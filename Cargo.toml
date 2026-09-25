@@ -426,7 +426,7 @@ rhai = "1"
 # separate `sea-orm-migration` crate, which re-exports the derive macros the
 # migration modules need. Both crates must stay on the same minor version so
 # cargo resolves a single copy of sea-orm.
-sea-orm = { version = "1.1", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros"] }
+sea-orm = { version = "2.0", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros"] }
 sea-orm-migration = { version = "1.1", features = ["sqlx-postgres", "runtime-tokio-rustls"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 # tonic-build 0.14 dropped its prost code generator (`configure()` /
