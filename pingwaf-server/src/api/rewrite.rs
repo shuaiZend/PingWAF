@@ -1,19 +1,20 @@
 //! Rewrite rules management: request/response header and path rewrites.
 
-use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use axum::Json;
 use axum::Router;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, Set,
+    ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter,
+    QueryOrder, Set,
 };
 use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::api::common::{
-    Page, Pagination, load_site_read, load_site_write, non_empty, parse_uuid,
+    load_site_read, load_site_write, non_empty, parse_uuid, Page, Pagination,
 };
 use crate::api::error::ApiError;
 use crate::api::sites::touch_site;
@@ -80,7 +81,10 @@ pub struct UpdateRequest {
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/sites/{site_id}/rewrite-rules", get(list).post(create))
-        .route("/sites/{site_id}/rewrite-rules/{rule_id}", axum::routing::put(update).delete(remove))
+        .route(
+            "/sites/{site_id}/rewrite-rules/{rule_id}",
+            axum::routing::put(update).delete(remove),
+        )
 }
 
 /// `GET /api/v1/sites/{site_id}/rewrite-rules`
@@ -116,15 +120,20 @@ async fn create(
     load_site_write(&state.db, id, &current).await?;
 
     if payload.name.trim().is_empty() || payload.name.len() > 200 {
-        return Err(ApiError::BadRequest("name must be 1-200 characters".to_string()));
+        return Err(ApiError::BadRequest(
+            "name must be 1-200 characters".to_string(),
+        ));
     }
     if !is_valid_direction(&payload.direction) {
         return Err(ApiError::BadRequest(format!(
-            "invalid direction '{}'; expected request or response", payload.direction
+            "invalid direction '{}'; expected request or response",
+            payload.direction
         )));
     }
     if !payload.operations.is_array() {
-        return Err(ApiError::BadRequest("operations must be a JSON array".to_string()));
+        return Err(ApiError::BadRequest(
+            "operations must be a JSON array".to_string(),
+        ));
     }
 
     let timestamp = chrono::Utc::now();
@@ -166,13 +175,17 @@ async fn update(
 
     if let Some(name) = non_empty(&payload.name) {
         if name.len() > 200 {
-            return Err(ApiError::BadRequest("name must be at most 200 characters".to_string()));
+            return Err(ApiError::BadRequest(
+                "name must be at most 200 characters".to_string(),
+            ));
         }
         active.name = Set(name);
     }
     if let Some(direction) = non_empty(&payload.direction) {
         if !is_valid_direction(&direction) {
-            return Err(ApiError::BadRequest(format!("invalid direction '{direction}'")));
+            return Err(ApiError::BadRequest(format!(
+                "invalid direction '{direction}'"
+            )));
         }
         active.direction = Set(direction);
     }
@@ -181,7 +194,9 @@ async fn update(
     }
     if let Some(ops) = payload.operations {
         if !ops.is_array() {
-            return Err(ApiError::BadRequest("operations must be a JSON array".to_string()));
+            return Err(ApiError::BadRequest(
+                "operations must be a JSON array".to_string(),
+            ));
         }
         active.operations = Set(ops);
     }
@@ -232,5 +247,7 @@ async fn find(
         .filter(rewrite_rules::Column::SiteId.eq(site_id))
         .one(&state.db)
         .await?
-        .ok_or_else(|| ApiError::NotFound(format!("rewrite rule {rule_id} not found")))
+        .ok_or_else(|| {
+            ApiError::NotFound(format!("rewrite rule {rule_id} not found"))
+        })
 }

@@ -31,7 +31,11 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(db: DatabaseConnection, config: ServerConfig, agents: AgentRegistry) -> Self {
+    pub fn new(
+        db: DatabaseConnection,
+        config: ServerConfig,
+        agents: AgentRegistry,
+    ) -> Self {
         Self {
             db,
             config: Arc::new(config),

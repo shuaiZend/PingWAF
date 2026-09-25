@@ -23,10 +23,15 @@ pub mod users;
 pub use agents::{agent_status, agents as agent};
 pub use certificates::site_certificates;
 pub use rules::{
-    action, cache_rules, characteristic, mode, rate_limit_rules, rule_groups, rules as rule,
+    action, cache_rules, characteristic, mode, rate_limit_rules, rule_groups,
+    rules as rule,
 };
-pub use security_events::{access_logs as access_log, security_events as security_event};
-pub use sites::{acme_challenge, site_ssl, site_status, site_upstreams, sites as site};
+pub use security_events::{
+    access_logs as access_log, security_events as security_event,
+};
+pub use sites::{
+    acme_challenge, site_ssl, site_status, site_upstreams, sites as site,
+};
 pub use users::{api_keys as api_key, permission, role, users as user};
 
 /// Convenience alias used across the API and gRPC layers.

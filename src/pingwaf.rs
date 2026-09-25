@@ -17,7 +17,9 @@
 //! Handles the three operating modes: Server (control plane only),
 //! Agent (data plane only), and AllInOne (both in a single process).
 
-use crate::cli::{AgentOpts, AllInOneOpts, PingWafCommand, PingWafCli, ServerOpts};
+use crate::cli::{
+    AgentOpts, AllInOneOpts, PingWafCli, PingWafCommand, ServerOpts,
+};
 use pingwaf_agent::config::AgentConfig;
 use pingwaf_server::ServerConfig;
 use tracing::{error, info};
@@ -79,7 +81,8 @@ fn agent_config_from_opts(opts: &AgentOpts) -> AgentConfig {
 /// In all-in-one mode the agent connects to the local server via loopback.
 fn agent_config_from_all_in_one(opts: &AllInOneOpts) -> AgentConfig {
     // Derive the loopback gRPC URL from the configured gRPC address
-    let server_url = format!("http://127.0.0.1:{}", extract_port(&opts.grpc_addr));
+    let server_url =
+        format!("http://127.0.0.1:{}", extract_port(&opts.grpc_addr));
     AgentConfig {
         server_url,
         api_key: opts.api_key.clone(),
@@ -184,10 +187,12 @@ async fn shutdown_signal() {
 
     #[cfg(unix)]
     let terminate = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to install SIGTERM handler")
-            .recv()
-            .await;
+        tokio::signal::unix::signal(
+            tokio::signal::unix::SignalKind::terminate(),
+        )
+        .expect("failed to install SIGTERM handler")
+        .recv()
+        .await;
     };
 
     #[cfg(not(unix))]

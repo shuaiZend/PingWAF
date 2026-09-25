@@ -1,8 +1,8 @@
 //! Bot protection settings management per site.
 
-use axum::Json;
 use axum::extract::{Path, State};
 use axum::routing::get;
+use axum::Json;
 use axum::Router;
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 use serde::Deserialize;
@@ -18,7 +18,10 @@ use crate::models::bot_protection;
 
 /// Valid bot protection actions.
 fn is_valid_action(action: &str) -> bool {
-    matches!(action, "block" | "challenge" | "js_challenge" | "log" | "allow")
+    matches!(
+        action,
+        "block" | "challenge" | "js_challenge" | "log" | "allow"
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -41,8 +44,10 @@ pub struct UpdateBotRequest {
 
 /// Routes contributed to `/api/v1`.
 pub fn routes() -> Router<AppState> {
-    Router::new()
-        .route("/sites/{site_id}/bot-protection", get(get_bot).put(update_bot))
+    Router::new().route(
+        "/sites/{site_id}/bot-protection",
+        get(get_bot).put(update_bot),
+    )
 }
 
 /// `GET /api/v1/sites/{site_id}/bot-protection`
@@ -88,13 +93,17 @@ async fn update_bot(
     }
     if let Some(action) = payload.action {
         if !is_valid_action(&action) {
-            return Err(ApiError::BadRequest(format!("unknown bot action '{action}'")));
+            return Err(ApiError::BadRequest(format!(
+                "unknown bot action '{action}'"
+            )));
         }
         active.action = Set(action);
     }
     if let Some(whitelist) = payload.known_bots_whitelist {
         if !whitelist.is_array() {
-            return Err(ApiError::BadRequest("known_bots_whitelist must be a JSON array".to_string()));
+            return Err(ApiError::BadRequest(
+                "known_bots_whitelist must be a JSON array".to_string(),
+            ));
         }
         active.known_bots_whitelist = Set(whitelist);
     }
@@ -109,7 +118,10 @@ async fn update_bot(
 }
 
 /// Finds the bot_protection row for a site, creating a default one if absent.
-async fn find_or_create(state: &AppState, site_id: Uuid) -> Result<bot_protection::Model, ApiError> {
+async fn find_or_create(
+    state: &AppState,
+    site_id: Uuid,
+) -> Result<bot_protection::Model, ApiError> {
     if let Some(row) = bot_protection::Entity::find()
         .filter(bot_protection::Column::SiteId.eq(site_id))
         .one(&state.db)

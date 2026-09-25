@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 pub mod site_certificates {
     use super::*;
 
-    #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
+    #[derive(
+        Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize,
+    )]
     #[sea_orm(table_name = "site_certificates")]
     pub struct Model {
         #[sea_orm(primary_key, auto_increment = false)]

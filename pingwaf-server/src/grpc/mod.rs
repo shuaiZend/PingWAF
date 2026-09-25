@@ -15,9 +15,11 @@ pub mod registry;
 
 pub use cache_status::{CacheStatusRegistry, SiteCacheStatus};
 pub use control_plane::ControlPlaneService;
-pub use registry::{AgentRegistry, COMMAND_CHANNEL_CAPACITY, ConnectedAgent};
+pub use registry::{AgentRegistry, ConnectedAgent, COMMAND_CHANNEL_CAPACITY};
 
-use pingwaf_proto::control_plane::{ServerCommand, UpdateSiteCommand, server_command::Payload};
+use pingwaf_proto::control_plane::{
+    server_command::Payload, ServerCommand, UpdateSiteCommand,
+};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use uuid::Uuid;
 
@@ -34,12 +36,13 @@ use crate::models::agent;
 pub async fn notify_config_changed(state: &AppState, site_id: Uuid) {
     // Build the new configuration. If the database is unhappy there is nothing
     // worth sending, so bail out with a warning.
-    let site_config = match build_site_config(&state.db, Some(&[site_id])).await {
+    let site_config = match build_site_config(&state.db, Some(&[site_id])).await
+    {
         Ok(config) => config,
         Err(err) => {
             tracing::warn!(%site_id, error = %err, "failed to build site config for push");
             return;
-        }
+        },
     };
 
     // Find every agent whose site_id matches, then attempt delivery.
@@ -52,7 +55,7 @@ pub async fn notify_config_changed(state: &AppState, site_id: Uuid) {
         Err(err) => {
             tracing::warn!(%site_id, error = %err, "failed to list agents for config push");
             return;
-        }
+        },
     };
 
     if agents.is_empty() {

@@ -1,20 +1,21 @@
 //! SSL/TLS certificate management: upload, ACME issuance, renewal and settings.
 
-use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use axum::Json;
 use axum::Router;
 use chrono::{DateTime, Utc};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, Set,
+    ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter,
+    QueryOrder, Set,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::api::common::{
-    Page, Pagination, load_site_read, load_site_write, non_empty, parse_uuid,
+    load_site_read, load_site_write, non_empty, parse_uuid, Page, Pagination,
 };
 use crate::api::error::ApiError;
 use crate::api::sites::touch_site;
@@ -170,13 +171,24 @@ fn default_challenge_type() -> String {
 /// Routes contributed to `/api/v1`.
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/sites/{site_id}/certificates", get(list_certificates).post(create_certificate))
+        .route(
+            "/sites/{site_id}/certificates",
+            get(list_certificates).post(create_certificate),
+        )
         .route(
             "/sites/{site_id}/certificates/{cert_id}",
-            get(show_certificate).put(update_certificate).delete(delete_certificate),
+            get(show_certificate)
+                .put(update_certificate)
+                .delete(delete_certificate),
         )
-        .route("/sites/{site_id}/certificates/{cert_id}/renew", axum::routing::post(renew_certificate))
-        .route("/sites/{site_id}/ssl-settings", get(get_ssl_settings).put(update_ssl_settings))
+        .route(
+            "/sites/{site_id}/certificates/{cert_id}/renew",
+            axum::routing::post(renew_certificate),
+        )
+        .route(
+            "/sites/{site_id}/ssl-settings",
+            get(get_ssl_settings).put(update_ssl_settings),
+        )
 }
 
 /// `GET /api/v1/sites/{site_id}/certificates`
@@ -197,7 +209,8 @@ async fn list_certificates(
 
     let total = paginator.num_items().await?;
     let rows = paginator.fetch_page(pagination.index()).await?;
-    let items: Vec<CertificateResponse> = rows.into_iter().map(Into::into).collect();
+    let items: Vec<CertificateResponse> =
+        rows.into_iter().map(Into::into).collect();
     Ok(Json(Page::new(items, total, pagination)))
 }
 
@@ -213,11 +226,14 @@ async fn create_certificate(
 
     let domain = payload.domain.trim().to_lowercase();
     if domain.is_empty() || domain.len() > 255 {
-        return Err(ApiError::BadRequest("domain must be 1-255 characters".to_string()));
+        return Err(ApiError::BadRequest(
+            "domain must be 1-255 characters".to_string(),
+        ));
     }
     if !acme_challenge::is_valid(&payload.acme_challenge_type) {
         return Err(ApiError::BadRequest(format!(
-            "invalid acme_challenge_type '{}'", payload.acme_challenge_type
+            "invalid acme_challenge_type '{}'",
+            payload.acme_challenge_type
         )));
     }
 
@@ -255,7 +271,10 @@ async fn create_certificate(
     touch_site(&state, id).await?;
     notify_config_changed(&state, id).await;
 
-    Ok((StatusCode::CREATED, Json(CertificateResponse::from(model))).into_response())
+    Ok(
+        (StatusCode::CREATED, Json(CertificateResponse::from(model)))
+            .into_response(),
+    )
 }
 
 /// `GET /api/v1/sites/{site_id}/certificates/{cert_id}`
@@ -312,7 +331,9 @@ async fn update_certificate(
     }
     if let Some(ct) = non_empty(&payload.acme_challenge_type) {
         if !acme_challenge::is_valid(&ct) {
-            return Err(ApiError::BadRequest(format!("invalid acme_challenge_type '{ct}'")));
+            return Err(ApiError::BadRequest(format!(
+                "invalid acme_challenge_type '{ct}'"
+            )));
         }
         active.acme_challenge_type = Set(ct);
     }
@@ -324,7 +345,9 @@ async fn update_certificate(
     }
     if let Some(status) = non_empty(&payload.status) {
         if !cert_status::is_valid(&status) {
-            return Err(ApiError::BadRequest(format!("invalid certificate status '{status}'")));
+            return Err(ApiError::BadRequest(format!(
+                "invalid certificate status '{status}'"
+            )));
         }
         active.status = Set(status);
     }
@@ -441,7 +464,9 @@ async fn update_ssl_settings(
     tracing::info!(site_id = %id, "SSL settings update requested");
 
     let settings = SslSettingsResponse {
-        min_tls_version: payload.min_tls_version.unwrap_or_else(|| "1.2".to_string()),
+        min_tls_version: payload
+            .min_tls_version
+            .unwrap_or_else(|| "1.2".to_string()),
         hsts_enabled: payload.hsts_enabled.unwrap_or(false),
         hsts_max_age: payload.hsts_max_age.unwrap_or(0),
         always_use_https: payload.always_use_https.unwrap_or(false),
@@ -463,5 +488,7 @@ async fn find_certificate(
         .filter(site_certificates::Column::SiteId.eq(site_id))
         .one(&state.db)
         .await?
-        .ok_or_else(|| ApiError::NotFound(format!("certificate {cert_id} not found")))
+        .ok_or_else(|| {
+            ApiError::NotFound(format!("certificate {cert_id} not found"))
+        })
 }

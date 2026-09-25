@@ -19,26 +19,91 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(SiteCertificates::Table)
                     .if_not_exists()
-                    .col(ColumnDef::new(SiteCertificates::Id).uuid().not_null().primary_key())
-                    .col(ColumnDef::new(SiteCertificates::SiteId).uuid().not_null())
-                    .col(ColumnDef::new(SiteCertificates::Domain).string_len(255).not_null())
-                    .col(ColumnDef::new(SiteCertificates::CertPem).text().null())
+                    .col(
+                        ColumnDef::new(SiteCertificates::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(SiteCertificates::SiteId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(SiteCertificates::Domain)
+                            .string_len(255)
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(SiteCertificates::CertPem).text().null(),
+                    )
                     .col(ColumnDef::new(SiteCertificates::KeyPem).text().null())
-                    .col(ColumnDef::new(SiteCertificates::Issuer).string_len(200).null())
-                    .col(ColumnDef::new(SiteCertificates::NotBefore).timestamp_with_time_zone().null())
-                    .col(ColumnDef::new(SiteCertificates::ExpiresAt).timestamp_with_time_zone().null())
-                    .col(ColumnDef::new(SiteCertificates::AutoRenew).boolean().not_null().default(true))
-                    .col(ColumnDef::new(SiteCertificates::AcmeEmail).string_len(255).null())
-                    .col(ColumnDef::new(SiteCertificates::AcmeChallengeType).string_len(20).not_null().default("http-01"))
-                    .col(ColumnDef::new(SiteCertificates::AcmeDnsProvider).string_len(50).null())
-                    .col(ColumnDef::new(SiteCertificates::AcmeDnsConfig).json_binary().null())
-                    .col(ColumnDef::new(SiteCertificates::Status).string_len(20).not_null().default("active"))
-                    .col(ColumnDef::new(SiteCertificates::CreatedAt).timestamp_with_time_zone().not_null())
-                    .col(ColumnDef::new(SiteCertificates::UpdatedAt).timestamp_with_time_zone().not_null())
+                    .col(
+                        ColumnDef::new(SiteCertificates::Issuer)
+                            .string_len(200)
+                            .null(),
+                    )
+                    .col(
+                        ColumnDef::new(SiteCertificates::NotBefore)
+                            .timestamp_with_time_zone()
+                            .null(),
+                    )
+                    .col(
+                        ColumnDef::new(SiteCertificates::ExpiresAt)
+                            .timestamp_with_time_zone()
+                            .null(),
+                    )
+                    .col(
+                        ColumnDef::new(SiteCertificates::AutoRenew)
+                            .boolean()
+                            .not_null()
+                            .default(true),
+                    )
+                    .col(
+                        ColumnDef::new(SiteCertificates::AcmeEmail)
+                            .string_len(255)
+                            .null(),
+                    )
+                    .col(
+                        ColumnDef::new(SiteCertificates::AcmeChallengeType)
+                            .string_len(20)
+                            .not_null()
+                            .default("http-01"),
+                    )
+                    .col(
+                        ColumnDef::new(SiteCertificates::AcmeDnsProvider)
+                            .string_len(50)
+                            .null(),
+                    )
+                    .col(
+                        ColumnDef::new(SiteCertificates::AcmeDnsConfig)
+                            .json_binary()
+                            .null(),
+                    )
+                    .col(
+                        ColumnDef::new(SiteCertificates::Status)
+                            .string_len(20)
+                            .not_null()
+                            .default("active"),
+                    )
+                    .col(
+                        ColumnDef::new(SiteCertificates::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(SiteCertificates::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
                     .foreign_key(
                         ForeignKey::create()
                             .name("fk_site_certificates_site_id")
-                            .from(SiteCertificates::Table, SiteCertificates::SiteId)
+                            .from(
+                                SiteCertificates::Table,
+                                SiteCertificates::SiteId,
+                            )
                             .to(Sites::Table, Sites::Id)
                             .on_delete(ForeignKeyAction::Cascade),
                     )
@@ -52,16 +117,55 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(IpAccessRules::Table)
                     .if_not_exists()
-                    .col(ColumnDef::new(IpAccessRules::Id).uuid().not_null().primary_key())
-                    .col(ColumnDef::new(IpAccessRules::SiteId).uuid().not_null())
-                    .col(ColumnDef::new(IpAccessRules::Name).string_len(200).not_null())
-                    .col(ColumnDef::new(IpAccessRules::IpRanges).array(ColumnType::Text).not_null().default(Expr::cust("'{}'::text[]")))
-                    .col(ColumnDef::new(IpAccessRules::Action).string_len(30).not_null().default("block"))
+                    .col(
+                        ColumnDef::new(IpAccessRules::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(IpAccessRules::SiteId).uuid().not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(IpAccessRules::Name)
+                            .string_len(200)
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(IpAccessRules::IpRanges)
+                            .array(ColumnType::Text)
+                            .not_null()
+                            .default(Expr::cust("'{}'::text[]")),
+                    )
+                    .col(
+                        ColumnDef::new(IpAccessRules::Action)
+                            .string_len(30)
+                            .not_null()
+                            .default("block"),
+                    )
                     .col(ColumnDef::new(IpAccessRules::Note).text().null())
-                    .col(ColumnDef::new(IpAccessRules::Enabled).boolean().not_null().default(true))
-                    .col(ColumnDef::new(IpAccessRules::Priority).integer().not_null().default(0))
-                    .col(ColumnDef::new(IpAccessRules::CreatedAt).timestamp_with_time_zone().not_null())
-                    .col(ColumnDef::new(IpAccessRules::UpdatedAt).timestamp_with_time_zone().not_null())
+                    .col(
+                        ColumnDef::new(IpAccessRules::Enabled)
+                            .boolean()
+                            .not_null()
+                            .default(true),
+                    )
+                    .col(
+                        ColumnDef::new(IpAccessRules::Priority)
+                            .integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(
+                        ColumnDef::new(IpAccessRules::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(IpAccessRules::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
                     .foreign_key(
                         ForeignKey::create()
                             .name("fk_ip_access_rules_site_id")
@@ -79,15 +183,59 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(GeoRules::Table)
                     .if_not_exists()
-                    .col(ColumnDef::new(GeoRules::Id).uuid().not_null().primary_key())
-                    .col(ColumnDef::new(GeoRules::SiteId).uuid().not_null().unique_key())
-                    .col(ColumnDef::new(GeoRules::Enabled).boolean().not_null().default(false))
-                    .col(ColumnDef::new(GeoRules::Mode).string_len(20).not_null().default("block_list"))
-                    .col(ColumnDef::new(GeoRules::Countries).array(ColumnType::Text).not_null().default(Expr::cust("'{}'::text[]")))
-                    .col(ColumnDef::new(GeoRules::BlockedAsns).array(ColumnType::Text).not_null().default(Expr::cust("'{}'::text[]")))
-                    .col(ColumnDef::new(GeoRules::BlockUnknown).boolean().not_null().default(false))
-                    .col(ColumnDef::new(GeoRules::Action).string_len(30).not_null().default("block"))
-                    .col(ColumnDef::new(GeoRules::UpdatedAt).timestamp_with_time_zone().not_null())
+                    .col(
+                        ColumnDef::new(GeoRules::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(GeoRules::SiteId)
+                            .uuid()
+                            .not_null()
+                            .unique_key(),
+                    )
+                    .col(
+                        ColumnDef::new(GeoRules::Enabled)
+                            .boolean()
+                            .not_null()
+                            .default(false),
+                    )
+                    .col(
+                        ColumnDef::new(GeoRules::Mode)
+                            .string_len(20)
+                            .not_null()
+                            .default("block_list"),
+                    )
+                    .col(
+                        ColumnDef::new(GeoRules::Countries)
+                            .array(ColumnType::Text)
+                            .not_null()
+                            .default(Expr::cust("'{}'::text[]")),
+                    )
+                    .col(
+                        ColumnDef::new(GeoRules::BlockedAsns)
+                            .array(ColumnType::Text)
+                            .not_null()
+                            .default(Expr::cust("'{}'::text[]")),
+                    )
+                    .col(
+                        ColumnDef::new(GeoRules::BlockUnknown)
+                            .boolean()
+                            .not_null()
+                            .default(false),
+                    )
+                    .col(
+                        ColumnDef::new(GeoRules::Action)
+                            .string_len(30)
+                            .not_null()
+                            .default("block"),
+                    )
+                    .col(
+                        ColumnDef::new(GeoRules::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
                     .foreign_key(
                         ForeignKey::create()
                             .name("fk_geo_rules_site_id")
@@ -105,16 +253,65 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(BotProtection::Table)
                     .if_not_exists()
-                    .col(ColumnDef::new(BotProtection::Id).uuid().not_null().primary_key())
-                    .col(ColumnDef::new(BotProtection::SiteId).uuid().not_null().unique_key())
-                    .col(ColumnDef::new(BotProtection::Enabled).boolean().not_null().default(false))
-                    .col(ColumnDef::new(BotProtection::UaAnalysis).boolean().not_null().default(true))
-                    .col(ColumnDef::new(BotProtection::JsDetection).boolean().not_null().default(true))
-                    .col(ColumnDef::new(BotProtection::TlsFingerprint).boolean().not_null().default(false))
-                    .col(ColumnDef::new(BotProtection::BehavioralAnalysis).boolean().not_null().default(false))
-                    .col(ColumnDef::new(BotProtection::Action).string_len(30).not_null().default("challenge"))
-                    .col(ColumnDef::new(BotProtection::KnownBotsWhitelist).json_binary().not_null().default(Expr::cust("'[]'::jsonb")))
-                    .col(ColumnDef::new(BotProtection::UpdatedAt).timestamp_with_time_zone().not_null())
+                    .col(
+                        ColumnDef::new(BotProtection::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(BotProtection::SiteId)
+                            .uuid()
+                            .not_null()
+                            .unique_key(),
+                    )
+                    .col(
+                        ColumnDef::new(BotProtection::Enabled)
+                            .boolean()
+                            .not_null()
+                            .default(false),
+                    )
+                    .col(
+                        ColumnDef::new(BotProtection::UaAnalysis)
+                            .boolean()
+                            .not_null()
+                            .default(true),
+                    )
+                    .col(
+                        ColumnDef::new(BotProtection::JsDetection)
+                            .boolean()
+                            .not_null()
+                            .default(true),
+                    )
+                    .col(
+                        ColumnDef::new(BotProtection::TlsFingerprint)
+                            .boolean()
+                            .not_null()
+                            .default(false),
+                    )
+                    .col(
+                        ColumnDef::new(BotProtection::BehavioralAnalysis)
+                            .boolean()
+                            .not_null()
+                            .default(false),
+                    )
+                    .col(
+                        ColumnDef::new(BotProtection::Action)
+                            .string_len(30)
+                            .not_null()
+                            .default("challenge"),
+                    )
+                    .col(
+                        ColumnDef::new(BotProtection::KnownBotsWhitelist)
+                            .json_binary()
+                            .not_null()
+                            .default(Expr::cust("'[]'::jsonb")),
+                    )
+                    .col(
+                        ColumnDef::new(BotProtection::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
                     .foreign_key(
                         ForeignKey::create()
                             .name("fk_bot_protection_site_id")
@@ -132,22 +329,87 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(ChallengeSettings::Table)
                     .if_not_exists()
-                    .col(ColumnDef::new(ChallengeSettings::Id).uuid().not_null().primary_key())
-                    .col(ColumnDef::new(ChallengeSettings::SiteId).uuid().not_null().unique_key())
-                    .col(ColumnDef::new(ChallengeSettings::Enabled).boolean().not_null().default(false))
-                    .col(ColumnDef::new(ChallengeSettings::UnderAttackMode).boolean().not_null().default(false))
-                    .col(ColumnDef::new(ChallengeSettings::DefaultLevel).string_len(30).not_null().default("non_interactive"))
-                    .col(ColumnDef::new(ChallengeSettings::ClearanceDurationSecs).integer().not_null().default(1800))
-                    .col(ColumnDef::new(ChallengeSettings::RateThreshold).integer().not_null().default(100))
-                    .col(ColumnDef::new(ChallengeSettings::ExemptPaths).array(ColumnType::Text).not_null().default(Expr::cust("'{}'::text[]")))
-                    .col(ColumnDef::new(ChallengeSettings::BrowserIntegrityCheck).boolean().not_null().default(true))
-                    .col(ColumnDef::new(ChallengeSettings::TlsFingerprintCheck).boolean().not_null().default(false))
-                    .col(ColumnDef::new(ChallengeSettings::CookieSecret).string_len(255).null())
-                    .col(ColumnDef::new(ChallengeSettings::UpdatedAt).timestamp_with_time_zone().not_null())
+                    .col(
+                        ColumnDef::new(ChallengeSettings::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(ChallengeSettings::SiteId)
+                            .uuid()
+                            .not_null()
+                            .unique_key(),
+                    )
+                    .col(
+                        ColumnDef::new(ChallengeSettings::Enabled)
+                            .boolean()
+                            .not_null()
+                            .default(false),
+                    )
+                    .col(
+                        ColumnDef::new(ChallengeSettings::UnderAttackMode)
+                            .boolean()
+                            .not_null()
+                            .default(false),
+                    )
+                    .col(
+                        ColumnDef::new(ChallengeSettings::DefaultLevel)
+                            .string_len(30)
+                            .not_null()
+                            .default("non_interactive"),
+                    )
+                    .col(
+                        ColumnDef::new(
+                            ChallengeSettings::ClearanceDurationSecs,
+                        )
+                        .integer()
+                        .not_null()
+                        .default(1800),
+                    )
+                    .col(
+                        ColumnDef::new(ChallengeSettings::RateThreshold)
+                            .integer()
+                            .not_null()
+                            .default(100),
+                    )
+                    .col(
+                        ColumnDef::new(ChallengeSettings::ExemptPaths)
+                            .array(ColumnType::Text)
+                            .not_null()
+                            .default(Expr::cust("'{}'::text[]")),
+                    )
+                    .col(
+                        ColumnDef::new(
+                            ChallengeSettings::BrowserIntegrityCheck,
+                        )
+                        .boolean()
+                        .not_null()
+                        .default(true),
+                    )
+                    .col(
+                        ColumnDef::new(ChallengeSettings::TlsFingerprintCheck)
+                            .boolean()
+                            .not_null()
+                            .default(false),
+                    )
+                    .col(
+                        ColumnDef::new(ChallengeSettings::CookieSecret)
+                            .string_len(255)
+                            .null(),
+                    )
+                    .col(
+                        ColumnDef::new(ChallengeSettings::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
                     .foreign_key(
                         ForeignKey::create()
                             .name("fk_challenge_settings_site_id")
-                            .from(ChallengeSettings::Table, ChallengeSettings::SiteId)
+                            .from(
+                                ChallengeSettings::Table,
+                                ChallengeSettings::SiteId,
+                            )
                             .to(Sites::Table, Sites::Id)
                             .on_delete(ForeignKeyAction::Cascade),
                     )
@@ -161,16 +423,57 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(RewriteRules::Table)
                     .if_not_exists()
-                    .col(ColumnDef::new(RewriteRules::Id).uuid().not_null().primary_key())
+                    .col(
+                        ColumnDef::new(RewriteRules::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
                     .col(ColumnDef::new(RewriteRules::SiteId).uuid().not_null())
-                    .col(ColumnDef::new(RewriteRules::Name).string_len(200).not_null())
-                    .col(ColumnDef::new(RewriteRules::Direction).string_len(20).not_null().default("request"))
-                    .col(ColumnDef::new(RewriteRules::ConditionExpr).text().null())
-                    .col(ColumnDef::new(RewriteRules::Operations).json_binary().not_null().default(Expr::cust("'[]'::jsonb")))
-                    .col(ColumnDef::new(RewriteRules::Priority).integer().not_null().default(0))
-                    .col(ColumnDef::new(RewriteRules::Enabled).boolean().not_null().default(true))
-                    .col(ColumnDef::new(RewriteRules::CreatedAt).timestamp_with_time_zone().not_null())
-                    .col(ColumnDef::new(RewriteRules::UpdatedAt).timestamp_with_time_zone().not_null())
+                    .col(
+                        ColumnDef::new(RewriteRules::Name)
+                            .string_len(200)
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(RewriteRules::Direction)
+                            .string_len(20)
+                            .not_null()
+                            .default("request"),
+                    )
+                    .col(
+                        ColumnDef::new(RewriteRules::ConditionExpr)
+                            .text()
+                            .null(),
+                    )
+                    .col(
+                        ColumnDef::new(RewriteRules::Operations)
+                            .json_binary()
+                            .not_null()
+                            .default(Expr::cust("'[]'::jsonb")),
+                    )
+                    .col(
+                        ColumnDef::new(RewriteRules::Priority)
+                            .integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(
+                        ColumnDef::new(RewriteRules::Enabled)
+                            .boolean()
+                            .not_null()
+                            .default(true),
+                    )
+                    .col(
+                        ColumnDef::new(RewriteRules::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(RewriteRules::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
                     .foreign_key(
                         ForeignKey::create()
                             .name("fk_rewrite_rules_site_id")
@@ -188,15 +491,50 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(ErrorPages::Table)
                     .if_not_exists()
-                    .col(ColumnDef::new(ErrorPages::Id).uuid().not_null().primary_key())
+                    .col(
+                        ColumnDef::new(ErrorPages::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
                     .col(ColumnDef::new(ErrorPages::SiteId).uuid().not_null())
-                    .col(ColumnDef::new(ErrorPages::StatusCode).integer().not_null())
-                    .col(ColumnDef::new(ErrorPages::Name).string_len(200).not_null())
-                    .col(ColumnDef::new(ErrorPages::ContentType).string_len(100).not_null().default("text/html"))
-                    .col(ColumnDef::new(ErrorPages::BodyTemplate).text().not_null())
-                    .col(ColumnDef::new(ErrorPages::Enabled).boolean().not_null().default(true))
-                    .col(ColumnDef::new(ErrorPages::CreatedAt).timestamp_with_time_zone().not_null())
-                    .col(ColumnDef::new(ErrorPages::UpdatedAt).timestamp_with_time_zone().not_null())
+                    .col(
+                        ColumnDef::new(ErrorPages::StatusCode)
+                            .integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(ErrorPages::Name)
+                            .string_len(200)
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(ErrorPages::ContentType)
+                            .string_len(100)
+                            .not_null()
+                            .default("text/html"),
+                    )
+                    .col(
+                        ColumnDef::new(ErrorPages::BodyTemplate)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(ErrorPages::Enabled)
+                            .boolean()
+                            .not_null()
+                            .default(true),
+                    )
+                    .col(
+                        ColumnDef::new(ErrorPages::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(ErrorPages::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
                     .foreign_key(
                         ForeignKey::create()
                             .name("fk_error_pages_site_id")
@@ -228,13 +566,32 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(RateLimitStats::Table)
                     .if_not_exists()
-                    .col(ColumnDef::new(RateLimitStats::Id).big_integer().not_null().auto_increment().primary_key())
+                    .col(
+                        ColumnDef::new(RateLimitStats::Id)
+                            .big_integer()
+                            .not_null()
+                            .auto_increment()
+                            .primary_key(),
+                    )
                     .col(ColumnDef::new(RateLimitStats::SiteId).uuid().null())
                     .col(ColumnDef::new(RateLimitStats::AgentId).uuid().null())
                     .col(ColumnDef::new(RateLimitStats::RuleId).uuid().null())
-                    .col(ColumnDef::new(RateLimitStats::CharacteristicKey).string_len(255).not_null())
-                    .col(ColumnDef::new(RateLimitStats::WindowStart).timestamp_with_time_zone().not_null())
-                    .col(ColumnDef::new(RateLimitStats::RequestCount).integer().not_null().default(0))
+                    .col(
+                        ColumnDef::new(RateLimitStats::CharacteristicKey)
+                            .string_len(255)
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(RateLimitStats::WindowStart)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(RateLimitStats::RequestCount)
+                            .integer()
+                            .not_null()
+                            .default(0),
+                    )
                     .foreign_key(
                         ForeignKey::create()
                             .name("fk_rate_limit_stats_site_id")
@@ -245,7 +602,10 @@ impl MigrationTrait for Migration {
                     .foreign_key(
                         ForeignKey::create()
                             .name("fk_rate_limit_stats_agent_id")
-                            .from(RateLimitStats::Table, RateLimitStats::AgentId)
+                            .from(
+                                RateLimitStats::Table,
+                                RateLimitStats::AgentId,
+                            )
                             .to(Agents::Table, Agents::Id)
                             .on_delete(ForeignKeyAction::SetNull),
                     )
@@ -272,7 +632,8 @@ impl MigrationTrait for Migration {
         // ── Indexes ─────────────────────────────────────────────────────────
         manager
             .create_index(
-                Index::create().if_not_exists()
+                Index::create()
+                    .if_not_exists()
                     .name("idx_site_certificates_site_id")
                     .table(SiteCertificates::Table)
                     .col(SiteCertificates::SiteId)
@@ -281,7 +642,8 @@ impl MigrationTrait for Migration {
             .await?;
         manager
             .create_index(
-                Index::create().if_not_exists()
+                Index::create()
+                    .if_not_exists()
                     .name("idx_ip_access_rules_site_id")
                     .table(IpAccessRules::Table)
                     .col(IpAccessRules::SiteId)
@@ -290,7 +652,8 @@ impl MigrationTrait for Migration {
             .await?;
         manager
             .create_index(
-                Index::create().if_not_exists()
+                Index::create()
+                    .if_not_exists()
                     .name("idx_rewrite_rules_site_id")
                     .table(RewriteRules::Table)
                     .col(RewriteRules::SiteId)
@@ -299,7 +662,8 @@ impl MigrationTrait for Migration {
             .await?;
         manager
             .create_index(
-                Index::create().if_not_exists()
+                Index::create()
+                    .if_not_exists()
                     .name("idx_rate_limit_stats_site_window")
                     .table(RateLimitStats::Table)
                     .col(RateLimitStats::SiteId)
@@ -312,14 +676,67 @@ impl MigrationTrait for Migration {
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        manager.drop_table(Table::drop().table(RateLimitStats::Table).if_exists().to_owned()).await?;
-        manager.drop_table(Table::drop().table(ErrorPages::Table).if_exists().to_owned()).await?;
-        manager.drop_table(Table::drop().table(RewriteRules::Table).if_exists().to_owned()).await?;
-        manager.drop_table(Table::drop().table(ChallengeSettings::Table).if_exists().to_owned()).await?;
-        manager.drop_table(Table::drop().table(BotProtection::Table).if_exists().to_owned()).await?;
-        manager.drop_table(Table::drop().table(GeoRules::Table).if_exists().to_owned()).await?;
-        manager.drop_table(Table::drop().table(IpAccessRules::Table).if_exists().to_owned()).await?;
-        manager.drop_table(Table::drop().table(SiteCertificates::Table).if_exists().to_owned()).await?;
+        manager
+            .drop_table(
+                Table::drop()
+                    .table(RateLimitStats::Table)
+                    .if_exists()
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .drop_table(
+                Table::drop()
+                    .table(ErrorPages::Table)
+                    .if_exists()
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .drop_table(
+                Table::drop()
+                    .table(RewriteRules::Table)
+                    .if_exists()
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .drop_table(
+                Table::drop()
+                    .table(ChallengeSettings::Table)
+                    .if_exists()
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .drop_table(
+                Table::drop()
+                    .table(BotProtection::Table)
+                    .if_exists()
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .drop_table(
+                Table::drop().table(GeoRules::Table).if_exists().to_owned(),
+            )
+            .await?;
+        manager
+            .drop_table(
+                Table::drop()
+                    .table(IpAccessRules::Table)
+                    .if_exists()
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .drop_table(
+                Table::drop()
+                    .table(SiteCertificates::Table)
+                    .if_exists()
+                    .to_owned(),
+            )
+            .await?;
         Ok(())
     }
 }

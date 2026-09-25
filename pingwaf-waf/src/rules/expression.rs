@@ -20,7 +20,7 @@ use std::fmt;
 use std::net::IpAddr;
 use std::str::FromStr;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{anyhow, bail, Result};
 use ipnet::IpNet;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -72,11 +72,21 @@ impl FieldKind {
         // Case-insensitive lookup against the canonical field names.
         let lower = path.to_ascii_lowercase();
         match lower.as_str() {
-            "http.request.uri.path" | "request.path" | "uri.path" => FieldKind::RequestPath,
-            "http.request.uri.full" | "http.request.uri" | "request.uri" => FieldKind::RequestUriFull,
-            "http.request.method" | "request.method" => FieldKind::RequestMethod,
-            "http.request.headers" | "http.request.header" => FieldKind::RequestHeader,
-            "http.request.cookies" | "http.request.cookie" => FieldKind::RequestCookie,
+            "http.request.uri.path" | "request.path" | "uri.path" => {
+                FieldKind::RequestPath
+            },
+            "http.request.uri.full" | "http.request.uri" | "request.uri" => {
+                FieldKind::RequestUriFull
+            },
+            "http.request.method" | "request.method" => {
+                FieldKind::RequestMethod
+            },
+            "http.request.headers" | "http.request.header" => {
+                FieldKind::RequestHeader
+            },
+            "http.request.cookies" | "http.request.cookie" => {
+                FieldKind::RequestCookie
+            },
             "http.request.body" | "request.body" => FieldKind::RequestBody,
             "http.host" | "host" => FieldKind::Host,
             "ip.src" | "client.ip" => FieldKind::IpSrc,
@@ -85,7 +95,9 @@ impl FieldKind {
             "cf.waf.score.sqli" | "waf.score.sqli" => FieldKind::WafScoreSqli,
             "cf.waf.score.xss" | "waf.score.xss" => FieldKind::WafScoreXss,
             "ssl" | "https" => FieldKind::Ssl,
-            "user_agent" | "http.user_agent" | "http.useragent" => FieldKind::UserAgent,
+            "user_agent" | "http.user_agent" | "http.useragent" => {
+                FieldKind::UserAgent
+            },
             other => FieldKind::Unknown(other.to_string()),
         }
     }
@@ -114,7 +126,10 @@ impl Operator {
     fn is_negated(self) -> bool {
         matches!(
             self,
-            Operator::Ne | Operator::NotContains | Operator::NotMatches | Operator::NotIn
+            Operator::Ne
+                | Operator::NotContains
+                | Operator::NotMatches
+                | Operator::NotIn
         )
     }
 }
@@ -173,27 +188,27 @@ fn tokenize(input: &str) -> Result<Vec<Token>> {
             b'(' => {
                 out.push(Token::LParen);
                 i += 1;
-            }
+            },
             b')' => {
                 out.push(Token::RParen);
                 i += 1;
-            }
+            },
             b'[' => {
                 out.push(Token::LBracket);
                 i += 1;
-            }
+            },
             b']' => {
                 out.push(Token::RBracket);
                 i += 1;
-            }
+            },
             b'{' => {
                 out.push(Token::LBrace);
                 i += 1;
-            }
+            },
             b'}' => {
                 out.push(Token::RBrace);
                 i += 1;
-            }
+            },
             b'"' | b'\'' => {
                 let quote = c;
                 let mut j = i + 1;
@@ -218,7 +233,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>> {
                                 buf.push_str(&input[j + 1..j + 1 + w]);
                                 j += 1 + w;
                                 continue;
-                            }
+                            },
                         }
                         j += 2;
                         continue;
@@ -238,7 +253,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>> {
                 }
                 out.push(Token::Str(buf));
                 i = j;
-            }
+            },
             b'-' if i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit() => {
                 let start = i;
                 i += 1;
@@ -246,9 +261,10 @@ fn tokenize(input: &str) -> Result<Vec<Token>> {
                     i += 1;
                 }
                 let s = &input[start..i];
-                let n = i64::from_str(s).map_err(|e| anyhow!("invalid number {:?}: {}", s, e))?;
+                let n = i64::from_str(s)
+                    .map_err(|e| anyhow!("invalid number {:?}: {}", s, e))?;
                 out.push(Token::Num(n));
-            }
+            },
             // Word: alphanumeric plus the punctuation that can appear inside
             // dotted field paths (`http.request.uri.path`), CIDR literals
             // (`10.0.0.0/8`) and IPv6 addresses (`2001:db8::/32`). We try to
@@ -275,8 +291,10 @@ fn tokenize(input: &str) -> Result<Vec<Token>> {
                 } else {
                     out.push(Token::Ident(word.to_string()));
                 }
-            }
-            other => bail!("unexpected character {:?} in expression", other as char),
+            },
+            other => {
+                bail!("unexpected character {:?} in expression", other as char)
+            },
         }
     }
     out.push(Token::Eof);
@@ -373,7 +391,7 @@ impl Parser {
                     bail!("expected ')' in expression");
                 }
                 Ok(e)
-            }
+            },
             Token::Ident(_) => self.parse_comparison(),
             other => bail!("unexpected token {:?} in expression", other),
         }
@@ -393,11 +411,18 @@ impl Parser {
                 bail!("expected ']' after header name");
             }
         }
-        let field = Field { kind: kind.clone(), index: index.clone() };
+        let field = Field {
+            kind: kind.clone(),
+            index: index.clone(),
+        };
 
         let operator = self.parse_operator()?;
         let value = self.parse_value(&field.kind, operator)?;
-        Ok(Expression::Field { field, operator, value })
+        Ok(Expression::Field {
+            field,
+            operator,
+            value,
+        })
     }
 
     fn parse_operator(&mut self) -> Result<Operator> {
@@ -423,15 +448,19 @@ impl Parser {
                 // Two-word operator: `not contains`, `not in`, `not matches`.
                 let next = match self.next() {
                     Token::Ident(s) => s.to_ascii_lowercase(),
-                    other => bail!("expected operator after 'not', got {:?}", other),
+                    other => {
+                        bail!("expected operator after 'not', got {:?}", other)
+                    },
                 };
                 match next.as_str() {
                     "contains" => Operator::NotContains,
                     "in" => Operator::NotIn,
                     "matches" => Operator::NotMatches,
-                    other => bail!("unsupported negated operator 'not {}'", other),
+                    other => {
+                        bail!("unsupported negated operator 'not {}'", other)
+                    },
                 }
-            }
+            },
             other => bail!("unknown operator '{}'", other),
         };
         Ok(op)
@@ -450,7 +479,7 @@ impl Parser {
                     _ => Value::Str(s),
                 };
                 finish_scalar(kind, op, v)
-            }
+            },
             Token::LBrace => {
                 let mut items: Vec<Value> = Vec::new();
                 loop {
@@ -458,20 +487,29 @@ impl Parser {
                         Token::RBrace => {
                             self.next();
                             break;
-                        }
-                        Token::Eof => bail!("unterminated set literal (missing closing brace)"),
-                        _ => {}
+                        },
+                        Token::Eof => bail!(
+                            "unterminated set literal (missing closing brace)"
+                        ),
+                        _ => {},
                     }
                     match self.next() {
                         Token::Str(s) => items.push(Value::Str(s)),
                         Token::Num(n) => items.push(Value::Num(n)),
                         Token::Ident(s) => items.push(Value::Str(s)),
-                        other => bail!("unexpected token {:?} inside set", other),
+                        other => {
+                            bail!("unexpected token {:?} inside set", other)
+                        },
                     }
                 }
                 let value = if matches!(kind, FieldKind::IpSrc)
-                    && matches!(op, Operator::In | Operator::NotIn | Operator::Eq | Operator::Ne)
-                {
+                    && matches!(
+                        op,
+                        Operator::In
+                            | Operator::NotIn
+                            | Operator::Eq
+                            | Operator::Ne
+                    ) {
                     let mut cidrs = Vec::with_capacity(items.len());
                     for it in &items {
                         if let Value::Str(s) = it {
@@ -492,7 +530,7 @@ impl Parser {
                     Value::Set(strs)
                 };
                 Ok(value)
-            }
+            },
             other => bail!("expected value, got {:?}", other),
         }
     }
@@ -502,13 +540,18 @@ fn finish_scalar(kind: &FieldKind, op: Operator, v: Value) -> Result<Value> {
     if matches!(op, Operator::Matches | Operator::NotMatches) {
         let pattern = match &v {
             Value::Str(s) => s.clone(),
-            other => bail!("'matches' requires a string pattern, got {:?}", other),
+            other => {
+                bail!("'matches' requires a string pattern, got {:?}", other)
+            },
         };
         let re = Regex::new(&pattern)?;
         return Ok(Value::Regex(Box::new(re), pattern));
     }
     if matches!(kind, FieldKind::IpSrc)
-        && matches!(op, Operator::Eq | Operator::Ne | Operator::In | Operator::NotIn)
+        && matches!(
+            op,
+            Operator::Eq | Operator::Ne | Operator::In | Operator::NotIn
+        )
     {
         if let Value::Str(s) = &v {
             return Ok(Value::CidrSet(vec![parse_cidr(s)?]));
@@ -611,13 +654,17 @@ fn resolve_field<'a>(field: &Field, ctx: &'a EvalContext) -> FieldValue<'a> {
         FieldKind::WafScore => FieldValue::Num(ctx.waf_score as i64),
         FieldKind::WafScoreSqli => FieldValue::Num(ctx.waf_score_sqli as i64),
         FieldKind::WafScoreXss => FieldValue::Num(ctx.waf_score_xss as i64),
-        FieldKind::RequestHeader => match field.index.as_deref().and_then(|n| ctx.header(n)) {
-            Some(v) => FieldValue::Str(v),
-            None => FieldValue::Missing,
+        FieldKind::RequestHeader => {
+            match field.index.as_deref().and_then(|n| ctx.header(n)) {
+                Some(v) => FieldValue::Str(v),
+                None => FieldValue::Missing,
+            }
         },
-        FieldKind::RequestCookie => match field.index.as_deref().and_then(|n| ctx.cookie(n)) {
-            Some(v) => FieldValue::Str(v),
-            None => FieldValue::Missing,
+        FieldKind::RequestCookie => {
+            match field.index.as_deref().and_then(|n| ctx.cookie(n)) {
+                Some(v) => FieldValue::Str(v),
+                None => FieldValue::Missing,
+            }
         },
         FieldKind::Unknown(_) => FieldValue::Missing,
     }
@@ -631,10 +678,14 @@ pub fn evaluate(expr: &Expression, ctx: &EvalContext) -> bool {
         Expression::And(a, b) => evaluate(a, ctx) && evaluate(b, ctx),
         Expression::Or(a, b) => evaluate(a, ctx) || evaluate(b, ctx),
         Expression::Not(inner) => !evaluate(inner, ctx),
-        Expression::Field { field, operator, value } => {
+        Expression::Field {
+            field,
+            operator,
+            value,
+        } => {
             let fv = resolve_field(field, ctx);
             apply_operator(fv, *operator, value)
-        }
+        },
     }
 }
 
@@ -650,7 +701,9 @@ fn apply_operator(fv: FieldValue<'_>, op: Operator, value: &Value) -> bool {
             Value::CidrSet(nets) => nets.iter().any(|n| n.contains(&ip)),
             Value::Str(s) => match IpAddr::from_str(s) {
                 Ok(a) => a == ip,
-                Err(_) => IpNet::from_str(s).map(|n| n.contains(&ip)).unwrap_or(false),
+                Err(_) => {
+                    IpNet::from_str(s).map(|n| n.contains(&ip)).unwrap_or(false)
+                },
             },
             Value::Set(items) => items.iter().any(|i| {
                 IpAddr::from_str(i)
@@ -692,18 +745,22 @@ fn apply_operator(fv: FieldValue<'_>, op: Operator, value: &Value) -> bool {
                     _ => false,
                 };
                 return negate_if(op, positive);
-            }
+            },
             Value::Str(s) => {
                 if let Ok(m) = i64::from_str(s) {
-                    return apply_operator(FieldValue::Num(n), op, &Value::Num(m));
+                    return apply_operator(
+                        FieldValue::Num(n),
+                        op,
+                        &Value::Num(m),
+                    );
                 }
                 return op.is_negated();
-            }
+            },
             Value::Set(items) => {
                 let ns = n.to_string();
                 let positive = items.contains(&ns);
                 return negate_if(op, positive);
-            }
+            },
             _ => return op.is_negated(),
         }
     }
@@ -731,13 +788,27 @@ fn apply_operator(fv: FieldValue<'_>, op: Operator, value: &Value) -> bool {
         (Operator::Le, Value::Str(v)) => raw <= v.as_str(),
         (Operator::Gt, Value::Str(v)) => raw > v.as_str(),
         (Operator::Ge, Value::Str(v)) => raw >= v.as_str(),
-        (Operator::Eq, Value::Num(n)) => raw.parse::<i64>().map(|m| m == *n).unwrap_or(false),
-        (Operator::Ne, Value::Num(n)) => raw.parse::<i64>().map(|m| m != *n).unwrap_or(true),
-        (Operator::Lt, Value::Num(n)) => raw.parse::<i64>().map(|m| m < *n).unwrap_or(false),
-        (Operator::Le, Value::Num(n)) => raw.parse::<i64>().map(|m| m <= *n).unwrap_or(false),
-        (Operator::Gt, Value::Num(n)) => raw.parse::<i64>().map(|m| m > *n).unwrap_or(false),
-        (Operator::Ge, Value::Num(n)) => raw.parse::<i64>().map(|m| m >= *n).unwrap_or(false),
-        (Operator::Eq, Value::Bool(b)) => raw.parse::<bool>().map(|x| x == *b).unwrap_or(false),
+        (Operator::Eq, Value::Num(n)) => {
+            raw.parse::<i64>().map(|m| m == *n).unwrap_or(false)
+        },
+        (Operator::Ne, Value::Num(n)) => {
+            raw.parse::<i64>().map(|m| m != *n).unwrap_or(true)
+        },
+        (Operator::Lt, Value::Num(n)) => {
+            raw.parse::<i64>().map(|m| m < *n).unwrap_or(false)
+        },
+        (Operator::Le, Value::Num(n)) => {
+            raw.parse::<i64>().map(|m| m <= *n).unwrap_or(false)
+        },
+        (Operator::Gt, Value::Num(n)) => {
+            raw.parse::<i64>().map(|m| m > *n).unwrap_or(false)
+        },
+        (Operator::Ge, Value::Num(n)) => {
+            raw.parse::<i64>().map(|m| m >= *n).unwrap_or(false)
+        },
+        (Operator::Eq, Value::Bool(b)) => {
+            raw.parse::<bool>().map(|x| x == *b).unwrap_or(false)
+        },
         _ => false,
     }
 }
@@ -754,7 +825,10 @@ fn negate_if(op: Operator, positive: bool) -> bool {
         | Operator::Le
         | Operator::Gt
         | Operator::Ge => positive,
-        Operator::Ne | Operator::NotIn | Operator::NotContains | Operator::NotMatches => !positive,
+        Operator::Ne
+        | Operator::NotIn
+        | Operator::NotContains
+        | Operator::NotMatches => !positive,
     }
 }
 
@@ -806,13 +880,16 @@ mod tests {
 
     #[test]
     fn parses_cidr_set() {
-        let e = parse_expression("ip.src in {192.168.0.0/16 10.0.0.0/8}").unwrap();
+        let e =
+            parse_expression("ip.src in {192.168.0.0/16 10.0.0.0/8}").unwrap();
         assert!(evaluate(&e, &ctx()));
     }
 
     #[test]
     fn parses_header_lookup() {
-        let e = parse_expression(r#"http.request.headers["x-custom"] eq "hello""#).unwrap();
+        let e =
+            parse_expression(r#"http.request.headers["x-custom"] eq "hello""#)
+                .unwrap();
         assert!(evaluate(&e, &ctx()));
     }
 
@@ -826,13 +903,17 @@ mod tests {
 
     #[test]
     fn parses_regex_match() {
-        let e = parse_expression(r#"http.request.uri.path matches "^/admin/.*$""#).unwrap();
+        let e =
+            parse_expression(r#"http.request.uri.path matches "^/admin/.*$""#)
+                .unwrap();
         assert!(evaluate(&e, &ctx()));
     }
 
     #[test]
     fn parses_not_contains() {
-        let e = parse_expression(r#"http.request.uri.path not contains "/secret""#).unwrap();
+        let e =
+            parse_expression(r#"http.request.uri.path not contains "/secret""#)
+                .unwrap();
         assert!(evaluate(&e, &ctx()));
     }
 

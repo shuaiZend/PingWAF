@@ -1,8 +1,8 @@
 //! Challenge/CC protection settings management per site.
 
-use axum::Json;
 use axum::extract::{Path, State};
 use axum::routing::get;
+use axum::Json;
 use axum::Router;
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 use serde::Deserialize;
@@ -63,8 +63,10 @@ pub struct UpdateChallengeRequest {
 
 /// Routes contributed to `/api/v1`.
 pub fn routes() -> Router<AppState> {
-    Router::new()
-        .route("/sites/{site_id}/challenge", get(get_challenge).put(update_challenge))
+    Router::new().route(
+        "/sites/{site_id}/challenge",
+        get(get_challenge).put(update_challenge),
+    )
 }
 
 /// `GET /api/v1/sites/{site_id}/challenge`
@@ -110,7 +112,8 @@ async fn update_challenge(
     if let Some(duration) = payload.clearance_duration_secs {
         if duration < 60 || duration > 86400 {
             return Err(ApiError::BadRequest(
-                "clearance_duration_secs must be between 60 and 86400".to_string(),
+                "clearance_duration_secs must be between 60 and 86400"
+                    .to_string(),
             ));
         }
         active.clearance_duration_secs = Set(duration);
@@ -138,7 +141,11 @@ async fn update_challenge(
         active.tls_fingerprint_check = Set(tls);
     }
     if let Some(secret) = payload.cookie_secret {
-        active.cookie_secret = Set(if secret.trim().is_empty() { None } else { Some(secret) });
+        active.cookie_secret = Set(if secret.trim().is_empty() {
+            None
+        } else {
+            Some(secret)
+        });
     }
     active.updated_at = Set(chrono::Utc::now());
 
@@ -151,7 +158,10 @@ async fn update_challenge(
 }
 
 /// Finds the challenge_settings row for a site, creating a default one if absent.
-async fn find_or_create(state: &AppState, site_id: Uuid) -> Result<challenge_settings::Model, ApiError> {
+async fn find_or_create(
+    state: &AppState,
+    site_id: Uuid,
+) -> Result<challenge_settings::Model, ApiError> {
     if let Some(row) = challenge_settings::Entity::find()
         .filter(challenge_settings::Column::SiteId.eq(site_id))
         .one(&state.db)

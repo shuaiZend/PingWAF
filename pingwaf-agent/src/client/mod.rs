@@ -56,7 +56,8 @@ pub struct LogEntry {
 /// Callback types for server commands that affect the host application.
 pub struct CommandHandlers {
     /// Called when the server requests a cache purge.
-    pub on_purge_cache: Option<Box<dyn Fn(&str, &[String], &[String]) + Send + Sync>>,
+    pub on_purge_cache:
+        Option<Box<dyn Fn(&str, &[String], &[String]) + Send + Sync>>,
     /// Called when the server requests a config reload.
     pub on_config_reload: Option<Box<dyn Fn() + Send + Sync>>,
     /// Called when the server requests agent restart.
@@ -181,10 +182,10 @@ impl ControlPlaneClient {
             match e {
                 mpsc::error::TrySendError::Full(_) => {
                     warn!("Log buffer full, dropping entry");
-                }
+                },
                 mpsc::error::TrySendError::Closed(_) => {
                     debug!("Log channel closed, dropping entry");
-                }
+                },
             }
         }
     }
@@ -206,7 +207,10 @@ impl ControlPlaneClient {
     /// Register this agent with the control plane.
     ///
     /// Returns the agent token and initial configuration if provided.
-    async fn register(&self, channel: Channel) -> anyhow::Result<proto::RegisterAgentResponse> {
+    async fn register(
+        &self,
+        channel: Channel,
+    ) -> anyhow::Result<proto::RegisterAgentResponse> {
         let mut client = ProtoClient::new(channel);
 
         let hostname = get_hostname();
@@ -222,10 +226,7 @@ impl ControlPlaneClient {
             memory_bytes,
         };
 
-        let response = client
-            .register_agent(request)
-            .await?
-            .into_inner();
+        let response = client.register_agent(request).await?.into_inner();
 
         // Store the agent token
         self.agent_token
@@ -240,7 +241,9 @@ impl ControlPlaneClient {
         // Apply initial config if provided
         if let Some(ref site_config) = response.initial_config {
             if !site_config.sites.is_empty() {
-                if let Err(e) = self.rule_cache.update_from_site_config(site_config) {
+                if let Err(e) =
+                    self.rule_cache.update_from_site_config(site_config)
+                {
                     error!(error = %e, "Failed to apply initial site config");
                 }
             }
@@ -252,7 +255,9 @@ impl ControlPlaneClient {
     /// Start the client: connect, register, and spawn background tasks.
     ///
     /// Returns join handles for the spawned tasks (heartbeat, log shipper, rule sync).
-    pub async fn start(self: &Arc<Self>) -> anyhow::Result<Vec<JoinHandle<()>>> {
+    pub async fn start(
+        self: &Arc<Self>,
+    ) -> anyhow::Result<Vec<JoinHandle<()>>> {
         let mut handles = Vec::new();
 
         // Spawn the connection manager with reconnection logic
@@ -267,8 +272,10 @@ impl ControlPlaneClient {
 
     /// Main connection loop with exponential backoff reconnection.
     async fn connection_loop(self: &Arc<Self>) {
-        let mut retry_delay = Duration::from_millis(self.config.reconnect_initial_delay_ms);
-        let max_delay = Duration::from_millis(self.config.reconnect_max_delay_ms);
+        let mut retry_delay =
+            Duration::from_millis(self.config.reconnect_initial_delay_ms);
+        let max_delay =
+            Duration::from_millis(self.config.reconnect_max_delay_ms);
 
         loop {
             if self.shutdown_signal.load(Ordering::Relaxed) {
@@ -280,15 +287,17 @@ impl ControlPlaneClient {
                 Ok(()) => {
                     // Clean disconnect (server closed connection gracefully)
                     info!("Disconnected from control plane, will reconnect");
-                    retry_delay = Duration::from_millis(self.config.reconnect_initial_delay_ms);
-                }
+                    retry_delay = Duration::from_millis(
+                        self.config.reconnect_initial_delay_ms,
+                    );
+                },
                 Err(e) => {
                     warn!(
                         error = %e,
                         delay_ms = retry_delay.as_millis() as u64,
                         "Connection to control plane failed"
                     );
-                }
+                },
             }
 
             self.connected.store(false, Ordering::Relaxed);
@@ -358,14 +367,20 @@ impl ControlPlaneClient {
 
         // Spawn a task to send heartbeats periodically
         let agent_id = self.agent_id.clone();
-        let agent_token = self.agent_token.load_full().map(|t| (*t).clone()).unwrap_or_default();
+        let agent_token = self
+            .agent_token
+            .load_full()
+            .map(|t| (*t).clone())
+            .unwrap_or_default();
         let metrics = Arc::clone(&self.metrics);
         let rule_cache = Arc::clone(&self.rule_cache);
         let shutdown = Arc::clone(&self.shutdown_signal);
 
         let sender_task = tokio::spawn(async move {
             let mut interval = tokio::time::interval(heartbeat_interval);
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            interval.set_missed_tick_behavior(
+                tokio::time::MissedTickBehavior::Delay,
+            );
 
             loop {
                 interval.tick().await;
@@ -386,7 +401,8 @@ impl ControlPlaneClient {
                     memory_usage_bytes: system_metrics.memory_usage_bytes,
                     active_connections: system_metrics.active_connections,
                     requests_per_second: system_metrics.requests_per_second,
-                    blocked_requests_total: system_metrics.blocked_requests_total,
+                    blocked_requests_total: system_metrics
+                        .blocked_requests_total,
                     health: proto::AgentHealthStatus::AgentHealthHealthy as i32,
                     config_hash: rule_cache.config_hash(),
                     // Per-site edge cache disk usage, straight from the quota
@@ -466,7 +482,7 @@ impl ControlPlaneClient {
                         info!(site_id = %update.site_id, "Applied rule update from server");
                     }
                 }
-            }
+            },
             Some(proto::server_command::Payload::BlockIp(block)) => {
                 let duration = if block.duration_seconds > 0 {
                     Some(Duration::from_secs(block.duration_seconds as u64))
@@ -474,14 +490,19 @@ impl ControlPlaneClient {
                     None
                 };
                 for ip in &block.ip_addresses {
-                    rule_cache.block_ip(&block.site_id, ip, duration, &block.reason);
+                    rule_cache.block_ip(
+                        &block.site_id,
+                        ip,
+                        duration,
+                        &block.reason,
+                    );
                 }
-            }
+            },
             Some(proto::server_command::Payload::UnblockIp(unblock)) => {
                 for ip in &unblock.ip_addresses {
                     rule_cache.unblock_ip(&unblock.site_id, ip);
                 }
-            }
+            },
             Some(proto::server_command::Payload::ConfigReload(reload)) => {
                 if let Some(ref config) = reload.config {
                     if let Err(e) = rule_cache.update_from_site_config(config) {
@@ -494,7 +515,7 @@ impl ControlPlaneClient {
                 if let Some(ref cb) = handlers.on_config_reload {
                     cb();
                 }
-            }
+            },
             Some(proto::server_command::Payload::PurgeCache(purge)) => {
                 info!(
                     site_id = %purge.site_id,
@@ -506,14 +527,16 @@ impl ControlPlaneClient {
                 if let Some(ref cb) = handlers.on_purge_cache {
                     cb(&purge.site_id, &purge.urls, &purge.tags);
                 }
-            }
+            },
             Some(proto::server_command::Payload::UpdateSite(update)) => {
                 if let Some(ref site_config) = update.site_config {
-                    if let Err(e) = rule_cache.update_from_site_config(site_config) {
+                    if let Err(e) =
+                        rule_cache.update_from_site_config(site_config)
+                    {
                         error!(error = %e, "Failed to apply site update");
                     }
                 }
-            }
+            },
             Some(proto::server_command::Payload::RestartAgent(restart)) => {
                 warn!(
                     reason = %restart.reason,
@@ -524,10 +547,10 @@ impl ControlPlaneClient {
                 if let Some(ref cb) = handlers.on_restart {
                     cb(restart.graceful);
                 }
-            }
+            },
             None => {
                 debug!("Received server command with no payload");
-            }
+            },
         }
     }
 
@@ -538,11 +561,14 @@ impl ControlPlaneClient {
     async fn run_log_shipper(&self, channel: Channel) -> anyhow::Result<()> {
         let mut client = ProtoClient::new(channel);
         let mut receiver = self.log_receiver.lock().await;
-        let mut batch: Vec<proto::LogEntry> = Vec::with_capacity(self.config.log_batch_size);
+        let mut batch: Vec<proto::LogEntry> =
+            Vec::with_capacity(self.config.log_batch_size);
 
-        let flush_interval = Duration::from_secs(self.config.log_flush_interval_secs.max(1));
+        let flush_interval =
+            Duration::from_secs(self.config.log_flush_interval_secs.max(1));
         let mut interval = tokio::time::interval(flush_interval);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        interval
+            .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         let agent_id = self.agent_id.clone();
 
@@ -611,17 +637,21 @@ impl ControlPlaneClient {
             Ok(response) => {
                 let ack = response.into_inner();
                 if ack.success {
-                    debug!(count, received = ack.received_count, "Flushed logs to server");
+                    debug!(
+                        count,
+                        received = ack.received_count,
+                        "Flushed logs to server"
+                    );
                 } else {
                     warn!(
                         error = %ack.error_message,
                         "Server rejected log batch"
                     );
                 }
-            }
+            },
             Err(e) => {
                 error!(error = %e, count, "Failed to ship logs");
-            }
+            },
         }
 
         let _ = agent_id; // Used in log context
@@ -727,7 +757,8 @@ fn get_system_info() -> (u32, u64, String) {
 
     let memory_bytes = get_total_memory();
 
-    let os_info = format!("{} {}", std::env::consts::OS, std::env::consts::ARCH);
+    let os_info =
+        format!("{} {}", std::env::consts::OS, std::env::consts::ARCH);
 
     (cpu_cores, memory_bytes, os_info)
 }

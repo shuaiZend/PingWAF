@@ -1,4 +1,4 @@
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use chrono::Utc;
 use hmac::{Hmac, KeyInit, Mac};
 use rand::RngExt;
@@ -174,8 +174,9 @@ impl CookieManager {
             .decode(payload_b64)
             .map_err(|_| CookieError::InvalidFormat)?;
 
-        let payload: ClearancePayload = serde_json::from_slice(&payload_json)
-            .map_err(|_| CookieError::InvalidPayload)?;
+        let payload: ClearancePayload =
+            serde_json::from_slice(&payload_json)
+                .map_err(|_| CookieError::InvalidPayload)?;
 
         // Check expiration
         if !self.is_valid(&payload) {
@@ -214,9 +215,7 @@ impl CookieManager {
     pub fn cookie_attributes(&self, payload: &ClearancePayload) -> String {
         let max_age = payload.expires_at - Utc::now().timestamp();
         let max_age = if max_age < 0 { 0 } else { max_age };
-        format!(
-            "Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age={max_age}"
-        )
+        format!("Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age={max_age}")
     }
 
     /// Encode a payload into the signed cookie format

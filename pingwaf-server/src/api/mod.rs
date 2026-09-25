@@ -26,18 +26,18 @@ pub mod ssl;
 pub mod state;
 
 use crate::frontend::serve_frontend;
-use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use axum::Json;
 use axum::Router;
 use serde_json::json;
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 
-pub use error::{ApiError, error_response};
+pub use error::{error_response, ApiError};
 pub use state::AppState;
 
 /// Prefix every REST route lives under.
@@ -77,16 +77,15 @@ pub fn build_router(state: AppState) -> Router {
         .fallback(serve_frontend)
         .layer(build_cors(&config.cors_origins))
         .layer(CompressionLayer::new())
-        .layer(
-            TraceLayer::new_for_http()
-                .make_span_with(|request: &axum::http::Request<_>| {
-                    tracing::info_span!(
-                        "http_request",
-                        method = %request.method(),
-                        path = %request.uri().path(),
-                    )
-                }),
-        )
+        .layer(TraceLayer::new_for_http().make_span_with(
+            |request: &axum::http::Request<_>| {
+                tracing::info_span!(
+                    "http_request",
+                    method = %request.method(),
+                    path = %request.uri().path(),
+                )
+            },
+        ))
         .with_state(state)
 }
 
@@ -132,7 +131,11 @@ fn build_cors(origins: &[String]) -> CorsLayer {
 /// `GET /healthz` and `GET /api/v1/health` — verifies the database is reachable.
 async fn health(State(state): State<AppState>) -> Response {
     match state.db.ping().await {
-        Ok(()) => (StatusCode::OK, Json(json!({ "status": "ok", "database": "up" }))).into_response(),
+        Ok(()) => (
+            StatusCode::OK,
+            Json(json!({ "status": "ok", "database": "up" })),
+        )
+            .into_response(),
         Err(err) => {
             tracing::error!(error = %err, "database health check failed");
             (
@@ -140,7 +143,7 @@ async fn health(State(state): State<AppState>) -> Response {
                 Json(json!({ "status": "degraded", "database": "down" })),
             )
                 .into_response()
-        }
+        },
     }
 }
 

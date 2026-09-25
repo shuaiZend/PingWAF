@@ -395,7 +395,9 @@ pub fn generate_managed_challenge_html(params: &ChallengePageParams) -> String {
 
 /// Generate the interactive challenge HTML page (CAPTCHA-style).
 /// This is a placeholder for future CAPTCHA integration.
-pub fn generate_interactive_challenge_html(params: &ChallengePageParams) -> String {
+pub fn generate_interactive_challenge_html(
+    params: &ChallengePageParams,
+) -> String {
     let brand_name = &params.brand_name;
     let request_id = &params.request_id;
     let original_url = &params.original_url;

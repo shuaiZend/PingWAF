@@ -5,9 +5,9 @@
 //! `FILTER (WHERE …)` aggregates or `date_trunc` bucketing without giving up
 //! most of the readability.
 
-use axum::Json;
 use axum::extract::{Query, State};
 use axum::routing::get;
+use axum::Json;
 use axum::Router;
 use chrono::{DateTime, Duration, Utc};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, TryGetable, Value};
@@ -68,7 +68,8 @@ struct Resolved {
 impl Resolved {
     /// Builds the `WHERE` fragment plus its bound values.
     fn filter(&self, table: &str) -> (String, Vec<Value>) {
-        let mut sql = format!("{table}.timestamp >= $1 AND {table}.timestamp < $2");
+        let mut sql =
+            format!("{table}.timestamp >= $1 AND {table}.timestamp < $2");
         let mut values: Vec<Value> = vec![self.from.into(), self.to.into()];
         if let Some(id) = self.site_id {
             sql.push_str(" AND site_id = $3");
@@ -183,7 +184,7 @@ async fn resolve(
             // `load_site_read` returns 404 for sites the caller may not see.
             load_site_read(&state.db, id, current).await?;
             Some(id)
-        }
+        },
         None if current.is_admin() => None,
         None => {
             // Non-admins may still see everything they own; pick the single site
@@ -205,7 +206,7 @@ async fn resolve(
                     ))
                 }
             }
-        }
+        },
     };
 
     let to = match parse_optional_datetime(&query.to, "to")? {
@@ -353,7 +354,8 @@ async fn requests_over_time(
     let mut buckets: Vec<TimeBucket> = Vec::with_capacity(rows.len());
     for row in &rows {
         buckets.push(TimeBucket {
-            bucket: try_get::<DateTime<Utc>>(row, "bucket").unwrap_or_else(Utc::now),
+            bucket: try_get::<DateTime<Utc>>(row, "bucket")
+                .unwrap_or_else(Utc::now),
             requests: get_value::<i64>(row, "requests"),
             cache_hits: get_value::<i64>(row, "cache_hits"),
             client_errors: get_value::<i64>(row, "client_errors"),
@@ -372,13 +374,16 @@ async fn requests_over_time(
          WHERE {event_where} AND action <> 'allow' \
          GROUP BY bucket ORDER BY bucket ASC"
     );
-    if let Ok(event_rows) = query_all(&state.db, &event_sql, event_values).await {
+    if let Ok(event_rows) = query_all(&state.db, &event_sql, event_values).await
+    {
         for row in &event_rows {
             let Some(bucket) = try_get::<DateTime<Utc>>(row, "bucket") else {
                 continue;
             };
             let blocked = get_value::<i64>(row, "blocked");
-            if let Some(target) = buckets.iter_mut().find(|item| item.bucket == bucket) {
+            if let Some(target) =
+                buckets.iter_mut().find(|item| item.bucket == bucket)
+            {
                 target.blocked = blocked;
             }
         }
@@ -526,11 +531,15 @@ async fn sites_overview(
 
     let sites = match resolved.site_id {
         Some(id) => vec![load_site_read(&state.db, id, &current).await?],
-        None if current.is_admin() => site::Entity::find().all(&state.db).await?,
-        None => site::Entity::find()
-            .filter(site::Column::UserId.eq(current.id))
-            .all(&state.db)
-            .await?,
+        None if current.is_admin() => {
+            site::Entity::find().all(&state.db).await?
+        },
+        None => {
+            site::Entity::find()
+                .filter(site::Column::UserId.eq(current.id))
+                .all(&state.db)
+                .await?
+        },
     };
 
     let mut out = Vec::with_capacity(sites.len());
@@ -543,9 +552,11 @@ async fn sites_overview(
                      (SELECT COUNT(*) FROM security_events \
                       WHERE site_id = $1 AND timestamp >= $2 AND timestamp < $3 \
                         AND action = 'block') AS blocked";
-        let values: Vec<Value> = vec![row.id.into(), resolved.from.into(), resolved.to.into()];
+        let values: Vec<Value> =
+            vec![row.id.into(), resolved.from.into(), resolved.to.into()];
 
-        let counts = query_all(&state.db, sql, values).await?.into_iter().next();
+        let counts =
+            query_all(&state.db, sql, values).await?.into_iter().next();
         out.push(SiteOverview {
             site_id: row.id,
             name: row.name,
@@ -606,7 +617,10 @@ mod tests {
     fn filter_placeholders_shift_with_the_site_scope() {
         let open = resolved(None);
         let (sql, values) = open.filter("access_logs");
-        assert_eq!(sql, "access_logs.timestamp >= $1 AND access_logs.timestamp < $2");
+        assert_eq!(
+            sql,
+            "access_logs.timestamp >= $1 AND access_logs.timestamp < $2"
+        );
         assert_eq!(values.len(), 2);
         assert_eq!(open.next_placeholder(), 3);
 

@@ -19,7 +19,12 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(Users::Table)
                     .if_not_exists()
-                    .col(ColumnDef::new(Users::Id).uuid().not_null().primary_key())
+                    .col(
+                        ColumnDef::new(Users::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
                     .col(
                         ColumnDef::new(Users::Email)
                             .string_len(255)
@@ -64,9 +69,21 @@ impl MigrationTrait for Migration {
                             .primary_key(),
                     )
                     .col(ColumnDef::new(ApiKeys::UserId).uuid().not_null())
-                    .col(ColumnDef::new(ApiKeys::Name).string_len(100).not_null())
-                    .col(ColumnDef::new(ApiKeys::KeyHash).string_len(255).not_null())
-                    .col(ColumnDef::new(ApiKeys::KeyPrefix).string_len(8).not_null())
+                    .col(
+                        ColumnDef::new(ApiKeys::Name)
+                            .string_len(100)
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(ApiKeys::KeyHash)
+                            .string_len(255)
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(ApiKeys::KeyPrefix)
+                            .string_len(8)
+                            .not_null(),
+                    )
                     .col(
                         ColumnDef::new(ApiKeys::Permissions)
                             .array(ColumnType::Text)
@@ -125,10 +142,14 @@ impl MigrationTrait for Migration {
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
-            .drop_table(Table::drop().table(ApiKeys::Table).if_exists().to_owned())
+            .drop_table(
+                Table::drop().table(ApiKeys::Table).if_exists().to_owned(),
+            )
             .await?;
         manager
-            .drop_table(Table::drop().table(Users::Table).if_exists().to_owned())
+            .drop_table(
+                Table::drop().table(Users::Table).if_exists().to_owned(),
+            )
             .await?;
         Ok(())
     }

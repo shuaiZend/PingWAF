@@ -77,11 +77,11 @@ pub fn decode_entities(input: &str) -> String {
             Some((c, consumed)) => {
                 out.push(c);
                 remaining = &after[consumed..];
-            }
+            },
             None => {
                 out.push('&');
                 remaining = after;
-            }
+            },
         }
     }
     out.push_str(remaining);

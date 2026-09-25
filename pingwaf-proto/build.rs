@@ -8,7 +8,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=proto/control_plane.proto");
 
     // Check if protoc is available (via PROTOC env var or PATH)
-    let protoc_bin = std::env::var("PROTOC").unwrap_or_else(|_| "protoc".to_string());
+    let protoc_bin =
+        std::env::var("PROTOC").unwrap_or_else(|_| "protoc".to_string());
     let protoc_available = std::process::Command::new(&protoc_bin)
         .arg("--version")
         .output()
@@ -40,7 +41,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ];
 
     for path in &well_known_paths {
-        let google_ts = PathBuf::from(path).join("google/protobuf/timestamp.proto");
+        let google_ts =
+            PathBuf::from(path).join("google/protobuf/timestamp.proto");
         if google_ts.exists() {
             includes.push(PathBuf::from(*path));
             break;
@@ -79,9 +81,7 @@ fn which_protoc() -> Result<PathBuf, Box<dyn std::error::Error>> {
         return Ok(PathBuf::from(protoc));
     }
 
-    let output = std::process::Command::new("which")
-        .arg("protoc")
-        .output()?;
+    let output = std::process::Command::new("which").arg("protoc").output()?;
 
     if output.status.success() {
         let path = String::from_utf8(output.stdout)?.trim().to_string();

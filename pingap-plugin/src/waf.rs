@@ -213,10 +213,8 @@ impl WafPlugin {
         let Some(agent) = PingWafAgent::instance() else {
             return;
         };
-        let blocked = matches!(
-            verdict.action,
-            WafAction::Block | WafAction::Challenge
-        );
+        let blocked =
+            matches!(verdict.action, WafAction::Block | WafAction::Challenge);
         agent.record_request(blocked);
         let user_agent = request_data
             .headers
@@ -232,20 +230,13 @@ impl WafPlugin {
             host: host.to_string(),
             path: request_data.path.clone(),
             query_string: request_data.query.clone(),
-            rule_id: verdict
-                .matched_rules
-                .first()
-                .cloned()
-                .unwrap_or_default(),
+            rule_id: verdict.matched_rules.first().cloned().unwrap_or_default(),
             rule_name: String::new(),
             action: action_str(&verdict.action).to_string(),
             score: verdict.score as u32,
             details: verdict.details.clone(),
             user_agent,
-            country_code: request_data
-                .country_code
-                .clone()
-                .unwrap_or_default(),
+            country_code: request_data.country_code.clone().unwrap_or_default(),
             matched_tags: verdict.matched_rules.clone(),
         });
     }
@@ -493,8 +484,7 @@ ml_threshold = 0.75
         )
         .unwrap();
 
-        let input_header =
-            "GET /api/users?id=1'%20OR%201=1%20-- HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let input_header = "GET /api/users?id=1'%20OR%201=1%20-- HTTP/1.1\r\nHost: example.com\r\n\r\n";
         let mock_io = Builder::new().read(input_header.as_bytes()).build();
         let mut session = Session::new_h1(Box::new(mock_io));
         session.read_request().await.unwrap();
@@ -544,8 +534,7 @@ ml_threshold = 0.75
         )
         .unwrap();
 
-        let input_header =
-            "GET /api/users?id=1'%20OR%201=1%20-- HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let input_header = "GET /api/users?id=1'%20OR%201=1%20-- HTTP/1.1\r\nHost: example.com\r\n\r\n";
         let mock_io = Builder::new().read(input_header.as_bytes()).build();
         let mut session = Session::new_h1(Box::new(mock_io));
         session.read_request().await.unwrap();
@@ -568,8 +557,7 @@ ml_threshold = 0.75
         )
         .unwrap();
 
-        let input_header =
-            "GET /api/users?id=1'%20OR%201=1%20-- HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let input_header = "GET /api/users?id=1'%20OR%201=1%20-- HTTP/1.1\r\nHost: example.com\r\n\r\n";
         let mock_io = Builder::new().read(input_header.as_bytes()).build();
         let mut session = Session::new_h1(Box::new(mock_io));
         session.read_request().await.unwrap();

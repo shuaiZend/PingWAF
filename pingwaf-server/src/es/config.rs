@@ -153,12 +153,18 @@ impl EsConfig {
                 "elasticsearch url '{trimmed}' must start with http:// or https://"
             );
         }
-        anyhow::ensure!(self.bulk_max_size > 0, "bulk_max_size must be positive");
+        anyhow::ensure!(
+            self.bulk_max_size > 0,
+            "bulk_max_size must be positive"
+        );
         anyhow::ensure!(
             self.bulk_flush_interval_ms > 0,
             "bulk_flush_interval_ms must be positive"
         );
-        anyhow::ensure!(self.max_body_size > 0, "max_body_size must be positive");
+        anyhow::ensure!(
+            self.max_body_size > 0,
+            "max_body_size must be positive"
+        );
         anyhow::ensure!(
             self.channel_capacity > 0,
             "channel_capacity must be positive"
@@ -187,7 +193,8 @@ impl EsConfig {
             .map(|url| url.trim().trim_end_matches('/').to_string())
             .filter(|url| !url.is_empty())
             .collect();
-        self.index_prefix = self.index_prefix.trim().trim_end_matches('-').to_string();
+        self.index_prefix =
+            self.index_prefix.trim().trim_end_matches('-').to_string();
         if self.index_prefix.is_empty() {
             self.index_prefix = default_index_prefix();
         }
@@ -237,7 +244,10 @@ mod tests {
         let mut config = sample();
         config.urls.push("   ".to_string());
         config.normalise();
-        assert_eq!(config.urls, vec!["https://es.example.com:9200".to_string()]);
+        assert_eq!(
+            config.urls,
+            vec!["https://es.example.com:9200".to_string()]
+        );
     }
 
     #[test]
@@ -267,9 +277,10 @@ mod tests {
 
     #[test]
     fn serde_defaults_fill_missing_fields() {
-        let config: EsConfig =
-            serde_json::from_str(r#"{"urls":["http://localhost:9200"],"enabled":true}"#)
-                .expect("partial config parses");
+        let config: EsConfig = serde_json::from_str(
+            r#"{"urls":["http://localhost:9200"],"enabled":true}"#,
+        )
+        .expect("partial config parses");
         assert_eq!(config.bulk_max_size, DEFAULT_BULK_MAX_SIZE);
         assert_eq!(config.max_body_size, DEFAULT_MAX_BODY_SIZE);
         assert_eq!(config.index_prefix, DEFAULT_INDEX_PREFIX);

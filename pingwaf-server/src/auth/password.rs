@@ -1,6 +1,6 @@
 //! Password hashing helpers built on bcrypt.
 
-use bcrypt::{DEFAULT_COST, BcryptError};
+use bcrypt::{BcryptError, DEFAULT_COST};
 
 /// bcrypt only ever looks at the first 72 bytes of the input. Instead of
 /// letting longer secrets fail at hash time we truncate on a character
@@ -60,7 +60,10 @@ pub fn hash_password(plain: &str) -> Result<String, PasswordError> {
 
 /// Hashes a plaintext password with an explicit cost (used by tests, where a low
 /// cost keeps the suite fast).
-pub fn hash_password_with_cost(plain: &str, cost: u32) -> Result<String, PasswordError> {
+pub fn hash_password_with_cost(
+    plain: &str,
+    cost: u32,
+) -> Result<String, PasswordError> {
     Ok(bcrypt::hash(bcrypt_input(plain), cost)?)
 }
 

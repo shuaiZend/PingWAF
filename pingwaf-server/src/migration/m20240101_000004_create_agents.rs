@@ -20,7 +20,12 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(Agents::Table)
                     .if_not_exists()
-                    .col(ColumnDef::new(Agents::Id).uuid().not_null().primary_key())
+                    .col(
+                        ColumnDef::new(Agents::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
                     .col(ColumnDef::new(Agents::SiteId).uuid().null())
                     .col(
                         ColumnDef::new(Agents::Hostname)
@@ -35,7 +40,11 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(Agents::Version).string_len(20).null())
                     .col(ColumnDef::new(Agents::OsInfo).string_len(100).null())
                     .col(ColumnDef::new(Agents::CpuCores).integer().null())
-                    .col(ColumnDef::new(Agents::MemoryBytes).big_integer().null())
+                    .col(
+                        ColumnDef::new(Agents::MemoryBytes)
+                            .big_integer()
+                            .null(),
+                    )
                     .col(
                         ColumnDef::new(Agents::Status)
                             .string_len(20)
@@ -115,7 +124,9 @@ impl MigrationTrait for Migration {
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
-            .drop_table(Table::drop().table(Agents::Table).if_exists().to_owned())
+            .drop_table(
+                Table::drop().table(Agents::Table).if_exists().to_owned(),
+            )
             .await?;
         Ok(())
     }

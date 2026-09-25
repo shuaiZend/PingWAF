@@ -1,19 +1,20 @@
 //! Custom error pages management per site.
 
-use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use axum::Json;
 use axum::Router;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, Set,
+    ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter,
+    QueryOrder, Set,
 };
 use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::api::common::{
-    Page, Pagination, load_site_read, load_site_write, non_empty, parse_uuid,
+    load_site_read, load_site_write, non_empty, parse_uuid, Page, Pagination,
 };
 use crate::api::error::ApiError;
 use crate::api::sites::touch_site;
@@ -65,7 +66,10 @@ pub struct UpdateRequest {
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/sites/{site_id}/error-pages", get(list).post(create))
-        .route("/sites/{site_id}/error-pages/{page_id}", axum::routing::put(update).delete(remove))
+        .route(
+            "/sites/{site_id}/error-pages/{page_id}",
+            axum::routing::put(update).delete(remove),
+        )
 }
 
 fn validate_status_code(code: i32) -> Result<(), ApiError> {
@@ -110,10 +114,14 @@ async fn create(
 
     validate_status_code(payload.status_code)?;
     if payload.name.trim().is_empty() || payload.name.len() > 200 {
-        return Err(ApiError::BadRequest("name must be 1-200 characters".to_string()));
+        return Err(ApiError::BadRequest(
+            "name must be 1-200 characters".to_string(),
+        ));
     }
     if payload.body_template.trim().is_empty() {
-        return Err(ApiError::BadRequest("body_template must not be empty".to_string()));
+        return Err(ApiError::BadRequest(
+            "body_template must not be empty".to_string(),
+        ));
     }
 
     let timestamp = chrono::Utc::now();
@@ -158,7 +166,9 @@ async fn update(
     }
     if let Some(name) = non_empty(&payload.name) {
         if name.len() > 200 {
-            return Err(ApiError::BadRequest("name must be at most 200 characters".to_string()));
+            return Err(ApiError::BadRequest(
+                "name must be at most 200 characters".to_string(),
+            ));
         }
         active.name = Set(name);
     }
@@ -167,7 +177,9 @@ async fn update(
     }
     if let Some(body) = payload.body_template {
         if body.trim().is_empty() {
-            return Err(ApiError::BadRequest("body_template must not be empty".to_string()));
+            return Err(ApiError::BadRequest(
+                "body_template must not be empty".to_string(),
+            ));
         }
         active.body_template = Set(body);
     }
@@ -215,5 +227,7 @@ async fn find(
         .filter(error_pages::Column::SiteId.eq(site_id))
         .one(&state.db)
         .await?
-        .ok_or_else(|| ApiError::NotFound(format!("error page {page_id} not found")))
+        .ok_or_else(|| {
+            ApiError::NotFound(format!("error page {page_id} not found"))
+        })
 }

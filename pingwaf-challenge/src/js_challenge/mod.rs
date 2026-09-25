@@ -6,8 +6,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::cookie::{ClearanceLevel, ClearancePayload, CookieManager};
 use crate::fingerprint::BrowserFingerprint;
-use page::{ChallengePageParams, generate_interactive_challenge_html, generate_js_challenge_html};
-use verify::{IntegrityResult, check_browser_integrity, verify_proof_of_work, verify_timestamp};
+use page::{
+    generate_interactive_challenge_html, generate_js_challenge_html,
+    ChallengePageParams,
+};
+use verify::{
+    check_browser_integrity, verify_proof_of_work, verify_timestamp,
+    IntegrityResult,
+};
 
 /// Configuration for the challenge system
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,7 +87,10 @@ impl ChallengeEngine {
     }
 
     /// Check if a request should be challenged
-    pub fn should_challenge(&self, request: &ChallengeRequest) -> ChallengeDecision {
+    pub fn should_challenge(
+        &self,
+        request: &ChallengeRequest,
+    ) -> ChallengeDecision {
         // If challenges are disabled, always pass
         if !self.config.enabled {
             return ChallengeDecision::Pass;
@@ -109,10 +118,10 @@ impl ChallengeEngine {
                     }
                     // Clearance exists but level insufficient — escalate
                     return self.decide_challenge_level(request);
-                }
+                },
                 Err(_) => {
                     // Invalid/expired cookie — challenge
-                }
+                },
             }
         }
 
@@ -154,14 +163,14 @@ impl ChallengeEngine {
             content_type: "text/html; charset=utf-8".to_string(),
             body,
             headers: vec![
-                ("Cache-Control".to_string(), "no-store, no-cache, must-revalidate".to_string()),
+                (
+                    "Cache-Control".to_string(),
+                    "no-store, no-cache, must-revalidate".to_string(),
+                ),
                 ("Pragma".to_string(), "no-cache".to_string()),
                 ("X-Frame-Options".to_string(), "DENY".to_string()),
                 ("X-Content-Type-Options".to_string(), "nosniff".to_string()),
-                (
-                    "X-PingWAF-Ray".to_string(),
-                    request_id.to_string(),
-                ),
+                ("X-PingWAF-Ray".to_string(), request_id.to_string()),
             ],
         }
     }
@@ -189,22 +198,28 @@ impl ChallengeEngine {
             content_type: "text/html; charset=utf-8".to_string(),
             body,
             headers: vec![
-                ("Cache-Control".to_string(), "no-store, no-cache, must-revalidate".to_string()),
+                (
+                    "Cache-Control".to_string(),
+                    "no-store, no-cache, must-revalidate".to_string(),
+                ),
                 ("Pragma".to_string(), "no-cache".to_string()),
                 ("X-Frame-Options".to_string(), "DENY".to_string()),
                 ("X-Content-Type-Options".to_string(), "nosniff".to_string()),
-                (
-                    "X-PingWAF-Ray".to_string(),
-                    request_id.to_string(),
-                ),
+                ("X-PingWAF-Ray".to_string(), request_id.to_string()),
             ],
         }
     }
 
     /// Verify a challenge solution submission
-    pub fn verify_solution(&self, submission: &ChallengeSubmission) -> VerifyResult {
+    pub fn verify_solution(
+        &self,
+        submission: &ChallengeSubmission,
+    ) -> VerifyResult {
         // 1. Verify timestamp (prevent replay)
-        if !verify_timestamp(submission.timestamp, self.config.submission_max_age_secs) {
+        if !verify_timestamp(
+            submission.timestamp,
+            self.config.submission_max_age_secs,
+        ) {
             return VerifyResult::Failed {
                 reason: "submission expired or timestamp invalid".to_string(),
             };
@@ -222,19 +237,21 @@ impl ChallengeEngine {
         }
 
         // 3. Parse and check browser fingerprint
-        let fingerprint = match BrowserFingerprint::from_json(&submission.fingerprint_json) {
-            Ok(fp) => fp,
-            Err(e) => {
-                return VerifyResult::Failed {
-                    reason: format!("invalid fingerprint data: {e}"),
-                };
-            }
-        };
+        let fingerprint =
+            match BrowserFingerprint::from_json(&submission.fingerprint_json) {
+                Ok(fp) => fp,
+                Err(e) => {
+                    return VerifyResult::Failed {
+                        reason: format!("invalid fingerprint data: {e}"),
+                    };
+                },
+            };
 
         // 4. Browser integrity check
         if self.config.browser_integrity_check {
-            match check_browser_integrity(&fingerprint, &fingerprint.user_agent) {
-                IntegrityResult::Passed => {}
+            match check_browser_integrity(&fingerprint, &fingerprint.user_agent)
+            {
+                IntegrityResult::Passed => {},
                 IntegrityResult::Suspicious(reason) => {
                     tracing::warn!(
                         request_id = %submission.request_id,
@@ -242,7 +259,7 @@ impl ChallengeEngine {
                         "suspicious browser detected during challenge"
                     );
                     // Still allow, but log it
-                }
+                },
                 IntegrityResult::Failed(reason) => {
                     tracing::warn!(
                         request_id = %submission.request_id,
@@ -250,19 +267,22 @@ impl ChallengeEngine {
                         "browser integrity check failed"
                     );
                     return VerifyResult::Failed {
-                        reason: format!("browser integrity check failed: {reason}"),
+                        reason: format!(
+                            "browser integrity check failed: {reason}"
+                        ),
                     };
-                }
+                },
             }
         }
 
         // 5. Issue clearance cookie
         let fp_hash = fingerprint.hash();
-        let (cookie_value, payload) = self.cookie_manager.issue_clearance_with_payload(
-            self.config.default_level,
-            &submission.site_id,
-            &fp_hash,
-        );
+        let (cookie_value, payload) =
+            self.cookie_manager.issue_clearance_with_payload(
+                self.config.default_level,
+                &submission.site_id,
+                &fp_hash,
+            );
         let cookie_attributes = self.cookie_manager.cookie_attributes(&payload);
 
         tracing::info!(
@@ -278,7 +298,10 @@ impl ChallengeEngine {
     }
 
     /// Validate an existing clearance cookie
-    pub fn validate_clearance(&self, cookie_value: &str) -> Option<ClearancePayload> {
+    pub fn validate_clearance(
+        &self,
+        cookie_value: &str,
+    ) -> Option<ClearancePayload> {
         self.cookie_manager.validate_clearance(cookie_value).ok()
     }
 
@@ -323,9 +346,10 @@ impl ChallengeEngine {
             return false;
         }
         let ua_lower = user_agent.to_lowercase();
-        self.config.exempt_user_agents.iter().any(|exempt| {
-            ua_lower.contains(&exempt.to_lowercase())
-        })
+        self.config
+            .exempt_user_agents
+            .iter()
+            .any(|exempt| ua_lower.contains(&exempt.to_lowercase()))
     }
 
     /// Extract the clearance cookie value from the request
@@ -339,7 +363,10 @@ impl ChallengeEngine {
     }
 
     /// Decide the challenge level based on request context
-    fn decide_challenge_level(&self, request: &ChallengeRequest) -> ChallengeDecision {
+    fn decide_challenge_level(
+        &self,
+        request: &ChallengeRequest,
+    ) -> ChallengeDecision {
         // High rate: use interactive challenge
         if request.request_rate > self.config.rate_threshold * 3 {
             return ChallengeDecision::InteractiveChallenge;
@@ -463,7 +490,9 @@ mod tests {
             path: "/".to_string(),
             method: "GET".to_string(),
             client_ip: "192.168.1.1".to_string(),
-            user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0".to_string(),
+            user_agent:
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0"
+                    .to_string(),
             cookies: vec![],
             has_js_support: None,
             request_rate: 5,
@@ -551,10 +580,8 @@ mod tests {
         let cookie_value = engine.cookie_manager_issue_clearance();
 
         let mut request = test_request();
-        request.cookies = vec![(
-            "__pingwaf_clearance".to_string(),
-            cookie_value,
-        )];
+        request.cookies =
+            vec![("__pingwaf_clearance".to_string(), cookie_value)];
         request.request_rate = 1000; // Even with high rate, valid cookie should pass
 
         let decision = engine.should_challenge(&request);
@@ -572,7 +599,8 @@ mod tests {
     #[test]
     fn test_generate_js_challenge_page() {
         let engine = ChallengeEngine::new(test_config());
-        let response = engine.generate_js_challenge_page("ray-123", "/protected");
+        let response =
+            engine.generate_js_challenge_page("ray-123", "/protected");
         assert_eq!(response.status_code, 503);
         assert!(response.content_type.contains("text/html"));
         assert!(response.body.contains("ray-123"));
@@ -607,10 +635,10 @@ mod tests {
             } => {
                 assert!(!cookie_value.is_empty());
                 assert!(cookie_attributes.contains("HttpOnly"));
-            }
+            },
             VerifyResult::Failed { reason } => {
                 panic!("Expected success but got failure: {reason}");
-            }
+            },
         }
     }
 
@@ -629,7 +657,7 @@ mod tests {
         match engine.verify_solution(&submission) {
             VerifyResult::Failed { reason } => {
                 assert!(reason.contains("expired"));
-            }
+            },
             _ => panic!("Expected failure"),
         }
     }

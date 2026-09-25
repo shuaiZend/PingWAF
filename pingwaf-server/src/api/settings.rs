@@ -9,16 +9,18 @@
 //! the single source of truth while still giving operators a safe way to check
 //! their settings before committing them.
 
-use axum::Json;
-use axum::Router;
 use axum::extract::State;
 use axum::routing::{get, post};
+use axum::Json;
+use axum::Router;
 use serde::Serialize;
 
 use crate::api::error::ApiError;
 use crate::api::state::AppState;
 use crate::auth::AuthUser;
-use crate::es::{ElasticsearchClient, EsConfig, EsHealth, ensure_index_template};
+use crate::es::{
+    ensure_index_template, ElasticsearchClient, EsConfig, EsHealth,
+};
 
 /// Routes contributed to `/api/v1`.
 pub fn routes() -> Router<AppState> {
@@ -189,7 +191,7 @@ async fn run_probe(mut config: EsConfig) -> EsTestResult {
                 error: Some(err.to_string()),
                 template_installed: false,
             }
-        }
+        },
     };
 
     let health = match client.health_check().await {
@@ -202,7 +204,7 @@ async fn run_probe(mut config: EsConfig) -> EsTestResult {
                 error: Some(err.to_string()),
                 template_installed: false,
             };
-        }
+        },
     };
 
     let template_installed = ensure_index_template(&client).await.is_ok();
@@ -221,10 +223,10 @@ async fn probe(config: EsConfig) -> Result<EsHealth, ApiError> {
     let result = run_probe(config).await;
     match result.health {
         Some(health) if result.ok => Ok(health),
-        _ => Err(ApiError::Unprocessable(
-            result
-                .error
-                .unwrap_or_else(|| "elasticsearch is unreachable".to_string()),
-        )),
+        _ => {
+            Err(ApiError::Unprocessable(result.error.unwrap_or_else(|| {
+                "elasticsearch is unreachable".to_string()
+            })))
+        },
     }
 }

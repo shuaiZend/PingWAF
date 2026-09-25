@@ -73,13 +73,19 @@ impl MigrationTrait for Migration {
                             .not_null(),
                     )
                     .col(ColumnDef::new(SecurityEvents::Score).integer().null())
-                    .col(ColumnDef::new(SecurityEvents::WafDetails).text().null())
+                    .col(
+                        ColumnDef::new(SecurityEvents::WafDetails)
+                            .text()
+                            .null(),
+                    )
                     .col(
                         ColumnDef::new(SecurityEvents::CountryCode)
                             .string_len(2)
                             .null(),
                     )
-                    .col(ColumnDef::new(SecurityEvents::UserAgent).text().null())
+                    .col(
+                        ColumnDef::new(SecurityEvents::UserAgent).text().null(),
+                    )
                     .col(
                         ColumnDef::new(SecurityEvents::CreatedAt)
                             .timestamp_with_time_zone()
@@ -95,7 +101,10 @@ impl MigrationTrait for Migration {
                     .foreign_key(
                         ForeignKey::create()
                             .name("fk_security_events_agent_id")
-                            .from(SecurityEvents::Table, SecurityEvents::AgentId)
+                            .from(
+                                SecurityEvents::Table,
+                                SecurityEvents::AgentId,
+                            )
                             .to(Agents::Table, Agents::Id)
                             .on_delete(ForeignKeyAction::SetNull),
                     )
@@ -137,11 +146,19 @@ impl MigrationTrait for Migration {
                             .string_len(10)
                             .not_null(),
                     )
-                    .col(ColumnDef::new(AccessLogs::Host).string_len(255).null())
+                    .col(
+                        ColumnDef::new(AccessLogs::Host).string_len(255).null(),
+                    )
                     .col(ColumnDef::new(AccessLogs::Path).text().null())
                     .col(ColumnDef::new(AccessLogs::QueryString).text().null())
-                    .col(ColumnDef::new(AccessLogs::StatusCode).integer().null())
-                    .col(ColumnDef::new(AccessLogs::ResponseSize).big_integer().null())
+                    .col(
+                        ColumnDef::new(AccessLogs::StatusCode).integer().null(),
+                    )
+                    .col(
+                        ColumnDef::new(AccessLogs::ResponseSize)
+                            .big_integer()
+                            .null(),
+                    )
                     .col(
                         ColumnDef::new(AccessLogs::UpstreamAddr)
                             .string_len(255)
@@ -224,7 +241,12 @@ impl MigrationTrait for Migration {
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
-            .drop_table(Table::drop().table(AccessLogs::Table).if_exists().to_owned())
+            .drop_table(
+                Table::drop()
+                    .table(AccessLogs::Table)
+                    .if_exists()
+                    .to_owned(),
+            )
             .await?;
         manager
             .drop_table(

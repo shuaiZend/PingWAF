@@ -1,7 +1,9 @@
 //! JWT issuing and verification for dashboard users and registered agents.
 
 use chrono::{Duration, Utc};
-use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
+use jsonwebtoken::{
+    decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation,
+};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -77,7 +79,9 @@ impl std::fmt::Display for JwtError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             JwtError::Expired => f.write_str("token expired"),
-            JwtError::InvalidSignature => f.write_str("invalid token signature"),
+            JwtError::InvalidSignature => {
+                f.write_str("invalid token signature")
+            },
             JwtError::Malformed(msg) => write!(f, "malformed token: {msg}"),
             JwtError::Signing(msg) => write!(f, "token signing failed: {msg}"),
         }
@@ -216,7 +220,10 @@ pub fn verify_token(token: &str, secret: &str) -> Result<Claims, JwtError> {
 
 /// Verifies a token and asserts it is a dashboard (non-agent, non-refresh)
 /// access token.
-pub fn verify_user_token(token: &str, secret: &str) -> Result<Claims, JwtError> {
+pub fn verify_user_token(
+    token: &str,
+    secret: &str,
+) -> Result<Claims, JwtError> {
     let claims = verify_token(token, secret)?;
     if claims.is_agent() {
         return Err(JwtError::Malformed(
@@ -232,7 +239,10 @@ pub fn verify_user_token(token: &str, secret: &str) -> Result<Claims, JwtError> 
 }
 
 /// Verifies a token and asserts it is a refresh token.
-pub fn verify_refresh_token(token: &str, secret: &str) -> Result<Claims, JwtError> {
+pub fn verify_refresh_token(
+    token: &str,
+    secret: &str,
+) -> Result<Claims, JwtError> {
     let claims = verify_token(token, secret)?;
     if !claims.is_refresh() {
         return Err(JwtError::Malformed("not a refresh token".to_string()));
@@ -241,7 +251,10 @@ pub fn verify_refresh_token(token: &str, secret: &str) -> Result<Claims, JwtErro
 }
 
 /// Verifies a token and asserts it was issued to an agent.
-pub fn verify_agent_token(token: &str, secret: &str) -> Result<Claims, JwtError> {
+pub fn verify_agent_token(
+    token: &str,
+    secret: &str,
+) -> Result<Claims, JwtError> {
     let claims = verify_token(token, secret)?;
     if !claims.is_agent() {
         return Err(JwtError::Malformed("not an agent token".to_string()));
@@ -259,8 +272,8 @@ mod tests {
     #[test]
     fn roundtrip_dashboard_token() {
         let id = Uuid::new_v4();
-        let token =
-            create_token(id, "ops@example.com", role::ADMIN, SECRET, 1).expect("token");
+        let token = create_token(id, "ops@example.com", role::ADMIN, SECRET, 1)
+            .expect("token");
         let claims = verify_token(&token, SECRET).expect("verify");
         assert_eq!(claims.sub, id.to_string());
         assert_eq!(claims.email, "ops@example.com");
@@ -272,7 +285,9 @@ mod tests {
 
     #[test]
     fn wrong_secret_is_rejected() {
-        let token = create_token(Uuid::new_v4(), "a@b.c", role::VIEWER, SECRET, 1).unwrap();
+        let token =
+            create_token(Uuid::new_v4(), "a@b.c", role::VIEWER, SECRET, 1)
+                .unwrap();
         assert!(matches!(
             verify_token(&token, "another-secret"),
             Err(JwtError::InvalidSignature | JwtError::Malformed(_))
@@ -285,7 +300,9 @@ mod tests {
         assert!(verify_agent_token(&agent, SECRET).is_ok());
         assert!(verify_user_token(&agent, SECRET).is_err());
 
-        let user = create_token(Uuid::new_v4(), "a@b.c", role::ADMIN, SECRET, 1).unwrap();
+        let user =
+            create_token(Uuid::new_v4(), "a@b.c", role::ADMIN, SECRET, 1)
+                .unwrap();
         assert!(verify_user_token(&user, SECRET).is_ok());
         assert!(verify_agent_token(&user, SECRET).is_err());
         assert!(verify_refresh_token(&user, SECRET).is_err());
@@ -294,7 +311,8 @@ mod tests {
     #[test]
     fn refresh_tokens_cannot_call_the_api() {
         let id = Uuid::new_v4();
-        let refresh = create_refresh_token(id, "a@b.c", role::ADMIN, SECRET, 24).unwrap();
+        let refresh =
+            create_refresh_token(id, "a@b.c", role::ADMIN, SECRET, 24).unwrap();
         assert!(verify_refresh_token(&refresh, SECRET).is_ok());
         assert!(verify_user_token(&refresh, SECRET).is_err());
     }

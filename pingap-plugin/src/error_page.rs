@@ -346,7 +346,10 @@ impl ErrorPagePlugin {
                     return (tera, pages);
                 },
                 Err(e) => {
-                    debug!(error = e.to_string(), "compile agent error pages failed");
+                    debug!(
+                        error = e.to_string(),
+                        "compile agent error pages failed"
+                    );
                 },
             }
         }
@@ -417,11 +420,17 @@ impl ErrorPagePlugin {
             .clone()
             .unwrap_or_else(generate_request_id);
         let client_ip = ensure_client_ip(session, ctx).to_string();
-        let context =
-            Self::build_context(session, status, &request_id, &client_ip, &host);
+        let context = Self::build_context(
+            session,
+            status,
+            &request_id,
+            &client_ip,
+            &host,
+        );
 
         // Render, falling back to a plain-text body if the template errors.
-        let (body, content_type) = match tera.render(&page.template_name, &context)
+        let (body, content_type) = match tera
+            .render(&page.template_name, &context)
         {
             Ok(rendered) => (rendered, page.content_type.clone()),
             Err(e) => {
@@ -436,7 +445,9 @@ impl ErrorPagePlugin {
                     .and_then(|s| s.canonical_reason())
                     .unwrap_or("Error");
                 (
-                    format!("{status} {error_message}\nRequest ID: {request_id}\n"),
+                    format!(
+                        "{status} {error_message}\nRequest ID: {request_id}\n"
+                    ),
                     "text/plain".to_string(),
                 )
             },
@@ -480,9 +491,10 @@ fn build_site_pages(
     pages: &[CustomErrorPage],
 ) -> Result<(Arc<Tera>, Arc<HashMap<u16, CompiledErrorPage>>)> {
     let mut tera = Tera::default();
-    tera.add_raw_template(STYLE_PARTIAL, PW_STYLE).map_err(|e| {
-        invalid(format!("failed to register style partial: {e}"))
-    })?;
+    tera.add_raw_template(STYLE_PARTIAL, PW_STYLE)
+        .map_err(|e| {
+            invalid(format!("failed to register style partial: {e}"))
+        })?;
     let mut map: HashMap<u16, CompiledErrorPage> = HashMap::new();
     for (i, page) in pages.iter().enumerate() {
         if !page.enabled {
@@ -492,14 +504,13 @@ fn build_site_pages(
             continue;
         };
         let template_name = format!("pw_agent_{status_code}_{i}");
-        tera.add_raw_template(&template_name, &page.body_template).map_err(
-            |e| {
+        tera.add_raw_template(&template_name, &page.body_template)
+            .map_err(|e| {
                 invalid(format!(
                     "invalid template for status {status_code} ({}): {e}",
                     page.name
                 ))
-            },
-        )?;
+            })?;
         map.insert(
             status_code,
             CompiledErrorPage {
@@ -561,9 +572,10 @@ impl TryFrom<&PluginConf> for ErrorPagePlugin {
             .unwrap_or(true);
 
         let mut tera = Tera::default();
-        tera.add_raw_template(STYLE_PARTIAL, PW_STYLE).map_err(|e| {
-            invalid(format!("failed to register style partial: {e}"))
-        })?;
+        tera.add_raw_template(STYLE_PARTIAL, PW_STYLE)
+            .map_err(|e| {
+                invalid(format!("failed to register style partial: {e}"))
+            })?;
         let mut map: HashMap<u16, CompiledErrorPage> = HashMap::new();
 
         // Built-in PingWAF pages.
@@ -579,7 +591,9 @@ impl TryFrom<&PluginConf> for ErrorPagePlugin {
             for (status, name, body, label) in defaults {
                 if !registered.contains_key(name) {
                     tera.add_raw_template(name, body).map_err(|e| {
-                        invalid(format!("failed to compile default {name}: {e}"))
+                        invalid(format!(
+                            "failed to compile default {name}: {e}"
+                        ))
                     })?;
                     registered.insert(name, body);
                 }
@@ -601,14 +615,13 @@ impl TryFrom<&PluginConf> for ErrorPagePlugin {
                 continue;
             }
             let template_name = format!("pw_custom_{}_{i}", page.status_code);
-            tera.add_raw_template(&template_name, &page.template).map_err(
-                |e| {
+            tera.add_raw_template(&template_name, &page.template)
+                .map_err(|e| {
                     invalid(format!(
                         "invalid template for status {} ({}): {e}",
                         page.status_code, page.name
                     ))
-                },
-            )?;
+                })?;
             map.insert(
                 page.status_code,
                 CompiledErrorPage {
@@ -716,10 +729,8 @@ use_defaults = true
     #[test]
     fn test_render_default_403() {
         let plugin = ErrorPagePlugin::new(
-            &toml::from_str::<PluginConf>(
-                r###"category = "error_page""###,
-            )
-            .unwrap(),
+            &toml::from_str::<PluginConf>(r###"category = "error_page""###)
+                .unwrap(),
         )
         .unwrap();
         let mut ctx = Context::new();
@@ -778,10 +789,8 @@ template = '{"error":"rate_limit_exceeded","request_id":"{{ request_id }}"}'
     #[tokio::test]
     async fn test_replaces_matching_status() {
         let plugin = ErrorPagePlugin::new(
-            &toml::from_str::<PluginConf>(
-                r###"category = "error_page""###,
-            )
-            .unwrap(),
+            &toml::from_str::<PluginConf>(r###"category = "error_page""###)
+                .unwrap(),
         )
         .unwrap();
 
@@ -805,10 +814,8 @@ template = '{"error":"rate_limit_exceeded","request_id":"{{ request_id }}"}'
     #[tokio::test]
     async fn test_passes_through_unconfigured_status() {
         let plugin = ErrorPagePlugin::new(
-            &toml::from_str::<PluginConf>(
-                r###"category = "error_page""###,
-            )
-            .unwrap(),
+            &toml::from_str::<PluginConf>(r###"category = "error_page""###)
+                .unwrap(),
         )
         .unwrap();
 

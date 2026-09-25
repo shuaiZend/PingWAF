@@ -45,7 +45,9 @@ pub mod users {
 pub mod api_keys {
     use super::*;
 
-    #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
+    #[derive(
+        Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize,
+    )]
     #[sea_orm(table_name = "api_keys")]
     pub struct Model {
         #[sea_orm(primary_key, auto_increment = false)]

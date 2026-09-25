@@ -441,7 +441,10 @@ pub struct RuleCache {
 
 impl RuleCache {
     /// Create a new rule cache, loading from disk if a previous cache exists.
-    pub fn new(cache_dir: PathBuf, agent_id: String) -> anyhow::Result<Arc<Self>> {
+    pub fn new(
+        cache_dir: PathBuf,
+        agent_id: String,
+    ) -> anyhow::Result<Arc<Self>> {
         let cache = Arc::new(Self {
             inner: ArcSwap::new(Arc::new(CachedRules::default())),
             blocked_ips: DashMap::new(),
@@ -556,8 +559,7 @@ impl RuleCache {
                 if let Some(usage) = ledger.and_then(|l| l.get_usage(domain)) {
                     disk_bytes = disk_bytes.saturating_add(usage.current_bytes);
                     items = items.saturating_add(usage.item_count);
-                    evictions =
-                        evictions.saturating_add(usage.evictions_total);
+                    evictions = evictions.saturating_add(usage.evictions_total);
                 }
                 quota_mb = quota_mb
                     .max(quota::configured_quota_mb(domain).unwrap_or(0));
@@ -585,7 +587,11 @@ impl RuleCache {
     /// An empty `urls` list purges the whole site (every domain it answers
     /// on); otherwise each entry is matched against the ledger keys. Returns
     /// the number of cache objects removed.
-    pub async fn purge_site(&self, site_id: &str, urls: &[String]) -> anyhow::Result<usize> {
+    pub async fn purge_site(
+        &self,
+        site_id: &str,
+        urls: &[String],
+    ) -> anyhow::Result<usize> {
         let domains: Vec<String> = {
             let rules = self.inner.load();
             match rules.sites.get(site_id) {
@@ -598,7 +604,9 @@ impl RuleCache {
             }
         };
         if domains.is_empty() {
-            anyhow::bail!("no cached rules for site {site_id}, nothing to purge");
+            anyhow::bail!(
+                "no cached rules for site {site_id}, nothing to purge"
+            );
         }
         let Some(ledger) = pingap_cache::global_disk_quota() else {
             // Memory-only or not-yet-initialised edge: there is no disk cache
@@ -614,12 +622,20 @@ impl RuleCache {
                 ledger.purge_urls(domain, urls).await.purged_count
             };
         }
-        info!(site_id, domains = domains.len(), purged, "purged edge cache for site");
+        info!(
+            site_id,
+            domains = domains.len(),
+            purged,
+            "purged edge cache for site"
+        );
         Ok(purged)
     }
 
     /// Update the cache from a proto RuleBundle received from the control plane.
-    pub fn update_from_bundle(&self, bundle: &proto::RuleBundle) -> anyhow::Result<()> {
+    pub fn update_from_bundle(
+        &self,
+        bundle: &proto::RuleBundle,
+    ) -> anyhow::Result<()> {
         let site_rules = Self::convert_bundle(bundle);
         let site_id = bundle.site_id.clone();
         let domain = site_rules.domain.clone();
@@ -661,7 +677,10 @@ impl RuleCache {
     }
 
     /// Update cache from a full SiteConfig (used on initial registration).
-    pub fn update_from_site_config(&self, config: &proto::SiteConfig) -> anyhow::Result<()> {
+    pub fn update_from_site_config(
+        &self,
+        config: &proto::SiteConfig,
+    ) -> anyhow::Result<()> {
         self.inner.rcu(|current| {
             let mut updated = (**current).clone();
             updated.config_hash = config.config_hash.clone();
@@ -677,14 +696,17 @@ impl RuleCache {
                         site_rules.domain = site.domain.clone();
                     }
                     site_rules.site_id = site.id.clone();
-                    site_rules.alternate_domains = site.alternate_domains.clone();
+                    site_rules.alternate_domains =
+                        site.alternate_domains.clone();
 
                     // Update domain index
                     updated
                         .domain_index
                         .insert(site_rules.domain.clone(), site.id.clone());
                     for alt in &site_rules.alternate_domains {
-                        updated.domain_index.insert(alt.clone(), site.id.clone());
+                        updated
+                            .domain_index
+                            .insert(alt.clone(), site.id.clone());
                     }
                     updated.sites.insert(site.id.clone(), site_rules);
                 }
@@ -715,7 +737,10 @@ impl RuleCache {
     }
 
     /// Look up site rules by site ID.
-    pub fn get_site_rules_by_id(&self, site_id: &str) -> Option<Arc<SiteRules>> {
+    pub fn get_site_rules_by_id(
+        &self,
+        site_id: &str,
+    ) -> Option<Arc<SiteRules>> {
         let rules = self.inner.load();
         rules.sites.get(site_id).cloned().map(Arc::new)
     }
@@ -744,15 +769,25 @@ impl RuleCache {
                 } else {
                     true
                 }
-            }
+            },
             None => false,
         }
     }
 
     /// Block an IP for a site, optionally with a duration.
-    pub fn block_ip(&self, site_id: &str, ip: &str, duration: Option<Duration>, reason: &str) {
+    pub fn block_ip(
+        &self,
+        site_id: &str,
+        ip: &str,
+        duration: Option<Duration>,
+        reason: &str,
+    ) {
         let key = format!("{}:{}", site_id, ip);
-        let expires_at = duration.map(|d| Utc::now() + chrono::Duration::from_std(d).unwrap_or(chrono::Duration::hours(1)));
+        let expires_at = duration.map(|d| {
+            Utc::now()
+                + chrono::Duration::from_std(d)
+                    .unwrap_or(chrono::Duration::hours(1))
+        });
 
         let entry = BlockedIpEntry {
             ip: ip.to_string(),
@@ -854,7 +889,8 @@ impl RuleCache {
         // Load blocked IPs
         if blocked_path.exists() {
             let blocked_json = std::fs::read_to_string(&blocked_path)?;
-            let blocked: Vec<BlockedIpEntry> = serde_json::from_str(&blocked_json)?;
+            let blocked: Vec<BlockedIpEntry> =
+                serde_json::from_str(&blocked_json)?;
             let mut loaded = 0;
             for entry in blocked {
                 if !entry.is_expired() {
@@ -908,8 +944,15 @@ impl RuleCache {
                 .map(Self::convert_ip_access_rule)
                 .collect(),
             geo_config: bundle.geo.as_ref().map(Self::convert_geo_config),
-            cache_rules: bundle.cache_rules.iter().map(Self::convert_cache_rule).collect(),
-            challenge_config: bundle.challenge.as_ref().map(Self::convert_challenge_config),
+            cache_rules: bundle
+                .cache_rules
+                .iter()
+                .map(Self::convert_cache_rule)
+                .collect(),
+            challenge_config: bundle
+                .challenge
+                .as_ref()
+                .map(Self::convert_challenge_config),
             rewrite_rules: bundle
                 .rewrite_rules
                 .iter()
@@ -940,18 +983,22 @@ impl RuleCache {
             lfi_detection: w.lfi_detection,
             ssrf_detection: w.ssrf_detection,
             bot_detection: w.bot_detection,
-            custom_rules: w.custom_rules.iter().map(|r| WafRule {
-                id: r.id.clone(),
-                name: r.name.clone(),
-                description: r.description.clone(),
-                expression: r.expression.clone(),
-                action: WafAction::from(r.action),
-                severity: r.severity,
-                tags: r.tags.clone(),
-                enabled: r.enabled,
-                mode: WafMode::from(r.mode),
-                priority: r.priority,
-            }).collect(),
+            custom_rules: w
+                .custom_rules
+                .iter()
+                .map(|r| WafRule {
+                    id: r.id.clone(),
+                    name: r.name.clone(),
+                    description: r.description.clone(),
+                    expression: r.expression.clone(),
+                    action: WafAction::from(r.action),
+                    severity: r.severity,
+                    tags: r.tags.clone(),
+                    enabled: r.enabled,
+                    mode: WafMode::from(r.mode),
+                    priority: r.priority,
+                })
+                .collect(),
             managed_overrides: w
                 .managed_overrides
                 .iter()
@@ -977,7 +1024,15 @@ impl RuleCache {
             characteristics: r
                 .characteristics
                 .iter()
-                .map(|c| format!("{:?}", proto::RateLimitCharacteristics::try_from(*c).unwrap_or(proto::RateLimitCharacteristics::RateLimitCharIp)))
+                .map(|c| {
+                    format!(
+                        "{:?}",
+                        proto::RateLimitCharacteristics::try_from(*c)
+                            .unwrap_or(
+                            proto::RateLimitCharacteristics::RateLimitCharIp
+                        )
+                    )
+                })
                 .collect(),
             period_seconds: r.period_seconds,
             threshold: r.threshold,

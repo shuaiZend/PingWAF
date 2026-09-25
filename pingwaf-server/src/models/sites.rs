@@ -19,7 +19,9 @@ pub mod site_status {
 pub mod sites {
     use super::*;
 
-    #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
+    #[derive(
+        Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize,
+    )]
     #[sea_orm(table_name = "sites")]
     pub struct Model {
         #[sea_orm(primary_key, auto_increment = false)]
@@ -44,7 +46,9 @@ pub mod sites {
 pub mod site_upstreams {
     use super::*;
 
-    #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
+    #[derive(
+        Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize,
+    )]
     #[sea_orm(table_name = "site_upstreams")]
     pub struct Model {
         #[sea_orm(primary_key, auto_increment = false)]

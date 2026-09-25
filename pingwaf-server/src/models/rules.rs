@@ -56,7 +56,9 @@ pub mod mode {
 pub mod rule_groups {
     use super::*;
 
-    #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
+    #[derive(
+        Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize,
+    )]
     #[sea_orm(table_name = "rule_groups")]
     pub struct Model {
         #[sea_orm(primary_key, auto_increment = false)]
@@ -80,7 +82,9 @@ pub mod rule_groups {
 pub mod rules {
     use super::*;
 
-    #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
+    #[derive(
+        Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize,
+    )]
     #[sea_orm(table_name = "rules")]
     pub struct Model {
         #[sea_orm(primary_key, auto_increment = false)]
@@ -110,7 +114,9 @@ pub mod rules {
 pub mod rate_limit_rules {
     use super::*;
 
-    #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
+    #[derive(
+        Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize,
+    )]
     #[sea_orm(table_name = "rate_limit_rules")]
     pub struct Model {
         #[sea_orm(primary_key, auto_increment = false)]
@@ -140,7 +146,9 @@ pub mod rate_limit_rules {
 pub mod cache_rules {
     use super::*;
 
-    #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
+    #[derive(
+        Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize,
+    )]
     #[sea_orm(table_name = "cache_rules")]
     pub struct Model {
         #[sea_orm(primary_key, auto_increment = false)]

@@ -110,7 +110,8 @@ impl MetricsCollector {
     /// Calculate requests per second since last collection.
     fn calculate_rps(&self) -> u64 {
         let current_count = self.requests_total.load(Ordering::Relaxed);
-        let previous_count = self.last_rps_count.swap(current_count, Ordering::Relaxed);
+        let previous_count =
+            self.last_rps_count.swap(current_count, Ordering::Relaxed);
 
         if let Ok(mut last_time) = self.last_rps_time.lock() {
             let now = Instant::now();
@@ -118,7 +119,8 @@ impl MetricsCollector {
             *last_time = now;
 
             if elapsed > 0.0 {
-                let rps = ((current_count - previous_count) as f64 / elapsed) as u64;
+                let rps =
+                    ((current_count - previous_count) as f64 / elapsed) as u64;
                 self.cached_rps.store(rps, Ordering::Relaxed);
                 return rps;
             }
@@ -273,7 +275,8 @@ fn read_macos_memory() -> Option<u64> {
         }
     }
 
-    let used_bytes = (active_pages + wired_pages + compressed_pages) * page_size;
+    let used_bytes =
+        (active_pages + wired_pages + compressed_pages) * page_size;
     if used_bytes > 0 {
         Some(used_bytes)
     } else {

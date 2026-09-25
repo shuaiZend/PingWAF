@@ -127,7 +127,8 @@ pub fn normalize_request(
     // NOTE: the raw query is split on `&`/`;` *before* decoding so that an
     // encoded `%26` inside a value is not mistaken for a separator. Each
     // key/value is then multi-decoded individually inside `parse_query`.
-    let query_params = parse_query(raw_query, max_decode_layers, &mut decoded_values);
+    let query_params =
+        parse_query(raw_query, max_decode_layers, &mut decoded_values);
     let full_uri = if query_params.is_empty() {
         normalized_path.clone()
     } else {
@@ -153,7 +154,12 @@ pub fn normalize_request(
     let mut cookies = Vec::new();
     for (k, v) in &normalized_headers {
         if k == "cookie" {
-            parse_cookies(v, max_decode_layers, &mut cookies, &mut decoded_values);
+            parse_cookies(
+                v,
+                max_decode_layers,
+                &mut cookies,
+                &mut decoded_values,
+            );
             continue;
         }
         if SKIP_HEADERS.contains(&k.as_str()) {
@@ -323,14 +329,24 @@ mod tests {
             ("User-Agent".to_string(), "curl/8.0".to_string()),
             ("Cookie".to_string(), "a=1; b=hello%20world".to_string()),
         ];
-        let req = normalize_request("get", "/foo/./bar", "x=1&y=hello%20world", &headers, None, 3);
+        let req = normalize_request(
+            "get",
+            "/foo/./bar",
+            "x=1&y=hello%20world",
+            &headers,
+            None,
+            3,
+        );
         assert_eq!(req.method, "GET");
         assert_eq!(req.path, "/foo/bar");
         assert_eq!(req.query_params.len(), 2);
-        assert_eq!(req.cookies, vec![
-            ("a".to_string(), "1".to_string()),
-            ("b".to_string(), "hello world".to_string()),
-        ]);
+        assert_eq!(
+            req.cookies,
+            vec![
+                ("a".to_string(), "1".to_string()),
+                ("b".to_string(), "hello world".to_string()),
+            ]
+        );
         // path + 2 query + UA + 2 cookies
         assert_eq!(req.decoded_values.len(), 6);
     }
@@ -355,11 +371,13 @@ mod tests {
 
     #[test]
     fn skips_authorization_header() {
-        let headers = vec![("Authorization".to_string(), "Bearer xyz".to_string())];
+        let headers =
+            vec![("Authorization".to_string(), "Bearer xyz".to_string())];
         let req = normalize_request("GET", "/", "", &headers, None, 3);
         assert!(!req
             .decoded_values
             .iter()
-            .any(|v| v.source == ValueSource::Header && v.name == "authorization"));
+            .any(|v| v.source == ValueSource::Header
+                && v.name == "authorization"));
     }
 }

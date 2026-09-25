@@ -12,11 +12,13 @@ pub mod managed;
 pub mod signatures;
 
 pub use expression::{
-    EvalContext, Expression, Field, FieldKind, Operator, Value, evaluate, parse_expression,
+    evaluate, parse_expression, EvalContext, Expression, Field, FieldKind,
+    Operator, Value,
 };
 pub use managed::default_managed_rules;
 pub use signatures::{
-    AttackCategory, SignatureEngine, SignatureHit, SignaturePattern, detect_sqli, detect_xss,
+    detect_sqli, detect_xss, AttackCategory, SignatureEngine, SignatureHit,
+    SignaturePattern,
 };
 
 use serde::{Deserialize, Serialize};

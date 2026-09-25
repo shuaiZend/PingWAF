@@ -126,7 +126,9 @@ mod tests {
 
     fn sample_fingerprint() -> BrowserFingerprint {
         BrowserFingerprint {
-            user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36".to_string(),
+            user_agent:
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                    .to_string(),
             screen_width: 1920,
             screen_height: 1080,
             timezone_offset: -480,

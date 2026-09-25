@@ -6,7 +6,7 @@
 //! (any unmatched path returns `index.html`).
 
 use axum::body::Body;
-use axum::http::{StatusCode, header};
+use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use rust_embed::RustEmbed;
 
@@ -42,7 +42,10 @@ pub async fn serve_frontend(uri: axum::http::Uri) -> Response {
         .into_response()
 }
 
-fn build_asset_response(file: rust_embed::EmbeddedFile, _path: &str) -> Response {
+fn build_asset_response(
+    file: rust_embed::EmbeddedFile,
+    _path: &str,
+) -> Response {
     // rust-embed's mime-guess feature provides mimetype()
     let content_type = file.metadata.mimetype().to_string();
 
@@ -59,7 +62,10 @@ fn build_asset_response(file: rust_embed::EmbeddedFile, _path: &str) -> Response
     let etag = format!(
         "\"{:x}-{:02x}{:02x}{:02x}{:02x}\"",
         file.data.len(),
-        hash[0], hash[1], hash[2], hash[3]
+        hash[0],
+        hash[1],
+        hash[2],
+        hash[3]
     );
 
     Response::builder()
@@ -69,6 +75,7 @@ fn build_asset_response(file: rust_embed::EmbeddedFile, _path: &str) -> Response
         .header(header::ETAG, &etag)
         .body(Body::from(file.data.to_vec()))
         .unwrap_or_else(|_| {
-            (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
+            (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+                .into_response()
         })
 }

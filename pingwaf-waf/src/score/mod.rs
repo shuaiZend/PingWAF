@@ -101,8 +101,14 @@ impl AnomalyScorer {
     }
 
     /// Add a generic severity-weighted hit.
-    pub fn add_severity_hit(&self, breakdown: &mut ScoreBreakdown, severity: u8) {
-        breakdown.total = breakdown.total.saturating_add(Self::points_for_severity(severity));
+    pub fn add_severity_hit(
+        &self,
+        breakdown: &mut ScoreBreakdown,
+        severity: u8,
+    ) {
+        breakdown.total = breakdown
+            .total
+            .saturating_add(Self::points_for_severity(severity));
         breakdown.overall_class = self.classify(breakdown.total);
     }
 
@@ -119,22 +125,23 @@ impl AnomalyScorer {
         let bump = u8::try_from(points * 12).unwrap_or(u8::MAX);
         match category {
             AttackCategory::SqlInjection => {
-                breakdown.sqli_score = breakdown.sqli_score.saturating_add(bump);
-            }
+                breakdown.sqli_score =
+                    breakdown.sqli_score.saturating_add(bump);
+            },
             AttackCategory::Xss => {
                 breakdown.xss_score = breakdown.xss_score.saturating_add(bump);
-            }
+            },
             AttackCategory::CommandInjection
             | AttackCategory::Deserialization
             | AttackCategory::TemplateInjection => {
                 breakdown.rce_score = breakdown.rce_score.saturating_add(bump);
-            }
+            },
             AttackCategory::PathTraversal
             | AttackCategory::Ssrf
             | AttackCategory::CrlfInjection
             | AttackCategory::Xxe => {
                 // Non-family attacks contribute to the aggregate only.
-            }
+            },
         }
         breakdown.overall_class = self.classify(breakdown.total);
     }

@@ -4,25 +4,27 @@
 //! stored as bcrypt hashes, so the plaintext value is only ever returned once —
 //! at creation time — and the row keeps an 8 character prefix for display.
 
-use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use axum::Json;
 use axum::Router;
 use chrono::{DateTime, Utc};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, Condition, DatabaseConnection, EntityTrait, PaginatorTrait,
-    QueryFilter, QueryOrder, Set,
+    ActiveModelTrait, ColumnTrait, Condition, DatabaseConnection, EntityTrait,
+    PaginatorTrait, QueryFilter, QueryOrder, Set,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::api::common::{Page, Pagination, non_empty, parse_datetime, parse_uuid, require_write};
+use crate::api::common::{
+    non_empty, parse_datetime, parse_uuid, require_write, Page, Pagination,
+};
 use crate::api::error::ApiError;
 use crate::api::state::AppState;
-use crate::auth::AuthUser;
 use crate::auth::password::{hash_password_with_cost, verify_password};
+use crate::auth::AuthUser;
 use crate::models::{api_key, permission, role, user};
 
 /// Human visible prefix length, matching the `key_prefix` column width.
@@ -148,13 +150,13 @@ async fn create(
                 ));
             }
             Some(instant)
-        }
+        },
         None => None,
     };
 
     let plaintext = generate_key();
-    let key_hash =
-        hash_password_with_cost(&plaintext, KEY_HASH_COST).map_err(ApiError::internal)?;
+    let key_hash = hash_password_with_cost(&plaintext, KEY_HASH_COST)
+        .map_err(ApiError::internal)?;
     let id = Uuid::new_v4();
 
     let model = api_key::ActiveModel {
@@ -202,11 +204,7 @@ async fn remove(
 
 /// Generates a `pwk_…` key with 128 bits of entropy from two UUIDv4 payloads.
 pub fn generate_key() -> String {
-    format!(
-        "pwk_{}{}",
-        Uuid::new_v4().simple(),
-        Uuid::new_v4().simple()
-    )
+    format!("pwk_{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
 }
 
 /// Validates, de-duplicates and sorts the requested permission set.
@@ -258,7 +256,9 @@ pub async fn authenticate_api_key(
         if let Some(expires_at) = candidate.expires_at {
             if expires_at <= Utc::now() {
                 tracing::warn!(key_id = %candidate.id, "expired API key presented");
-                return Err(ApiError::Unauthorized("API key has expired".to_string()));
+                return Err(ApiError::Unauthorized(
+                    "API key has expired".to_string(),
+                ));
             }
         }
 
@@ -266,7 +266,9 @@ pub async fn authenticate_api_key(
             .one(db)
             .await?
             .ok_or_else(|| {
-                ApiError::Unauthorized("API key owner no longer exists".to_string())
+                ApiError::Unauthorized(
+                    "API key owner no longer exists".to_string(),
+                )
             })?;
         if owner.role != role::ADMIN && owner.role != role::VIEWER {
             return Err(ApiError::Unauthorized(
@@ -289,7 +291,8 @@ pub async fn authenticate_api_key(
 
 /// True when the key is allowed to register agents and ship telemetry.
 pub fn key_allows_agent(key: &api_key::Model) -> bool {
-    key.permissions.is_empty() || key.permissions.iter().any(|p| p == permission::AGENT)
+    key.permissions.is_empty()
+        || key.permissions.iter().any(|p| p == permission::AGENT)
 }
 
 #[cfg(test)]
@@ -307,7 +310,12 @@ mod tests {
 
     #[test]
     fn permissions_are_normalised() {
-        let out = normalise_permissions(&["AGENT".into(), " agent ".into(), "read".into()]).unwrap();
+        let out = normalise_permissions(&[
+            "AGENT".into(),
+            " agent ".into(),
+            "read".into(),
+        ])
+        .unwrap();
         assert_eq!(out, vec!["agent".to_string(), "read".to_string()]);
         assert!(normalise_permissions(&["admin-all".into()]).is_err());
         assert!(normalise_permissions(&[]).unwrap().is_empty());

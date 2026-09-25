@@ -46,9 +46,9 @@ use http::header::HeaderName;
 use http::{HeaderValue, StatusCode};
 use pingap_config::PluginConf;
 use pingap_core::{
-    Ctx, ModifyResponseBody, Plugin, PluginStep, RequestPluginResult,
-    ResponseBodyPluginResult, ResponsePluginResult, ensure_client_ip, get_host,
-    HTTP_HEADER_TRANSFER_CHUNKED,
+    Ctx, HTTP_HEADER_TRANSFER_CHUNKED, ModifyResponseBody, Plugin, PluginStep,
+    RequestPluginResult, ResponseBodyPluginResult, ResponsePluginResult,
+    ensure_client_ip, get_host,
 };
 use pingora::http::ResponseHeader;
 use pingora::proxy::Session;
@@ -102,16 +102,41 @@ impl RewriteDirection {
 /// A declarative description of a single rewrite operation.
 #[derive(Debug, Clone)]
 pub enum RewriteOperation {
-    SetHeader { name: String, value: String },
-    AddHeader { name: String, value: String },
-    RemoveHeader { name: String },
-    SetPath { value: String },
-    RegexReplacePath { pattern: String, replacement: String },
-    SetQueryParam { name: String, value: String },
-    RemoveQueryParam { name: String },
-    ReplaceBody { search: String, replacement: String },
-    SetBody { content: String },
-    SetStatusCode { code: u16 },
+    SetHeader {
+        name: String,
+        value: String,
+    },
+    AddHeader {
+        name: String,
+        value: String,
+    },
+    RemoveHeader {
+        name: String,
+    },
+    SetPath {
+        value: String,
+    },
+    RegexReplacePath {
+        pattern: String,
+        replacement: String,
+    },
+    SetQueryParam {
+        name: String,
+        value: String,
+    },
+    RemoveQueryParam {
+        name: String,
+    },
+    ReplaceBody {
+        search: String,
+        replacement: String,
+    },
+    SetBody {
+        content: String,
+    },
+    SetStatusCode {
+        code: u16,
+    },
 }
 
 /// A single rewrite rule: an optional condition plus ordered operations.
@@ -644,10 +669,7 @@ impl<'a> CondCtx<'a> {
     }
 }
 
-fn resolve_field<'a>(
-    field: &CondField,
-    ctx: &'a CondCtx<'a>,
-) -> FieldVal<'a> {
+fn resolve_field<'a>(field: &CondField, ctx: &'a CondCtx<'a>) -> FieldVal<'a> {
     match field {
         CondField::Path => FieldVal::Str(ctx.path),
         CondField::FullUri => FieldVal::Str(ctx.full_uri),
@@ -838,12 +860,13 @@ impl ModifyResponseBody for RewriteBodyReplacer {
         let mut data = self.buffer.to_vec();
         for op in &self.ops {
             match op {
-                BodyOperation::Replace { search, replacement } => {
+                BodyOperation::Replace {
+                    search,
+                    replacement,
+                } => {
                     if !search.is_empty() {
-                        data = data.replace(
-                            search.as_bytes(),
-                            replacement.as_bytes(),
-                        );
+                        data = data
+                            .replace(search.as_bytes(), replacement.as_bytes());
                     }
                 },
                 BodyOperation::Set { content } => {
@@ -892,28 +915,52 @@ fn default_true() -> bool {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum OpSpec {
-    SetHeader { name: String, value: String },
-    AddHeader { name: String, value: String },
-    RemoveHeader { name: String },
-    SetPath { value: String },
-    RegexReplacePath { pattern: String, replacement: String },
-    SetQueryParam { name: String, value: String },
-    RemoveQueryParam { name: String },
-    ReplaceBody { search: String, replacement: String },
-    SetBody { content: String },
-    SetStatusCode { code: u16 },
+    SetHeader {
+        name: String,
+        value: String,
+    },
+    AddHeader {
+        name: String,
+        value: String,
+    },
+    RemoveHeader {
+        name: String,
+    },
+    SetPath {
+        value: String,
+    },
+    RegexReplacePath {
+        pattern: String,
+        replacement: String,
+    },
+    SetQueryParam {
+        name: String,
+        value: String,
+    },
+    RemoveQueryParam {
+        name: String,
+    },
+    ReplaceBody {
+        search: String,
+        replacement: String,
+    },
+    SetBody {
+        content: String,
+    },
+    SetStatusCode {
+        code: u16,
+    },
 }
 
 impl RuleSpec {
     fn into_rule(self) -> Result<RewriteRule> {
-        let direction = RewriteDirection::parse(&self.direction).ok_or_else(
-            || {
+        let direction =
+            RewriteDirection::parse(&self.direction).ok_or_else(|| {
                 invalid(format!(
                     "invalid direction '{}', expect request or response",
                     self.direction
                 ))
-            },
-        )?;
+            })?;
         let operations = self
             .operations
             .into_iter()
@@ -927,12 +974,15 @@ impl RuleSpec {
                 OpSpec::RemoveHeader { name } => {
                     RewriteOperation::RemoveHeader { name }
                 },
-                OpSpec::SetPath { value } => RewriteOperation::SetPath { value },
-                OpSpec::RegexReplacePath { pattern, replacement } => {
-                    RewriteOperation::RegexReplacePath {
-                        pattern,
-                        replacement,
-                    }
+                OpSpec::SetPath { value } => {
+                    RewriteOperation::SetPath { value }
+                },
+                OpSpec::RegexReplacePath {
+                    pattern,
+                    replacement,
+                } => RewriteOperation::RegexReplacePath {
+                    pattern,
+                    replacement,
                 },
                 OpSpec::SetQueryParam { name, value } => {
                     RewriteOperation::SetQueryParam { name, value }
@@ -940,10 +990,16 @@ impl RuleSpec {
                 OpSpec::RemoveQueryParam { name } => {
                     RewriteOperation::RemoveQueryParam { name }
                 },
-                OpSpec::ReplaceBody { search, replacement } => {
-                    RewriteOperation::ReplaceBody { search, replacement }
+                OpSpec::ReplaceBody {
+                    search,
+                    replacement,
+                } => RewriteOperation::ReplaceBody {
+                    search,
+                    replacement,
                 },
-                OpSpec::SetBody { content } => RewriteOperation::SetBody { content },
+                OpSpec::SetBody { content } => {
+                    RewriteOperation::SetBody { content }
+                },
                 OpSpec::SetStatusCode { code } => {
                     RewriteOperation::SetStatusCode { code }
                 },
@@ -973,29 +1029,32 @@ fn compile_rule(rule: &RewriteRule) -> Result<CompiledRewriteRule> {
     let mut body_operations = Vec::new();
     for op in &rule.operations {
         match op {
-            RewriteOperation::SetHeader { name, value } => operations.push(
-                CompiledOperation::SetHeader {
+            RewriteOperation::SetHeader { name, value } => {
+                operations.push(CompiledOperation::SetHeader {
                     name: parse_header_name(name)?,
                     value: value.clone(),
-                },
-            ),
-            RewriteOperation::AddHeader { name, value } => operations.push(
-                CompiledOperation::AddHeader {
+                })
+            },
+            RewriteOperation::AddHeader { name, value } => {
+                operations.push(CompiledOperation::AddHeader {
                     name: parse_header_name(name)?,
                     value: value.clone(),
-                },
-            ),
-            RewriteOperation::RemoveHeader { name } => operations.push(
-                CompiledOperation::RemoveHeader {
+                })
+            },
+            RewriteOperation::RemoveHeader { name } => {
+                operations.push(CompiledOperation::RemoveHeader {
                     name: parse_header_name(name)?,
-                },
-            ),
+                })
+            },
             RewriteOperation::SetPath { value } => {
                 operations.push(CompiledOperation::SetPath {
                     value: value.clone(),
                 });
             },
-            RewriteOperation::RegexReplacePath { pattern, replacement } => {
+            RewriteOperation::RegexReplacePath {
+                pattern,
+                replacement,
+            } => {
                 let regex = Regex::new(pattern).map_err(|e| {
                     invalid(format!("invalid path regex '{pattern}': {e}"))
                 })?;
@@ -1004,14 +1063,17 @@ fn compile_rule(rule: &RewriteRule) -> Result<CompiledRewriteRule> {
                     replacement: replacement.clone(),
                 });
             },
-            RewriteOperation::SetQueryParam { name, value } => operations
-                .push(CompiledOperation::SetQueryParam {
+            RewriteOperation::SetQueryParam { name, value } => {
+                operations.push(CompiledOperation::SetQueryParam {
                     name: name.clone(),
                     value: value.clone(),
-                }),
-            RewriteOperation::RemoveQueryParam { name } => operations.push(
-                CompiledOperation::RemoveQueryParam { name: name.clone() },
-            ),
+                })
+            },
+            RewriteOperation::RemoveQueryParam { name } => {
+                operations.push(CompiledOperation::RemoveQueryParam {
+                    name: name.clone(),
+                })
+            },
             RewriteOperation::SetStatusCode { code } => {
                 let status = StatusCode::from_u16(*code).map_err(|e| {
                     invalid(format!("invalid status code {code}: {e}"))
@@ -1019,17 +1081,19 @@ fn compile_rule(rule: &RewriteRule) -> Result<CompiledRewriteRule> {
                 operations
                     .push(CompiledOperation::SetStatusCode { code: status });
             },
-            RewriteOperation::ReplaceBody { search, replacement } => {
+            RewriteOperation::ReplaceBody {
+                search,
+                replacement,
+            } => {
                 body_operations.push(BodyOperation::Replace {
                     search: search.clone(),
                     replacement: replacement.clone(),
                 });
             },
             RewriteOperation::SetBody { content } => {
-                body_operations
-                    .push(BodyOperation::Set {
-                        content: content.clone(),
-                    });
+                body_operations.push(BodyOperation::Set {
+                    content: content.clone(),
+                });
             },
         }
     }
@@ -1098,9 +1162,7 @@ fn convert_agent_rules(rules: &[CacheRewriteRule]) -> Vec<RewriteRule> {
                     replacement: r.body_replace.clone(),
                 });
             }
-            if let Some((name, value)) =
-                r.query_rewrite.split_once('=')
-            {
+            if let Some((name, value)) = r.query_rewrite.split_once('=') {
                 operations.push(RewriteOperation::SetQueryParam {
                     name: name.trim().to_string(),
                     value: value.trim().to_string(),
@@ -1179,7 +1241,10 @@ impl RewritePlugin {
                     return rules;
                 },
                 Err(e) => {
-                    debug!(error = e.to_string(), "compile agent rewrite rules failed");
+                    debug!(
+                        error = e.to_string(),
+                        "compile agent rewrite rules failed"
+                    );
                 },
             }
         }
@@ -1206,8 +1271,9 @@ impl TryFrom<&PluginConf> for RewritePlugin {
                 if s.trim().is_empty() {
                     Vec::new()
                 } else {
-                    serde_json::from_str(s)
-                        .map_err(|e| invalid(format!("invalid rules json: {e}")))?
+                    serde_json::from_str(s).map_err(|e| {
+                        invalid(format!("invalid rules json: {e}"))
+                    })?
                 }
             },
             Some(other) => {
@@ -1263,18 +1329,16 @@ impl RewritePlugin {
                 CompiledOperation::SetHeader { name, value } => {
                     let v = interpolate(value, vars);
                     if let Ok(hv) = HeaderValue::from_str(&v) {
-                        let _ = session
-                            .req_header_mut()
-                            .insert_header(name, hv);
+                        let _ =
+                            session.req_header_mut().insert_header(name, hv);
                         changed = true;
                     }
                 },
                 CompiledOperation::AddHeader { name, value } => {
                     let v = interpolate(value, vars);
                     if let Ok(hv) = HeaderValue::from_str(&v) {
-                        let _ = session
-                            .req_header_mut()
-                            .append_header(name, hv);
+                        let _ =
+                            session.req_header_mut().append_header(name, hv);
                         changed = true;
                     }
                 },
@@ -1314,8 +1378,7 @@ impl RewritePlugin {
             let path = new_path
                 .clone()
                 .unwrap_or_else(|| req.uri.path().to_string());
-            let mut query =
-                req.uri.query().unwrap_or_default().to_string();
+            let mut query = req.uri.query().unwrap_or_default().to_string();
             for op in query_ops {
                 match op {
                     CompiledOperation::SetQueryParam { name, value } => {
@@ -1389,7 +1452,10 @@ impl Plugin for RewritePlugin {
             .unwrap_or_default()
             .to_string();
         let rules = self.active_rules(&host);
-        if rules.iter().all(|r| r.direction != RewriteDirection::Request) {
+        if rules
+            .iter()
+            .all(|r| r.direction != RewriteDirection::Request)
+        {
             return Ok(RequestPluginResult::Skipped);
         }
 
@@ -1447,7 +1513,10 @@ impl Plugin for RewritePlugin {
             .unwrap_or_default()
             .to_string();
         let rules = self.active_rules(&host);
-        if rules.iter().all(|r| r.direction != RewriteDirection::Response) {
+        if rules
+            .iter()
+            .all(|r| r.direction != RewriteDirection::Response)
+        {
             return Ok(ResponsePluginResult::Unchanged);
         }
 
@@ -1490,16 +1559,14 @@ impl Plugin for RewritePlugin {
                     CompiledOperation::SetHeader { name, value } => {
                         let v = interpolate(value, &vars);
                         if let Ok(hv) = HeaderValue::from_str(&v) {
-                            let _ =
-                                upstream_response.insert_header(name, hv);
+                            let _ = upstream_response.insert_header(name, hv);
                             modified = true;
                         }
                     },
                     CompiledOperation::AddHeader { name, value } => {
                         let v = interpolate(value, &vars);
                         if let Ok(hv) = HeaderValue::from_str(&v) {
-                            let _ =
-                                upstream_response.append_header(name, hv);
+                            let _ = upstream_response.append_header(name, hv);
                             modified = true;
                         }
                     },
@@ -1655,10 +1722,7 @@ mod tests {
             "ip=10.0.0.1 host=example.com",
             interpolate("ip=${client_ip} host=${host}", &vars)
         );
-        assert_eq!(
-            Cow::Borrowed("plain"),
-            interpolate("plain", &vars)
-        );
+        assert_eq!(Cow::Borrowed("plain"), interpolate("plain", &vars));
     }
 
     #[test]
@@ -1694,11 +1758,7 @@ rules = '[{"id":"strip","direction":"request","condition":"http.request.uri.path
 
         let mut s = session("GET", "/api/users", "example.com").await;
         let result = plugin
-            .handle_request(
-                PluginStep::Request,
-                &mut s,
-                &mut Ctx::default(),
-            )
+            .handle_request(PluginStep::Request, &mut s, &mut Ctx::default())
             .await
             .unwrap();
         assert_eq!(true, result == RequestPluginResult::Continue);
@@ -1726,10 +1786,7 @@ rules = '[{"id":"h","direction":"response","operations":[{"type":"set_header","n
             .await
             .unwrap();
         assert_eq!(ResponsePluginResult::Modified, result);
-        assert_eq!(
-            "1",
-            resp.headers.get("x-test").unwrap().to_str().unwrap()
-        );
+        assert_eq!("1", resp.headers.get("x-test").unwrap().to_str().unwrap());
         assert!(resp.headers.get("server").is_none());
         assert_eq!(201, resp.status.as_u16());
     }

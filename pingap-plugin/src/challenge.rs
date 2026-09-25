@@ -225,10 +225,8 @@ impl ChallengePlugin {
     /// 60-second window.
     fn record_rate(&self, ip: &str) -> u32 {
         let now = now_secs();
-        let mut entry = self
-            .rates
-            .entry(ip.to_string())
-            .or_insert(RateWindow {
+        let mut entry =
+            self.rates.entry(ip.to_string()).or_insert(RateWindow {
                 count: 0,
                 window_start: now,
             });
@@ -310,8 +308,7 @@ impl ChallengePlugin {
         };
 
         let result = {
-            let engine =
-                self.engine.read().unwrap_or_else(|e| e.into_inner());
+            let engine = self.engine.read().unwrap_or_else(|e| e.into_inner());
             engine.verify_solution(&submission)
         };
 
@@ -324,13 +321,12 @@ impl ChallengePlugin {
                     "{}={}; {}",
                     self.cookie_name, cookie_value, cookie_attributes
                 );
-                let mut builder = HttpResponse::builder(StatusCode::OK).body(
-                    format!(
+                let mut builder =
+                    HttpResponse::builder(StatusCode::OK).body(format!(
                         "<html><body><script>window.location.href = \"{}\";\
 </script></body></html>",
                         pending.original_url
-                    ),
-                );
+                    ));
                 builder = builder.header(HTTP_HEADER_CONTENT_HTML.clone());
                 if let Ok(hv) = HeaderValue::from_str(&set_cookie) {
                     builder = builder.header((header::SET_COOKIE, hv));
@@ -382,7 +378,8 @@ impl TryFrom<&PluginConf> for ChallengePlugin {
             cookie_name = "__pingwaf_clearance".to_string();
         }
         let exempt_paths = get_str_slice_conf(value, "exempt_paths");
-        let exempt_user_agents = get_str_slice_conf(value, "exempt_user_agents");
+        let exempt_user_agents =
+            get_str_slice_conf(value, "exempt_user_agents");
 
         let plugin_step = match super::get_step_conf_in(
             value,
@@ -470,10 +467,10 @@ impl Plugin for ChallengePlugin {
                 .to_string();
 
         // A valid clearance cookie short-circuits everything.
-        if let Some(cookie) = get_cookie_value(session.req_header(), &self.cookie_name)
+        if let Some(cookie) =
+            get_cookie_value(session.req_header(), &self.cookie_name)
         {
-            let engine =
-                self.engine.read().unwrap_or_else(|e| e.into_inner());
+            let engine = self.engine.read().unwrap_or_else(|e| e.into_inner());
             if engine.validate_clearance(cookie).is_some() {
                 return Ok(RequestPluginResult::Continue);
             }
@@ -491,8 +488,7 @@ impl Plugin for ChallengePlugin {
         };
 
         let decision = {
-            let engine =
-                self.engine.read().unwrap_or_else(|e| e.into_inner());
+            let engine = self.engine.read().unwrap_or_else(|e| e.into_inner());
             engine.should_challenge(&challenge_request)
         };
 

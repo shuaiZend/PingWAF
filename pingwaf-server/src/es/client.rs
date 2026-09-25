@@ -19,13 +19,13 @@
 //! flushed on process exit.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::task::JoinHandle;
 
 use super::config::EsConfig;
@@ -132,11 +132,17 @@ impl ElasticsearchClient {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(config.request_timeout_secs.max(1)))
             .build()
-            .map_err(|err| anyhow::anyhow!("failed to build the ES HTTP client: {err}"))?;
+            .map_err(|err| {
+                anyhow::anyhow!("failed to build the ES HTTP client: {err}")
+            })?;
 
-        let (tx, rx) = mpsc::channel::<EsDocument>(config.channel_capacity.max(1));
+        let (tx, rx) =
+            mpsc::channel::<EsDocument>(config.channel_capacity.max(1));
         let (control_tx, control_rx) = mpsc::channel::<Control>(32);
-        let buffer = DiskBuffer::new(config.buffer_dir.clone(), config.buffer_max_size_mb);
+        let buffer = DiskBuffer::new(
+            config.buffer_dir.clone(),
+            config.buffer_max_size_mb,
+        );
         if let Err(err) = buffer.create_dir().await {
             // A missing buffer directory downgrades resilience but must not stop
             // the shipper; buffering simply stays off until it is writable.
@@ -181,11 +187,15 @@ impl ElasticsearchClient {
         if let Err(err) = self.inner.tx.try_send(doc) {
             match err {
                 mpsc::error::TrySendError::Full(_) => {
-                    tracing::warn!("elasticsearch buffer full, dropping a document");
-                }
+                    tracing::warn!(
+                        "elasticsearch buffer full, dropping a document"
+                    );
+                },
                 mpsc::error::TrySendError::Closed(_) => {
-                    tracing::debug!("elasticsearch shipper closed, dropping a document");
-                }
+                    tracing::debug!(
+                        "elasticsearch shipper closed, dropping a document"
+                    );
+                },
             }
         }
     }
@@ -199,20 +209,25 @@ impl ElasticsearchClient {
                 doc_type: DocumentType::AccessLog,
                 body,
             }),
-            Err(err) => tracing::error!(error = %err, "could not serialise an access log document"),
+            Err(err) => {
+                tracing::error!(error = %err, "could not serialise an access log document")
+            },
         }
     }
 
     /// Queues a security event.
     pub fn index_security_event(&self, event: SecurityEventDocument) {
-        let index = self.index_name(DocumentType::SecurityEvent, event.timestamp);
+        let index =
+            self.index_name(DocumentType::SecurityEvent, event.timestamp);
         match serde_json::to_value(&event) {
             Ok(body) => self.index(EsDocument {
                 index,
                 doc_type: DocumentType::SecurityEvent,
                 body,
             }),
-            Err(err) => tracing::error!(error = %err, "could not serialise a security event document"),
+            Err(err) => {
+                tracing::error!(error = %err, "could not serialise a security event document")
+            },
         }
     }
 
@@ -240,12 +255,18 @@ impl ElasticsearchClient {
 
     /// Convenience wrapper producing the optional string body stored on a
     /// document: empty input becomes `None`, everything else a lossy string.
-    pub fn truncate_body_to_string(&self, body: &[u8]) -> (Option<String>, bool) {
+    pub fn truncate_body_to_string(
+        &self,
+        body: &[u8],
+    ) -> (Option<String>, bool) {
         if body.is_empty() {
             return (None, false);
         }
         let (bytes, truncated) = self.truncate_body(body);
-        (Some(String::from_utf8_lossy(&bytes).into_owned()), truncated)
+        (
+            Some(String::from_utf8_lossy(&bytes).into_owned()),
+            truncated,
+        )
     }
 
     /// Forces the worker to flush everything currently buffered.
@@ -255,9 +276,12 @@ impl ElasticsearchClient {
             .control_tx
             .send(Control::Flush(reply))
             .await
-            .map_err(|_| anyhow::anyhow!("the elasticsearch shipper is not running"))?;
-        rx.await
-            .map_err(|_| anyhow::anyhow!("the elasticsearch worker dropped the flush reply"))?
+            .map_err(|_| {
+                anyhow::anyhow!("the elasticsearch shipper is not running")
+            })?;
+        rx.await.map_err(|_| {
+            anyhow::anyhow!("the elasticsearch worker dropped the flush reply")
+        })?
     }
 
     /// Flushes remaining documents, stops the background tasks and makes one
@@ -267,7 +291,13 @@ impl ElasticsearchClient {
 
         let (reply, rx) = oneshot::channel();
         // The worker may already have exited; a send failure is not fatal.
-        if self.inner.control_tx.send(Control::Shutdown(reply)).await.is_ok() {
+        if self
+            .inner
+            .control_tx
+            .send(Control::Shutdown(reply))
+            .await
+            .is_ok()
+        {
             let _ = rx.await;
         }
 
@@ -292,8 +322,13 @@ impl ElasticsearchClient {
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown")
                 .to_string(),
-            cluster_name: body.get("cluster_name").and_then(|v| v.as_str()).map(str::to_string),
-            number_of_nodes: body.get("number_of_nodes").and_then(|v| v.as_u64()),
+            cluster_name: body
+                .get("cluster_name")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            number_of_nodes: body
+                .get("number_of_nodes")
+                .and_then(|v| v.as_u64()),
             active_shards: body.get("active_shards").and_then(|v| v.as_u64()),
         })
     }
@@ -322,11 +357,25 @@ impl Inner {
     }
 
     /// Attaches API-key or basic auth to a request builder.
-    fn apply_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        if let Some(key) = self.config.api_key.as_deref().filter(|k| !k.trim().is_empty()) {
-            return req.header(reqwest::header::AUTHORIZATION, format!("ApiKey {key}"));
+    fn apply_auth(
+        &self,
+        req: reqwest::RequestBuilder,
+    ) -> reqwest::RequestBuilder {
+        if let Some(key) = self
+            .config
+            .api_key
+            .as_deref()
+            .filter(|k| !k.trim().is_empty())
+        {
+            return req.header(
+                reqwest::header::AUTHORIZATION,
+                format!("ApiKey {key}"),
+            );
         }
-        match (self.config.username.as_deref(), self.config.password.as_deref()) {
+        match (
+            self.config.username.as_deref(),
+            self.config.password.as_deref(),
+        ) {
             (Some(user), Some(pass)) => req.basic_auth(user, Some(pass)),
             _ => req,
         }
@@ -345,10 +394,9 @@ impl Inner {
         if let Some(payload) = body {
             req = req.json(&payload);
         }
-        let resp = req
-            .send()
-            .await
-            .map_err(|err| anyhow::anyhow!("elasticsearch request to {url} failed: {err}"))?;
+        let resp = req.send().await.map_err(|err| {
+            anyhow::anyhow!("elasticsearch request to {url} failed: {err}")
+        })?;
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
@@ -363,7 +411,10 @@ impl Inner {
     }
 
     /// Encodes and sends a batch of documents to `_bulk`.
-    async fn bulk_send(&self, docs: &[EsDocument]) -> anyhow::Result<BulkResult> {
+    async fn bulk_send(
+        &self,
+        docs: &[EsDocument],
+    ) -> anyhow::Result<BulkResult> {
         if docs.is_empty() {
             return Ok(BulkResult::default());
         }
@@ -375,7 +426,11 @@ impl Inner {
     /// transient failures. Returns `Err` only when every attempt was transient
     /// (so the caller buffers the batch); a hard 4xx yields a non-retryable
     /// [`BulkResult`] instead.
-    async fn send_raw_bulk(&self, payload: &[u8], doc_count: usize) -> anyhow::Result<BulkResult> {
+    async fn send_raw_bulk(
+        &self,
+        payload: &[u8],
+        doc_count: usize,
+    ) -> anyhow::Result<BulkResult> {
         let attempts = self.config.urls.len().max(1);
         let mut last_err: Option<anyhow::Error> = None;
 
@@ -395,7 +450,9 @@ impl Inner {
                     {
                         let text = resp.text().await.unwrap_or_default();
                         tracing::warn!(%status, %url, body = %text, "elasticsearch busy, will retry");
-                        last_err = Some(anyhow::anyhow!("elasticsearch returned {status}"));
+                        last_err = Some(anyhow::anyhow!(
+                            "elasticsearch returned {status}"
+                        ));
                         sleep_backoff(attempt).await;
                         continue;
                     }
@@ -411,16 +468,18 @@ impl Inner {
                     let body: serde_json::Value =
                         resp.json().await.unwrap_or(serde_json::Value::Null);
                     return Ok(parse_bulk_response(&body, doc_count));
-                }
+                },
                 Err(err) => {
                     tracing::warn!(%url, error = %err, "elasticsearch bulk transport error");
                     last_err = Some(err.into());
                     sleep_backoff(attempt).await;
-                }
+                },
             }
         }
 
-        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("elasticsearch bulk send failed")))
+        Err(last_err.unwrap_or_else(|| {
+            anyhow::anyhow!("elasticsearch bulk send failed")
+        }))
     }
 }
 
@@ -436,7 +495,8 @@ async fn worker_loop(
     mut control_rx: mpsc::Receiver<Control>,
 ) {
     let max = inner.config.bulk_max_size.max(1);
-    let interval = Duration::from_millis(inner.config.bulk_flush_interval_ms.max(1));
+    let interval =
+        Duration::from_millis(inner.config.bulk_flush_interval_ms.max(1));
     let mut buf: Vec<EsDocument> = Vec::with_capacity(max.min(4096));
 
     let mut ticker = tokio::time::interval(interval);
@@ -486,7 +546,10 @@ async fn worker_loop(
 
 /// Sends the accumulated batch; on transient failure writes it to the on-disk
 /// buffer. Clears `buf` in all cases.
-async fn flush_batch(inner: &Inner, buf: &mut Vec<EsDocument>) -> anyhow::Result<()> {
+async fn flush_batch(
+    inner: &Inner,
+    buf: &mut Vec<EsDocument>,
+) -> anyhow::Result<()> {
     if buf.is_empty() {
         return Ok(());
     }
@@ -500,18 +563,24 @@ async fn flush_batch(inner: &Inner, buf: &mut Vec<EsDocument>) -> anyhow::Result
                     "elasticsearch bulk completed with item-level failures"
                 );
             } else {
-                tracing::debug!(indexed = result.indexed, "elasticsearch bulk indexed");
+                tracing::debug!(
+                    indexed = result.indexed,
+                    "elasticsearch bulk indexed"
+                );
             }
             Ok(())
-        }
+        },
         Ok(_) => {
-            tracing::warn!(count = docs.len(), "elasticsearch busy, buffering the batch");
+            tracing::warn!(
+                count = docs.len(),
+                "elasticsearch busy, buffering the batch"
+            );
             buffer_docs(inner, &docs).await
-        }
+        },
         Err(err) => {
             tracing::warn!(count = docs.len(), error = %err, "elasticsearch unreachable, buffering the batch");
             buffer_docs(inner, &docs).await
-        }
+        },
     }
 }
 
@@ -521,15 +590,18 @@ async fn buffer_docs(inner: &Inner, docs: &[EsDocument]) -> anyhow::Result<()> {
         Ok(Some(path)) => {
             tracing::warn!(path = %path.display(), count = docs.len(), "buffered elasticsearch batch to disk");
             Ok(())
-        }
+        },
         Ok(None) => {
-            tracing::warn!(count = docs.len(), "elasticsearch buffer disabled, dropping the batch");
+            tracing::warn!(
+                count = docs.len(),
+                "elasticsearch buffer disabled, dropping the batch"
+            );
             Err(anyhow::anyhow!("buffer disabled, batch dropped"))
-        }
+        },
         Err(err) => {
             tracing::error!(error = %err, "failed to write the elasticsearch buffer");
             Err(err)
-        }
+        },
     }
 }
 
@@ -555,9 +627,14 @@ async fn replay_loop(inner: Arc<Inner>) {
             break;
         }
         match inner.buffer.replay(&inner).await {
-            Ok(0) => {}
-            Ok(n) => tracing::info!(segments = n, "replayed buffered elasticsearch segments"),
-            Err(err) => tracing::debug!(error = %err, "elasticsearch buffer replay pass failed"),
+            Ok(0) => {},
+            Ok(n) => tracing::info!(
+                segments = n,
+                "replayed buffered elasticsearch segments"
+            ),
+            Err(err) => {
+                tracing::debug!(error = %err, "elasticsearch buffer replay pass failed")
+            },
         }
     }
     // One last drain attempt on the way out.
@@ -589,23 +666,29 @@ fn parse_bulk_response(body: &serde_json::Value, total: usize) -> BulkResult {
                     .and_then(|op| op.get("status"))
                     .and_then(|s| s.as_u64());
                 match status {
-                    Some(code) if (200..300).contains(&code) => result.indexed += 1,
+                    Some(code) if (200..300).contains(&code) => {
+                        result.indexed += 1
+                    },
                     Some(code) if code == 429 || code == 503 => {
                         result.failed += 1;
                         result.retryable = true;
-                    }
+                    },
                     _ => result.failed += 1,
                 }
             }
-        }
+        },
         None => {
             // Fall back to the top-level flag when the item array is absent.
-            if body.get("errors").and_then(|v| v.as_bool()).unwrap_or(false) {
+            if body
+                .get("errors")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
                 result.failed = total;
             } else {
                 result.indexed = total;
             }
-        }
+        },
     }
     result
 }
@@ -659,7 +742,10 @@ impl DiskBuffer {
 
     /// Writes a batch to a new segment, enforcing the total-size quota first.
     /// Returns the segment path, or `None` when buffering is disabled.
-    async fn write(&self, docs: &[EsDocument]) -> anyhow::Result<Option<PathBuf>> {
+    async fn write(
+        &self,
+        docs: &[EsDocument],
+    ) -> anyhow::Result<Option<PathBuf>> {
         let Some(dir) = self.dir.clone() else {
             return Ok(None);
         };
@@ -677,11 +763,16 @@ impl DiskBuffer {
     }
 
     /// Lists segments oldest-first as `(path, size_bytes)`.
-    async fn list_segments(&self, dir: &Path) -> anyhow::Result<Vec<(PathBuf, u64)>> {
+    async fn list_segments(
+        &self,
+        dir: &Path,
+    ) -> anyhow::Result<Vec<(PathBuf, u64)>> {
         let mut out = Vec::new();
         let mut entries = match tokio::fs::read_dir(dir).await {
             Ok(entries) => entries,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(out)
+            },
             Err(err) => return Err(err.into()),
         };
         while let Some(entry) = entries.next_entry().await? {
@@ -740,7 +831,7 @@ impl DiskBuffer {
                 Err(err) => {
                     tracing::warn!(path = %path.display(), error = %err, "could not read an ES buffer segment");
                     continue;
-                }
+                },
             };
             if bytes.is_empty() {
                 let _ = tokio::fs::remove_file(&path).await;
@@ -750,12 +841,12 @@ impl DiskBuffer {
                 Ok(result) if !result.retryable => {
                     let _ = tokio::fs::remove_file(&path).await;
                     replayed += 1;
-                }
+                },
                 Ok(_) => break, // ES still busy; keep the segment for later.
                 Err(err) => {
                     tracing::debug!(error = %err, "elasticsearch still unreachable, keeping the buffer");
                     break;
-                }
+                },
             }
         }
         Ok(replayed)
@@ -803,10 +894,12 @@ mod tests {
 
     #[test]
     fn parse_bulk_falls_back_to_errors_flag() {
-        let ok = parse_bulk_response(&serde_json::json!({ "errors": false }), 5);
+        let ok =
+            parse_bulk_response(&serde_json::json!({ "errors": false }), 5);
         assert_eq!(ok.indexed, 5);
         assert_eq!(ok.failed, 0);
-        let bad = parse_bulk_response(&serde_json::json!({ "errors": true }), 5);
+        let bad =
+            parse_bulk_response(&serde_json::json!({ "errors": true }), 5);
         assert_eq!(bad.failed, 5);
     }
 
@@ -846,7 +939,10 @@ mod tests {
     #[tokio::test]
     async fn disk_buffer_writes_and_lists_segments() {
         let tmp = tempfile::tempdir().unwrap();
-        let buffer = DiskBuffer::new(Some(tmp.path().to_string_lossy().into_owned()), 512);
+        let buffer = DiskBuffer::new(
+            Some(tmp.path().to_string_lossy().into_owned()),
+            512,
+        );
         buffer.create_dir().await.unwrap();
 
         let path = buffer.write(&[doc("idx")]).await.unwrap().unwrap();
@@ -875,6 +971,9 @@ mod tests {
 
         let segments = buffer.list_segments(tmp.path()).await.unwrap();
         let total: u64 = segments.iter().map(|(_, len)| len).sum();
-        assert!(total <= 64 + 512, "quota sweep should keep the total bounded");
+        assert!(
+            total <= 64 + 512,
+            "quota sweep should keep the total bounded"
+        );
     }
 }

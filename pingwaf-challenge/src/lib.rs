@@ -3,13 +3,15 @@ pub mod fingerprint;
 pub mod js_challenge;
 
 // Re-export main types for convenient access
-pub use cookie::{ClearanceLevel, ClearancePayload, CookieError, CookieManager};
-pub use fingerprint::BrowserFingerprint;
-pub use js_challenge::{
-    ChallengeConfig, ChallengeDecision, ChallengeEngine, ChallengeRequest, ChallengeResponse,
-    ChallengeSubmission, VerifyResult, generate_request_id,
+pub use cookie::{
+    ClearanceLevel, ClearancePayload, CookieError, CookieManager,
 };
-pub use js_challenge::verify::{IntegrityResult, check_browser_integrity};
+pub use fingerprint::BrowserFingerprint;
+pub use js_challenge::verify::{check_browser_integrity, IntegrityResult};
+pub use js_challenge::{
+    generate_request_id, ChallengeConfig, ChallengeDecision, ChallengeEngine,
+    ChallengeRequest, ChallengeResponse, ChallengeSubmission, VerifyResult,
+};
 
 /// Challenge level (public enum matching the proto definition)
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,7 +69,7 @@ impl ChallengeLevel {
         match s.to_lowercase().as_str() {
             "non_interactive" | "noninteractive" | "js" | "js_challenge" => {
                 Self::NonInteractive
-            }
+            },
             "managed" => Self::Managed,
             "interactive" | "captcha" => Self::Interactive,
             _ => Self::None,

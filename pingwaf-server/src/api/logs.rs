@@ -1,16 +1,20 @@
 //! Log queries: security events produced by the WAF and the full access log.
 
-use axum::Json;
 use axum::extract::{Query, State};
 use axum::routing::get;
+use axum::Json;
 use axum::Router;
 use chrono::{DateTime, Duration, Utc};
-use sea_orm::{ColumnTrait, Condition, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder};
+use sea_orm::{
+    ColumnTrait, Condition, DatabaseConnection, EntityTrait, PaginatorTrait,
+    QueryFilter, QueryOrder,
+};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::api::common::{
-    Page, Pagination, non_empty, parse_optional_datetime, parse_uuid, scope_site,
+    non_empty, parse_optional_datetime, parse_uuid, scope_site, Page,
+    Pagination,
 };
 use crate::api::error::ApiError;
 use crate::api::state::AppState;
@@ -121,10 +125,16 @@ async fn resolve_scope(
 
 /// Applies the site scope to a condition. An empty allow-list yields a condition
 /// that matches nothing, which keeps the query cheap and correct.
-fn apply_scope(condition: Condition, scope: &Option<Vec<Uuid>>, column: impl ColumnTrait) -> Condition {
+fn apply_scope(
+    condition: Condition,
+    scope: &Option<Vec<Uuid>>,
+    column: impl ColumnTrait,
+) -> Condition {
     match scope {
         None => condition,
-        Some(ids) if ids.is_empty() => condition.add(column.eq(Uuid::nil()).and(column.ne(Uuid::nil()))),
+        Some(ids) if ids.is_empty() => {
+            condition.add(column.eq(Uuid::nil()).and(column.ne(Uuid::nil())))
+        },
         Some(ids) => condition.add(column.is_in(ids.iter().copied())),
     }
 }
@@ -187,7 +197,9 @@ async fn list_security(
         condition = condition.add(security_event::Column::Path.contains(path));
     }
     if let Some(country) = non_empty(&query.country_code) {
-        condition = condition.add(security_event::Column::CountryCode.eq(country.to_uppercase()));
+        condition = condition.add(
+            security_event::Column::CountryCode.eq(country.to_uppercase()),
+        );
     }
 
     let paginator = security_event::Entity::find()
@@ -219,7 +231,8 @@ async fn list_access(
         condition = condition.add(access_log::Column::ClientIp.eq(ip));
     }
     if let Some(method) = non_empty(&query.method) {
-        condition = condition.add(access_log::Column::Method.eq(method.to_uppercase()));
+        condition =
+            condition.add(access_log::Column::Method.eq(method.to_uppercase()));
     }
     if let Some(status) = query.status_code {
         if !(100..=599).contains(&status) {
@@ -246,13 +259,17 @@ async fn list_access(
         condition = condition.add(access_log::Column::Path.contains(path));
     }
     if let Some(cache_status) = non_empty(&query.cache_status) {
-        condition = condition.add(access_log::Column::CacheStatus.eq(cache_status.to_lowercase()));
+        condition = condition.add(
+            access_log::Column::CacheStatus.eq(cache_status.to_lowercase()),
+        );
     }
     if let Some(country) = non_empty(&query.country_code) {
-        condition = condition.add(access_log::Column::CountryCode.eq(country.to_uppercase()));
+        condition = condition
+            .add(access_log::Column::CountryCode.eq(country.to_uppercase()));
     }
     if let Some(min_latency) = query.min_latency_ms {
-        condition = condition.add(access_log::Column::TotalLatencyMs.gte(min_latency));
+        condition =
+            condition.add(access_log::Column::TotalLatencyMs.gte(min_latency));
     }
 
     let paginator = access_log::Entity::find()
@@ -286,11 +303,15 @@ async fn purge(
         None => None,
     };
 
-    let mut security_condition = Condition::all().add(security_event::Column::Timestamp.lt(cutoff));
-    let mut access_condition = Condition::all().add(access_log::Column::Timestamp.lt(cutoff));
+    let mut security_condition =
+        Condition::all().add(security_event::Column::Timestamp.lt(cutoff));
+    let mut access_condition =
+        Condition::all().add(access_log::Column::Timestamp.lt(cutoff));
     if let Some(id) = site_filter {
-        security_condition = security_condition.add(security_event::Column::SiteId.eq(id));
-        access_condition = access_condition.add(access_log::Column::SiteId.eq(id));
+        security_condition =
+            security_condition.add(security_event::Column::SiteId.eq(id));
+        access_condition =
+            access_condition.add(access_log::Column::SiteId.eq(id));
     }
 
     let security = security_event::Entity::delete_many()
@@ -338,7 +359,11 @@ mod tests {
         // Reversed range.
         assert!(resolve_window(&Some(to.clone()), &Some(from.clone())).is_err());
         // Window far beyond the ceiling.
-        assert!(resolve_window(&Some("1970-01-01T00:00:00Z".to_string()), &Some(to)).is_err());
+        assert!(resolve_window(
+            &Some("1970-01-01T00:00:00Z".to_string()),
+            &Some(to)
+        )
+        .is_err());
         // Unparsable input.
         assert!(resolve_window(&Some("yesterday".to_string()), &None).is_err());
     }
