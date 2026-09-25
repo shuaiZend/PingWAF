@@ -1068,6 +1068,7 @@ value = "/storage22"
     }
 
     #[tokio::test]
+    #[ignore = "requires a live etcd at 127.0.0.1:2379; run with: cargo test -p pingap-config -- --ignored"]
     async fn test_etcd_config_manger() {
         let url = format!(
             "etcd://127.0.0.1:2379/{}?timeout=10s&connect_timeout=5s",
