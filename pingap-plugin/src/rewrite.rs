@@ -724,7 +724,7 @@ fn apply_operator(
             },
             CondValue::Set(items) => {
                 let ns = n.to_string();
-                return negate_if(op, items.iter().any(|i| *i == ns));
+                return negate_if(op, items.contains(&ns));
             },
             _ => return op.is_negated(),
         };
@@ -1575,10 +1575,10 @@ impl Plugin for RewritePlugin {
                             modified = true;
                         }
                     },
-                    CompiledOperation::SetStatusCode { code } => {
-                        if upstream_response.set_status(*code).is_ok() {
-                            modified = true;
-                        }
+                    CompiledOperation::SetStatusCode { code }
+                        if upstream_response.set_status(*code).is_ok() =>
+                    {
+                        modified = true;
                     },
                     // Request-only operations are ignored on the response.
                     _ => {},

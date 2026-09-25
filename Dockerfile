@@ -80,6 +80,9 @@ RUN cargo build --release --features full 2>/dev/null || true
 COPY build.rs ./
 COPY src/ src/
 COPY benches/ benches/
+# src/plugin/admin.rs embeds dist/ via rust-embed (resolved against the root
+# crate's manifest dir /app), so the folder must exist at compile time.
+COPY dist/ dist/
 COPY pingap-core/ pingap-core/
 COPY pingap-util/ pingap-util/
 COPY pingap-config/ pingap-config/
