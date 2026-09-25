@@ -91,15 +91,21 @@ impl<T> Page<T> {
 
 /// Parses a path/query UUID with a 400 instead of a 500.
 pub fn parse_uuid(value: &str, what: &str) -> Result<Uuid, ApiError> {
-    Uuid::parse_str(value.trim())
-        .map_err(|err| ApiError::BadRequest(format!("invalid {what} '{value}': {err}")))
+    Uuid::parse_str(value.trim()).map_err(|err| {
+        ApiError::BadRequest(format!("invalid {what} '{value}': {err}"))
+    })
 }
 
 /// Parses an RFC 3339 timestamp filter.
-pub fn parse_datetime(value: &str, what: &str) -> Result<DateTime<Utc>, ApiError> {
+pub fn parse_datetime(
+    value: &str,
+    what: &str,
+) -> Result<DateTime<Utc>, ApiError> {
     DateTime::parse_from_rfc3339(value.trim())
         .map(|dt| dt.with_timezone(&Utc))
-        .map_err(|err| ApiError::BadRequest(format!("invalid {what} '{value}': {err}")))
+        .map_err(|err| {
+            ApiError::BadRequest(format!("invalid {what} '{value}': {err}"))
+        })
 }
 
 /// Optional RFC 3339 filter that tolerates an empty string.
@@ -138,11 +144,15 @@ pub async fn load_site(
     let model = site::Entity::find_by_id(site_id)
         .one(db)
         .await?
-        .ok_or_else(|| ApiError::NotFound(format!("site {site_id} not found")))?;
+        .ok_or_else(|| {
+            ApiError::NotFound(format!("site {site_id} not found"))
+        })?;
 
     if !user.is_admin() {
         if model.user_id != user.id {
-            return Err(ApiError::NotFound(format!("site {site_id} not found")));
+            return Err(ApiError::NotFound(format!(
+                "site {site_id} not found"
+            )));
         }
         if write {
             require_write(user)?;
@@ -218,16 +228,19 @@ pub fn trim_trailing_slash(value: &str) -> &str {
 /// Lower-cases and validates a domain name.
 pub fn normalise_domain(value: &str) -> Result<String, ApiError> {
     let domain = value.trim().trim_start_matches('.').to_lowercase();
-    let domain = trim_trailing_slash(&domain).trim_end_matches('.').to_string();
+    let domain = trim_trailing_slash(&domain)
+        .trim_end_matches('.')
+        .to_string();
     if domain.is_empty() || domain.len() > 253 {
         return Err(ApiError::BadRequest(format!(
             "invalid domain '{value}': must be 1-253 characters"
         )));
     }
-    if !domain
-        .split('.')
-        .all(|label| !label.is_empty() && label.len() <= 63 && label.chars().all(is_domain_char))
-    {
+    if !domain.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && label.chars().all(is_domain_char)
+    }) {
         return Err(ApiError::BadRequest(format!(
             "invalid domain '{value}': labels may only contain letters, digits and '-'"
         )));
@@ -279,18 +292,20 @@ mod tests {
 
     #[test]
     fn datetime_filters_tolerate_blanks() {
-        assert_eq!(
-            parse_optional_datetime(&None, "from").unwrap(),
-            None
-        );
+        assert_eq!(parse_optional_datetime(&None, "from").unwrap(), None);
         assert_eq!(
             parse_optional_datetime(&Some("".into()), "from").unwrap(),
             None
         );
-        assert!(parse_optional_datetime(&Some("2024-01-01T00:00:00Z".into()), "from")
-            .unwrap()
-            .is_some());
-        assert!(parse_optional_datetime(&Some("yesterday".into()), "from").is_err());
+        assert!(parse_optional_datetime(
+            &Some("2024-01-01T00:00:00Z".into()),
+            "from"
+        )
+        .unwrap()
+        .is_some());
+        assert!(
+            parse_optional_datetime(&Some("yesterday".into()), "from").is_err()
+        );
     }
 
     #[test]

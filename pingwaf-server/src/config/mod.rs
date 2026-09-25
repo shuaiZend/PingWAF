@@ -14,7 +14,8 @@ use serde::{Deserialize, Serialize};
 use crate::es::EsConfig;
 
 /// Default PostgreSQL DSN used by the development docker-compose file.
-pub const DEFAULT_DB_URL: &str = "postgres://pingwaf:pingwaf@localhost:5432/pingwaf";
+pub const DEFAULT_DB_URL: &str =
+    "postgres://pingwaf:pingwaf@localhost:5432/pingwaf";
 /// Default address of the REST API / dashboard.
 pub const DEFAULT_HTTP_ADDR: &str = "0.0.0.0:9080";
 /// Default address of the gRPC control plane used by the agents.
@@ -231,7 +232,10 @@ impl ServerConfig {
     /// The bundled JWT secret is accepted (it keeps `cargo run` frictionless)
     /// but reported so the operator sees the warning at startup.
     pub fn validate(&self) -> anyhow::Result<()> {
-        anyhow::ensure!(!self.db_url.trim().is_empty(), "db_url must not be empty");
+        anyhow::ensure!(
+            !self.db_url.trim().is_empty(),
+            "db_url must not be empty"
+        );
         anyhow::ensure!(
             !self.http_addr.trim().is_empty(),
             "http_addr must not be empty"
@@ -260,7 +264,10 @@ impl ServerConfig {
             self.db_max_connections >= self.db_min_connections,
             "db_max_connections must be >= db_min_connections"
         );
-        anyhow::ensure!(self.log_batch_size > 0, "log_batch_size must be positive");
+        anyhow::ensure!(
+            self.log_batch_size > 0,
+            "log_batch_size must be positive"
+        );
         // Only an enabled Elasticsearch shipper has to be valid; a stored-but-
         // disabled config may be incomplete while an operator finishes setting
         // it up through the dashboard.
@@ -397,9 +404,10 @@ mod tests {
 
     #[test]
     fn serde_defaults_fill_missing_fields() {
-        let config: ServerConfig =
-            serde_json::from_str(r#"{"jwt_secret":"a-very-long-secret-value"}"#)
-                .expect("missing fields fall back to defaults");
+        let config: ServerConfig = serde_json::from_str(
+            r#"{"jwt_secret":"a-very-long-secret-value"}"#,
+        )
+        .expect("missing fields fall back to defaults");
         assert_eq!(config.http_addr, DEFAULT_HTTP_ADDR);
         assert!(config.allow_registration);
         assert_eq!(config.heartbeat_interval_seconds, 15);

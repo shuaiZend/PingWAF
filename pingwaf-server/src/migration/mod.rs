@@ -39,11 +39,13 @@ mod tests {
     fn migrations_are_ordered_and_unique() {
         let migrations = Migrator::migrations();
         assert_eq!(migrations.len(), 6);
-        let names: Vec<String> = migrations.iter().map(|m| m.name().to_owned()).collect();
+        let names: Vec<String> =
+            migrations.iter().map(|m| m.name().to_owned()).collect();
         let mut sorted = names.clone();
         sorted.sort();
         assert_eq!(names, sorted, "migrations must be listed in name order");
-        let unique: std::collections::BTreeSet<&String> = names.iter().collect();
+        let unique: std::collections::BTreeSet<&String> =
+            names.iter().collect();
         assert_eq!(unique.len(), names.len(), "duplicate migration name");
     }
 }

@@ -1,30 +1,30 @@
 //! Site management: CRUD for sites plus their origin servers and TLS material.
 
-use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, put};
+use axum::Json;
 use axum::Router;
 use chrono::{DateTime, Utc};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, Condition, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
-    Set,
+    ActiveModelTrait, ColumnTrait, Condition, EntityTrait, PaginatorTrait,
+    QueryFilter, QueryOrder, Set,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::api::common::{
-    Page, Pagination, load_site_read, load_site_write, non_empty, normalise_domain, parse_uuid,
-    require_write,
+    load_site_read, load_site_write, non_empty, normalise_domain, parse_uuid,
+    require_write, Page, Pagination,
 };
 use crate::api::error::ApiError;
 use crate::api::state::AppState;
 use crate::auth::AuthUser;
 use crate::grpc::notify_config_changed;
 use crate::models::{
-    acme_challenge, cache_rules, rate_limit_rules, rule, rule_groups, site, site_ssl, site_status,
-    site_upstreams,
+    acme_challenge, cache_rules, rate_limit_rules, rule, rule_groups, site,
+    site_ssl, site_status, site_upstreams,
 };
 
 /// Public representation of a site.
@@ -92,8 +92,14 @@ impl From<site_ssl::Model> for SslResponse {
             site_id: model.site_id,
             domain: model.domain,
             issuer: model.issuer,
-            has_certificate: model.cert_pem.as_ref().is_some_and(|v| !v.is_empty()),
-            has_private_key: model.key_pem.as_ref().is_some_and(|v| !v.is_empty()),
+            has_certificate: model
+                .cert_pem
+                .as_ref()
+                .is_some_and(|v| !v.is_empty()),
+            has_private_key: model
+                .key_pem
+                .as_ref()
+                .is_some_and(|v| !v.is_empty()),
             expires_at: model.expires_at,
             auto_renew: model.auto_renew,
             acme_email: model.acme_email,
@@ -223,7 +229,9 @@ async fn list(
     }
     if let Some(status) = non_empty(&query.status) {
         if !site_status::is_valid(&status) {
-            return Err(ApiError::BadRequest(format!("unknown site status '{status}'")));
+            return Err(ApiError::BadRequest(format!(
+                "unknown site status '{status}'"
+            )));
         }
         condition = condition.add(site::Column::Status.eq(status));
     }
@@ -266,13 +274,19 @@ async fn create(
         ));
     }
     let domain = normalise_domain(&payload.domain)?;
-    let status = payload.status.unwrap_or_else(|| site_status::PENDING.to_string());
+    let status = payload
+        .status
+        .unwrap_or_else(|| site_status::PENDING.to_string());
     if !site_status::is_valid(&status) {
-        return Err(ApiError::BadRequest(format!("unknown site status '{status}'")));
+        return Err(ApiError::BadRequest(format!(
+            "unknown site status '{status}'"
+        )));
     }
     let plan = payload.plan.unwrap_or_else(|| "free".to_string());
     if plan.len() > 20 {
-        return Err(ApiError::BadRequest("plan must be at most 20 characters".to_string()));
+        return Err(ApiError::BadRequest(
+            "plan must be at most 20 characters".to_string(),
+        ));
     }
 
     let timestamp = Utc::now();
@@ -368,7 +382,9 @@ async fn update(
     }
     if let Some(status) = non_empty(&payload.status) {
         if !site_status::is_valid(&status) {
-            return Err(ApiError::BadRequest(format!("unknown site status '{status}'")));
+            return Err(ApiError::BadRequest(format!(
+                "unknown site status '{status}'"
+            )));
         }
         active.status = Set(status);
     }
@@ -472,7 +488,9 @@ async fn update_upstream(
         .filter(site_upstreams::Column::SiteId.eq(id))
         .one(&state.db)
         .await?
-        .ok_or_else(|| ApiError::NotFound(format!("upstream {target} not found")))?;
+        .ok_or_else(|| {
+            ApiError::NotFound(format!("upstream {target} not found"))
+        })?;
 
     let mut active: site_upstreams::ActiveModel = row.into();
     if let Some(name) = non_empty(&payload.name) {
@@ -564,7 +582,9 @@ async fn upsert_ssl(
         }
     }
     let expires_at = match non_empty(&payload.expires_at) {
-        Some(raw) => Some(crate::api::common::parse_datetime(&raw, "expires_at")?),
+        Some(raw) => {
+            Some(crate::api::common::parse_datetime(&raw, "expires_at")?)
+        },
         None => None,
     };
 
@@ -588,15 +608,17 @@ async fn upsert_ssl(
             active.expires_at = Set(expires_at);
             active.auto_renew = Set(payload.auto_renew);
             active.acme_email = Set(non_empty(&payload.acme_email));
-            active.acme_challenge_type = Set(non_empty(&payload.acme_challenge_type));
-            active.acme_dns_provider = Set(non_empty(&payload.acme_dns_provider));
+            active.acme_challenge_type =
+                Set(non_empty(&payload.acme_challenge_type));
+            active.acme_dns_provider =
+                Set(non_empty(&payload.acme_dns_provider));
             if let Some(config) = payload.acme_dns_config {
                 active.acme_dns_config = Set(Some(config));
             }
             let updated = active.update(&state.db).await?;
             tracing::info!(site_id = %id, ssl = %row_id, "SSL configuration updated");
             updated
-        }
+        },
         None => {
             let row_id = Uuid::new_v4();
             let active = site_ssl::ActiveModel {
@@ -609,7 +631,9 @@ async fn upsert_ssl(
                 expires_at: Set(expires_at),
                 auto_renew: Set(payload.auto_renew),
                 acme_email: Set(non_empty(&payload.acme_email)),
-                acme_challenge_type: Set(non_empty(&payload.acme_challenge_type)),
+                acme_challenge_type: Set(non_empty(
+                    &payload.acme_challenge_type,
+                )),
                 acme_dns_provider: Set(non_empty(&payload.acme_dns_provider)),
                 acme_dns_config: Set(payload.acme_dns_config),
                 created_at: Set(Utc::now()),
@@ -617,7 +641,7 @@ async fn upsert_ssl(
             let inserted = active.insert(&state.db).await?;
             tracing::info!(site_id = %id, ssl = %row_id, "SSL configuration created");
             inserted
-        }
+        },
     };
 
     // Bump the site so that agents notice the configuration changed.
@@ -649,7 +673,11 @@ async fn delete_ssl(
 }
 
 /// Validates the fields shared by upstream create/update.
-fn validate_upstream(name: &str, address: &str, weight: i32) -> Result<(), ApiError> {
+fn validate_upstream(
+    name: &str,
+    address: &str,
+    weight: i32,
+) -> Result<(), ApiError> {
     if name.is_empty() || name.len() > 100 {
         return Err(ApiError::BadRequest(
             "upstream name must be 1-100 characters".to_string(),
@@ -669,9 +697,15 @@ fn validate_upstream(name: &str, address: &str, weight: i32) -> Result<(), ApiEr
 }
 
 /// Updates `sites.updated_at` so agents see a fresh configuration fingerprint.
-pub async fn touch_site(state: &AppState, site_id: Uuid) -> Result<(), ApiError> {
+pub async fn touch_site(
+    state: &AppState,
+    site_id: Uuid,
+) -> Result<(), ApiError> {
     site::Entity::update_many()
-        .col_expr(site::Column::UpdatedAt, sea_orm::sea_query::Expr::value(Utc::now()))
+        .col_expr(
+            site::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(Utc::now()),
+        )
         .filter(site::Column::Id.eq(site_id))
         .exec(&state.db)
         .await?;

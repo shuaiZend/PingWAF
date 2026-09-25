@@ -15,4 +15,11 @@ ignore = [
     # output. The `exr` path was removed by trimming image's default features.
     # Remove when rav1e moves to pastey or drops the dependency.
     "RUSTSEC-2024-0436",
+
+    # rsa 0.9.10 (RUSTSEC-2023-0071, "Marvin" timing side-channel in PKCS#1 v1.5
+    # decryption). No upstream fix exists yet. It reaches this tree only through
+    # sqlx-mysql (MySQL caching_sha2_password authentication); this project uses
+    # PostgreSQL, so that code path is never exercised.
+    # Remove once rsa ships a constant-time fix.
+    "RUSTSEC-2023-0071",
 ]

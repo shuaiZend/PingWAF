@@ -20,16 +20,18 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::normalize::{NormalizedRequest, normalize_request};
-use crate::rules::expression::{EvalContext, evaluate};
+use crate::normalize::{normalize_request, NormalizedRequest};
+use crate::rules::expression::{evaluate, EvalContext};
 use crate::rules::managed::default_managed_rules;
-use crate::rules::signatures::{SignatureEngine, detect_sqli, detect_xss};
+use crate::rules::signatures::{detect_sqli, detect_xss, SignatureEngine};
 use crate::rules::{CompiledRule, RuleAction};
 use crate::score::{AnomalyScorer, ScoreBreakdown, ScoreClass};
 use crate::{WafAction, WafVerdict};
 
 /// Operating mode for the engine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum WafMode {
     /// Engine is disabled — every request returns `Pass` immediately.
@@ -232,8 +234,11 @@ impl WafEngine {
                 if hit.severity >= 5 {
                     critical_hit = true;
                 }
-                self.scorer
-                    .add_category_hit(&mut breakdown, hit.category, hit.severity);
+                self.scorer.add_category_hit(
+                    &mut breakdown,
+                    hit.category,
+                    hit.severity,
+                );
                 matched.push(hit.pattern_id.clone());
                 details.push(format!(
                     "{} [{} sev={}] in {} '{}'",
@@ -298,8 +303,11 @@ impl WafEngine {
             if hit.severity >= 5 {
                 critical_hit = true;
             }
-            self.scorer
-                .add_category_hit(&mut breakdown, hit.category, hit.severity);
+            self.scorer.add_category_hit(
+                &mut breakdown,
+                hit.category,
+                hit.severity,
+            );
             if !matched.contains(&hit.pattern_id) {
                 matched.push(hit.pattern_id.clone());
             }
@@ -351,7 +359,10 @@ impl WafEngine {
                 action: WafAction::Pass,
                 score: breakdown.total_u8(),
                 matched_rules: matched,
-                details: format!("allow-rule matched: {} [{}]", rule.id, rule.name),
+                details: format!(
+                    "allow-rule matched: {} [{}]",
+                    rule.id, rule.name
+                ),
                 breakdown,
             };
         }
@@ -388,20 +399,22 @@ impl WafEngine {
                 rule.severity
             ));
             match rule.action {
-                RuleAction::Allow => unreachable!("allow rules handled in pre-pass"),
+                RuleAction::Allow => {
+                    unreachable!("allow rules handled in pre-pass")
+                },
                 RuleAction::Log => {
                     self.scorer.add_severity_hit(&mut breakdown, rule.severity);
-                }
+                },
                 RuleAction::Block => {
                     self.scorer.add_severity_hit(&mut breakdown, rule.severity);
                     forced_action = Some(WafAction::Block);
-                }
+                },
                 RuleAction::Challenge | RuleAction::JsChallenge => {
                     self.scorer.add_severity_hit(&mut breakdown, rule.severity);
                     if forced_action != Some(WafAction::Block) {
                         forced_action = Some(WafAction::Challenge);
                     }
-                }
+                },
             }
         }
 
@@ -425,7 +438,13 @@ impl WafEngine {
             ScoreClass::LikelyAttack => "likely-attack",
             ScoreClass::Attack => "attack",
         };
-        self.finalize_verdict(&mut breakdown, matched, details, Some(action), reason)
+        self.finalize_verdict(
+            &mut breakdown,
+            matched,
+            details,
+            Some(action),
+            reason,
+        )
     }
 
     fn finalize_verdict(
@@ -534,14 +553,16 @@ mod tests {
     #[test]
     fn blocks_xss_script() {
         let e = engine();
-        let v = e.inspect(&req("GET", "/search", "q=<script>alert(1)</script>"));
+        let v =
+            e.inspect(&req("GET", "/search", "q=<script>alert(1)</script>"));
         assert!(matches!(v.action, WafAction::Block | WafAction::Monitor));
     }
 
     #[test]
     fn blocks_xss_onerror() {
         let e = engine();
-        let v = e.inspect(&req("GET", "/search", "q=<img src=x onerror=alert(1)>"));
+        let v =
+            e.inspect(&req("GET", "/search", "q=<img src=x onerror=alert(1)>"));
         assert!(matches!(v.action, WafAction::Block | WafAction::Monitor));
     }
 
@@ -580,7 +601,11 @@ mod tests {
     #[test]
     fn blocks_ssrf_metadata() {
         let e = engine();
-        let v = e.inspect(&req("GET", "/proxy", "url=http://169.254.169.254/latest/"));
+        let v = e.inspect(&req(
+            "GET",
+            "/proxy",
+            "url=http://169.254.169.254/latest/",
+        ));
         assert!(matches!(v.action, WafAction::Block | WafAction::Monitor));
     }
 
@@ -675,7 +700,10 @@ mod tests {
     fn body_payload_detected() {
         let e = engine();
         let mut r = req("POST", "/api/comment", "");
-        r.headers.push(("Content-Type".into(), "application/x-www-form-urlencoded".into()));
+        r.headers.push((
+            "Content-Type".into(),
+            "application/x-www-form-urlencoded".into(),
+        ));
         r.body = Some(b"comment=<script>alert(1)</script>&author=bob".to_vec());
         let v = e.inspect(&r);
         assert!(matches!(v.action, WafAction::Block | WafAction::Monitor));
@@ -726,7 +754,8 @@ mod tests {
     #[test]
     fn verdict_breakdown_populated() {
         let e = engine();
-        let v = e.inspect(&req("GET", "/api/users", "id=1' UNION SELECT 1,2,3 --"));
+        let v =
+            e.inspect(&req("GET", "/api/users", "id=1' UNION SELECT 1,2,3 --"));
         assert!(v.breakdown.total > 0);
         assert!(v.breakdown.sqli_score > 0);
         assert!(!matches!(v.breakdown.overall_class, ScoreClass::Clean));

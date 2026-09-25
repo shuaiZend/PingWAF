@@ -165,7 +165,9 @@ pub fn check_browser_integrity(
 
     // Check for empty/suspicious fingerprint data
     if fingerprint.user_agent.is_empty() {
-        return IntegrityResult::Failed("empty user agent in fingerprint".to_string());
+        return IntegrityResult::Failed(
+            "empty user agent in fingerprint".to_string(),
+        );
     }
 
     if fingerprint.screen_width == 0 || fingerprint.screen_height == 0 {
@@ -206,13 +208,17 @@ pub fn check_browser_integrity(
 /// Check if a user agent matches known good bots (search engines)
 pub fn is_known_good_bot(user_agent: &str) -> bool {
     let ua_lower = user_agent.to_lowercase();
-    GOOD_BOT_PATTERNS.iter().any(|pattern| ua_lower.contains(pattern))
+    GOOD_BOT_PATTERNS
+        .iter()
+        .any(|pattern| ua_lower.contains(pattern))
 }
 
 /// Check if a user agent matches known automation/bot patterns
 pub fn is_known_bot(user_agent: &str) -> bool {
     let ua_lower = user_agent.to_lowercase();
-    BOT_UA_PATTERNS.iter().any(|pattern| ua_lower.contains(pattern))
+    BOT_UA_PATTERNS
+        .iter()
+        .any(|pattern| ua_lower.contains(pattern))
 }
 
 #[cfg(test)]

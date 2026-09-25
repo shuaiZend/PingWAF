@@ -8,7 +8,8 @@
 use crate::rules::{CompiledRule, RuleAction};
 
 /// (id, name, expression, action, severity, paranoia_level, tags)
-type ManagedSpec<'a> = (&'a str, &'a str, &'a str, RuleAction, u8, u8, &'a [&'a str]);
+type ManagedSpec<'a> =
+    (&'a str, &'a str, &'a str, RuleAction, u8, u8, &'a [&'a str]);
 
 /// Returns the built-in managed rule set. Rules that fail to parse are
 /// silently skipped (logged at warn level) so a typo in one default never
@@ -147,10 +148,10 @@ pub fn default_managed_rules() -> Vec<CompiledRule> {
             Ok(mut rule) => {
                 rule.paranoia_level = paranoia;
                 out.push(rule);
-            }
+            },
             Err(err) => {
                 tracing::warn!(rule_id = id, error = %err, "skipping malformed managed rule");
-            }
+            },
         }
     }
     out

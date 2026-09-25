@@ -30,7 +30,7 @@ use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
 
 use crate::api::state::AppState;
-use crate::es::{ElasticsearchClient, ensure_index_template};
+use crate::es::{ensure_index_template, ElasticsearchClient};
 use crate::grpc::{AgentRegistry, ControlPlaneService};
 use crate::migration::Migrator;
 use crate::models::{role, user};
@@ -72,23 +72,21 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
     tracing::info!("database connection established");
 
     // ── 3. Run migrations ────────────────────────────────────────────────────
-    Migrator::up(&db, None).await.map_err(|err| {
-        anyhow::anyhow!("migration failed: {err}")
-    })?;
+    Migrator::up(&db, None)
+        .await
+        .map_err(|err| anyhow::anyhow!("migration failed: {err}"))?;
     tracing::info!("schema migrations applied");
 
     // ── 4. Seed default admin ────────────────────────────────────────────────
     seed_admin(&db, &config).await?;
 
     // ── 5. Parse addresses early (before config moves into Arc) ─────────────
-    let http_addr: SocketAddr = config
-        .http_addr
-        .parse()
-        .map_err(|e| anyhow::anyhow!("invalid http_addr '{}': {e}", config.http_addr))?;
-    let grpc_addr: SocketAddr = config
-        .grpc_addr
-        .parse()
-        .map_err(|e| anyhow::anyhow!("invalid grpc_addr '{}': {e}", config.grpc_addr))?;
+    let http_addr: SocketAddr = config.http_addr.parse().map_err(|e| {
+        anyhow::anyhow!("invalid http_addr '{}': {e}", config.http_addr)
+    })?;
+    let grpc_addr: SocketAddr = config.grpc_addr.parse().map_err(|e| {
+        anyhow::anyhow!("invalid grpc_addr '{}': {e}", config.grpc_addr)
+    })?;
 
     // ── 6. Build shared state ────────────────────────────────────────────────
     let agents = AgentRegistry::new();
@@ -110,16 +108,16 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
                         );
                     }
                     Some(client)
-                }
+                },
                 Err(err) => {
                     tracing::error!(
                         error = %err,
                         "failed to start the elasticsearch shipper, continuing without it"
                     );
                     None
-                }
+                },
             }
-        }
+        },
         _ => None,
     };
 
@@ -158,7 +156,8 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
     let grpc_server = ControlPlaneServer::new(control_plane_service);
 
     // ── 9. Start agent health monitor ───────────────────────────────────────
-    let monitor_config = monitoring::MonitorConfig::from_server_config(&shared_config);
+    let monitor_config =
+        monitoring::MonitorConfig::from_server_config(&shared_config);
     let _monitor_handle = monitoring::start_health_monitor(
         db.clone(),
         shared_config.clone(),
@@ -223,7 +222,9 @@ async fn seed_admin(
     }
 
     let password_hash = auth::hash_password(&config.default_admin_password)
-        .map_err(|err| anyhow::anyhow!("failed to hash admin password: {err}"))?;
+        .map_err(|err| {
+            anyhow::anyhow!("failed to hash admin password: {err}")
+        })?;
 
     let now = chrono::Utc::now();
     let admin = user::ActiveModel {
@@ -256,10 +257,12 @@ async fn shutdown_signal() {
 
     #[cfg(unix)]
     let terminate = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to install SIGTERM handler")
-            .recv()
-            .await;
+        tokio::signal::unix::signal(
+            tokio::signal::unix::SignalKind::terminate(),
+        )
+        .expect("failed to install SIGTERM handler")
+        .recv()
+        .await;
     };
 
     #[cfg(not(unix))]

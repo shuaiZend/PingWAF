@@ -1,8 +1,8 @@
 //! Geo restriction management: per-site geographic blocking/allowing.
 
-use axum::Json;
 use axum::extract::{Path, State};
 use axum::routing::get;
+use axum::Json;
 use axum::Router;
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 use serde::Deserialize;
@@ -44,8 +44,7 @@ pub struct UpdateGeoRequest {
 
 /// Routes contributed to `/api/v1`.
 pub fn routes() -> Router<AppState> {
-    Router::new()
-        .route("/sites/{site_id}/geo", get(get_geo).put(update_geo))
+    Router::new().route("/sites/{site_id}/geo", get(get_geo).put(update_geo))
 }
 
 /// `GET /api/v1/sites/{site_id}/geo`
@@ -89,7 +88,9 @@ async fn update_geo(
         let normalised: Vec<String> = countries
             .iter()
             .map(|c| c.trim().to_uppercase())
-            .filter(|c| c.len() == 2 && c.chars().all(|ch| ch.is_ascii_alphabetic()))
+            .filter(|c| {
+                c.len() == 2 && c.chars().all(|ch| ch.is_ascii_alphabetic())
+            })
             .collect();
         active.countries = Set(normalised);
     }
@@ -106,7 +107,9 @@ async fn update_geo(
     }
     if let Some(action_str) = payload.action {
         if !action::is_valid(&action_str) {
-            return Err(ApiError::BadRequest(format!("unknown action '{action_str}'")));
+            return Err(ApiError::BadRequest(format!(
+                "unknown action '{action_str}'"
+            )));
         }
         active.action = Set(action_str);
     }
@@ -121,7 +124,10 @@ async fn update_geo(
 }
 
 /// Finds the geo_rules row for a site, creating a default one if absent.
-async fn find_or_create(state: &AppState, site_id: Uuid) -> Result<geo_rules::Model, ApiError> {
+async fn find_or_create(
+    state: &AppState,
+    site_id: Uuid,
+) -> Result<geo_rules::Model, ApiError> {
     if let Some(row) = geo_rules::Entity::find()
         .filter(geo_rules::Column::SiteId.eq(site_id))
         .one(&state.db)

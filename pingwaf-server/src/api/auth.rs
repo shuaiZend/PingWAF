@@ -1,14 +1,17 @@
 //! Authentication endpoints: login, registration, token refresh and the
 //! self-service profile routes the dashboard calls right after booting.
 
-use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
+use axum::Json;
 use axum::Router;
 use chrono::{DateTime, Utc};
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, Set};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter,
+    Set,
+};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -16,7 +19,9 @@ use crate::api::common::non_empty;
 use crate::api::error::ApiError;
 use crate::api::state::AppState;
 use crate::auth::middleware::AuthUser;
-use crate::auth::password::{hash_password, validate_password, verify_password};
+use crate::auth::password::{
+    hash_password, validate_password, verify_password,
+};
 use crate::auth::{create_refresh_token, create_token, verify_refresh_token};
 use crate::models::{role, user};
 
@@ -109,7 +114,9 @@ pub fn routes() -> Router<AppState> {
 }
 
 /// `GET /api/v1/auth/status`
-async fn status(State(state): State<AppState>) -> Result<Json<AuthStatus>, ApiError> {
+async fn status(
+    State(state): State<AppState>,
+) -> Result<Json<AuthStatus>, ApiError> {
     let count = user::Entity::find().count(&state.db).await?;
     Ok(Json(AuthStatus {
         needs_setup: count == 0,
@@ -148,7 +155,8 @@ async fn login(
     }
 
     tracing::info!(%email, user_id = %account.id, role = %account.role, "user logged in");
-    issue_tokens(&state, account).map(|body| (StatusCode::OK, Json(body)).into_response())
+    issue_tokens(&state, account)
+        .map(|body| (StatusCode::OK, Json(body)).into_response())
 }
 
 /// `POST /api/v1/auth/register`
@@ -157,7 +165,8 @@ async fn register(
     Json(payload): Json<RegisterRequest>,
 ) -> Result<Response, ApiError> {
     let email = normalise_email(&payload.email)?;
-    validate_password(&payload.password).map_err(|err| ApiError::BadRequest(err.to_string()))?;
+    validate_password(&payload.password)
+        .map_err(|err| ApiError::BadRequest(err.to_string()))?;
 
     let existing = user::Entity::find().count(&state.db).await?;
     if existing > 0 && !state.config.allow_registration {
@@ -199,7 +208,8 @@ async fn register(
         role = %account.role,
         "account registered"
     );
-    issue_tokens(&state, account).map(|body| (StatusCode::CREATED, Json(body)).into_response())
+    issue_tokens(&state, account)
+        .map(|body| (StatusCode::CREATED, Json(body)).into_response())
 }
 
 /// `POST /api/v1/auth/refresh`
@@ -207,8 +217,9 @@ async fn refresh(
     State(state): State<AppState>,
     Json(payload): Json<RefreshRequest>,
 ) -> Result<Json<TokenResponse>, ApiError> {
-    let claims = verify_refresh_token(&payload.refresh_token, state.jwt_secret())
-        .map_err(|err| ApiError::Unauthorized(err.to_string()))?;
+    let claims =
+        verify_refresh_token(&payload.refresh_token, state.jwt_secret())
+            .map_err(|err| ApiError::Unauthorized(err.to_string()))?;
     let user_id = claims
         .subject_id()
         .map_err(|err| ApiError::Unauthorized(err.to_string()))?;
@@ -218,7 +229,9 @@ async fn refresh(
     let account = user::Entity::find_by_id(user_id)
         .one(&state.db)
         .await?
-        .ok_or_else(|| ApiError::Unauthorized("account no longer exists".to_string()))?;
+        .ok_or_else(|| {
+            ApiError::Unauthorized("account no longer exists".to_string())
+        })?;
 
     if !role::is_valid(&account.role) {
         return Err(ApiError::Unauthorized(format!(
@@ -239,7 +252,9 @@ async fn me(
     let account = user::Entity::find_by_id(current.id)
         .one(&state.db)
         .await?
-        .ok_or_else(|| ApiError::Unauthorized("account no longer exists".to_string()))?;
+        .ok_or_else(|| {
+            ApiError::Unauthorized("account no longer exists".to_string())
+        })?;
     Ok(Json(account.into()))
 }
 
@@ -285,19 +300,20 @@ async fn change_password(
         .await?
         .ok_or_else(|| ApiError::NotFound("account not found".to_string()))?;
 
-    let valid = verify_password(&payload.current_password, &account.password_hash)
-        .map_err(|err| ApiError::Internal(err.to_string()))?;
+    let valid =
+        verify_password(&payload.current_password, &account.password_hash)
+            .map_err(|err| ApiError::Internal(err.to_string()))?;
     if !valid {
         return Err(ApiError::Unauthorized(
             "current password is incorrect".to_string(),
         ));
     }
-    validate_password(&payload.new_password).map_err(|err| ApiError::BadRequest(err.to_string()))?;
+    validate_password(&payload.new_password)
+        .map_err(|err| ApiError::BadRequest(err.to_string()))?;
 
     let mut active: user::ActiveModel = account.into();
-    active.password_hash = Set(
-        hash_password(&payload.new_password).map_err(|err| ApiError::BadRequest(err.to_string()))?,
-    );
+    active.password_hash = Set(hash_password(&payload.new_password)
+        .map_err(|err| ApiError::BadRequest(err.to_string()))?);
     active.updated_at = Set(Utc::now());
     active.update(&state.db).await?;
 
@@ -309,18 +325,17 @@ const INVALID_CREDENTIALS: &str = "invalid e-mail or password";
 
 /// A precomputed bcrypt hash that matches nothing; used to equalise the cost of
 /// a failed login for unknown accounts.
-const DUMMY_HASH: &str = "$2b$10$Q9V0Z7rQZ3h8YqQZQZQZQeQ9V0Z7rQZ3h8YqQZQZQZQZQZQZQZQZu";
+const DUMMY_HASH: &str =
+    "$2b$10$Q9V0Z7rQZ3h8YqQZQZQZQeQ9V0Z7rQZ3h8YqQZQZQZQZQZQZQZQZu";
 
 /// Lower-cases and structurally validates an e-mail address.
 fn normalise_email(raw: &str) -> Result<String, ApiError> {
     let email = raw.trim().to_lowercase();
-    let (local, domain) = email
-        .split_once('@')
-        .ok_or_else(|| ApiError::BadRequest("invalid e-mail address".to_string()))?;
+    let (local, domain) = email.split_once('@').ok_or_else(|| {
+        ApiError::BadRequest("invalid e-mail address".to_string())
+    })?;
     if local.is_empty() || local.len() > 64 {
-        return Err(ApiError::BadRequest(
-            "invalid e-mail address".to_string(),
-        ));
+        return Err(ApiError::BadRequest("invalid e-mail address".to_string()));
     }
     if domain.is_empty()
         || domain.len() > 253
@@ -328,9 +343,7 @@ fn normalise_email(raw: &str) -> Result<String, ApiError> {
         || domain.starts_with('.')
         || domain.ends_with('.')
     {
-        return Err(ApiError::BadRequest(
-            "invalid e-mail address".to_string(),
-        ));
+        return Err(ApiError::BadRequest("invalid e-mail address".to_string()));
     }
     Ok(email)
 }
@@ -348,8 +361,8 @@ pub async fn create_user(
             "unknown role '{assigned_role}'"
         )));
     }
-    let password_hash =
-        hash_password(password).map_err(|err| ApiError::BadRequest(err.to_string()))?;
+    let password_hash = hash_password(password)
+        .map_err(|err| ApiError::BadRequest(err.to_string()))?;
     let timestamp = Utc::now();
     let active = user::ActiveModel {
         id: Set(Uuid::new_v4()),
@@ -364,7 +377,10 @@ pub async fn create_user(
 }
 
 /// Mints an access/refresh pair for `account`.
-fn issue_tokens(state: &AppState, account: user::Model) -> Result<TokenResponse, ApiError> {
+fn issue_tokens(
+    state: &AppState,
+    account: user::Model,
+) -> Result<TokenResponse, ApiError> {
     let secret = state.jwt_secret();
     let access = create_token(
         account.id,

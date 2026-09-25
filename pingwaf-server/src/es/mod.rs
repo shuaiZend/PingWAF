@@ -17,7 +17,7 @@ pub mod models;
 pub mod template;
 
 pub use client::{
-    BulkResult, DocumentType, EsDocument, EsHealth, ElasticsearchClient,
+    BulkResult, DocumentType, ElasticsearchClient, EsDocument, EsHealth,
 };
 pub use config::EsConfig;
 pub use models::{AccessLogDocument, SecurityEventDocument};

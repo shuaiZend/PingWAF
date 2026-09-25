@@ -19,7 +19,12 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(Sites::Table)
                     .if_not_exists()
-                    .col(ColumnDef::new(Sites::Id).uuid().not_null().primary_key())
+                    .col(
+                        ColumnDef::new(Sites::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
                     .col(ColumnDef::new(Sites::UserId).uuid().not_null())
                     .col(ColumnDef::new(Sites::Name).string_len(100).not_null())
                     .col(
@@ -72,7 +77,9 @@ impl MigrationTrait for Migration {
                             .not_null()
                             .primary_key(),
                     )
-                    .col(ColumnDef::new(SiteUpstreams::SiteId).uuid().not_null())
+                    .col(
+                        ColumnDef::new(SiteUpstreams::SiteId).uuid().not_null(),
+                    )
                     .col(
                         ColumnDef::new(SiteUpstreams::Name)
                             .string_len(100)
@@ -153,7 +160,11 @@ impl MigrationTrait for Migration {
                             .not_null()
                             .default(true),
                     )
-                    .col(ColumnDef::new(SiteSsl::AcmeEmail).string_len(255).null())
+                    .col(
+                        ColumnDef::new(SiteSsl::AcmeEmail)
+                            .string_len(255)
+                            .null(),
+                    )
                     .col(
                         ColumnDef::new(SiteSsl::AcmeChallengeType)
                             .string_len(20)
@@ -165,7 +176,11 @@ impl MigrationTrait for Migration {
                             .string_len(50)
                             .null(),
                     )
-                    .col(ColumnDef::new(SiteSsl::AcmeDnsConfig).json_binary().null())
+                    .col(
+                        ColumnDef::new(SiteSsl::AcmeDnsConfig)
+                            .json_binary()
+                            .null(),
+                    )
                     .col(
                         ColumnDef::new(SiteSsl::CreatedAt)
                             .timestamp_with_time_zone()
@@ -218,7 +233,9 @@ impl MigrationTrait for Migration {
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
-            .drop_table(Table::drop().table(SiteSsl::Table).if_exists().to_owned())
+            .drop_table(
+                Table::drop().table(SiteSsl::Table).if_exists().to_owned(),
+            )
             .await?;
         manager
             .drop_table(
@@ -229,7 +246,9 @@ impl MigrationTrait for Migration {
             )
             .await?;
         manager
-            .drop_table(Table::drop().table(Sites::Table).if_exists().to_owned())
+            .drop_table(
+                Table::drop().table(Sites::Table).if_exists().to_owned(),
+            )
             .await?;
         Ok(())
     }

@@ -13,7 +13,8 @@ use std::time::Duration;
 
 use chrono::Utc;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait,
+    QueryFilter, Set,
 };
 use serde::Serialize;
 
@@ -89,7 +90,9 @@ impl MonitorConfig {
         Self {
             check_interval: Duration::from_secs(interval_secs),
             stale_multiplier: 3,
-            webhook_url: std::env::var("PINGWAF_WEBHOOK_URL").ok().filter(|url| !url.is_empty()),
+            webhook_url: std::env::var("PINGWAF_WEBHOOK_URL")
+                .ok()
+                .filter(|url| !url.is_empty()),
             webhook_timeout: Duration::from_secs(10),
         }
     }
@@ -106,12 +109,7 @@ pub fn start_health_monitor(
     monitor_config: MonitorConfig,
     registry: AgentRegistry,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(health_monitor_loop(
-        db,
-        config,
-        monitor_config,
-        registry,
-    ))
+    tokio::spawn(health_monitor_loop(db, config, monitor_config, registry))
 }
 
 /// Main loop: periodically scans for stale agents and updates their status.
@@ -122,7 +120,8 @@ async fn health_monitor_loop(
     registry: AgentRegistry,
 ) {
     let stale_threshold = Duration::from_secs(
-        (config.heartbeat_interval_seconds.max(1) as u64) * (monitor_config.stale_multiplier as u64),
+        (config.heartbeat_interval_seconds.max(1) as u64)
+            * (monitor_config.stale_multiplier as u64),
     );
 
     let http_client = reqwest::Client::builder()
@@ -163,8 +162,9 @@ async fn check_stale_agents(
     http_client: &reqwest::Client,
 ) -> anyhow::Result<()> {
     let now = Utc::now();
-    let cutoff = now - chrono::Duration::from_std(stale_threshold)
-        .unwrap_or(chrono::Duration::seconds(90));
+    let cutoff = now
+        - chrono::Duration::from_std(stale_threshold)
+            .unwrap_or(chrono::Duration::seconds(90));
 
     // Find agents currently marked online whose last heartbeat is older than cutoff
     let stale_agents = agent::Entity::find()
@@ -244,7 +244,11 @@ async fn check_stale_agents(
 }
 
 /// Sends a JSON webhook notification. Failures are logged but not propagated.
-async fn send_webhook<T: Serialize>(client: &reqwest::Client, url: &str, payload: &T) {
+async fn send_webhook<T: Serialize>(
+    client: &reqwest::Client,
+    url: &str,
+    payload: &T,
+) {
     match client
         .post(url)
         .header("Content-Type", "application/json")
@@ -261,9 +265,9 @@ async fn send_webhook<T: Serialize>(client: &reqwest::Client, url: &str, payload
                     "webhook returned non-success status"
                 );
             }
-        }
+        },
         Err(err) => {
             tracing::warn!(url = %url, error = %err, "failed to send webhook notification");
-        }
+        },
     }
 }

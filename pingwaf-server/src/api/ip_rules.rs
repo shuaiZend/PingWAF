@@ -1,19 +1,20 @@
 //! IP access rules management: allow, block, challenge specific IPs/CIDRs.
 
-use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use axum::Json;
 use axum::Router;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, Set,
+    ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter,
+    QueryOrder, Set,
 };
 use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::api::common::{
-    Page, Pagination, load_site_read, load_site_write, non_empty, parse_uuid,
+    load_site_read, load_site_write, non_empty, parse_uuid, Page, Pagination,
 };
 use crate::api::error::ApiError;
 use crate::api::sites::touch_site;
@@ -105,17 +106,27 @@ pub struct BulkImportRequest {
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/sites/{site_id}/ip-rules", get(list).post(create))
-        .route("/sites/{site_id}/ip-rules/{rule_id}", axum::routing::put(update).delete(remove))
-        .route("/sites/{site_id}/ip-rules/bulk", axum::routing::post(bulk_import))
+        .route(
+            "/sites/{site_id}/ip-rules/{rule_id}",
+            axum::routing::put(update).delete(remove),
+        )
+        .route(
+            "/sites/{site_id}/ip-rules/bulk",
+            axum::routing::post(bulk_import),
+        )
 }
 
 /// Validates IP/CIDR ranges (basic format check).
 fn validate_ip_ranges(ranges: &[String]) -> Result<Vec<String>, ApiError> {
     if ranges.is_empty() {
-        return Err(ApiError::BadRequest("at least one IP range is required".to_string()));
+        return Err(ApiError::BadRequest(
+            "at least one IP range is required".to_string(),
+        ));
     }
     if ranges.len() > 1000 {
-        return Err(ApiError::BadRequest("a rule may contain at most 1000 IP ranges".to_string()));
+        return Err(ApiError::BadRequest(
+            "a rule may contain at most 1000 IP ranges".to_string(),
+        ));
     }
     let mut out = Vec::with_capacity(ranges.len());
     for range in ranges {
@@ -135,14 +146,18 @@ fn validate_ip_ranges(ranges: &[String]) -> Result<Vec<String>, ApiError> {
         }
     }
     if out.is_empty() {
-        return Err(ApiError::BadRequest("at least one valid IP range is required".to_string()));
+        return Err(ApiError::BadRequest(
+            "at least one valid IP range is required".to_string(),
+        ));
     }
     Ok(out)
 }
 
 fn validate(name: &str, action: &str) -> Result<(), ApiError> {
     if name.trim().is_empty() || name.len() > 200 {
-        return Err(ApiError::BadRequest("name must be 1-200 characters".to_string()));
+        return Err(ApiError::BadRequest(
+            "name must be 1-200 characters".to_string(),
+        ));
     }
     if !ip_action::is_valid(action) {
         return Err(ApiError::BadRequest(format!("unknown action '{action}'")));
@@ -161,8 +176,8 @@ async fn list(
     load_site_read(&state.db, id, &current).await?;
     let pagination = query.pagination.normalise();
 
-    let mut condition = sea_orm::Condition::all()
-        .add(ip_access_rules::Column::SiteId.eq(id));
+    let mut condition =
+        sea_orm::Condition::all().add(ip_access_rules::Column::SiteId.eq(id));
     if let Some(enabled) = query.enabled {
         condition = condition.add(ip_access_rules::Column::Enabled.eq(enabled));
     }
@@ -229,7 +244,9 @@ async fn update(
 
     if let Some(name) = non_empty(&payload.name) {
         if name.len() > 200 {
-            return Err(ApiError::BadRequest("name must be at most 200 characters".to_string()));
+            return Err(ApiError::BadRequest(
+                "name must be at most 200 characters".to_string(),
+            ));
         }
         active.name = Set(name);
     }
@@ -238,7 +255,9 @@ async fn update(
     }
     if let Some(action) = non_empty(&payload.action) {
         if !ip_action::is_valid(&action) {
-            return Err(ApiError::BadRequest(format!("unknown action '{action}'")));
+            return Err(ApiError::BadRequest(format!(
+                "unknown action '{action}'"
+            )));
         }
         active.action = Set(action);
     }
@@ -294,7 +313,10 @@ async fn bulk_import(
     load_site_write(&state.db, id, &current).await?;
 
     if !ip_action::is_valid(&payload.action) {
-        return Err(ApiError::BadRequest(format!("unknown action '{}'", payload.action)));
+        return Err(ApiError::BadRequest(format!(
+            "unknown action '{}'",
+            payload.action
+        )));
     }
     let ip_ranges = validate_ip_ranges(&payload.ip_ranges)?;
 
@@ -318,10 +340,14 @@ async fn bulk_import(
     touch_site(&state, id).await?;
     notify_config_changed(&state, id).await;
 
-    Ok((StatusCode::CREATED, Json(serde_json::json!({
-        "id": model.id,
-        "imported": ip_ranges.len(),
-    }))).into_response())
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "id": model.id,
+            "imported": ip_ranges.len(),
+        })),
+    )
+        .into_response())
 }
 
 async fn find(
@@ -333,5 +359,7 @@ async fn find(
         .filter(ip_access_rules::Column::SiteId.eq(site_id))
         .one(&state.db)
         .await?
-        .ok_or_else(|| ApiError::NotFound(format!("IP access rule {rule_id} not found")))
+        .ok_or_else(|| {
+            ApiError::NotFound(format!("IP access rule {rule_id} not found"))
+        })
 }

@@ -48,10 +48,7 @@ impl WafVerdict {
 
     /// `true` when the request should be blocked or challenged.
     pub fn is_blocked(&self) -> bool {
-        matches!(
-            self.action,
-            WafAction::Block | WafAction::Challenge
-        )
+        matches!(self.action, WafAction::Block | WafAction::Challenge)
     }
 }
 

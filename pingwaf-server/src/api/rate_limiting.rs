@@ -1,19 +1,20 @@
 //! Rate limiting rule management.
 
-use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, put};
+use axum::Json;
 use axum::Router;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, Set,
+    ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter,
+    QueryOrder, Set,
 };
 use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::api::common::{
-    Page, Pagination, load_site_read, load_site_write, non_empty, parse_uuid,
+    load_site_read, load_site_write, non_empty, parse_uuid, Page, Pagination,
 };
 use crate::api::error::ApiError;
 use crate::api::sites::touch_site;
@@ -106,10 +107,7 @@ pub struct UpdateRequest {
 /// Routes contributed to `/api/v1`.
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route(
-            "/sites/{site_id}/rate-limit-rules",
-            get(list).post(create),
-        )
+        .route("/sites/{site_id}/rate-limit-rules", get(list).post(create))
         .route(
             "/sites/{site_id}/rate-limit-rules/{rule_id}",
             put(update).delete(remove),
@@ -268,7 +266,8 @@ async fn update(
         active.expression = Set(expression);
     }
     if let Some(characteristics) = payload.characteristics {
-        active.characteristics = Set(normalise_characteristics(&characteristics)?);
+        active.characteristics =
+            Set(normalise_characteristics(&characteristics)?);
     }
     if let Some(period) = payload.period_seconds {
         if !(MIN_PERIOD_SECONDS..=MAX_PERIOD_SECONDS).contains(&period) {
@@ -349,7 +348,9 @@ async fn find(
         .filter(rate_limit_rules::Column::SiteId.eq(site_id))
         .one(&state.db)
         .await?
-        .ok_or_else(|| ApiError::NotFound(format!("rate limit rule {rule_id} not found")))
+        .ok_or_else(|| {
+            ApiError::NotFound(format!("rate limit rule {rule_id} not found"))
+        })
 }
 
 #[cfg(test)]
@@ -358,7 +359,12 @@ mod tests {
 
     #[test]
     fn characteristics_are_normalised() {
-        let out = normalise_characteristics(&["IP".into(), " ip ".into(), "path".into()]).unwrap();
+        let out = normalise_characteristics(&[
+            "IP".into(),
+            " ip ".into(),
+            "path".into(),
+        ])
+        .unwrap();
         assert_eq!(out, vec!["ip".to_string(), "path".to_string()]);
         assert!(normalise_characteristics(&["unknown".into()]).is_err());
         assert!(normalise_characteristics(&[]).is_err());

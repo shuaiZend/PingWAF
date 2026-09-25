@@ -9,22 +9,25 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, TimeZone, Utc};
 use pingwaf_proto::control_plane::{
-    CacheRule, ChallengeConfig, CustomErrorPage, GeoConfig, HeaderOperation, IpAccessRule,
-    RateLimitRule, RewriteRule, RuleBundle, Site, SiteConfig, SslConfig, UpstreamConfig,
-    UpstreamPeer, WafConfig, WafRule,
+    CacheRule, ChallengeConfig, CustomErrorPage, GeoConfig, HeaderOperation,
+    IpAccessRule, RateLimitRule, RewriteRule, RuleBundle, Site, SiteConfig,
+    SslConfig, UpstreamConfig, UpstreamPeer, WafConfig, WafRule,
 };
 use prost::Message;
 use prost_types::Timestamp;
-use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder};
+use sea_orm::{
+    ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder,
+};
 use uuid::Uuid;
 
-use crate::models::{
-    acme_challenge, action, characteristic, challenge_settings, error_pages, geo_rules,
-    ip_access_rules, cache_rules, mode, rate_limit_rules, rewrite_rules, rule, rule_groups,
-    site, site_ssl, site_status, site_upstreams,
-};
 use crate::api::challenge::challenge_level;
 use crate::api::ip_rules::ip_action;
+use crate::models::{
+    acme_challenge, action, cache_rules, challenge_settings, characteristic,
+    error_pages, geo_rules, ip_access_rules, mode, rate_limit_rules,
+    rewrite_rules, rule, rule_groups, site, site_ssl, site_status,
+    site_upstreams,
+};
 
 /// `pingwaf.WafMode` values from control_plane.proto.
 ///
@@ -66,8 +69,8 @@ pub fn from_timestamp(value: Option<&Timestamp>) -> DateTime<Utc> {
 /// prefixed enum entries is not something the control plane should depend on.
 pub fn site_status_proto(status: &str) -> i32 {
     match status {
-        site_status::ACTIVE => 0, // SITE_STATUS_ACTIVE
-        site_status::PAUSED => 1, // SITE_STATUS_PAUSED
+        site_status::ACTIVE => 0,  // SITE_STATUS_ACTIVE
+        site_status::PAUSED => 1,  // SITE_STATUS_PAUSED
         site_status::PENDING => 2, // SITE_STATUS_PENDING
         _ => 0,
     }
@@ -103,7 +106,9 @@ pub fn fingerprint<T: Message>(message: &T) -> String {
 
 /// Flattens a JSON object into the `map<string, string>` shape the protocol
 /// expects; non-object or non-string values are stringified.
-fn json_to_string_map(value: &Option<serde_json::Value>) -> HashMap<String, String> {
+fn json_to_string_map(
+    value: &Option<serde_json::Value>,
+) -> HashMap<String, String> {
     let mut map = HashMap::new();
     if let Some(serde_json::Value::Object(object)) = value {
         for (key, raw) in object {
@@ -269,7 +274,8 @@ fn rate_limit_to_proto(row: &rate_limit_rules::Model) -> RateLimitRule {
         period_seconds: row.period_seconds.max(0) as u32,
         threshold: row.threshold.max(0) as u32,
         action: action::to_proto(&row.action),
-        mitigation_timeout_seconds: row.mitigation_timeout_seconds.max(0) as u32,
+        mitigation_timeout_seconds: row.mitigation_timeout_seconds.max(0)
+            as u32,
         enabled: row.enabled,
         priority: row.priority.max(0) as u32,
     }
@@ -298,7 +304,9 @@ fn ssl_to_proto(row: &site_ssl::Model) -> SslConfig {
         key_pem: row.key_pem.clone().unwrap_or_default(),
         acme_enabled,
         acme_email: row.acme_email.clone().unwrap_or_default(),
-        acme_challenge_type: acme_challenge_proto(row.acme_challenge_type.as_deref()),
+        acme_challenge_type: acme_challenge_proto(
+            row.acme_challenge_type.as_deref(),
+        ),
         acme_dns_provider: row.acme_dns_provider.clone().unwrap_or_default(),
         acme_dns_config: json_to_string_map(&row.acme_dns_config),
         min_tls_version: String::new(),
@@ -308,7 +316,10 @@ fn ssl_to_proto(row: &site_ssl::Model) -> SslConfig {
     }
 }
 
-fn upstreams_to_proto(site_name: &str, rows: &[site_upstreams::Model]) -> Vec<UpstreamConfig> {
+fn upstreams_to_proto(
+    site_name: &str,
+    rows: &[site_upstreams::Model],
+) -> Vec<UpstreamConfig> {
     if rows.is_empty() {
         return Vec::new();
     }
@@ -333,7 +344,10 @@ fn upstreams_to_proto(site_name: &str, rows: &[site_upstreams::Model]) -> Vec<Up
 }
 
 /// Derives the site-wide WAF switches from the rules that are actually enabled.
-fn waf_config_to_proto(rules: &[WafRule], groups: &[rule_groups::Model]) -> WafConfig {
+fn waf_config_to_proto(
+    rules: &[WafRule],
+    groups: &[rule_groups::Model],
+) -> WafConfig {
     let active: Vec<&WafRule> = rules.iter().filter(|r| r.enabled).collect();
 
     // Blocking wins over monitoring, monitoring wins over off.
@@ -353,7 +367,8 @@ fn waf_config_to_proto(rules: &[WafRule], groups: &[rule_groups::Model]) -> WafC
         })
     };
 
-    let any_group_enabled = groups.is_empty() || groups.iter().any(|group| group.enabled);
+    let any_group_enabled =
+        groups.is_empty() || groups.iter().any(|group| group.enabled);
 
     WafConfig {
         enabled: !active.is_empty() && any_group_enabled,
@@ -398,8 +413,16 @@ fn geo_to_proto(row: Option<&geo_rules::Model>) -> GeoConfig {
     match row {
         Some(g) => GeoConfig {
             enabled: g.enabled,
-            blocked_countries: if g.mode == "block_list" { g.countries.clone() } else { Vec::new() },
-            allowed_countries: if g.mode == "allow_list" { g.countries.clone() } else { Vec::new() },
+            blocked_countries: if g.mode == "block_list" {
+                g.countries.clone()
+            } else {
+                Vec::new()
+            },
+            allowed_countries: if g.mode == "allow_list" {
+                g.countries.clone()
+            } else {
+                Vec::new()
+            },
             blocked_asns: g.blocked_asns.clone(),
             block_unknown: g.block_unknown,
             action: action::to_proto(&g.action),
@@ -416,7 +439,9 @@ fn geo_to_proto(row: Option<&geo_rules::Model>) -> GeoConfig {
 }
 
 /// Converts stored challenge settings into the protocol representation.
-fn challenge_to_proto(row: Option<&challenge_settings::Model>) -> ChallengeConfig {
+fn challenge_to_proto(
+    row: Option<&challenge_settings::Model>,
+) -> ChallengeConfig {
     match row {
         Some(c) => ChallengeConfig {
             enabled: c.enabled,
@@ -468,7 +493,8 @@ fn parse_header_operations(ops: &serde_json::Value) -> Vec<HeaderOperation> {
     if let Some(array) = ops.as_array() {
         for item in array {
             if let Some(obj) = item.as_object() {
-                let op_type = obj.get("type")
+                let op_type = obj
+                    .get("type")
                     .and_then(|v| v.as_str())
                     .map(|t| match t {
                         "set" => 0,
@@ -479,8 +505,16 @@ fn parse_header_operations(ops: &serde_json::Value) -> Vec<HeaderOperation> {
                     .unwrap_or(0);
                 result.push(HeaderOperation {
                     r#type: op_type,
-                    name: obj.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-                    value: obj.get("value").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                    name: obj
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    value: obj
+                        .get("value")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
                 });
             }
         }
@@ -517,7 +551,8 @@ pub async fn build_rule_bundle(
     let rewrites = load_rewrite_rules(db, site_row.id).await?;
     let err_pages = load_error_pages(db, site_row.id).await?;
 
-    let custom_rules: Vec<WafRule> = rules_rows.iter().map(rule_to_proto).collect();
+    let custom_rules: Vec<WafRule> =
+        rules_rows.iter().map(rule_to_proto).collect();
 
     let mut bundle = RuleBundle {
         site_id: site_row.id.to_string(),

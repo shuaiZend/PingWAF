@@ -77,7 +77,12 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(Rules::Table)
                     .if_not_exists()
-                    .col(ColumnDef::new(Rules::Id).uuid().not_null().primary_key())
+                    .col(
+                        ColumnDef::new(Rules::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
                     .col(ColumnDef::new(Rules::GroupId).uuid().null())
                     .col(ColumnDef::new(Rules::SiteId).uuid().not_null())
                     .col(ColumnDef::new(Rules::Name).string_len(200).not_null())
@@ -199,10 +204,12 @@ impl MigrationTrait for Migration {
                             .default("block"),
                     )
                     .col(
-                        ColumnDef::new(RateLimitRules::MitigationTimeoutSeconds)
-                            .integer()
-                            .not_null()
-                            .default(300),
+                        ColumnDef::new(
+                            RateLimitRules::MitigationTimeoutSeconds,
+                        )
+                        .integer()
+                        .not_null()
+                        .default(300),
                     )
                     .col(
                         ColumnDef::new(RateLimitRules::Enabled)
@@ -368,7 +375,12 @@ impl MigrationTrait for Migration {
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
-            .drop_table(Table::drop().table(CacheRules::Table).if_exists().to_owned())
+            .drop_table(
+                Table::drop()
+                    .table(CacheRules::Table)
+                    .if_exists()
+                    .to_owned(),
+            )
             .await?;
         manager
             .drop_table(
@@ -379,10 +391,17 @@ impl MigrationTrait for Migration {
             )
             .await?;
         manager
-            .drop_table(Table::drop().table(Rules::Table).if_exists().to_owned())
+            .drop_table(
+                Table::drop().table(Rules::Table).if_exists().to_owned(),
+            )
             .await?;
         manager
-            .drop_table(Table::drop().table(RuleGroups::Table).if_exists().to_owned())
+            .drop_table(
+                Table::drop()
+                    .table(RuleGroups::Table)
+                    .if_exists()
+                    .to_owned(),
+            )
             .await?;
         Ok(())
     }

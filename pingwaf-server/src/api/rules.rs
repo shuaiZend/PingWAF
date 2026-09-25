@@ -1,20 +1,20 @@
 //! WAF rule management: rule groups and the rules inside them.
 
-use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, put};
+use axum::Json;
 use axum::Router;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, Condition, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
-    Set,
+    ActiveModelTrait, ColumnTrait, Condition, EntityTrait, PaginatorTrait,
+    QueryFilter, QueryOrder, Set,
 };
 use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::api::common::{
-    Page, Pagination, load_site_read, load_site_write, non_empty, parse_uuid,
+    load_site_read, load_site_write, non_empty, parse_uuid, Page, Pagination,
 };
 use crate::api::error::ApiError;
 use crate::api::sites::touch_site;
@@ -132,7 +132,10 @@ pub struct UpdateRuleRequest {
 /// Routes contributed to `/api/v1`.
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/sites/{site_id}/rule-groups", get(list_groups).post(create_group))
+        .route(
+            "/sites/{site_id}/rule-groups",
+            get(list_groups).post(create_group),
+        )
         .route(
             "/sites/{site_id}/rule-groups/{group_id}",
             put(update_group).delete(delete_group),
@@ -183,14 +186,22 @@ fn validate_group(name: &str, phase: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn validate_rule(name: &str, expression: &str, rule_action: &str, rule_mode: &str, severity: i32) -> Result<(), ApiError> {
+fn validate_rule(
+    name: &str,
+    expression: &str,
+    rule_action: &str,
+    rule_mode: &str,
+    severity: i32,
+) -> Result<(), ApiError> {
     if name.trim().is_empty() || name.len() > 200 {
         return Err(ApiError::BadRequest(
             "rule name must be 1-200 characters".to_string(),
         ));
     }
     if expression.trim().is_empty() {
-        return Err(ApiError::BadRequest("expression must not be empty".to_string()));
+        return Err(ApiError::BadRequest(
+            "expression must not be empty".to_string(),
+        ));
     }
     if !action::is_valid(rule_action) {
         return Err(ApiError::BadRequest(format!(
@@ -198,7 +209,9 @@ fn validate_rule(name: &str, expression: &str, rule_action: &str, rule_mode: &st
         )));
     }
     if !mode::is_valid(rule_mode) {
-        return Err(ApiError::BadRequest(format!("unknown mode '{rule_mode}'")));
+        return Err(ApiError::BadRequest(format!(
+            "unknown mode '{rule_mode}'"
+        )));
     }
     if !(1..=5).contains(&severity) {
         return Err(ApiError::BadRequest(
@@ -280,7 +293,9 @@ async fn update_group(
     }
     if let Some(phase) = non_empty(&payload.phase) {
         if !PHASES.contains(&phase.as_str()) {
-            return Err(ApiError::BadRequest(format!("unknown phase '{phase}'")));
+            return Err(ApiError::BadRequest(format!(
+                "unknown phase '{phase}'"
+            )));
         }
         active.phase = Set(phase);
     }
@@ -312,7 +327,9 @@ async fn delete_group(
     find_group(&state, id, target).await?;
 
     // Rules are cascade-deleted by `fk_rules_group_id`.
-    rule_groups::Entity::delete_by_id(target).exec(&state.db).await?;
+    rule_groups::Entity::delete_by_id(target)
+        .exec(&state.db)
+        .await?;
 
     tracing::info!(site_id = %id, group_id = %target, "rule group deleted");
     touch_site(&state, id).await?;
@@ -334,7 +351,8 @@ async fn list_rules(
 
     let mut condition = Condition::all().add(rule::Column::SiteId.eq(id));
     if let Some(group) = non_empty(&query.group_id) {
-        condition = condition.add(rule::Column::GroupId.eq(parse_uuid(&group, "group id")?));
+        condition = condition
+            .add(rule::Column::GroupId.eq(parse_uuid(&group, "group id")?));
     }
     if let Some(enabled) = query.enabled {
         condition = condition.add(rule::Column::Enabled.eq(enabled));
@@ -382,7 +400,7 @@ async fn create_rule(
             let parsed = parse_uuid(&raw, "group id")?;
             find_group(&state, id, parsed).await?;
             Some(parsed)
-        }
+        },
         None => None,
     };
 
@@ -477,7 +495,9 @@ async fn update_rule(
     }
     if let Some(rule_mode) = non_empty(&payload.mode) {
         if !mode::is_valid(&rule_mode) {
-            return Err(ApiError::BadRequest(format!("unknown mode '{rule_mode}'")));
+            return Err(ApiError::BadRequest(format!(
+                "unknown mode '{rule_mode}'"
+            )));
         }
         active.mode = Set(rule_mode);
     }
@@ -531,7 +551,9 @@ async fn find_group(
         .filter(rule_groups::Column::SiteId.eq(site_id))
         .one(&state.db)
         .await?
-        .ok_or_else(|| ApiError::NotFound(format!("rule group {group_id} not found")))
+        .ok_or_else(|| {
+            ApiError::NotFound(format!("rule group {group_id} not found"))
+        })
 }
 
 /// Loads a rule scoped to a site.
@@ -553,7 +575,13 @@ mod tests {
 
     #[test]
     fn tags_are_trimmed_and_deduplicated() {
-        let tags = normalise_tags(&[" sqli ".into(), "sqli".into(), "".into(), "owasp".into()]).unwrap();
+        let tags = normalise_tags(&[
+            " sqli ".into(),
+            "sqli".into(),
+            "".into(),
+            "owasp".into(),
+        ])
+        .unwrap();
         assert_eq!(tags, vec!["sqli".to_string(), "owasp".to_string()]);
         assert!(normalise_tags(&vec!["x".to_string(); MAX_TAGS + 1]).is_err());
     }
@@ -568,7 +596,8 @@ mod tests {
 
     #[test]
     fn rule_validation_covers_every_field() {
-        assert!(validate_rule("r", "ip.src == 1.2.3.4", "block", "block", 3).is_ok());
+        assert!(validate_rule("r", "ip.src == 1.2.3.4", "block", "block", 3)
+            .is_ok());
         assert!(validate_rule("r", "  ", "block", "block", 3).is_err());
         assert!(validate_rule("r", "true", "nuke", "block", 3).is_err());
         assert!(validate_rule("r", "true", "block", "enforce", 3).is_err());

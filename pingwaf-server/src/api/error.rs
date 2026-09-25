@@ -5,14 +5,18 @@
 //! together with the matching HTTP status code, which keeps the frontend's
 //! error handling down to a single shape.
 
-use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use axum::Json;
 use sea_orm::DbErr;
 use serde_json::json;
 
 /// Builds the shared `{"error": {...}}` envelope.
-pub fn error_response(status: StatusCode, code: &str, message: &str) -> Response {
+pub fn error_response(
+    status: StatusCode,
+    code: &str,
+    message: &str,
+) -> Response {
     let body = json!({ "error": { "code": code, "message": message } });
     (status, Json(body)).into_response()
 }
@@ -118,7 +122,7 @@ impl From<DbErr> for ApiError {
                 if runtime_err.to_string().contains("duplicate key") =>
             {
                 ApiError::Conflict("resource already exists".to_string())
-            }
+            },
             other => ApiError::Internal(other.to_string()),
         }
     }

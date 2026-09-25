@@ -48,7 +48,11 @@ pub enum PingWafCommand {
 #[derive(Parser, Debug, Clone)]
 pub struct CommonOpts {
     /// PostgreSQL connection string
-    #[arg(long, env = "PINGWAF_DB_URL", default_value = "postgres://pingwaf:pingwaf@localhost:5432/pingwaf")]
+    #[arg(
+        long,
+        env = "PINGWAF_DB_URL",
+        default_value = "postgres://pingwaf:pingwaf@localhost:5432/pingwaf"
+    )]
     pub db_url: String,
 
     /// HTTP admin/API listen address
@@ -67,11 +71,19 @@ pub struct ServerOpts {
     pub common: CommonOpts,
 
     /// JWT signing secret (must be at least 16 characters)
-    #[arg(long, env = "PINGWAF_JWT_SECRET", default_value = "change-me-in-production")]
+    #[arg(
+        long,
+        env = "PINGWAF_JWT_SECRET",
+        default_value = "change-me-in-production"
+    )]
     pub jwt_secret: String,
 
     /// Default admin email for initial seeding
-    #[arg(long, env = "PINGWAF_ADMIN_EMAIL", default_value = "admin@pingwaf.local")]
+    #[arg(
+        long,
+        env = "PINGWAF_ADMIN_EMAIL",
+        default_value = "admin@pingwaf.local"
+    )]
     pub admin_email: String,
 
     /// Default admin password for initial seeding
@@ -87,7 +99,11 @@ pub struct ServerOpts {
 #[derive(Parser, Debug, Clone)]
 pub struct AgentOpts {
     /// Control plane gRPC URL to connect to
-    #[arg(long, env = "PINGWAF_SERVER_URL", default_value = "http://localhost:9090")]
+    #[arg(
+        long,
+        env = "PINGWAF_SERVER_URL",
+        default_value = "http://localhost:9090"
+    )]
     pub server_url: String,
 
     /// API key for agent authentication
@@ -124,7 +140,11 @@ pub struct AgentOpts {
 pub struct AllInOneOpts {
     // ── Common ────────────────────────────────────────────────────────
     /// PostgreSQL connection string
-    #[arg(long, env = "PINGWAF_DB_URL", default_value = "postgres://pingwaf:pingwaf@localhost:5432/pingwaf")]
+    #[arg(
+        long,
+        env = "PINGWAF_DB_URL",
+        default_value = "postgres://pingwaf:pingwaf@localhost:5432/pingwaf"
+    )]
     pub db_url: String,
 
     /// HTTP admin/API listen address
@@ -137,11 +157,19 @@ pub struct AllInOneOpts {
 
     // ── Server ────────────────────────────────────────────────────────
     /// JWT signing secret (must be at least 16 characters)
-    #[arg(long, env = "PINGWAF_JWT_SECRET", default_value = "change-me-in-production")]
+    #[arg(
+        long,
+        env = "PINGWAF_JWT_SECRET",
+        default_value = "change-me-in-production"
+    )]
     pub jwt_secret: String,
 
     /// Default admin email for initial seeding
-    #[arg(long, env = "PINGWAF_ADMIN_EMAIL", default_value = "admin@pingwaf.local")]
+    #[arg(
+        long,
+        env = "PINGWAF_ADMIN_EMAIL",
+        default_value = "admin@pingwaf.local"
+    )]
     pub admin_email: String,
 
     /// Default admin password for initial seeding
@@ -198,10 +226,7 @@ pub fn is_pingwaf_mode() -> bool {
     // Check argv
     let args: Vec<String> = std::env::args().collect();
     if args.len() > 1 {
-        matches!(
-            args[1].as_str(),
-            "server" | "agent" | "all-in-one"
-        )
+        matches!(args[1].as_str(), "server" | "agent" | "all-in-one")
     } else {
         false
     }

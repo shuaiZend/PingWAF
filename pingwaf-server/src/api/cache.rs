@@ -2,25 +2,26 @@
 
 use std::collections::HashMap;
 
-use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
+use axum::Json;
 use axum::Router;
 use chrono::{DateTime, Utc};
 use pingwaf_proto::control_plane::server_command::Payload as CommandPayload;
 use pingwaf_proto::control_plane::{PurgeCacheCommand, ServerCommand};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, Condition, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
-    Set,
+    ActiveModelTrait, ColumnTrait, Condition, EntityTrait, PaginatorTrait,
+    QueryFilter, QueryOrder, Set,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::api::agents::command_type;
 use crate::api::common::{
-    Page, Pagination, load_site_read, load_site_write, non_empty, parse_uuid, scope_site,
+    load_site_read, load_site_write, non_empty, parse_uuid, scope_site, Page,
+    Pagination,
 };
 use crate::api::error::ApiError;
 use crate::api::sites::touch_site;
@@ -308,7 +309,9 @@ async fn find(
         .filter(cache_rules::Column::SiteId.eq(site_id))
         .one(&state.db)
         .await?
-        .ok_or_else(|| ApiError::NotFound(format!("cache rule {rule_id} not found")))
+        .ok_or_else(|| {
+            ApiError::NotFound(format!("cache rule {rule_id} not found"))
+        })
 }
 
 /// Looks a rule up by id alone; the caller authorises through its `site_id`.
@@ -319,7 +322,9 @@ async fn find_by_id(
     cache_rules::Entity::find_by_id(rule_id)
         .one(&state.db)
         .await?
-        .ok_or_else(|| ApiError::NotFound(format!("cache rule {rule_id} not found")))
+        .ok_or_else(|| {
+            ApiError::NotFound(format!("cache rule {rule_id} not found"))
+        })
 }
 
 // ─── Flat rule aliases ─────────────────────────────────────────────────────
@@ -358,9 +363,9 @@ async fn list_by_query(
         Some(id) => {
             load_site_read(&state.db, id, &current).await?;
             condition = condition.add(cache_rules::Column::SiteId.eq(id));
-        }
+        },
         // Administrator without a filter: every rule in the system.
-        None => {}
+        None => {},
     }
     if !current.is_admin() && requested.is_none() {
         // `scope_site` already rejected this, but a non-admin listing every
@@ -476,7 +481,8 @@ fn status_view(
     configured: Option<(i32, usize)>,
     reported: Option<SiteCacheStatus>,
 ) -> CacheStatusView {
-    let (configured_quota_mb, enabled_rule_count) = configured.unwrap_or((0, 0));
+    let (configured_quota_mb, enabled_rule_count) =
+        configured.unwrap_or((0, 0));
     match reported {
         Some(reported) => CacheStatusView {
             site_id: model.id,
@@ -535,7 +541,10 @@ async fn status_all(
             status_view(
                 model,
                 configured.get(&model.id).copied(),
-                reported.iter().find(|item| item.site_id == model.id).cloned(),
+                reported
+                    .iter()
+                    .find(|item| item.site_id == model.id)
+                    .cloned(),
             )
         })
         .collect();
@@ -592,7 +601,9 @@ pub struct PurgeResponse {
 ///
 /// An empty result means "purge everything": the agent reads a missing list the
 /// same way, so the wire format does not have to carry a separate flag.
-fn normalize_purge_urls(payload: &PurgeRequest) -> Result<Vec<String>, ApiError> {
+fn normalize_purge_urls(
+    payload: &PurgeRequest,
+) -> Result<Vec<String>, ApiError> {
     if payload.purge_all {
         // Explicit: "everything" wins over a leftover list, which would
         // otherwise make the request ambiguous.
@@ -734,12 +745,13 @@ mod tests {
 
     #[test]
     fn a_purge_with_nothing_to_purge_is_rejected() {
-        let err = normalize_purge_urls(&purge(&[], false)).expect_err("invalid");
+        let err =
+            normalize_purge_urls(&purge(&[], false)).expect_err("invalid");
         assert!(matches!(err, ApiError::BadRequest(_)));
         // Blank entries are dropped before the emptiness check, so a list of
         // whitespace is the same mistake.
-        let err =
-            normalize_purge_urls(&purge(&["  ", "\t"], false)).expect_err("invalid");
+        let err = normalize_purge_urls(&purge(&["  ", "\t"], false))
+            .expect_err("invalid");
         assert!(matches!(err, ApiError::BadRequest(_)));
     }
 
@@ -752,9 +764,9 @@ mod tests {
         .expect("valid");
         assert_eq!(vec!["/a", "/b", "/c"], urls);
 
-        let too_many: Vec<&str> =
-            (0..=MAX_PURGE_URLS).map(|_| "/x").collect();
-        let err = normalize_purge_urls(&purge(&too_many, false)).expect_err("invalid");
+        let too_many: Vec<&str> = (0..=MAX_PURGE_URLS).map(|_| "/x").collect();
+        let err = normalize_purge_urls(&purge(&too_many, false))
+            .expect_err("invalid");
         assert!(matches!(err, ApiError::BadRequest(_)));
     }
 }

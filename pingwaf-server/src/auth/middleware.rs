@@ -2,15 +2,15 @@
 //! [`AuthUser`], plus role helpers used by the write endpoints.
 
 use axum::extract::{FromRef, FromRequestParts};
-use axum::http::StatusCode;
 use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use uuid::Uuid;
 
 use crate::api::error::error_response;
 use crate::api::state::AppState;
-use crate::auth::jwt::{Claims, JwtError, verify_user_token};
+use crate::auth::jwt::{verify_user_token, Claims, JwtError};
 use crate::models::role;
 
 /// Scheme prefix accepted in the `Authorization` header.
@@ -25,7 +25,11 @@ pub struct AuthUser {
 }
 
 impl AuthUser {
-    pub fn new(id: Uuid, email: impl Into<String>, role: impl Into<String>) -> Self {
+    pub fn new(
+        id: Uuid,
+        email: impl Into<String>,
+        role: impl Into<String>,
+    ) -> Self {
         Self {
             id,
             email: email.into(),
@@ -78,10 +82,12 @@ pub enum AuthError {
 impl std::fmt::Display for AuthError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AuthError::MissingCredentials => f.write_str("missing authorization header"),
+            AuthError::MissingCredentials => {
+                f.write_str("missing authorization header")
+            },
             AuthError::MalformedCredentials => {
                 f.write_str("authorization header must use the Bearer scheme")
-            }
+            },
             AuthError::InvalidToken(msg) => write!(f, "invalid token: {msg}"),
             AuthError::ExpiredToken => f.write_str("token expired"),
             AuthError::Forbidden(msg) => write!(f, "forbidden: {msg}"),
@@ -120,8 +126,12 @@ impl From<JwtError> for AuthError {
 impl From<AuthError> for crate::api::error::ApiError {
     fn from(err: AuthError) -> Self {
         match err {
-            AuthError::Forbidden(msg) => crate::api::error::ApiError::Forbidden(msg),
-            other => crate::api::error::ApiError::Unauthorized(other.to_string()),
+            AuthError::Forbidden(msg) => {
+                crate::api::error::ApiError::Forbidden(msg)
+            },
+            other => {
+                crate::api::error::ApiError::Unauthorized(other.to_string())
+            },
         }
     }
 }
@@ -134,7 +144,9 @@ impl IntoResponse for AuthError {
         // RFC 6750: tell the client which scheme we expect.
         response.headers_mut().insert(
             axum::http::header::WWW_AUTHENTICATE,
-            axum::http::HeaderValue::from_static("Bearer realm=\"pingwaf\", error=\"invalid_token\""),
+            axum::http::HeaderValue::from_static(
+                "Bearer realm=\"pingwaf\", error=\"invalid_token\"",
+            ),
         );
         response
     }
@@ -168,13 +180,16 @@ where
 {
     type Rejection = AuthError;
 
-    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
         let app_state = AppState::from_ref(state);
         let token = bearer_token(parts)?;
         let claims = verify_user_token(&token, app_state.jwt_secret())?;
-        let id = claims
-            .subject_id()
-            .map_err(|err| AuthError::InvalidToken(format!("subject is not a UUID: {err}")))?;
+        let id = claims.subject_id().map_err(|err| {
+            AuthError::InvalidToken(format!("subject is not a UUID: {err}"))
+        })?;
         if !role::is_valid(&claims.role) {
             return Err(AuthError::InvalidToken(format!(
                 "unknown role '{}'",
@@ -206,7 +221,10 @@ where
 {
     type Rejection = AuthError;
 
-    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
         let user = AuthUser::from_request_parts(parts, state).await?;
         user.require_admin()?;
         Ok(AdminUser(user))
@@ -227,7 +245,8 @@ mod tests {
 
     #[test]
     fn admin_check_rejects_viewers() {
-        let viewer = AuthUser::new(Uuid::new_v4(), "v@example.com", role::VIEWER);
+        let viewer =
+            AuthUser::new(Uuid::new_v4(), "v@example.com", role::VIEWER);
         assert!(!viewer.is_admin());
         assert!(viewer.require_admin().is_err());
 

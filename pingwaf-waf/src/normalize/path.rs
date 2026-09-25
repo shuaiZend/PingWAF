@@ -23,7 +23,7 @@ pub fn normalize(path: &str) -> String {
             "" | "." => continue,
             ".." => {
                 segments.pop();
-            }
+            },
             other => segments.push(other),
         }
     }

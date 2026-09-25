@@ -28,7 +28,9 @@ pub mod agent_status {
 pub mod agents {
     use super::*;
 
-    #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
+    #[derive(
+        Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize,
+    )]
     #[sea_orm(table_name = "agents")]
     pub struct Model {
         #[sea_orm(primary_key, auto_increment = false)]

@@ -9,31 +9,38 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use pingwaf_proto::control_plane::{
-    AgentHeartbeat, GetSiteConfigRequest, LogAck, LogEntry, MetricAck, MetricBatch,
-    RegisterAgentRequest, RegisterAgentResponse, RuleBundle, ServerCommand, SiteConfig,
-    SyncRulesRequest, control_plane_server::ControlPlane as ControlPlaneTrait,
+    control_plane_server::ControlPlane as ControlPlaneTrait, AgentHeartbeat,
+    GetSiteConfigRequest, LogAck, LogEntry, MetricAck, MetricBatch,
+    RegisterAgentRequest, RegisterAgentResponse, RuleBundle, ServerCommand,
+    SiteConfig, SyncRulesRequest,
 };
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait,
+    QueryFilter, Set,
 };
 use tokio::sync::mpsc;
-use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
+use tokio_stream::{wrappers::ReceiverStream, Stream, StreamExt};
 use tonic::{Request, Response, Status, Streaming};
 use uuid::Uuid;
 
 use crate::api::keys::{authenticate_api_key, key_allows_agent};
 use crate::auth::jwt::{create_agent_token, verify_agent_token};
 use crate::config::ServerConfig;
-use crate::es::{AccessLogDocument, ElasticsearchClient, SecurityEventDocument};
+use crate::es::{
+    AccessLogDocument, ElasticsearchClient, SecurityEventDocument,
+};
 use crate::grpc::cache_status::CacheStatusRegistry;
-use crate::grpc::config::{build_rule_bundle, build_site_config, from_timestamp};
+use crate::grpc::config::{
+    build_rule_bundle, build_site_config, from_timestamp,
+};
 use crate::grpc::registry::{AgentRegistry, COMMAND_CHANNEL_CAPACITY};
 use crate::models::{
-    action, agent, agent_status, api_key, security_event, site, access_log,
+    access_log, action, agent, agent_status, api_key, security_event, site,
 };
 
 /// Stream type returned by the server-streaming RPCs.
-type BoxedStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send + 'static>>;
+type BoxedStream<T> =
+    Pin<Box<dyn Stream<Item = Result<T, Status>> + Send + 'static>>;
 
 /// gRPC status codes are deliberately coarse: agents must never learn whether an
 /// API key exists but is wrong, or does not exist at all.
@@ -99,12 +106,17 @@ impl ControlPlaneService {
             .one(&self.db)
             .await
             .map_err(db_status)?
-            .ok_or_else(|| Status::unauthenticated("agent is no longer registered"))
+            .ok_or_else(|| {
+                Status::unauthenticated("agent is no longer registered")
+            })
     }
 
     /// Sites this agent is allowed to see: its own binding, or every site owned
     /// by the user that issued its API key.
-    async fn visible_sites(&self, row: &agent::Model) -> Result<Vec<site::Model>, Status> {
+    async fn visible_sites(
+        &self,
+        row: &agent::Model,
+    ) -> Result<Vec<site::Model>, Status> {
         if let Some(site_id) = row.site_id {
             let owned = site::Entity::find_by_id(site_id)
                 .one(&self.db)
@@ -130,10 +142,15 @@ impl ControlPlaneService {
     }
 
     /// Builds the configuration an agent should be running right now.
-    async fn site_config_for(&self, row: &agent::Model) -> Result<SiteConfig, Status> {
+    async fn site_config_for(
+        &self,
+        row: &agent::Model,
+    ) -> Result<SiteConfig, Status> {
         let sites = self.visible_sites(row).await?;
         let ids: Vec<Uuid> = sites.iter().map(|site| site.id).collect();
-        build_site_config(&self.db, Some(&ids)).await.map_err(db_status)
+        build_site_config(&self.db, Some(&ids))
+            .await
+            .map_err(db_status)
     }
 }
 
@@ -186,14 +203,16 @@ impl ControlPlaneTrait for ControlPlaneService {
                 active.version = Set(optional(&payload.version));
                 active.os_info = Set(optional(&payload.os_info));
                 active.cpu_cores = Set(positive_i32(payload.cpu_cores as i64));
-                active.memory_bytes = Set(positive_i64(payload.memory_bytes as i64));
+                active.memory_bytes =
+                    Set(positive_i64(payload.memory_bytes as i64));
                 active.status = Set(status);
                 active.api_key_id = Set(Some(key.id));
                 active.last_heartbeat = Set(Some(now));
-                let updated = active.update(&self.db).await.map_err(db_status)?;
+                let updated =
+                    active.update(&self.db).await.map_err(db_status)?;
                 tracing::info!(%agent_id, hostname = %payload.hostname, "agent re-registered");
                 updated
-            }
+            },
             None => {
                 let agent_id = Uuid::new_v4();
                 let created = agent::ActiveModel {
@@ -204,7 +223,9 @@ impl ControlPlaneTrait for ControlPlaneService {
                     version: Set(optional(&payload.version)),
                     os_info: Set(optional(&payload.os_info)),
                     cpu_cores: Set(positive_i32(payload.cpu_cores as i64)),
-                    memory_bytes: Set(positive_i64(payload.memory_bytes as i64)),
+                    memory_bytes: Set(positive_i64(
+                        payload.memory_bytes as i64,
+                    )),
                     status: Set(status),
                     api_key_id: Set(Some(key.id)),
                     config_hash: Set(None),
@@ -216,7 +237,7 @@ impl ControlPlaneTrait for ControlPlaneService {
                 .map_err(db_status)?;
                 tracing::info!(%agent_id, hostname = %payload.hostname, "agent registered");
                 created
-            }
+            },
         };
 
         let token = create_agent_token(
@@ -246,17 +267,18 @@ impl ControlPlaneTrait for ControlPlaneService {
 
         // The first message identifies the agent; refusing to open a stream
         // before authentication keeps unauthenticated peers cheap.
-        let first = inbound
-            .message()
-            .await?
-            .ok_or_else(|| Status::invalid_argument("heartbeat stream closed immediately"))?;
+        let first = inbound.message().await?.ok_or_else(|| {
+            Status::invalid_argument("heartbeat stream closed immediately")
+        })?;
 
-        let claims = verify_agent_token(&first.agent_token, &self.config.jwt_secret)
-            .map_err(|err| Status::unauthenticated(err.to_string()))?;
+        let claims =
+            verify_agent_token(&first.agent_token, &self.config.jwt_secret)
+                .map_err(|err| Status::unauthenticated(err.to_string()))?;
         let agent_id = claims
             .subject_id()
             .map_err(|_| Status::unauthenticated(INVALID_CREDENTIALS))?;
-        if !first.agent_id.is_empty() && first.agent_id != agent_id.to_string() {
+        if !first.agent_id.is_empty() && first.agent_id != agent_id.to_string()
+        {
             return Err(Status::permission_denied(
                 "agent_id does not match the presented token",
             ));
@@ -267,10 +289,13 @@ impl ControlPlaneTrait for ControlPlaneService {
             .map_err(db_status)?
             .is_none()
         {
-            return Err(Status::unauthenticated("agent is no longer registered"));
+            return Err(Status::unauthenticated(
+                "agent is no longer registered",
+            ));
         }
 
-        let (sender, receiver) = mpsc::channel::<ServerCommand>(COMMAND_CHANNEL_CAPACITY);
+        let (sender, receiver) =
+            mpsc::channel::<ServerCommand>(COMMAND_CHANNEL_CAPACITY);
         let queued = self.agents.connect(agent_id, sender).await;
         for command in queued {
             // The registry owns the sender now, so replay through it.
@@ -282,7 +307,9 @@ impl ControlPlaneTrait for ControlPlaneService {
         let cache_status = self.cache_status.clone();
         // The opening message already carries metrics; recording it means a
         // freshly connected edge shows up before its second heartbeat.
-        cache_status.record_heartbeat(agent_id, &first.site_statuses).await;
+        cache_status
+            .record_heartbeat(agent_id, &first.site_statuses)
+            .await;
         tokio::spawn(async move {
             persist_heartbeat(&db, agent_id, &first).await;
             while let Some(message) = match inbound.message().await {
@@ -291,7 +318,7 @@ impl ControlPlaneTrait for ControlPlaneService {
                 Err(err) => {
                     tracing::debug!(%agent_id, error = %err, "heartbeat stream error");
                     None
-                }
+                },
             } {
                 cache_status
                     .record_heartbeat(agent_id, &message.site_statuses)
@@ -305,7 +332,8 @@ impl ControlPlaneTrait for ControlPlaneService {
 
         tracing::info!(%agent_id, "agent heartbeat stream opened");
         Ok(Response::new(
-            Box::pin(ReceiverStream::new(receiver).map(Ok)) as Self::HeartbeatStream
+            Box::pin(ReceiverStream::new(receiver).map(Ok))
+                as Self::HeartbeatStream,
         ))
     }
 
@@ -323,8 +351,9 @@ impl ControlPlaneTrait for ControlPlaneService {
         let selected: Vec<site::Model> = if requested.is_empty() {
             sites
         } else {
-            let id = Uuid::parse_str(requested)
-                .map_err(|_| Status::invalid_argument("site_id is not a UUID"))?;
+            let id = Uuid::parse_str(requested).map_err(|_| {
+                Status::invalid_argument("site_id is not a UUID")
+            })?;
             if !sites.iter().any(|site| site.id == id) {
                 return Err(Status::permission_denied(
                     "agent is not allowed to sync this site",
@@ -340,19 +369,21 @@ impl ControlPlaneTrait for ControlPlaneService {
             match build_rule_bundle(&self.db, site_row).await {
                 Ok(bundle) => {
                     // Delta sync: the agent already runs this exact configuration.
-                    if !current_hash.is_empty() && bundle.config_hash == current_hash {
+                    if !current_hash.is_empty()
+                        && bundle.config_hash == current_hash
+                    {
                         skipped += 1;
                         continue;
                     }
                     bundles.push(Ok(bundle));
-                }
+                },
                 Err(err) => {
                     tracing::error!(site_id = %site_row.id, error = %err, "could not build rule bundle");
                     bundles.push(Err(Status::internal(format!(
                         "could not build the rule bundle for site {}: {err}",
                         site_row.id
                     ))));
-                }
+                },
             }
         }
 
@@ -387,8 +418,10 @@ impl ControlPlaneTrait for ControlPlaneService {
         let batch_size = self.config.log_batch_size.max(1);
 
         let mut received: u64 = 0;
-        let mut access_batch: Vec<access_log::ActiveModel> = Vec::with_capacity(batch_size);
-        let mut event_batch: Vec<security_event::ActiveModel> = Vec::with_capacity(batch_size);
+        let mut access_batch: Vec<access_log::ActiveModel> =
+            Vec::with_capacity(batch_size);
+        let mut event_batch: Vec<security_event::ActiveModel> =
+            Vec::with_capacity(batch_size);
 
         loop {
             let message = match inbound.message().await {
@@ -401,7 +434,7 @@ impl ControlPlaneTrait for ControlPlaneService {
                         success: false,
                         error_message: err.to_string(),
                     }));
-                }
+                },
             };
             received += 1;
 
@@ -409,8 +442,11 @@ impl ControlPlaneTrait for ControlPlaneService {
             let agent_id = parse_optional_uuid(&message.agent_id);
             let timestamp = from_timestamp(message.timestamp.as_ref());
 
-            access_batch.push(access_log_row(&message, site_id, agent_id, timestamp));
-            if let Some(event) = security_event_row(&message, site_id, agent_id, timestamp) {
+            access_batch
+                .push(access_log_row(&message, site_id, agent_id, timestamp));
+            if let Some(event) =
+                security_event_row(&message, site_id, agent_id, timestamp)
+            {
                 event_batch.push(event);
             }
 
@@ -418,8 +454,12 @@ impl ControlPlaneTrait for ControlPlaneService {
             // retention. Both calls are non-blocking `try_send`s, so a slow or
             // down ES cluster can never apply back-pressure to the agent stream.
             if let Some(es) = &self.es {
-                es.index_access_log(access_log_document(es, &message, timestamp));
-                if let Some(event) = security_event_document(es, &message, timestamp) {
+                es.index_access_log(access_log_document(
+                    es, &message, timestamp,
+                ));
+                if let Some(event) =
+                    security_event_document(es, &message, timestamp)
+                {
                     es.index_security_event(event);
                 }
             }
@@ -457,7 +497,9 @@ impl ControlPlaneTrait for ControlPlaneService {
                 agent::Entity::update_many()
                     .col_expr(
                         agent::Column::LastHeartbeat,
-                        sea_orm::sea_query::Expr::value(from_timestamp(batch.timestamp.as_ref())),
+                        sea_orm::sea_query::Expr::value(from_timestamp(
+                            batch.timestamp.as_ref(),
+                        )),
                     )
                     .filter(agent::Column::Id.eq(agent_id))
                     .exec(&self.db)
@@ -466,7 +508,11 @@ impl ControlPlaneTrait for ControlPlaneService {
             }
         }
 
-        tracing::trace!(batches, metrics, "metrics received (not persisted yet)");
+        tracing::trace!(
+            batches,
+            metrics,
+            "metrics received (not persisted yet)"
+        );
         Ok(Response::new(MetricAck {
             received_count: metrics,
             success: true,
@@ -484,15 +530,18 @@ impl ControlPlaneTrait for ControlPlaneService {
         let config = if requested.is_empty() {
             self.site_config_for(&row).await?
         } else {
-            let id = Uuid::parse_str(requested)
-                .map_err(|_| Status::invalid_argument("site_id is not a UUID"))?;
+            let id = Uuid::parse_str(requested).map_err(|_| {
+                Status::invalid_argument("site_id is not a UUID")
+            })?;
             let visible = self.visible_sites(&row).await?;
             if !visible.iter().any(|site| site.id == id) {
                 return Err(Status::permission_denied(
                     "agent is not allowed to read this site",
                 ));
             }
-            build_site_config(&self.db, Some(&[id])).await.map_err(db_status)?
+            build_site_config(&self.db, Some(&[id]))
+                .await
+                .map_err(db_status)?
         };
 
         tracing::debug!(
@@ -516,7 +565,11 @@ impl ControlPlaneTrait for ControlPlaneService {
 }
 
 /// Persists the runtime counters of one heartbeat.
-async fn persist_heartbeat(db: &DatabaseConnection, agent_id: Uuid, message: &AgentHeartbeat) {
+async fn persist_heartbeat(
+    db: &DatabaseConnection,
+    agent_id: Uuid,
+    message: &AgentHeartbeat,
+) {
     let reported = from_timestamp(message.timestamp.as_ref());
     let health = agent_status::from_proto_health(message.health);
 
@@ -547,9 +600,12 @@ async fn mark_offline(db: &DatabaseConnection, agent_id: Uuid) {
         Err(err) => {
             tracing::warn!(%agent_id, error = %err, "could not load agent to mark offline");
             return;
-        }
+        },
     };
-    if row.last_heartbeat.is_some_and(|ts| ts > Utc::now() - chrono::Duration::seconds(2)) {
+    if row
+        .last_heartbeat
+        .is_some_and(|ts| ts > Utc::now() - chrono::Duration::seconds(2))
+    {
         return;
     }
     let mut active: agent::ActiveModel = row.into();
@@ -574,7 +630,9 @@ async fn flush(
     }
     if !events.is_empty() {
         let rows = std::mem::take(events);
-        if let Err(err) = security_event::Entity::insert_many(rows).exec(db).await {
+        if let Err(err) =
+            security_event::Entity::insert_many(rows).exec(db).await
+        {
             tracing::error!(error = %err, "failed to persist security events");
             return Err(db_status(err));
         }
@@ -595,8 +653,10 @@ fn access_log_row(
         agent_id: Set(agent_id),
         request_id: Set(truncate(&entry.request_id, MAX_REQUEST_ID)),
         timestamp: Set(timestamp),
-        client_ip: Set(truncate(&entry.client_ip, MAX_CLIENT_IP).unwrap_or_else(|| "0.0.0.0".to_string())),
-        method: Set(truncate(&entry.method, MAX_METHOD).unwrap_or_else(|| "GET".to_string())),
+        client_ip: Set(truncate(&entry.client_ip, MAX_CLIENT_IP)
+            .unwrap_or_else(|| "0.0.0.0".to_string())),
+        method: Set(truncate(&entry.method, MAX_METHOD)
+            .unwrap_or_else(|| "GET".to_string())),
         host: Set(truncate(&entry.host, MAX_HOST)),
         path: Set(optional(&entry.path)),
         query_string: Set(optional(&entry.query_string)),
@@ -607,7 +667,9 @@ fn access_log_row(
         }),
         response_size: Set(positive_i64(entry.response_body_size as i64)),
         upstream_addr: Set(truncate(&entry.upstream_addr, MAX_UPSTREAM)),
-        upstream_latency_ms: Set(positive_i64(entry.upstream_latency_ms as i64)),
+        upstream_latency_ms: Set(positive_i64(
+            entry.upstream_latency_ms as i64,
+        )),
         total_latency_ms: Set(positive_i64(entry.total_latency_ms as i64)),
         cache_status: Set(truncate(&entry.cache_status, MAX_CACHE_STATUS)),
         user_agent: Set(optional(&entry.user_agent)),
@@ -627,7 +689,10 @@ fn security_event_row(
     timestamp: DateTime<Utc>,
 ) -> Option<security_event::ActiveModel> {
     let waf_action = entry.waf_action.trim();
-    if waf_action.is_empty() && entry.waf_score == 0 && entry.waf_rule_id.trim().is_empty() {
+    if waf_action.is_empty()
+        && entry.waf_score == 0
+        && entry.waf_rule_id.trim().is_empty()
+    {
         return None;
     }
 
@@ -636,15 +701,16 @@ fn security_event_row(
         agent_id: Set(agent_id),
         request_id: Set(truncate(&entry.request_id, MAX_REQUEST_ID)),
         timestamp: Set(timestamp),
-        client_ip: Set(
-            truncate(&entry.client_ip, MAX_CLIENT_IP).unwrap_or_else(|| "0.0.0.0".to_string()),
-        ),
-        method: Set(truncate(&entry.method, MAX_METHOD).unwrap_or_else(|| "GET".to_string())),
+        client_ip: Set(truncate(&entry.client_ip, MAX_CLIENT_IP)
+            .unwrap_or_else(|| "0.0.0.0".to_string())),
+        method: Set(truncate(&entry.method, MAX_METHOD)
+            .unwrap_or_else(|| "GET".to_string())),
         host: Set(truncate(&entry.host, MAX_HOST)),
         path: Set(optional(&entry.path)),
         rule_id: Set(truncate(&entry.waf_rule_id, MAX_RULE_ID)),
         rule_name: Set(None),
-        action: Set(truncate(waf_action, MAX_ACTION).unwrap_or_else(|| action::LOG.to_string())),
+        action: Set(truncate(waf_action, MAX_ACTION)
+            .unwrap_or_else(|| action::LOG.to_string())),
         score: Set(if entry.waf_score == 0 {
             None
         } else {
@@ -669,7 +735,8 @@ fn access_log_document(
     entry: &LogEntry,
     timestamp: DateTime<Utc>,
 ) -> AccessLogDocument {
-    let (request_body, mut request_body_truncated) = es.truncate_body_to_string(&entry.request_body);
+    let (request_body, mut request_body_truncated) =
+        es.truncate_body_to_string(&entry.request_body);
     request_body_truncated |= entry.request_body_truncated;
     let (response_body, mut response_body_truncated) =
         es.truncate_body_to_string(&entry.response_body);
@@ -735,11 +802,15 @@ fn security_event_document(
     timestamp: DateTime<Utc>,
 ) -> Option<SecurityEventDocument> {
     let waf_action = entry.waf_action.trim();
-    if waf_action.is_empty() && entry.waf_score == 0 && entry.waf_rule_id.trim().is_empty() {
+    if waf_action.is_empty()
+        && entry.waf_score == 0
+        && entry.waf_rule_id.trim().is_empty()
+    {
         return None;
     }
 
-    let (request_body, mut request_body_truncated) = es.truncate_body_to_string(&entry.request_body);
+    let (request_body, mut request_body_truncated) =
+        es.truncate_body_to_string(&entry.request_body);
     request_body_truncated |= entry.request_body_truncated;
 
     Some(SecurityEventDocument {
@@ -788,7 +859,9 @@ fn headers_json(
     }
     let map = headers
         .iter()
-        .map(|(key, value)| (key.clone(), serde_json::Value::String(value.clone())))
+        .map(|(key, value)| {
+            (key.clone(), serde_json::Value::String(value.clone()))
+        })
         .collect::<serde_json::Map<String, serde_json::Value>>();
     Some(serde_json::Value::Object(map))
 }
@@ -846,7 +919,7 @@ fn parse_optional_uuid(raw: &str) -> Option<Uuid> {
         Err(err) => {
             tracing::debug!(value = %raw, error = %err, "ignoring malformed UUID in log entry");
             None
-        }
+        },
     }
 }
 
@@ -945,14 +1018,17 @@ mod tests {
             ..Default::default()
         };
         assert!(security_event_row(&entry, None, None, Utc::now()).is_none());
-        assert!(access_log_row(&entry, None, None, Utc::now()).timestamp.is_set());
+        assert!(access_log_row(&entry, None, None, Utc::now())
+            .timestamp
+            .is_set());
 
         let mut blocked = entry.clone();
         blocked.waf_action = action::BLOCK.into();
         blocked.waf_score = 42;
         blocked.waf_rule_id = "sqli-942100".into();
         blocked.waf_details = "matched rule".into();
-        let event = security_event_row(&blocked, None, None, Utc::now()).expect("event");
+        let event = security_event_row(&blocked, None, None, Utc::now())
+            .expect("event");
         assert!(event.action.is_set());
         assert_eq!(event.score.unwrap(), Some(42));
     }
@@ -966,10 +1042,7 @@ mod tests {
             ..Default::default()
         };
         let row = access_log_row(&entry, None, None, Utc::now());
-        assert_eq!(
-            row.client_ip.clone().unwrap().len(),
-            MAX_CLIENT_IP
-        );
+        assert_eq!(row.client_ip.clone().unwrap().len(), MAX_CLIENT_IP);
         assert_eq!(
             row.country_code.clone().unwrap().unwrap().len(),
             MAX_COUNTRY

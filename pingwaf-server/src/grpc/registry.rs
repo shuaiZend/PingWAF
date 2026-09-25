@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use pingwaf_proto::control_plane::ServerCommand;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{mpsc, RwLock};
 use uuid::Uuid;
 
 /// Buffer depth of the per-agent command channel.
@@ -106,7 +106,11 @@ impl AgentRegistry {
             .map(|(id, conn)| ConnectedAgent {
                 id: *id,
                 connected_at: conn.connected_at,
-                queued_commands: inner.pending.get(id).map(|q| q.len()).unwrap_or(0),
+                queued_commands: inner
+                    .pending
+                    .get(id)
+                    .map(|q| q.len())
+                    .unwrap_or(0),
             })
             .collect();
         out.sort_by_key(|agent| agent.connected_at);
@@ -117,7 +121,11 @@ impl AgentRegistry {
     /// it for the next heartbeat.
     ///
     /// Returns `true` when the command was delivered on a live stream.
-    pub async fn send_command(&self, agent_id: &Uuid, command: ServerCommand) -> bool {
+    pub async fn send_command(
+        &self,
+        agent_id: &Uuid,
+        command: ServerCommand,
+    ) -> bool {
         // Grab the sender while holding the read lock only: `send().await`
         // must not block other registry operations.
         let sender = {
@@ -130,17 +138,17 @@ impl AgentRegistry {
                 Ok(()) => {
                     tracing::debug!(%agent_id, "command pushed to agent");
                     return true;
-                }
+                },
                 Err(mpsc::error::TrySendError::Full(command)) => {
                     tracing::warn!(%agent_id, "agent command channel full, queueing instead");
                     self.enqueue(agent_id, command).await;
                     return false;
-                }
+                },
                 Err(mpsc::error::TrySendError::Closed(command)) => {
                     tracing::debug!(%agent_id, "agent stream closed, queueing command");
                     self.enqueue(agent_id, command).await;
                     return false;
-                }
+                },
             }
         }
 
@@ -151,7 +159,10 @@ impl AgentRegistry {
     /// Pushes a command to every connected agent, queueing for the offline ones.
     ///
     /// Returns how many agents received it live.
-    pub async fn broadcast(&self, build: impl Fn(Uuid) -> ServerCommand) -> usize {
+    pub async fn broadcast(
+        &self,
+        build: impl Fn(Uuid) -> ServerCommand,
+    ) -> usize {
         let ids: Vec<Uuid> = {
             let inner = self.inner.read().await;
             inner.connected.keys().copied().collect()
@@ -232,7 +243,9 @@ mod tests {
         let registry = AgentRegistry::new();
         let agent = Uuid::new_v4();
         for i in 0..(PENDING_COMMAND_LIMIT + 10) {
-            registry.send_command(&agent, restart(&format!("cmd-{i}"))).await;
+            registry
+                .send_command(&agent, restart(&format!("cmd-{i}")))
+                .await;
         }
         assert_eq!(registry.pending_count(&agent).await, PENDING_COMMAND_LIMIT);
     }

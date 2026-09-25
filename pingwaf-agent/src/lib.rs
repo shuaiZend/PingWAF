@@ -17,7 +17,8 @@ use heartbeat::MetricsCollector;
 // Global agent instance (singleton)
 // ─────────────────────────────────────────────────────────────
 
-static AGENT_INSTANCE: ArcSwapOption<PingWafAgent> = ArcSwapOption::const_empty();
+static AGENT_INSTANCE: ArcSwapOption<PingWafAgent> =
+    ArcSwapOption::const_empty();
 
 // ─────────────────────────────────────────────────────────────
 // Simplified types for the plugin API
@@ -158,13 +159,19 @@ impl PingWafAgent {
     ///
     /// Returns `None` if no rules are cached for this domain.
     #[inline]
-    pub fn get_rules_for_domain(&self, domain: &str) -> Option<Arc<cache::SiteRules>> {
+    pub fn get_rules_for_domain(
+        &self,
+        domain: &str,
+    ) -> Option<Arc<cache::SiteRules>> {
         self.rule_cache.get_site_rules(domain)
     }
 
     /// Get rules for a specific site by ID.
     #[inline]
-    pub fn get_rules_for_site(&self, site_id: &str) -> Option<Arc<cache::SiteRules>> {
+    pub fn get_rules_for_site(
+        &self,
+        site_id: &str,
+    ) -> Option<Arc<cache::SiteRules>> {
         self.rule_cache.get_site_rules_by_id(site_id)
     }
 
@@ -292,7 +299,9 @@ impl PingWafAgent {
 /// Start the PingWAF agent with the given configuration.
 ///
 /// Convenience function that calls [`PingWafAgent::start`].
-pub async fn start_agent(config: AgentConfig) -> anyhow::Result<Arc<PingWafAgent>> {
+pub async fn start_agent(
+    config: AgentConfig,
+) -> anyhow::Result<Arc<PingWafAgent>> {
     PingWafAgent::start(config).await
 }
 

@@ -13,7 +13,9 @@ use super::client::ElasticsearchClient;
 /// Idempotent: `PUT _index_template/…` replaces any existing template of the
 /// same name, so calling this on every boot keeps the mappings in sync with the
 /// current document models.
-pub async fn ensure_index_template(client: &ElasticsearchClient) -> anyhow::Result<()> {
+pub async fn ensure_index_template(
+    client: &ElasticsearchClient,
+) -> anyhow::Result<()> {
     let prefix = client.config().index_prefix.clone();
 
     // 1. Retention policy — best effort. ILM ships with the free Basic licence,
@@ -60,7 +62,10 @@ pub async fn ensure_index_template(client: &ElasticsearchClient) -> anyhow::Resu
 
 /// Builds the template payload. Exposed for tests and for the settings API to
 /// show what would be applied.
-pub fn index_template_body(prefix: &str, ilm_policy: &str) -> serde_json::Value {
+pub fn index_template_body(
+    prefix: &str,
+    ilm_policy: &str,
+) -> serde_json::Value {
     serde_json::json!({
         "index_patterns": [format!("{prefix}-access-*"), format!("{prefix}-security-*")],
         "priority": 200,

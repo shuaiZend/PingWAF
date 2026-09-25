@@ -1,22 +1,26 @@
 //! Agent inventory: which agents are registered, whether they are currently
 //! connected, and the commands the dashboard can push at them.
 
-use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
+use axum::Json;
 use axum::Router;
 use chrono::{DateTime, Utc};
 use pingwaf_proto::control_plane::{
     BlockIpCommand, PurgeCacheCommand, RestartAgentCommand, ServerCommand,
 };
-use sea_orm::{ColumnTrait, Condition, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder};
+use sea_orm::{
+    ColumnTrait, Condition, EntityTrait, PaginatorTrait, QueryFilter,
+    QueryOrder,
+};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::api::common::{
-    Page, Pagination, load_site_read, non_empty, parse_uuid, require_write, scope_site,
+    load_site_read, non_empty, parse_uuid, require_write, scope_site, Page,
+    Pagination,
 };
 use crate::api::error::ApiError;
 use crate::api::state::AppState;
@@ -207,7 +211,7 @@ async fn send_command(
             let parsed = parse_uuid(&raw, "site id")?;
             load_site_read(&state.db, parsed, &current).await?;
             Some(parsed)
-        }
+        },
         None => None,
     };
 
@@ -261,7 +265,8 @@ async fn enrich(
     rows: Vec<agent::Model>,
 ) -> Result<Vec<AgentResponse>, ApiError> {
     let domains: std::collections::HashMap<Uuid, String> = {
-        let ids: Vec<Uuid> = rows.iter().filter_map(|row| row.site_id).collect();
+        let ids: Vec<Uuid> =
+            rows.iter().filter_map(|row| row.site_id).collect();
         if ids.is_empty() {
             Default::default()
         } else {
