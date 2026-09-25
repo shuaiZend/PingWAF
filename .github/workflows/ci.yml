@@ -40,7 +40,7 @@ jobs:
       PROTOC: /usr/bin/protoc
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install system dependencies
         run: |
@@ -86,7 +86,7 @@ jobs:
 
       - name: Typos
         if: always()
-        uses: crate-ci/typos@master
+        uses: crate-ci/typos@v1.50.2
 
   web:
     name: Web (lint / build)
@@ -96,7 +96,7 @@ jobs:
         working-directory: web
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -123,7 +123,7 @@ jobs:
     timeout-minutes: 120
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3

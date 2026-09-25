@@ -70,7 +70,7 @@ jobs:
             features: "--no-default-features --features tls-rustls,full"
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # The released binary embeds the dashboard, so build the real bundle
       # before cargo (rust-embed reads ../web/dist at compile time).
@@ -160,7 +160,7 @@ jobs:
       packages: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
