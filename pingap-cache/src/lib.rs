@@ -27,6 +27,7 @@ use tracing::info;
 
 mod file;
 mod http_cache;
+pub mod quota;
 mod tiny;
 
 pub static PAGE_SIZE: usize = 4096;
@@ -62,6 +63,11 @@ fn new_tiny_ufo_cache(mode: CacheMode, size: usize) -> HttpCache {
 }
 fn new_file_cache(dir: &str) -> Result<HttpCache> {
     let cache = FileCache::new(dir)?;
+    // The per-domain quota ledger lives beside the file backend and is
+    // rebuilt from whatever is already on disk, so a restart does not look
+    // like an empty cache and allow a full quota of overshoot before the
+    // first eviction.
+    quota::init_global_disk_quota(&cache.directory).load_sync();
     Ok(HttpCache {
         directory: Some(cache.directory.clone()),
         cache: Arc::new(cache),
@@ -228,6 +234,11 @@ pub fn new_cache_backend(directory: &str) -> Result<&'static HttpCache> {
 }
 
 pub use http_cache::{CacheObject, HttpCache, new_storage_clear_service};
+pub use quota::{
+    DiskQuotaManager, DomainQuotaStatus, EvictionResult, PurgeResult,
+    QuotaInfo, configured_quota_mb, forget_quota, global_disk_quota,
+    init_global_disk_quota, set_quota, tracked_domains,
+};
 
 #[cfg(feature = "tracing")]
 mod prom;

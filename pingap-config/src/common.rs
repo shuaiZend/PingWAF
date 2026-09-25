@@ -97,6 +97,10 @@ pub enum PluginCategory {
     AcceptEncoding,
     /// Traffic splitting
     TrafficSplitting,
+    /// Web Application Firewall request inspection
+    Waf,
+    /// CC protection / browser challenge (5-second shield)
+    Challenge,
 }
 impl Serialize for PluginCategory {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>

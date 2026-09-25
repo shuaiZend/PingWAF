@@ -1,17 +1,57 @@
-# Dependabot for the workflow actions only: weekly, one PR per action that
-# has a newer tag. test.yml gates whatever it opens.
+# Dependabot configuration for the PingWAF workspace.
 #
-# Cargo is left out on purpose. Dependabot resolves without regard to
-# `rust-version`, so it would keep proposing kdl/sysinfo/time releases the
-# MSRV-aware `cargo update` refuses, and it cannot follow the git pin on
-# pingora. Crate updates stay a deliberate, locally verified step.
-#
-# Actions referenced by branch (`jlumbroso/free-disk-space@main`) are
-# invisible to this: Dependabot only follows tags and commit SHAs.
+# Four ecosystems are tracked weekly. Cargo updates are grouped to keep the PR
+# count manageable, but note that Dependabot resolves without regard to the
+# workspace `rust-version = "1.96"` MSRV: verify `make msrv` locally before
+# merging any cargo bump that could raise the minimum toolchain.
 version: 2
 updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - rust
+    groups:
+      cargo-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: npm
+    directory: /web
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - javascript
+    groups:
+      npm-minor-patch:
+        update-types:
+          - minor
+          - patch
+
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
       day: monday
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - ci
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - docker

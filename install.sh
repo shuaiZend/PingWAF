@@ -1,256 +1,467 @@
-#!/usr/bin/env sh
+#!/bin/bash
+# ─────────────────────────────────────────────────────────────────────────────
+# PingWAF Installation Script
+# ─────────────────────────────────────────────────────────────────────────────
+# Usage:
+#   curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh | bash
+#   ./install.sh [--version X.Y.Z] [--mode all-in-one|server|agent]
+#
+# Options:
+#   --version   Install a specific version (default: latest)
+#   --mode      Operating mode: all-in-one, server, agent (default: all-in-one)
+#   --no-systemd  Skip systemd service creation
+#   --help      Show this help message
+# ─────────────────────────────────────────────────────────────────────────────
 
-set -eu
-printf '\n'
+set -euo pipefail
 
+# ─── Colors & Helpers ─────────────────────────────────────────────────────────
 BOLD="$(tput bold 2>/dev/null || printf '')"
-GREY="$(tput setaf 0 2>/dev/null || printf '')"
+RED="$(tput setaf 1 2>/dev/null || printf '')"
 GREEN="$(tput setaf 2 2>/dev/null || printf '')"
 YELLOW="$(tput setaf 3 2>/dev/null || printf '')"
 BLUE="$(tput setaf 4 2>/dev/null || printf '')"
-RED="$(tput setaf 1 2>/dev/null || printf '')"
 NO_COLOR="$(tput sgr0 2>/dev/null || printf '')"
 
-info() {
-  printf '%s\n' "${BOLD}${GREY}>${NO_COLOR} $*"
+info()    { printf '%s\n' "${BLUE}>${NO_COLOR} $*"; }
+success() { printf '%s\n' "${GREEN}✓${NO_COLOR} $*"; }
+warn()    { printf '%s\n' "${YELLOW}! $*${NO_COLOR}"; }
+error()   { printf '%s\n' "${RED}✗ $*${NO_COLOR}" >&2; }
+fatal()   { error "$@"; exit 1; }
+
+has() { command -v "$1" >/dev/null 2>&1; }
+
+# ─── Constants ────────────────────────────────────────────────────────────────
+REPO="shuaiZend/PingWAF"
+BINARY_NAME="pingwaf"
+INSTALL_DIR="/usr/local/bin"
+CONFIG_DIR="/etc/pingwaf"
+DATA_DIR="/var/lib/pingwaf"
+SERVICE_NAME="pingwaf"
+SUPPORTED_PLATFORMS="linux/amd64 linux/arm64 darwin/amd64 darwin/arm64"
+
+# ─── Default Configuration ────────────────────────────────────────────────────
+VERSION=""
+MODE="all-in-one"
+SKIP_SYSTEMD=false
+DB_URL="postgres://pingwaf:pingwaf@localhost:5432/pingwaf"
+
+# ─── Argument Parsing ─────────────────────────────────────────────────────────
+show_help() {
+    cat <<EOF
+PingWAF Installation Script
+
+Usage: $(basename "$0") [OPTIONS]
+
+Options:
+  --version VERSION   Install a specific version (default: latest release)
+  --mode MODE         Operating mode: all-in-one, server, agent
+  --no-systemd        Skip systemd service file creation
+  --db-url URL        PostgreSQL connection string
+  --help              Show this help message
+
+Environment Variables:
+  PINGWAF_VERSION     Same as --version
+  PINGWAF_MODE        Same as --mode
+  PINGWAF_DB_URL      Same as --db-url
+
+Examples:
+  # Install latest, all-in-one mode
+  curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh | bash
+
+  # Install specific version as agent only
+  ./install.sh --version 0.14.3 --mode agent
+
+  # Custom database URL
+  ./install.sh --db-url "postgres://user:pass@db-host:5432/pingwaf"
+EOF
 }
 
-warn() {
-  printf '%s\n' "${YELLOW}! $*${NO_COLOR}"
-}
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --version)   VERSION="$2"; shift 2 ;;
+        --mode)      MODE="$2"; shift 2 ;;
+        --db-url)    DB_URL="$2"; shift 2 ;;
+        --no-systemd) SKIP_SYSTEMD=true; shift ;;
+        --help|-h)   show_help; exit 0 ;;
+        *)           fatal "Unknown option: $1 (use --help for usage)" ;;
+    esac
+done
 
-error() {
-  printf '%s\n' "${RED}x $*${NO_COLOR}" >&2
-}
+# Environment variable fallbacks
+VERSION="${VERSION:-${PINGWAF_VERSION:-}}"
+MODE="${MODE:-${PINGWAF_MODE:-all-in-one}}"
+DB_URL="${DB_URL:-${PINGWAF_DB_URL:-$DB_URL}}"
 
-completed() {
-  printf '%s\n' "${GREEN}✓${NO_COLOR} $*"
-}
-
-has() {
-  command -v "$1" 1>/dev/null 2>&1
-}
-
-REPO="vicanso/pingap"
-SUPPORTED_TARGETS="Linux_x86_64 Linux_arm64 Darwin_x86_64 Darwin_arm64 Windows_x86_64"
-
-# PINGAP_FULL=1 to install the -full variant (all features enabled)
-FULL_SUFFIX=""
-if [ "${PINGAP_FULL:-0}" = "1" ]; then
-  FULL_SUFFIX="-full"
-fi
-
-# PINGAP_LIBC=gnu to use glibc build on Linux (default: musl, statically linked)
-LINUX_LIBC="${PINGAP_LIBC:-musl}"
-
-# PINGAP_TLS=rustls to install the rustls TLS backend build. Linux only, and
-# only published with the full feature set, so it implies PINGAP_FULL=1.
-TLS_BACKEND="${PINGAP_TLS:-openssl}"
-case "${TLS_BACKEND}" in
-  openssl|rustls) ;;
-  *)
-    error "PINGAP_TLS must be openssl or rustls (got: ${TLS_BACKEND})"
-    exit 1
-    ;;
+# Validate mode
+case "$MODE" in
+    all-in-one|server|agent) ;;
+    *) fatal "Invalid mode: $MODE (must be: all-in-one, server, agent)" ;;
 esac
-if [ "${TLS_BACKEND}" = "rustls" ]; then
-  FULL_SUFFIX="-rustls-full"
-fi
 
-get_latest_release() {
-  curl --silent "https://api.github.com/repos/${REPO}/releases/latest" |
-    grep '"tag_name":' |
-    sed -E 's/.*"([^"]+)".*/\1/'
-}
-
-detect_platform() {
-  platform="$(uname -s)"
-  case "${platform}" in
-    Linux*) platform="Linux" ;;
-    Darwin*) platform="Darwin" ;;
-    MINGW*|MSYS*|CYGWIN*) platform="Windows" ;;
-    *)
-      error "Unsupported platform: ${platform}"
-      exit 1
-      ;;
-  esac
-  printf '%s' "${platform}"
+# ─── Platform Detection ───────────────────────────────────────────────────────
+detect_os() {
+    local os
+    os="$(uname -s)"
+    case "$os" in
+        Linux*)  echo "linux" ;;
+        Darwin*) echo "darwin" ;;
+        *)       fatal "Unsupported operating system: $os" ;;
+    esac
 }
 
 detect_arch() {
-  arch="$(uname -m)"
-  case "${arch}" in
-    x86_64|amd64) arch="x86_64" ;;
-    aarch64|arm64) arch="arm64" ;;
-    *)
-      error "Unsupported architecture: ${arch}"
-      exit 1
-      ;;
-  esac
-  printf '%s' "${arch}"
+    local arch
+    arch="$(uname -m)"
+    case "$arch" in
+        x86_64|amd64)  echo "amd64" ;;
+        aarch64|arm64) echo "arm64" ;;
+        *)             fatal "Unsupported architecture: $arch" ;;
+    esac
 }
 
-# Map (platform, arch) -> archive filename + binary name inside the archive.
-# Pingap release naming (see .github/workflows/publish.yml):
-#   pingap-linux-musl-x86[-full].tar.gz       -> pingap-linux-musl-x86[-full]
-#   pingap-linux-musl-aarch64[-full].tar.gz   -> pingap-linux-musl-aarch64[-full]
-#   pingap-linux-gnu-x86[-full].tar.gz        -> pingap-linux-gnu-x86[-full]
-#   pingap-linux-gnu-aarch64[-full].tar.gz    -> pingap-linux-gnu-aarch64[-full]
-#   pingap-linux-{musl,gnu}-{x86,aarch64}-rustls-full.tar.gz (PINGAP_TLS=rustls)
-#   pingap-darwin-x86[-full].tar.gz           -> pingap-darwin-x86[-full]
-#   pingap-darwin-aarch64[-full].tar.gz       -> pingap-darwin-aarch64[-full]
-#   pingap-windows.exe.zip                    -> pingap-windows.exe
-resolve_filename() {
-  platform="$1"
-  arch="$2"
+OS="$(detect_os)"
+ARCH="$(detect_arch)"
+PLATFORM="${OS}/${ARCH}"
 
-  case "${platform}" in
-    Linux)
-      case "${LINUX_LIBC}" in
-        musl|gnu) ;;
-        *)
-          error "PINGAP_LIBC must be musl or gnu (got: ${LINUX_LIBC})"
-          exit 1
-          ;;
-      esac
-      if [ "${arch}" = "x86_64" ]; then
-        arch_tag="x86"
-      else
-        arch_tag="aarch64"
-      fi
-      basename="pingap-linux-${LINUX_LIBC}-${arch_tag}${FULL_SUFFIX}"
-      filename="${basename}.tar.gz"
-      binary_name="${basename}"
-      ;;
-    Darwin)
-      if [ "${TLS_BACKEND}" = "rustls" ]; then
-        error "PINGAP_TLS=rustls is only published for Linux."
-        exit 1
-      fi
-      if [ "${arch}" = "x86_64" ]; then
-        arch_tag="x86"
-      else
-        arch_tag="aarch64"
-      fi
-      basename="pingap-darwin-${arch_tag}${FULL_SUFFIX}"
-      filename="${basename}.tar.gz"
-      binary_name="${basename}"
-      ;;
-    Windows)
-      if [ "${TLS_BACKEND}" = "rustls" ]; then
-        error "PINGAP_TLS=rustls is only published for Linux."
-        exit 1
-      fi
-      if [ -n "${FULL_SUFFIX}" ]; then
-        warn "Windows release does not have a separate -full variant; PINGAP_FULL ignored."
-      fi
-      filename="pingap-windows.exe.zip"
-      binary_name="pingap-windows.exe"
-      ;;
-  esac
-}
+info "Detected platform: ${PLATFORM}"
 
-download_and_install() {
-  version="$1"
-  platform="$2"
-  arch="$3"
+if ! echo "$SUPPORTED_PLATFORMS" | grep -q "$PLATFORM"; then
+    fatal "Platform $PLATFORM is not supported. Supported: $SUPPORTED_PLATFORMS"
+fi
 
-  resolve_filename "${platform}" "${arch}"
-
-  url="https://github.com/${REPO}/releases/download/${version}/${filename}"
-
-  info "Downloading pingap ${version}..."
-  info "URL: ${url}"
-
-  if has curl; then
-    curl -sSL --fail "${url}" -o "${filename}"
-  elif has wget; then
-    wget -q "${url}" -O "${filename}"
-  else
-    error "curl or wget not found."
-    exit 1
-  fi
-
-  info "Extracting ${filename}..."
-  extract_dir="pingap_tmp"
-  rm -rf "${extract_dir}"
-  mkdir -p "${extract_dir}"
-
-  if echo "${filename}" | grep -q '\.zip$'; then
-    if ! has unzip; then error "unzip not found"; exit 1; fi
-    unzip -q "${filename}" -d "${extract_dir}"
-  else
-    tar -xzf "${filename}" -C "${extract_dir}"
-  fi
-
-  info "Installing..."
-
-  binary_path=$(find "${extract_dir}" -name "${binary_name}" -type f | head -n 1)
-
-  # Fallback: if naming inside the archive ever changes, take the first regular file.
-  if [ -z "${binary_path}" ]; then
-    binary_path=$(find "${extract_dir}" -type f | head -n 1)
-  fi
-
-  if [ -z "${binary_path}" ]; then
-    error "Binary not found in archive."
-    ls -R "${extract_dir}"
-    exit 1
-  fi
-
-  chmod +x "${binary_path}"
-
-  if [ "${platform}" = "Windows" ]; then
-    info "Windows detected. Please manually move ${binary_path} to a directory in your PATH."
-  else
-    target_bin="/usr/local/bin/pingap"
-    if [ -w "$(dirname "${target_bin}")" ]; then
-      mv "${binary_path}" "${target_bin}"
-    elif has sudo; then
-      sudo mv "${binary_path}" "${target_bin}"
+# ─── Version Resolution ───────────────────────────────────────────────────────
+get_latest_version() {
+    local url="https://api.github.com/repos/${REPO}/releases/latest"
+    if has curl; then
+        curl -fsSL "$url" | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/'
+    elif has wget; then
+        wget -qO- "$url" | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/'
     else
-      error "No write permission to $(dirname "${target_bin}") and sudo not available."
-      exit 1
+        fatal "Neither curl nor wget found. Please install one of them."
     fi
-    completed "Installed to ${target_bin}"
-  fi
-
-  rm -rf "${filename}" "${extract_dir}"
 }
 
-main() {
-  platform="$(detect_platform)"
-  arch="$(detect_arch)"
+if [[ -z "$VERSION" ]]; then
+    info "Fetching latest release version..."
+    VERSION="$(get_latest_version)"
+    if [[ -z "$VERSION" ]]; then
+        fatal "Failed to determine latest version. Use --version to specify manually."
+    fi
+fi
 
-  info "Detected: ${platform} (${arch})"
-  if [ "${platform}" = "Linux" ]; then
-    info "Linux libc: ${LINUX_LIBC} (override with PINGAP_LIBC=gnu|musl)"
-  fi
-  if [ "${TLS_BACKEND}" = "rustls" ]; then
-    info "Variant: rustls-full (rustls TLS backend, all features enabled)"
-  elif [ -n "${FULL_SUFFIX}" ]; then
-    info "Variant: full (all features enabled)"
-  else
-    info "Variant: default (set PINGAP_FULL=1 for the full-featured build)"
-  fi
+# Strip leading 'v' if present
+VERSION="${VERSION#v}"
+info "Installing PingWAF v${VERSION}"
 
-  target="${platform}_${arch}"
-  if ! echo "${SUPPORTED_TARGETS}" | grep -q "${target}"; then
-    error "Unsupported target: ${target}"
-    exit 1
-  fi
-
-  if [ "${platform}" = "Windows" ]; then
-    warn "The Windows release job is currently disabled in publish.yml; the asset may not exist for the latest tag."
-  fi
-
-  version="$(get_latest_release)"
-  if [ -z "${version}" ]; then
-    error "Failed to fetch latest release tag from GitHub API."
-    exit 1
-  fi
-
-  download_and_install "${version}" "${platform}" "${arch}"
+# ─── Download ─────────────────────────────────────────────────────────────────
+resolve_asset_name() {
+    local os="$1" arch="$2"
+    case "$os" in
+        linux)
+            case "$arch" in
+                amd64) echo "pingwaf-linux-amd64.tar.gz" ;;
+                arm64) echo "pingwaf-linux-arm64.tar.gz" ;;
+            esac
+            ;;
+        darwin)
+            case "$arch" in
+                amd64) echo "pingwaf-darwin-amd64.tar.gz" ;;
+                arm64) echo "pingwaf-darwin-arm64.tar.gz" ;;
+            esac
+            ;;
+    esac
 }
 
-main
+ASSET_NAME="$(resolve_asset_name "$OS" "$ARCH")"
+DOWNLOAD_URL="https://github.com/${REPO}/releases/download/v${VERSION}/${ASSET_NAME}"
+
+TMPDIR="$(mktemp -d)"
+trap 'rm -rf "$TMPDIR"' EXIT
+
+info "Downloading ${ASSET_NAME}..."
+info "URL: ${DOWNLOAD_URL}"
+
+if has curl; then
+    curl -fsSL "$DOWNLOAD_URL" -o "${TMPDIR}/${ASSET_NAME}" || \
+        fatal "Download failed. Check that version v${VERSION} exists and has a ${ASSET_NAME} asset."
+elif has wget; then
+    wget -q "$DOWNLOAD_URL" -O "${TMPDIR}/${ASSET_NAME}" || \
+        fatal "Download failed. Check that version v${VERSION} exists and has a ${ASSET_NAME} asset."
+fi
+
+# ─── Extract & Install Binary ─────────────────────────────────────────────────
+info "Extracting..."
+tar -xzf "${TMPDIR}/${ASSET_NAME}" -C "$TMPDIR"
+
+# Find the binary
+BINARY_PATH="$(find "$TMPDIR" -name "$BINARY_NAME" -type f | head -n1)"
+if [[ -z "$BINARY_PATH" ]]; then
+    # Fallback: first executable file
+    BINARY_PATH="$(find "$TMPDIR" -type f -perm +111 | head -n1)"
+fi
+if [[ -z "$BINARY_PATH" ]]; then
+    fatal "Binary not found in archive."
+fi
+
+chmod +x "$BINARY_PATH"
+
+info "Installing binary to ${INSTALL_DIR}/${BINARY_NAME}..."
+if [[ -w "$INSTALL_DIR" ]]; then
+    mv "$BINARY_PATH" "${INSTALL_DIR}/${BINARY_NAME}"
+elif has sudo; then
+    sudo mv "$BINARY_PATH" "${INSTALL_DIR}/${BINARY_NAME}"
+else
+    fatal "No write permission to ${INSTALL_DIR} and sudo not available."
+fi
+
+success "Binary installed: ${INSTALL_DIR}/${BINARY_NAME}"
+
+# ─── Create Directories ───────────────────────────────────────────────────────
+create_dirs() {
+    local cmd=""
+    if [[ -w "/" ]]; then
+        cmd=""
+    elif has sudo; then
+        cmd="sudo"
+    else
+        warn "Cannot create system directories without sudo."
+        return
+    fi
+
+    $cmd mkdir -p "$CONFIG_DIR" "$DATA_DIR" "${DATA_DIR}/cache" "${DATA_DIR}/certs"
+
+    # Create pingwaf user if on Linux
+    if [[ "$OS" == "linux" ]]; then
+        if ! id -u pingwaf >/dev/null 2>&1; then
+            $cmd useradd -r -m -d "$DATA_DIR" -s /usr/sbin/nologin pingwaf 2>/dev/null || \
+            $cmd adduser -r -d "$DATA_DIR" -s /sbin/nologin pingwaf 2>/dev/null || true
+        fi
+        $cmd chown -R pingwaf:pingwaf "$CONFIG_DIR" "$DATA_DIR" 2>/dev/null || true
+    fi
+}
+
+if [[ "$OS" == "linux" ]]; then
+    info "Creating directories..."
+    create_dirs
+    success "Created ${CONFIG_DIR} and ${DATA_DIR}"
+fi
+
+# ─── Write Default Configuration ─────────────────────────────────────────────
+write_config() {
+    local config_file="${CONFIG_DIR}/pingwaf.toml"
+    if [[ -f "$config_file" ]]; then
+        warn "Config file already exists at ${config_file}, skipping."
+        return
+    fi
+
+    local cmd=""
+    [[ -w "$CONFIG_DIR" ]] || cmd="sudo"
+
+    $cmd tee "$config_file" >/dev/null <<EOF
+# PingWAF Configuration
+# Generated by install.sh on $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+# Mode: ${MODE}
+
+[server]
+db_url = "${DB_URL}"
+http_addr = "0.0.0.0:9080"
+grpc_addr = "0.0.0.0:9090"
+jwt_secret = "$(head -c 32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 32)"
+admin_email = "admin@pingwaf.local"
+admin_password = "pingwaf123"
+jwt_expiration_hours = 12
+refresh_token_expiration_hours = 720
+db_max_connections = 20
+db_min_connections = 1
+allow_registration = false
+cors_origins = []
+
+[agent]
+server_url = "http://127.0.0.1:9090"
+api_key = ""
+cache_dir = "${DATA_DIR}/cache"
+heartbeat_interval_secs = 30
+log_batch_size = 100
+log_flush_interval_secs = 5
+max_body_log_size = 8192
+fail_open = true
+reconnect_initial_delay_ms = 1000
+reconnect_max_delay_ms = 60000
+EOF
+
+    if [[ -n "$cmd" ]]; then
+        $cmd chown pingwaf:pingwaf "$config_file" 2>/dev/null || true
+        $cmd chmod 640 "$config_file"
+    fi
+
+    success "Configuration written to ${config_file}"
+}
+
+if [[ "$OS" == "linux" ]]; then
+    write_config
+fi
+
+# ─── Systemd Service ──────────────────────────────────────────────────────────
+install_systemd() {
+    if [[ "$SKIP_SYSTEMD" == "true" ]]; then
+        info "Skipping systemd service installation (--no-systemd)."
+        return
+    fi
+
+    if [[ "$OS" != "linux" ]]; then
+        info "macOS detected — skipping systemd. Use launchd or run directly."
+        return
+    fi
+
+    if ! has systemctl; then
+        warn "systemctl not found — skipping service installation."
+        return
+    fi
+
+    local service_file="/etc/systemd/system/${SERVICE_NAME}.service"
+    local exec_start="${INSTALL_DIR}/${BINARY_NAME} ${MODE}"
+
+    info "Creating systemd service..."
+
+    local cmd=""
+    [[ -w "/etc/systemd/system" ]] || cmd="sudo"
+
+    $cmd tee "$service_file" >/dev/null <<EOF
+[Unit]
+Description=PingWAF - High Performance Web Application Firewall
+Documentation=https://github.com/${REPO}
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=pingwaf
+Group=pingwaf
+ExecStart=${exec_start}
+ExecReload=/bin/kill -HUP \$MAINPID
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+Environment=PINGWAF_CONFIG=${CONFIG_DIR}/pingwaf.toml
+Environment=RUST_LOG=info
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=${DATA_DIR} ${CONFIG_DIR}
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    $cmd systemctl daemon-reload
+    success "Systemd service installed: ${SERVICE_NAME}.service"
+
+    info "To start PingWAF:"
+    echo "  sudo systemctl enable --now ${SERVICE_NAME}"
+    echo "  sudo systemctl status ${SERVICE_NAME}"
+}
+
+install_systemd
+
+# ─── PostgreSQL Check ─────────────────────────────────────────────────────────
+check_postgres() {
+    info "Checking PostgreSQL availability..."
+
+    if has psql; then
+        if psql "$DB_URL" -c "SELECT 1" >/dev/null 2>&1; then
+            success "PostgreSQL connection successful."
+        else
+            warn "psql found but cannot connect to: ${DB_URL}"
+            echo ""
+            echo "  To set up PostgreSQL:"
+            echo "    1. Install: sudo apt install postgresql-16"
+            echo "    2. Create user & database:"
+            echo "       sudo -u postgres createuser pingwaf"
+            echo "       sudo -u postgres createdb -O pingwaf pingwaf"
+            echo "       sudo -u postgres psql -c \"ALTER USER pingwaf PASSWORD 'pingwaf';\""
+            echo ""
+        fi
+    else
+        warn "PostgreSQL client (psql) not found."
+        echo ""
+        echo "  PingWAF requires PostgreSQL 14+. Install it with:"
+        echo ""
+        if [[ "$OS" == "linux" ]]; then
+            if has apt-get; then
+                echo "    sudo apt install postgresql-16"
+            elif has dnf; then
+                echo "    sudo dnf install postgresql-server"
+            elif has yum; then
+                echo "    sudo yum install postgresql-server"
+            else
+                echo "    (install PostgreSQL from your distribution's package manager)"
+            fi
+        else
+            echo "    brew install postgresql@16"
+        fi
+        echo ""
+        echo "  Then create the database:"
+        echo "    sudo -u postgres createuser pingwaf"
+        echo "    sudo -u postgres createdb -O pingwaf pingwaf"
+        echo "    sudo -u postgres psql -c \"ALTER USER pingwaf PASSWORD 'pingwaf';\""
+        echo ""
+    fi
+}
+
+check_postgres
+
+# ─── Firewall Hints ───────────────────────────────────────────────────────────
+print_firewall_hints() {
+    if [[ "$OS" != "linux" ]]; then return; fi
+
+    echo ""
+    info "Firewall ports to open:"
+    echo "    80/tcp   — HTTP traffic (proxied sites)"
+    echo "    443/tcp  — HTTPS traffic (proxied sites)"
+    echo "    9080/tcp — Admin dashboard & REST API"
+    echo "    9090/tcp — gRPC control plane (agent connections)"
+    echo ""
+    if has ufw; then
+        echo "  With UFW:"
+        echo "    sudo ufw allow 80/tcp"
+        echo "    sudo ufw allow 443/tcp"
+        echo "    sudo ufw allow 9080/tcp"
+        echo "    sudo ufw allow 9090/tcp"
+    fi
+}
+
+print_firewall_hints
+
+# ─── Success ──────────────────────────────────────────────────────────────────
+echo ""
+echo "${BOLD}${GREEN}═══════════════════════════════════════════════════════════════${NO_COLOR}"
+echo "${BOLD}${GREEN}  PingWAF v${VERSION} installed successfully!${NO_COLOR}"
+echo "${BOLD}${GREEN}═══════════════════════════════════════════════════════════════${NO_COLOR}"
+echo ""
+echo "  Binary:    ${INSTALL_DIR}/${BINARY_NAME}"
+if [[ "$OS" == "linux" ]]; then
+    echo "  Config:    ${CONFIG_DIR}/pingwaf.toml"
+    echo "  Data:      ${DATA_DIR}/"
+    echo "  Service:   systemctl ${start|stop|restart|status} ${SERVICE_NAME}"
+fi
+echo ""
+echo "  Quick start:"
+echo "    ${BINARY_NAME} ${MODE} --db-url \"${DB_URL}\""
+echo ""
+echo "  Dashboard: http://localhost:9080"
+echo "  Default credentials:"
+echo "    Email:    admin@pingwaf.local"
+echo "    Password: pingwaf123"
+echo ""
+echo "  ${YELLOW}⚠ Change the default admin password and JWT secret in production!${NO_COLOR}"
+echo ""
+echo "  Next steps:"
+echo "    1. Ensure PostgreSQL is running and accessible"
+echo "    2. Edit ${CONFIG_DIR}/pingwaf.toml with your settings"
+echo "    3. Start the service: sudo systemctl enable --now ${SERVICE_NAME}"
+echo "    4. Open the dashboard and add your first site"
+echo ""

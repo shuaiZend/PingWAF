@@ -248,11 +248,13 @@ macro_rules! register_plugin {
 mod accept_encoding;
 mod basic_auth;
 mod cache;
+mod challenge;
 mod combined_auth;
 mod compression;
 mod cors;
 mod csrf;
 mod directory;
+mod error_page;
 mod forward_auth;
 #[cfg(feature = "geo")]
 mod geo_restriction;
@@ -266,9 +268,11 @@ mod redirect;
 mod referer_restriction;
 mod request_id;
 mod response_headers;
+mod rewrite;
 mod sub_filter;
 mod traffic_splitting;
 mod ua_restriction;
+mod waf;
 
 mod plugin;
 

@@ -1,0 +1,40 @@
+# PingWAF systemd service
+# ─────────────────────────────────────────────────────────────────────────────
+# Install to: /etc/systemd/system/pingwaf.service
+# Enable:     sudo systemctl enable --now pingwaf
+# Status:     sudo systemctl status pingwaf
+# Logs:       sudo journalctl -u pingwaf -f
+# ─────────────────────────────────────────────────────────────────────────────
+
+[Unit]
+Description=PingWAF - High Performance Web Application Firewall
+Documentation=https://github.com/shuaiZend/PingWAF
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=pingwaf
+Group=pingwaf
+ExecStart=/usr/local/bin/pingwaf all-in-one
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+Environment=PINGWAF_CONFIG=/etc/pingwaf/pingwaf.toml
+Environment=RUST_LOG=info
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/pingwaf /etc/pingwaf
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

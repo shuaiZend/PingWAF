@@ -1,35 +1,96 @@
-"use client";
+import { forwardRef, useId, useState, type ReactNode } from 'react'
+import { cn } from '@/lib/utils'
 
-import * as React from "react";
-import { Switch as SwitchPrimitive } from "radix-ui";
-
-import { cn } from "@/lib/utils";
-
-function Switch({
-  className,
-  size = "default",
-  ...props
-}: React.ComponentProps<typeof SwitchPrimitive.Root> & {
-  size?: "sm" | "default";
-}) {
-  return (
-    <SwitchPrimitive.Root
-      data-slot="switch"
-      data-size={size}
-      className={cn(
-        "peer group/switch inline-flex shrink-0 items-center rounded-full border border-transparent shadow-xs transition-all outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50 data-[size=default]:h-[1.15rem] data-[size=default]:w-8 data-[size=sm]:h-3.5 data-[size=sm]:w-6 data-[state=checked]:bg-primary data-[state=unchecked]:bg-input dark:data-[state=unchecked]:bg-input/80",
-        className,
-      )}
-      {...props}
-    >
-      <SwitchPrimitive.Thumb
-        data-slot="switch-thumb"
-        className={cn(
-          "pointer-events-none block rounded-full bg-background ring-0 transition-transform group-data-[size=default]/switch:size-4 group-data-[size=sm]/switch:size-3 data-[state=checked]:translate-x-[calc(100%-2px)] data-[state=unchecked]:translate-x-0 dark:data-[state=checked]:bg-primary-foreground dark:data-[state=unchecked]:bg-foreground",
-        )}
-      />
-    </SwitchPrimitive.Root>
-  );
+export interface SwitchProps {
+  checked?: boolean
+  defaultChecked?: boolean
+  onCheckedChange?: (checked: boolean) => void
+  disabled?: boolean
+  label?: ReactNode
+  description?: ReactNode
+  size?: 'sm' | 'md'
+  className?: string
+  id?: string
 }
 
-export { Switch };
+export const Switch = forwardRef<HTMLButtonElement, SwitchProps>(
+  (
+    {
+      checked,
+      defaultChecked = false,
+      onCheckedChange,
+      disabled = false,
+      label,
+      description,
+      size = 'md',
+      className,
+      id,
+    },
+    ref,
+  ) => {
+    const generatedId = useId()
+    const switchId = id ?? generatedId
+    const isControlled = checked !== undefined
+    const [internal, setInternal] = useState(defaultChecked)
+    const isOn = isControlled ? checked : internal
+
+    const dims =
+      size === 'sm'
+        ? { track: 'h-5 w-9', thumb: 'h-4 w-4', translate: 'translate-x-4' }
+        : { track: 'h-6 w-11', thumb: 'h-5 w-5', translate: 'translate-x-5' }
+
+    const toggle = () => {
+      if (disabled) return
+      const next = !isOn
+      if (!isControlled) setInternal(next)
+      onCheckedChange?.(next)
+    }
+
+    const control = (
+      <button
+        ref={ref}
+        id={switchId}
+        type="button"
+        role="switch"
+        aria-checked={isOn}
+        disabled={disabled}
+        onClick={toggle}
+        className={cn(
+          'relative inline-flex shrink-0 items-center rounded-full border transition-colors duration-200',
+          dims.track,
+          isOn ? 'border-transparent bg-brand' : 'border-line bg-fill',
+          disabled && 'cursor-not-allowed opacity-50',
+        )}
+      >
+        <span
+          className={cn(
+            'pointer-events-none absolute left-0.5 inline-block rounded-full bg-white shadow-sm transition-transform duration-200',
+            dims.thumb,
+            isOn ? dims.translate : 'translate-x-0',
+          )}
+        />
+      </button>
+    )
+
+    if (!label && !description) {
+      return <span className={className}>{control}</span>
+    }
+
+    return (
+      <div className={cn('flex items-start gap-3', className)}>
+        {control}
+        <label
+          htmlFor={switchId}
+          className="flex cursor-pointer flex-col pt-0.5 leading-tight"
+        >
+          {label && <span className="text-sm font-medium text-fg">{label}</span>}
+          {description && (
+            <span className="mt-0.5 text-xs text-fg-subtle">{description}</span>
+          )}
+        </label>
+      </div>
+    )
+  },
+)
+
+Switch.displayName = 'Switch'

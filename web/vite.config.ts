@@ -1,56 +1,39 @@
-import { defineConfig } from "vite";
-import path from "path";
-import react from "@vitejs/plugin-react";
-import tailwindcss from "@tailwindcss/vite";
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+import tailwindcss from '@tailwindcss/vite'
+import path from 'path'
 
-function getModuleName(id: string) {
-  const arr = id.split(path.sep);
-  const index = arr.indexOf("node_modules");
-  if (index === -1 || index === arr.length - 1) {
-    return "";
-  }
-  return arr[index + 1];
-}
-
-function manualChunks(id: string) {
-  const module = getModuleName(id);
-  if (
-    ["axios", "crypto-js", "radash", "react", "zod", "zustand"].includes(module)
-  ) {
-    return "common";
-  }
-  if (id.includes("node_modules")) {
-    return "vendor";
-  }
-  if (id.includes("components/ui")) {
-    return "ui";
-  }
-}
-
-// https://vitejs.dev/config/
+// https://vite.dev/config/
 export default defineConfig({
   plugins: [react(), tailwindcss()],
-  base: "./",
   resolve: {
     alias: {
-      "@": path.resolve(import.meta.dirname, "./src"),
-    },
-  },
-  build: {
-    chunkSizeWarningLimit: 1024 * 1024,
-    rollupOptions: {
-      output: {
-        manualChunks,
-      },
+      '@': path.resolve(__dirname, './src'),
     },
   },
   server: {
+    port: 5173,
     proxy: {
-      "/api": {
-        // Defaults to the admin address `make dev` starts. Override to point the
-        // dev server at another instance: PINGAP_ADMIN_PROXY=http://host:port
-        target: process.env.PINGAP_ADMIN_PROXY || "http://127.0.0.1:3018",
+      '/api': {
+        target: 'http://localhost:9080',
+        changeOrigin: true,
       },
     },
   },
-});
+  build: {
+    outDir: 'dist',
+    sourcemap: false,
+    emptyOutDir: true,
+    chunkSizeWarningLimit: 900,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          react: ['react', 'react-dom', 'react-router-dom'],
+          charts: ['recharts'],
+          icons: ['@phosphor-icons/react'],
+          query: ['@tanstack/react-query', 'zustand'],
+        },
+      },
+    },
+  },
+})

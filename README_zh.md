@@ -1,278 +1,304 @@
-# Pingap
+<div align="center">
 
-Pingap在发布稳定版本之前，暂时不接受 pull requests，如果有问题可以先提issue，会及时处理。
+# 🛡️ PingWAF
 
-Pingap 是一款由 [`Cloudflare Pingora`](https://github.com/cloudflare/pingora) 框架驱动的高性能反向代理。它通过简洁的 TOML 文件和直观的 Web 管理界面，实现了动态、零停机的配置热更新，极大地简化了运维管理。
+**基于 [`pingap`](https://github.com/vicanso/pingap) 与 Cloudflare [`Pingora`](https://github.com/cloudflare/pingora) 构建的分布式、集中控制的高性能 Web 应用防火墙（WAF）。**
 
-其核心优势在于强大的插件体系，提供了二十多种开箱即用的功能，涵盖认证 (JWT, Key Auth)、安全 (CSRF, IP/Referer/UA 限制)、流量控制 (限流、缓存)、内容修改 (重定向、内容替换) 和可观测性 (请求 ID)。
+语义级攻击检测 · Cloudflare 风格规则 · CC 与 Bot 防护 · TLS 自动签发 · 内嵌多语言控制台
 
-这使得 Pingap 不仅仅是一个代理，更是一个灵活且可扩展的应用网关，旨在轻松应对从 API 保护到现代化 Web 应用部署的各类复杂场景。
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
+[![Rust](https://img.shields.io/badge/rust-1.96%2B-orange.svg)](https://www.rust-lang.org/)
+[![Build](https://github.com/shuaiZend/PingWAF/actions/workflows/test.yml/badge.svg)](https://github.com/shuaiZend/PingWAF/actions/workflows/test.yml)
+[![Docker](https://img.shields.io/badge/docker-compose%20ready-2496ED?logo=docker&logoColor=white)](./docker-compose.yml)
 
+**[English](./README.md) | [简体中文](./README_zh.md)**
 
-[详细文档](https://pingap.io/zh/) · [English](https://pingap.io/) | [使用示例](./examples/README.md) | [插件](./pingap-plugin/README.md) | [组件](./docs/README.md)
+[快速开始](#-快速开始) · [架构概览](#-架构概览) · [核心特性](#-核心特性) · [文档导航](#-文档导航) · [参与贡献](./CONTRIBUTING.md)
 
+</div>
 
-```mermaid
-flowchart LR
-  internet("互联网") -- 客户端请求 --> pingap["Pingap"]
-  pingap -- 转发:pingap.io/api/* --> apiUpstream["10.1.1.1,10.1.1.2"]
-  pingap -- 转发:cdn.pingap.io --> cdnUpstream["10.1.2.1,10.1.2.2"]
-  pingap -- 转发:/* --> upstream["10.1.3.1,10.1.3.2"]
-```
+---
 
-## 核心特性
+## 📖 PingWAF 是什么？
 
-- 🚀 高性能与高可靠性
-  - 基于 `Rust` 构建，确保内存安全与顶尖性能。
-  - 由 `Cloudflare Pingora` 驱动，一个经过实战考验的异步网络库。
-  - 支持 HTTP/1.1、HTTP/2 和 gRPC-web 代理。
+**PingWAF** 是一款高性能的开源 **Web 应用防火墙（WAF）**，把 Cloudflare 级别的边缘安全能力带到你自己掌控的基础设施中。它构建于 [`pingap`](https://github.com/vicanso/pingap)——一款由 Cloudflare [`Pingora`](https://github.com/cloudflare/pingora) 网络框架驱动的生产级反向代理——之上，并在其上叠加了**分布式、集中控制**的安全层。
 
-- 🔧 动态化与易用性
-  - 通过热更新实现零停机的配置变更。
-  - 简单且人类可读的 TOML 配置文件。
-  - 功能齐全的 Web UI，提供直观的实时管理。
-  - 同时支持文件和 etcd 作为配置后端。
-  - 支持配置变更历史记录功能，可一键恢复到历史版本。
+单一的**控制面（Control Plane）**负责定义站点、规则与策略；一个或多个**数据面（Data Plane）Agent** 在边缘执行它们。规则、日志与指标通过持久化的 **gRPC 双向流**在两者之间流转，因此在控制台修改策略后，几秒内即可下发到所有 Agent——无需重载、无需停机。
 
-- 🧩 强大的可扩展性
-  - 丰富的插件体系，用于处理常见的网关任务。
-  - 支持基于主机、路径和正则表达式的高级路由。
-  - 内置通过静态列表、DNS 或 Docker 标签的服务发现机制。
-  - 通过 Let's Encrypt 实现自动化 HTTPS（支持 HTTP-01 和 DNS-01 两种质询方式）。
+- 🎯 **语义级检测**——通过 `libinjection` + Aho-Corasick 签名匹配、异常评分以及 Cloudflare 风格表达式规则，覆盖 SQLi / XSS / RCE / 路径穿越 / 命令注入。
+- 🕸️ **为分布式而生**——既可单进程运行全部能力（`all-in-one`），也可将数据面横向扩展为多个独立的边缘 Agent（`server` + `agent`）。
+- 🧭 **开箱即用，默认关闭**——每一项防护能力默认关闭，按站点单独开启，让你对流量拥有完全的掌控。
+- ⚡ **纯 Rust 打造**——内存安全、异步 I/O，单个自包含二进制文件，控制台已内嵌其中。
 
-- 📊 现代化的可观测性
-  - 原生的 Prometheus 指标监控（支持 pull 和 push 模式）。
-  - 集成 OpenTelemetry，支持分布式追踪。
-  - 超过 30 种变量的高度可定制的访问日志。
-  - 包含上游连接、处理时间等详细的性能指标。
+> PingWAF 是一个独立项目，与 Cloudflare 及 `pingap` 维护者均无关联，也未获其背书。详见[致谢](#-致谢)。
 
-## 🚀 快速入门
+---
 
-上手 `Pingap` 最简单的方式是使用 `Docker Compose`。
-
-1. 创建一个 `docker-compose.yml` 文件：
-
-```yaml
-# docker-compose.yml
-version: '3.8'
-
-services:
-  pingap:
-    image: vicanso/pingap:latest # 生产环境建议使用具体的版本号，如 vicanso/pingap:0.12.1-full
-    container_name: pingap-instance
-    restart: always
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      # 挂载本地目录以持久化所有配置和数据
-      - ./pingap_data:/opt/pingap
-    environment:
-      # 使用环境变量进行配置
-      - PINGAP_CONF=/opt/pingap/conf
-      - PINGAP_ADMIN_ADDR=0.0.0.0:80/pingap
-      - PINGAP_ADMIN_USER=pingap
-      - PINGAP_ADMIN_PASSWORD=<YourSecurePassword> # 修改此密码！
-    command:
-      # 启动 pingap 并启用热更新
-      - pingap
-      - --autoreload
-```
-
-2. 创建一个数据目录并运行：
-
-```bash
-mkdir pingap_data
-docker-compose up -d
-```
-
-3. 访问管理后台：
-
-您的 Pingap 实例现已运行！您可以使用您设置的凭证，通过 http://localhost/pingap 访问 Web 管理界面。
-
-
-### 通过 curl 安装二进制
-
-Linux 与 macOS 用户可以用一条命令将最新的预编译二进制安装到 `/usr/local/bin/pingap`：
-
-```bash
-curl -sSL https://raw.githubusercontent.com/vicanso/pingap/main/install.sh | sh
-```
-
-可选环境变量：
-
-- `PINGAP_FULL=1` —— 安装 `-full` 构建（启用所有可选特性）
-- `PINGAP_LIBC=gnu` —— Linux 上使用 glibc 构建（默认是静态链接的 musl 构建）
-- `PINGAP_TLS=rustls` —— Linux 上安装 `-rustls-full` 构建（rustls TLS 后端，启用所有可选特性，不含 OpenSSL），见 [TLS 后端](#tls-后端)
-
-```bash
-# 安装完整特性版本
-curl -sSL https://raw.githubusercontent.com/vicanso/pingap/main/install.sh | PINGAP_FULL=1 sh
-```
-
-支持的平台：`Linux x86_64/arm64`、`Darwin x86_64/arm64`。所有可用的构建产物见 [releases 页面](https://github.com/vicanso/pingap/releases)。
-
-要了解更多详细说明，包括如何通过二进制文件运行，请查阅我们的[文档](https://pingap.io/zh/#/)。
-
-
-
-### 不写配置文件直接启动代理
-
-一条命令即可把一个域名以 https 对外提供，并转发到后端：
-
-```bash
-# 证书向 Let's Encrypt 申请
-pingap --domain=pingap.io --upstream=192.168.1.1:3000
-
-# 或使用自己的证书
-pingap --domain=pingap.io --upstream=192.168.1.1:3000 --cert=/etc/ssl/pingap.io
-```
-
-不带 `--cert` 时，Pingap 通过 HTTP-01 质询向 Let's Encrypt 申请证书，因此 `pingap.io` 必须解析到本机，且 80 端口可从公网访问。签发的证书保存在 `~/.pingap/acme/<domains>.toml`，重启时复用——申请有速率限制，请勿删除。其余一切仍来自命令行：改动 `--upstream` 在下次启动时生效，不影响证书。
-
-`--cert` 接受证书文件本身或其所在目录——常见的 `fullchain.pem` / `privkey.pem`、`cert.pem` / `key.pem` 与 `tls.crt` / `tls.key` 布局会自动识别，其他命名用 `--key` 指定。有证书时监听默认为 `0.0.0.0:443`，既无证书也无域名时为 `0.0.0.0:80`，`--addr` 可覆盖。`--upstream` 为逗号分隔的后端列表，`--domain` 为逗号分隔的主机名（省略则以明文 http 服务所有主机），未列出的主机的请求返回 404。
-
-配置在每次启动时生成，因此不能通过管理界面修改：超出单个 server 的需求请使用 `--conf`，它不能与这些参数同时使用。
-
-## 动态配置
-
-Pingap 的设计旨在无需停机即可适应配置变更。
-
-热更新 (--autoreload)：对于大多数变更——如更新上游服务、路由或插件——Pingap 会在10秒内应用新配置，无需重启。这是容器化环境的推荐模式。
-
-平滑重启 (-a 或 --autorestart)：对于基础性变更（如修改服务器监听端口），此模式会执行一次完整的、零停机的重启，确保不丢失任何请求。
-
-交接以“就绪”而不是计时为准：新进程以 `-d -u` 拉起，一旦准备好接管监听就通过升级 socket 旁边的一个 unix socket 回报，旧进程此时才向自己发送 SIGQUIT。若新进程退出、其守护进程死亡，或先到了 `basic.restart_ready_timeout`（默认 1m），本次重启作废，旧进程继续服务。
-
-
-## 🔧 开发
-
-```bash
-make dev
-```
-
-如果需要 Web 管理界面，需要安装 nodejs 并构建 Web 资产。
-
-
-```bash
-# 生成 Web 管理界面资产
-cd web
-npm i 
-cd ..
-make build-web
-```
-
-### TLS 后端
-
-默认构建使用 OpenSSL 终止 TLS（由 `openssl` crate 从源码编译）。若想改用 rustls（不再从源码编译 OpenSSL；但仍需要 C 编译器，rustls 的密码学库 ring 与 aws-lc-rs 含 C 和汇编代码）：
-
-```bash
-cargo build --release --no-default-features --features tls-rustls
-# 连同可选特性一起
-cargo build --release --no-default-features --features tls-rustls,full
-```
-
-rustls 构建会在配置校验阶段（启动、`--test`、auto-restart）拒绝 server 级的 `tls_min_version`、`tls_max_version`、`tls_cipher_list` 与 `tls_ciphersuites`：它固定提供 TLS 1.2 与 1.3，使用 rustls 默认密码套件。Admin UI 在当前二进制为 rustls 构建时会禁用这些字段。其余能力，包括按 SNI 动态选证书、自签名 CA 签发、ACME 与上游 `ca`，行为一致。预构建镜像也提供同一变体：`vicanso/pingap:rustls-full`（发布版本为 `:<版本>-rustls-full`），与 `:latest`、`:full` 并列。校验上游时有一点差异需要知道：rustls（webpki）会拒绝带 `CA:TRUE` 的服务端证书，而 OpenSSL 接受，所以后端若用 `openssl req -x509` 随手生成的自签名证书，需要换成由 CA 签发的叶子证书（或不带 CA 标记的自签名叶子），上游 `ca` 选项才能信任它。`--version` 长格式、启动日志与 Admin 首页都会标明二进制使用的后端。
-
-## 📝 应用配置
-
-```toml
-[upstreams.charts]
-addrs = ["127.0.0.1:5000"]
-
-[locations.lo]
-upstream = "charts"
-path = "/"
-
-[servers.test]
-addr = "0.0.0.0:6188"
-locations = ["lo"]
-```
-
-所有的 TOML 配置可以查阅：[https://pingap.io/zh/#/crates/config](https://pingap.io/zh/#/crates/config)。
-
-
-## 🔄 请求处理流程
+## 🏗️ 架构概览
 
 ```mermaid
-graph TD;
-    server["HTTP服务"];
-    locationA["Location A"];
-    locationB["Location B"];
-    locationPluginListA["转发插件列表A"];
-    locationPluginListB["转发插件列表B"];
-    upstreamA1["上游服务A1"];
-    upstreamA2["上游服务A2"];
-    upstreamB1["上游服务B1"];
-    upstreamB2["上游服务B2"];
-    locationResponsePluginListA["响应插件列表A"];
-    locationResponsePluginListB["响应插件列表B"];
+graph TB
+    Client[客户端 / 浏览器]
 
-    start("新的请求") --> server
+    subgraph ControlPlane["控制面 (pingwaf server)"]
+        Dashboard[内嵌控制台 + REST API :9080]
+        GRPC[gRPC ControlPlane 服务 :9090]
+        PG[(PostgreSQL 14+)]
+        ES[(Elasticsearch - 可选)]
+    end
 
-    server -- "host:HostA, Path:/api/*" --> locationA
+    subgraph DataPlane["数据面 (pingwaf agents)"]
+        AgentA[边缘 Agent A :80 / :443]
+        AgentB[边缘 Agent B :80 / :443]
+    end
 
-    server -- "Path:/rest/*"--> locationB
+    Origin[源站 / 上游服务]
 
-    locationA -- "顺序执行转发插件" --> locationPluginListA
-
-    locationB -- "顺序执行转发插件" --> locationPluginListB
-
-    locationPluginListA -- "转发至: 10.0.0.1:8001" --> upstreamA1
-
-    locationPluginListA -- "转发至: 10.0.0.2:8001" --> upstreamA2
-
-    locationPluginListA -- "处理完成" --> response
-
-    locationPluginListB -- "转发至: 10.0.0.1:8002" --> upstreamB1
-
-    locationPluginListB -- "转发至: 10.0.0.2:8002" --> upstreamB2
-
-    locationPluginListB -- "处理完成" --> response
-
-    upstreamA1 -- "顺序执行响应插件" --> locationResponsePluginListA
-    upstreamA2 -- "顺序执行响应插件" --> locationResponsePluginListA
-
-    upstreamB1 -- "顺序执行响应插件" --> locationResponsePluginListB
-    upstreamB2 -- "顺序执行响应插件" --> locationResponsePluginListB
-
-    locationResponsePluginListA --> response
-    locationResponsePluginListB --> response
-
-    response["HTTP响应"] --> stop("日志记录");
+    Client -->|HTTP / HTTPS| AgentA
+    Client -->|HTTP / HTTPS| AgentB
+    AgentA <-->|gRPC 双向流| GRPC
+    AgentB <-->|gRPC 双向流| GRPC
+    Dashboard --> PG
+    GRPC --> PG
+    GRPC --> ES
+    AgentA -->|安全流量| Origin
+    AgentB -->|安全流量| Origin
 ```
 
-## 📊 性能测试
+控制面与数据面通过 `ControlPlane` gRPC 服务通信（定义于 [`control_plane.proto`](./pingwaf-proto/proto/control_plane.proto)），共包含 6 个 RPC：
 
-CPU: M4 Pro, Thread: 1
+| RPC | 类型 | 用途 |
+| --- | --- | --- |
+| `RegisterAgent` | 一元调用 | Agent 加入集群，获取 ID 与心跳间隔 |
+| `Heartbeat` | 双向流 | 上行存活/统计，下行实时命令 |
+| `SyncRules` | 服务端流 | 策略变更时将规则包推送到 Agent |
+| `ShipLogs` | 客户端流 | 批量请求/攻击日志流式上报控制面 |
+| `ShipMetrics` | 客户端流 | 批量流量指标流式上报控制面 |
+| `GetSiteConfig` | 一元调用 | Agent 拉取单个站点的完整配置 |
 
-### Ping (无访问日志)
+**同一个二进制，两种部署形态：**
+
+- **All-in-One（一体化）**——控制面 + 数据面运行于单进程。适合单节点、小型部署与本地评估。
+- **Distributed（分布式）**——一个独立的 `server`（控制面）+ 多个边缘 `agent` 进程。适合集群、多地域部署与集中管理。
+
+---
+
+## ✨ 核心特性
+
+### 🛡️ 安全检测
+- **语义级 WAF 引擎**，覆盖 SQL 注入、XSS、RCE、路径穿越与命令注入——由 `libinjection` 启发式算法与 Aho-Corasick 多模式签名匹配驱动。
+- **四阶段流水线**：`normalize`（请求归一化）→ `signatures`（签名 / libinjection）→ `expression`（规则表达式）→ `anomaly score`（加权异常评分）。
+- **Cloudflare 风格表达式规则**——可编写形如 `http.request.uri.path contains "/admin" and ip.src in {1.2.3.0/24}` 的条件。
+- **异常评分**，四种裁决结果：`Pass`（放行）、`Monitor`（观察）、`Block`（拦截）、`Challenge`（挑战）。
+- **托管规则集**——可按站点开关的精选签名。
+
+### 🤖 CC 与 Bot 防护
+- **CC 防护 / 5 秒盾**——JavaScript 挑战、PoW（工作量证明）与交互式挑战。
+- **浏览器指纹**与 **HMAC 签名 clearance cookie**，用于区分真人与机器人。
+- 针对自动化流量的 **Bot 防护**规则。
+
+### 🚦 访问控制
+- **IP 访问规则**——`block` / `allow` / `challenge` / `rate_limit`，支持 CIDR 网段与 CSV 批量导入。
+- **Geo 地域限制**——按国家/地区放行或拦截。
+- **多维限流**——按 IP、路径、请求头等多个维度。
+
+### 🌊 流量管理
+- **边缘缓存**，支持按域名的磁盘配额与 LRU 驱逐。
+- **请求 / 响应改写**——头部、路径与响应体。
+- **自定义错误页**，基于 Tera 模板渲染。
+
+### 🔐 TLS 与证书
+- **ACME / Let's Encrypt 自动签发与续期**（HTTP-01 与 DNS-01）。
+- **多 DNS 提供商**支持 DNS-01（阿里云、Cloudflare、华为云、腾讯云、手动）。
+
+### 📊 可观测性
+- **全量请求日志写入 Elasticsearch**，支持响应体截断与 WAL 缓冲以保证可靠性。
+- **Analytics 分析**面板，呈现流量与攻击趋势。
+- 每个 Agent 上报 Prometheus 风格指标。
+
+### 🎛️ 管理控制台
+- **JWT + bcrypt 认证**与**多租户**隔离。
+- **内嵌多语言控制台**（English / 简体中文 / 日本語），通过 `rust-embed` 编译进二进制。
+- **所有功能默认关闭**——按站点显式开启防护。
+
+---
+
+## 🧱 技术栈
+
+| 层次 | 技术 |
+| --- | --- |
+| 数据面 / 代理 | Rust · [`Pingora`](https://github.com/cloudflare/pingora) · [`pingap`](https://github.com/vicanso/pingap) |
+| 控制面 API | [`Axum`](https://github.com/tokio-rs/axum)（REST）· [`tonic`](https://github.com/hyperium/tonic)（gRPC） |
+| 持久化 | [`SeaORM`](https://www.sea-ql.org/SeaORM/) · PostgreSQL 14+（推荐 16） |
+| 日志存储 | Elasticsearch（可选） |
+| 控制台 | React 19 · Vite · Tailwind CSS v4（通过 `rust-embed` 内嵌） |
+| WAF 引擎 | `libinjection` · Aho-Corasick · 表达式求值器 |
+
+**核心 crate：**
+
+| Crate | 职责 |
+| --- | --- |
+| [`pingwaf-proto`](./pingwaf-proto) | 控制面 gRPC 协议定义（单一来源：`control_plane.proto`） |
+| [`pingwaf-server`](./pingwaf-server) | 控制面：Axum REST + tonic gRPC + SeaORM/PostgreSQL + ES 日志 + 内嵌前端 + Agent 健康监控 |
+| [`pingwaf-agent`](./pingwaf-agent) | 数据面 Agent：连接控制面、规则缓存 + 磁盘持久化、回传日志/指标、接收命令 |
+| [`pingwaf-waf`](./pingwaf-waf) | 检测引擎：归一化 → 签名 → 表达式 → 异常评分 |
+| [`pingwaf-challenge`](./pingwaf-challenge) | 动态挑战子系统：JS 5 秒盾、交互式挑战、PoW、浏览器指纹、HMAC 签名 clearance cookie |
+
+---
+
+## 🚀 快速开始
+
+> **注意：** 预编译 Release 二进制**尚未发布**。当前推荐路径为 **Docker Compose** 与**源码编译**。一键安装脚本（`install.sh`）将在 Release 资产发布后可用。
+
+### 方式 A —— Docker Compose（推荐）
+
+仓库内置的 [`docker-compose.yml`](./docker-compose.yml) 会以 `all-in-one` 模式连同 PostgreSQL 一起启动 PingWAF：
 
 ```bash
-wrk 'http://127.0.0.1:6118/ping' --latency
+git clone https://github.com/shuaiZend/PingWAF.git
+cd PingWAF
 
-Running 10s test @ http://127.0.0.1:6118/ping
-  2 threads and 10 connections
-  Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency    66.41us   23.67us   1.11ms   76.54%
-    Req/Sec    73.99k     2.88k   79.77k    68.81%
-  Latency Distribution
-     50%   67.00us
-     75%   80.00us
-     90%   91.00us
-     99%  116.00us
-  1487330 requests in 10.10s, 194.32MB read
-Requests/sec: 147260.15
-Transfer/sec:     19.24MB
+# 启动控制面 + 数据面 + PostgreSQL
+docker compose up -d
 ```
 
+随后打开控制台：
 
+- **地址：** http://localhost:9080
+- **邮箱：** `admin@pingwaf.local`
+- **密码：** `pingwaf123`
 
+> ⚠️ **在任何生产环境使用前，请务必修改默认管理员密码与 `PINGWAF_JWT_SECRET`。**
 
-## 📦 最低支持rust版本
+健康检查：`GET http://localhost:9080/healthz`。
 
-最低支持的rust版本为1.83
+### 方式 B —— 源码编译
 
-## 📄 开源协议
+**环境要求**
 
-本项目采用 [Apache License, Version 2.0](./LICENSE) 开源协议。
+| 工具 | 版本 | 说明 |
+| --- | --- | --- |
+| Rust | 1.96+（MSRV） | CI/Docker 使用 1.98.0 构建 |
+| Node.js | 22 | 构建控制台所需 |
+| `protoc` | 任意较新版本 | **必需**——用于 gRPC 代码生成 |
+| `cmake` | 任意较新版本 | 构建 TLS 后端（OpenSSL）所需 |
+| PostgreSQL | 14+（推荐 16） | 控制面数据存储 |
+
+> ⚠️ **`protoc` 为必需项。** 若缺失，`pingwaf-proto` 会静默降级为占位文件，导致下游 crate 编译失败。请先安装：
+>
+> ```bash
+> brew install protobuf                        # macOS
+> sudo apt install protobuf-compiler cmake     # Debian / Ubuntu
+> ```
+
+**编译与运行**
+
+```bash
+git clone https://github.com/shuaiZend/PingWAF.git
+cd PingWAF
+
+# 1. 构建内嵌控制台
+cd web && npm ci && npm run build && cd ..
+
+# 2. 构建 pingwaf 二进制
+cargo build --release --bin pingwaf --features full
+
+# 3. 以 all-in-one 模式运行
+./target/release/pingwaf all-in-one \
+  --db-url "postgres://pingwaf:pingwaf@localhost:5432/pingwaf"
+```
+
+👉 完整流程（数据库准备、首个站点、分布式 Agent、systemd）请见 **[docs/quick-start.md](./docs/quick-start.md)**。
+
+---
+
+## 🧭 运行模式
+
+PingWAF 是单一二进制（`pingwaf`），与 `pingap` 共享入口。它通过 CLI 子命令**或** `PINGWAF_MODE` 环境变量选择运行模式。
+
+| 模式 | 命令 | 角色 |
+| --- | --- | --- |
+| **控制面** | `pingwaf server` | REST API + gRPC 服务 + 控制台 + PostgreSQL。不代理流量。 |
+| **数据面** | `pingwaf agent` | 连接远端控制面，执行规则，在 :80/:443 代理流量。 |
+| **All-in-One** | `pingwaf all-in-one` | 单进程同时运行上述两者（Agent 通过本地回环连接 Server）。 |
+
+```bash
+# 等价于 `pingwaf all-in-one`
+PINGWAF_MODE=all-in-one ./pingwaf
+```
+
+---
+
+## ⚙️ 配置说明
+
+PingWAF 通过 **`PINGWAF_*` 环境变量**与 **CLI 参数**进行配置（CLI 参数优先级高于环境变量）。
+
+> ℹ️ 仓库根目录的 [`pingwaf.toml`](./pingwaf.toml) 仅为**参考示例**——进程运行时并不会加载它。请使用环境变量或 CLI 参数。
+
+### 关键环境变量
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `PINGWAF_MODE` | — | `server`、`agent` 或 `all-in-one` |
+| `PINGWAF_DB_URL` | `postgres://pingwaf:pingwaf@localhost:5432/pingwaf` | PostgreSQL DSN |
+| `PINGWAF_ADMIN_ADDR` | `0.0.0.0:9080` | REST API + 控制台监听地址 |
+| `PINGWAF_GRPC_ADDR` | `0.0.0.0:9090` | gRPC 控制面监听地址 |
+| `PINGWAF_JWT_SECRET` | `change-me-in-production` | JWT 签名密钥（**≥ 16 字符**，生产必改） |
+| `PINGWAF_ADMIN_EMAIL` | `admin@pingwaf.local` | 初始管理员邮箱 |
+| `PINGWAF_ADMIN_PASSWORD` | `pingwaf123` | 初始管理员密码（**生产必改**） |
+| `PINGWAF_ALLOW_REGISTRATION` | `false` | `POST /api/v1/auth/register` 是否接受注册 |
+| `PINGWAF_HEARTBEAT_INTERVAL` | `15` | 下发给 Agent 的心跳间隔（秒） |
+| `PINGWAF_SERVER_URL` | `http://localhost:9090` | *（agent）* 控制面 gRPC 地址 |
+| `PINGWAF_API_KEY` | *（空）* | *（agent）* API Key；为空则通过本地回环自动注册 |
+| `PINGWAF_CACHE_DIR` | `./data/cache` | *（agent）* 本地规则缓存目录 |
+| `PINGWAF_ES_ENABLED` | `false` | 是否启用 Elasticsearch 日志投递 |
+| `PINGWAF_ES_URLS` | *（空）* | 逗号分隔的 Elasticsearch 地址 |
+
+### 默认端口
+
+| 端口 | 用途 |
+| --- | --- |
+| `9080` | REST API + 内嵌控制台（健康检查：`GET /healthz`） |
+| `9090` | gRPC 控制面（Agent 连接此端口） |
+| `80` / `443` | 代理流量（创建站点后绑定） |
+
+👉 完整配置参考：**[docs/deployment.md](./docs/deployment.md)** 与 **[docs/api.md](./docs/api.md)**。
+
+---
+
+## 📚 文档导航
+
+| 文档 | 内容 |
+| --- | --- |
+| [docs/quick-start.md](./docs/quick-start.md) | 从零开始，保护你的第一个站点 |
+| [docs/deployment.md](./docs/deployment.md) | Docker、二进制 + systemd、分布式拓扑 |
+| [docs/user-guide.md](./docs/user-guide.md) | 控制台使用、站点、规则与策略 |
+| [docs/api.md](./docs/api.md) | REST API 参考（`http://<host>:9080/api/v1`） |
+| [docs/README.md](./docs/README.md) | 完整文档索引 |
+| [CONTRIBUTING.md](./CONTRIBUTING.md) | 如何参与贡献 |
+| [SECURITY.md](./SECURITY.md) | 漏洞披露政策 |
+| [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md) | 社区行为准则 |
+
+---
+
+## 🤝 参与贡献
+
+欢迎贡献代码！在提交 Pull Request 前，请先阅读 **[CONTRIBUTING.md](./CONTRIBUTING.md)**；如需负责任地报告安全漏洞，请见 **[SECURITY.md](./SECURITY.md)**。
+
+---
+
+## 🙏 致谢
+
+PingWAF 建立在优秀的开源项目之上：
+
+- **[pingap](https://github.com/vicanso/pingap)**（作者 Tree Xie）——PingWAF 数据面所依托的反向代理基础（路由、插件、ACME、缓存、热重载）。
+- **[Pingora](https://github.com/cloudflare/pingora)**（Cloudflare）——驱动 `pingap` 的异步网络框架。
+- **[libinjection](https://github.com/client9/libinjection)**——WAF 引擎所使用的 SQLi/XSS 检测启发式算法。
+
+PingWAF 是在上述项目之上的衍生作品，新增了 WAF 控制面、数据面 Agent 与检测引擎。它与上游依赖一样，采用相同的 **[Apache License 2.0](./LICENSE)** 分发，并保留了 `pingap`/`Pingora` 的原始版权声明。PingWAF 与 Cloudflare 及 `pingap` 项目**均无关联，也未获其背书**。
+
+---
+
+## 📄 License
+
+PingWAF 基于 **[Apache License 2.0](./LICENSE)** 发布。

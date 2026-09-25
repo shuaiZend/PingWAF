@@ -1,29 +1,62 @@
-# Documents
+# PingWAF Documentation
 
-- [acme chart](./acme_chart.md)
-- [modules](./modules.md)
-- **Chinese translations** — [zh/](./zh/) (home, plugins, crates, guide)
-- **Documentation site** (VitePress, bilingual) — assembled by
-  [`scripts/build-website.sh`](../scripts/build-website.sh), built under
-  [`website/`](../website/), deployed by
-  [`.github/workflows/pages.yml`](../.github/workflows/pages.yml).
+Welcome to the PingWAF documentation index. PingWAF is a distributed,
+centrally-controlled Web Application Firewall built on
+[`pingap`](https://github.com/vicanso/pingap) and Cloudflare
+[`Pingora`](https://github.com/cloudflare/pingora).
 
-  | URL | Content |
-  | --- | --- |
-  | <https://pingap.io/> | English (from crate / plugin READMEs) |
-  | <https://pingap.io/zh/> | 中文 (from `docs/zh/`) |
+> Project home: [`README.md`](../README.md) · [中文](../README_zh.md)
 
-  Local preview:
+## 🚀 Getting started
 
-  ```bash
-  ./scripts/build-website.sh
-  cd website && npm install && npm run docs:dev
-  ```
+| Document | What you'll find |
+| --- | --- |
+| [quick-start.md](./quick-start.md) | From zero to your first protected site: prerequisites, install, first run |
+| [deployment.md](./deployment.md) | Docker Compose, binary + systemd, and distributed (server + agents) topologies |
+| [user-guide.md](./user-guide.md) | Dashboard walkthrough — sites, rules, policies, IP access, rate limiting |
+| [api.md](./api.md) | REST API reference (base URL `http://<host>:9080/api/v1`) |
 
-## Crate documentation
+## 🧭 Project & community
 
-Each workspace crate has its own README describing what it owns, how it is
-configured and where it sits in the dependency graph.
+| Document | What you'll find |
+| --- | --- |
+| [CONTRIBUTING.md](../CONTRIBUTING.md) | How to contribute — setup, workflow, code style |
+| [SECURITY.md](../SECURITY.md) | Vulnerability disclosure policy |
+| [CODE_OF_CONDUCT.md](../CODE_OF_CONDUCT.md) | Community guidelines |
+| [LICENSE](../LICENSE) | Apache License 2.0 |
+
+## 🏗️ Architecture at a glance
+
+```
+Client ──HTTP/HTTPS──► Data-plane Agent (:80/:443)
+                              │  gRPC bidi streams (rules / logs / metrics)
+                              ▼
+                    Control-plane Server
+                    ├─ REST API + Dashboard (:9080)
+                    ├─ gRPC ControlPlane    (:9090)
+                    ├─ PostgreSQL (state)
+                    └─ Elasticsearch (logs, optional)
+```
+
+Run everything in one process with `all-in-one`, or split the control plane
+(`server`) from one or many edge agents (`agent`).
+
+## 📦 Crate documentation
+
+PingWAF adds five WAF-specific crates on top of the `pingap` proxy foundation.
+
+**WAF crates:**
+
+| Crate | What it does |
+| --- | --- |
+| [pingwaf-proto](../pingwaf-proto) | Control-plane gRPC protocol definitions (single source: `control_plane.proto`) |
+| [pingwaf-server](../pingwaf-server) | Control plane: Axum REST + tonic gRPC + SeaORM/PostgreSQL + ES logs + embedded frontend + agent health monitoring |
+| [pingwaf-agent](../pingwaf-agent) | Data-plane agent: connects to the control plane, caches rules with disk persistence, ships logs/metrics, receives commands |
+| [pingwaf-waf](../pingwaf-waf) | Detection engine: normalize → signatures → expression → anomaly score |
+| [pingwaf-challenge](../pingwaf-challenge) | Dynamic challenges: JS 5-second shield, interactive challenge, PoW, fingerprinting, HMAC clearance cookies |
+
+**Proxy foundation (`pingap-*`) — each crate has its own README** describing what
+it owns, how it is configured and where it sits in the dependency graph:
 
 | Crate | What it does |
 | --- | --- |
@@ -47,8 +80,14 @@ configured and where it sits in the dependency graph.
 | [pingap-webhook](../pingap-webhook/README.md) | Operational notifications to WeCom / DingTalk / HTTP |
 | [pingap-proxy](../pingap-proxy/README.md) | The proxy engine: lifecycle, routing, server configuration |
 
-## Plugin documentation
+## 🔌 Plugin documentation
 
 Every plugin has a page covering its configuration keys, worked examples and the
 caveats worth knowing before you deploy it:
 [pingap-plugin/docs](../pingap-plugin/README.md#plugin-index).
+
+## 🌐 Reference material
+
+- [acme_chart.md](./acme_chart.md) — ACME / Let's Encrypt issuance flow.
+- [modules.md](./modules.md) — module map of the workspace.
+- **Chinese translations** — [zh/](./zh/) (home, plugins, crates, guide).

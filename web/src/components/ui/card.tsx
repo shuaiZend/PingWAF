@@ -1,95 +1,93 @@
-import * as React from "react";
+import type { HTMLAttributes, ReactNode } from 'react'
+import { cn } from '@/lib/utils'
 
-import { cn } from "@/lib/utils";
+export interface CardProps extends HTMLAttributes<HTMLDivElement> {
+  children: ReactNode
+  /** Adds a subtle hover lift — useful for clickable cards. */
+  interactive?: boolean
+  padded?: boolean
+}
 
-function Card({ className, ...props }: React.ComponentProps<"div">) {
+export function Card({
+  className,
+  children,
+  interactive = false,
+  padded = false,
+  ...props
+}: CardProps) {
   return (
     <div
-      data-slot="card"
       className={cn(
-        // Console plates are hairline-bordered and own their own padding: the v4
-        // default (py-6 + gap-6) fights the dense label/value rows this app is
-        // built from, and several plates are full-height scroll containers.
-        "flex flex-col rounded-lg border bg-card text-card-foreground",
+        'rounded-lg border border-line bg-elevated shadow-sm',
+        padded && 'p-5',
+        interactive &&
+          'transition-[box-shadow,transform,border-color] duration-150 hover:-translate-y-0.5 hover:border-fill hover:shadow-md',
         className,
       )}
       {...props}
-    />
-  );
+    >
+      {children}
+    </div>
+  )
 }
 
-function CardHeader({ className, ...props }: React.ComponentProps<"div">) {
+export interface CardHeaderProps extends Omit<HTMLAttributes<HTMLDivElement>, 'title'> {
+  title?: ReactNode
+  description?: ReactNode
+  action?: ReactNode
+}
+
+export function CardHeader({
+  className,
+  title,
+  description,
+  action,
+  children,
+  ...props
+}: CardHeaderProps) {
   return (
     <div
-      data-slot="card-header"
       className={cn(
-        "@container/card-header grid auto-rows-min grid-rows-[auto_auto] items-start gap-2 px-6 has-data-[slot=card-action]:grid-cols-[1fr_auto] [.border-b]:pb-6",
+        'flex items-start justify-between gap-4 border-b border-line px-5 py-4',
         className,
       )}
       {...props}
-    />
-  );
+    >
+      {children ?? (
+        <div className="min-w-0">
+          {title && (
+            <h3 className="truncate text-[15px] font-semibold text-fg-strong">{title}</h3>
+          )}
+          {description && (
+            <p className="mt-0.5 text-[13px] leading-relaxed text-fg-subtle">
+              {description}
+            </p>
+          )}
+        </div>
+      )}
+      {action && <div className="flex shrink-0 items-center gap-2">{action}</div>}
+    </div>
+  )
 }
 
-function CardTitle({ className, ...props }: React.ComponentProps<"div">) {
+export function CardBody({ className, children, ...props }: HTMLAttributes<HTMLDivElement>) {
   return (
-    <div
-      data-slot="card-title"
-      className={cn("leading-none font-semibold", className)}
-      {...props}
-    />
-  );
+    <div className={cn('px-5 py-4', className)} {...props}>
+      {children}
+    </div>
+  )
 }
 
-function CardDescription({ className, ...props }: React.ComponentProps<"div">) {
+export function CardFooter({ className, children, ...props }: HTMLAttributes<HTMLDivElement>) {
   return (
     <div
-      data-slot="card-description"
-      className={cn("text-sm text-muted-foreground", className)}
-      {...props}
-    />
-  );
-}
-
-function CardAction({ className, ...props }: React.ComponentProps<"div">) {
-  return (
-    <div
-      data-slot="card-action"
       className={cn(
-        "col-start-2 row-span-2 row-start-1 self-start justify-self-end",
+        'flex items-center justify-end gap-2 border-t border-line px-5 py-3',
         className,
       )}
       {...props}
-    />
-  );
+    >
+      {children}
+    </div>
+  )
 }
-
-function CardContent({ className, ...props }: React.ComponentProps<"div">) {
-  return (
-    <div
-      data-slot="card-content"
-      className={cn("px-6", className)}
-      {...props}
-    />
-  );
-}
-
-function CardFooter({ className, ...props }: React.ComponentProps<"div">) {
-  return (
-    <div
-      data-slot="card-footer"
-      className={cn("flex items-center px-6 [.border-t]:pt-6", className)}
-      {...props}
-    />
-  );
-}
-
-export {
-  Card,
-  CardHeader,
-  CardFooter,
-  CardTitle,
-  CardAction,
-  CardDescription,
-  CardContent,
-};

@@ -1,0 +1,170 @@
+/**
+ * Presentation helpers shared by every page.
+ *
+ * The API returns RFC 3339 timestamps and raw counters; the console needs
+ * locale-aware, compact and *relative* renderings of both. Keeping the rules
+ * here means the logs table, the dashboard and the agents page all agree on
+ * what "3 minutes ago" looks like.
+ */
+
+const numberFormatter = new Intl.NumberFormat('en-US')
+
+/** `1234567` → `1,234,567`. */
+export function formatNumber(value: number | null | undefined): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) return '—'
+  return numberFormatter.format(value)
+}
+
+/** `1234567` → `1.2M`. */
+export function formatCompactNumber(value: number | null | undefined): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) return '—'
+  return new Intl.NumberFormat('en-US', {
+    notation: 'compact',
+    maximumFractionDigits: 1,
+  }).format(value)
+}
+
+/** `0.4231` → `42.3%`. */
+export function formatPercent(ratio: number | null | undefined, digits = 1): string {
+  if (ratio === null || ratio === undefined || !Number.isFinite(ratio)) return '—'
+  return `${(ratio * 100).toFixed(digits)}%`
+}
+
+/** `1250` → `1.2 ms`; values below 1000 stay integral. */
+export function formatLatency(ms: number | null | undefined): string {
+  if (ms === null || ms === undefined || !Number.isFinite(ms)) return '—'
+  if (ms < 1000) return `${Math.round(ms)} ms`
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)} s`
+  return `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1000)}s`
+}
+
+const ABSOLUTE = new Intl.DateTimeFormat(undefined, {
+  year: 'numeric',
+  month: 'short',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+})
+
+const SHORT_TIME = new Intl.DateTimeFormat(undefined, {
+  hour: '2-digit',
+  minute: '2-digit',
+})
+
+const SHORT_DATE = new Intl.DateTimeFormat(undefined, {
+  month: 'short',
+  day: '2-digit',
+})
+
+/** Full local timestamp for table cells and detail rows. */
+export function formatDateTime(value: string | number | Date | null | undefined): string {
+  const date = toDate(value)
+  return date ? ABSOLUTE.format(date) : '—'
+}
+
+/** Time only — for a chart axis bucketed within one day. */
+export function formatTime(value: string | number | Date | null | undefined): string {
+  const date = toDate(value)
+  return date ? SHORT_TIME.format(date) : '—'
+}
+
+/** Date only — for a chart axis spanning several days. */
+export function formatDate(value: string | number | Date | null | undefined): string {
+  const date = toDate(value)
+  return date ? SHORT_DATE.format(date) : '—'
+}
+
+/**
+ * Bucket labels adapt to the span: hours inside a day, dates across days.
+ * `spanMs` is the total window the series covers.
+ */
+export function formatBucket(
+  value: string | number | Date | null | undefined,
+  spanMs: number,
+): string {
+  const date = toDate(value)
+  if (!date) return '—'
+  return spanMs > 36 * 3600_000 ? SHORT_DATE.format(date) : SHORT_TIME.format(date)
+}
+
+function toDate(value: string | number | Date | null | undefined): Date | null {
+  if (value === null || value === undefined || value === '') return null
+  const date = value instanceof Date ? value : new Date(value)
+  return Number.isNaN(date.getTime()) ? null : date
+}
+
+/** `"3m ago"` / `"in 2h"` — the primary way operators read heartbeat columns. */
+export function formatRelative(
+  value: string | number | Date | null | undefined,
+  now = Date.now(),
+): string {
+  const date = toDate(value)
+  if (!date) return '—'
+  const diff = date.getTime() - now
+  const abs = Math.abs(diff)
+
+  const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' })
+  if (abs < 45_000) return rtf.format(0, 'minute')
+  if (abs < 60_000) return rtf.format(Math.round(diff / 1000), 'second')
+
+  // Largest unit whose threshold the gap has not crossed yet.
+  const ladder: [number, Intl.RelativeTimeFormatUnit][] = [
+    [3600_000, 'minute'],
+    [86_400_000, 'hour'],
+    [604_800_000, 'day'],
+    [2_629_800_000, 'week'],
+    [31_557_600_000, 'month'],
+  ]
+  for (let i = 1; i < ladder.length; i += 1) {
+    if (abs < ladder[i][0]) {
+      return rtf.format(Math.round(diff / ladder[i - 1][0]), ladder[i - 1][1])
+    }
+  }
+  return rtf.format(Math.round(diff / 31_557_600_000), 'year')
+}
+
+/** `2026-09-25T10:30:00Z` → the `YYYY-MM-DDTHH:mm` shape `<input type=datetime-local>` wants. */
+export function toLocalInputValue(value: Date | null | undefined): string {
+  if (!value) return ''
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return (
+    `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}` +
+    `T${pad(value.getHours())}:${pad(value.getMinutes())}`
+  )
+}
+
+/** Inverse of {@link toLocalInputValue}; returns `undefined` for an empty field. */
+export function fromLocalInputValue(value: string): string | undefined {
+  if (!value) return undefined
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? undefined : date.toISOString()
+}
+
+/** `bytes` → `1.4 MB`, with a fixed unit ladder so columns stay comparable. */
+export function formatSize(bytes: number | null | undefined): string {
+  if (bytes === null || bytes === undefined || !Number.isFinite(bytes)) return '—'
+  if (bytes < 1024) return `${bytes} B`
+  const units = ['KB', 'MB', 'GB', 'TB']
+  let value = bytes / 1024
+  let i = 0
+  while (value >= 1024 && i < units.length - 1) {
+    value /= 1024
+    i += 1
+  }
+  return `${value.toFixed(value < 10 ? 1 : 0)} ${units[i]}`
+}
+
+/** Uppercases an HTTP verb for table cells. */
+export function formatMethod(method: string | null | undefined): string {
+  return method ? method.toUpperCase() : '—'
+}
+
+/** Colour class for an HTTP status: 2xx green, 3xx neutral, 4xx amber, 5xx red. */
+export function statusTone(code: number | null | undefined): 'success' | 'neutral' | 'warning' | 'danger' {
+  if (code === null || code === undefined) return 'neutral'
+  if (code >= 500) return 'danger'
+  if (code >= 400) return 'warning'
+  if (code >= 300) return 'neutral'
+  return 'success'
+}
