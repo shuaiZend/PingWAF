@@ -1,8 +1,6 @@
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::time::Instant;
 
-use tracing::debug;
-
 /// Collected system metrics for heartbeat reporting.
 #[derive(Debug, Clone)]
 pub struct SystemMetrics {
@@ -294,6 +292,7 @@ fn parse_vm_stat_value(line: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracing::debug;
 
     #[test]
     fn test_metrics_collector_basic() {

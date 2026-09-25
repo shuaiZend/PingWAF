@@ -53,7 +53,6 @@ const MAX_CLIENT_IP: usize = 45;
 const MAX_METHOD: usize = 10;
 const MAX_HOST: usize = 255;
 const MAX_RULE_ID: usize = 100;
-const MAX_RULE_NAME: usize = 200;
 const MAX_ACTION: usize = 30;
 const MAX_COUNTRY: usize = 2;
 const MAX_CACHE_STATUS: usize = 20;

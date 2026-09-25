@@ -359,13 +359,11 @@ async fn list_by_query(
     let pagination = query.pagination.normalise();
 
     let mut condition = Condition::all();
-    match scope_site(requested, &current)? {
-        Some(id) => {
-            load_site_read(&state.db, id, &current).await?;
-            condition = condition.add(cache_rules::Column::SiteId.eq(id));
-        },
-        // Administrator without a filter: every rule in the system.
-        None => {},
+    // Administrator without a filter: every rule in the system, so `None`
+    // adds no condition.
+    if let Some(id) = scope_site(requested, &current)? {
+        load_site_read(&state.db, id, &current).await?;
+        condition = condition.add(cache_rules::Column::SiteId.eq(id));
     }
     if !current.is_admin() && requested.is_none() {
         // `scope_site` already rejected this, but a non-admin listing every

@@ -63,16 +63,21 @@ impl ChallengeLevel {
             Self::Interactive => "interactive",
         }
     }
+}
 
-    /// Parse from a string representation
-    pub fn from_str(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
+impl std::str::FromStr for ChallengeLevel {
+    type Err = std::convert::Infallible;
+
+    /// Parse from a string representation; unknown labels fall back to
+    /// [`ChallengeLevel::None`], so parsing never fails.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s.to_lowercase().as_str() {
             "non_interactive" | "noninteractive" | "js" | "js_challenge" => {
                 Self::NonInteractive
             },
             "managed" => Self::Managed,
             "interactive" | "captcha" => Self::Interactive,
             _ => Self::None,
-        }
+        })
     }
 }

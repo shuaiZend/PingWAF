@@ -53,25 +53,19 @@ pub struct LogEntry {
     pub referer: String,
 }
 
+/// Host callback invoked when the server requests a cache purge:
+/// `(site_id, urls, tags)`.
+type PurgeCacheFn = Box<dyn Fn(&str, &[String], &[String]) + Send + Sync>;
+
 /// Callback types for server commands that affect the host application.
+#[derive(Default)]
 pub struct CommandHandlers {
     /// Called when the server requests a cache purge.
-    pub on_purge_cache:
-        Option<Box<dyn Fn(&str, &[String], &[String]) + Send + Sync>>,
+    pub on_purge_cache: Option<PurgeCacheFn>,
     /// Called when the server requests a config reload.
     pub on_config_reload: Option<Box<dyn Fn() + Send + Sync>>,
     /// Called when the server requests agent restart.
     pub on_restart: Option<Box<dyn Fn(bool) + Send + Sync>>,
-}
-
-impl Default for CommandHandlers {
-    fn default() -> Self {
-        Self {
-            on_purge_cache: None,
-            on_config_reload: None,
-            on_restart: None,
-        }
-    }
 }
 
 /// The main gRPC client that manages the connection to the control plane server.

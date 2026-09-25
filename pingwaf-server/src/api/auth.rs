@@ -408,10 +408,9 @@ fn issue_tokens(
     })
 }
 
-/// Middleware that copies the [`AuthUser`] extractor result into request
-/// extensions is deliberately absent: handlers take [`AuthUser`] directly as an
-/// extractor, which keeps axum's rejection handling intact.
-
+// Middleware that copies the [`AuthUser`] extractor result into request
+// extensions is deliberately absent: handlers take [`AuthUser`] directly as an
+// extractor, which keeps axum's rejection handling intact.
 #[cfg(test)]
 mod tests {
     use super::*;
