@@ -1,0 +1,201 @@
+name: Release
+
+# Tag-triggered release pipeline.
+#
+#   trigger: push of a `v*` tag (e.g. v0.14.3)
+#
+# It produces the four tarballs install.sh downloads, named EXACTLY:
+#   pingwaf-linux-amd64.tar.gz   pingwaf-linux-arm64.tar.gz
+#   pingwaf-darwin-amd64.tar.gz  pingwaf-darwin-arm64.tar.gz
+# install.sh resolves the asset as `pingwaf-${OS}-${ARCH}.tar.gz` from
+#   https://github.com/shuaiZend/PingWAF/releases/download/v${VERSION}/<asset>
+# so these names must not drift. Each tarball also ships a `.sha256` checksum.
+#
+# Backend choice per OS (see matrix):
+#   - Linux  -> OpenSSL (default feature), matching the Dockerfile.
+#   - macOS  -> rustls (`--no-default-features --features tls-rustls,full`).
+#     Intel macOS runners were retired, so darwin/amd64 has to be cross-compiled
+#     on Apple Silicon; rustls cross-compiles cleanly there while OpenSSL would
+#     need x86_64 libs Homebrew no longer provides on arm64. Both macOS binaries
+#     therefore use the same backend. openssl and tls-rustls are mutually
+#     exclusive, hence `--no-default-features` on the rustls leg.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# Never cancel a half-finished release: a partial asset set is worse than a slow
+# complete one.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  binaries:
+    name: Build ${{ matrix.plat }}/${{ matrix.arch }}
+    runs-on: ${{ matrix.runs-on }}
+    timeout-minutes: 120
+    permissions:
+      contents: write # create the release and upload assets
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - plat: linux
+            arch: amd64
+            runs-on: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            features: "--features full"
+          - plat: linux
+            arch: arm64
+            runs-on: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            features: "--features full"
+          - plat: darwin
+            arch: amd64
+            runs-on: macos-latest
+            target: x86_64-apple-darwin
+            features: "--no-default-features --features tls-rustls,full"
+          - plat: darwin
+            arch: arm64
+            runs-on: macos-latest
+            target: aarch64-apple-darwin
+            features: "--no-default-features --features tls-rustls,full"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The released binary embeds the dashboard, so build the real bundle
+      # before cargo (rust-embed reads ../web/dist at compile time).
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build frontend
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            protobuf-compiler \
+            cmake \
+            libclang-dev \
+            pkg-config \
+            libssl-dev \
+            nasm
+
+      - name: Install system dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf cmake nasm
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      # build.rs needs protoc; resolve whatever the package manager put on PATH.
+      - name: Export PROTOC
+        shell: bash
+        run: echo "PROTOC=$(command -v protoc)" >> "$GITHUB_ENV"
+
+      - name: Build pingwaf
+        shell: bash
+        run: |
+          cargo build --release --bin pingwaf ${{ matrix.features }} --target ${{ matrix.target }}
+          ls -lh "target/${{ matrix.target }}/release/pingwaf"
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          ASSET="pingwaf-${{ matrix.plat }}-${{ matrix.arch }}"
+          STAGE="$ASSET"
+          rm -rf "$STAGE" "$ASSET.tar.gz" "$ASSET.tar.gz.sha256"
+          mkdir -p "$STAGE"
+          cp "target/${{ matrix.target }}/release/pingwaf" "$STAGE/pingwaf"
+          cp LICENSE README.md "$STAGE/"
+          # Optional extras: shipped when present, never fatal when absent.
+          cp pingwaf.toml "$STAGE/" 2>/dev/null || true
+          cp pingwaf.service "$STAGE/" 2>/dev/null || true
+          chmod +x "$STAGE/pingwaf"
+          tar -czf "$ASSET.tar.gz" "$STAGE"
+          shasum -a 256 "$ASSET.tar.gz" > "$ASSET.tar.gz.sha256"
+          ls -lh "$ASSET.tar.gz" "$ASSET.tar.gz.sha256"
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          generate_release_notes: true
+          files: |
+            pingwaf-${{ matrix.plat }}-${{ matrix.arch }}.tar.gz
+            pingwaf-${{ matrix.plat }}-${{ matrix.arch }}.tar.gz.sha256
+
+  docker:
+    name: Publish Docker image (ghcr.io)
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          # ghcr paths must be lowercase regardless of the owner's casing.
+          images: ghcr.io/shuaizend/pingwaf
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+
+      # NOTE: the arm64 leg is cross-built under QEMU emulation and compiles the
+      # full Rust workspace inside the image, so it is slow. The generous
+      # timeout above accounts for it; split into native per-arch builds + a
+      # manifest merge if it ever becomes a bottleneck.
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

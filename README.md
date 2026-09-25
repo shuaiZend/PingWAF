@@ -1,325 +1,304 @@
-# pingap
+<div align="center">
 
-Before the pingap version is stable, no pull requests will be accepted. If you have any questions, please create a new issue first.
+# 🛡️ PingWAF
 
-![Pingap Logo](./asset/pingap-logo.png)
+**A distributed, centrally-controlled Web Application Firewall built on [`pingap`](https://github.com/vicanso/pingap) and Cloudflare [`Pingora`](https://github.com/cloudflare/pingora).**
 
-## Overview
+Semantic-grade attack detection · Cloudflare-style rules · CC & Bot defense · Automatic TLS · Embedded i18n dashboard
 
-Pingap is a high-performance reverse proxy powered by the [`Cloudflare Pingora`](https://github.com/cloudflare/pingora) . It simplifies operational management by enabling dynamic, zero-downtime configuration hot-reloading through concise TOML files and an intuitive web admin interface.
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
+[![Rust](https://img.shields.io/badge/rust-1.96%2B-orange.svg)](https://www.rust-lang.org/)
+[![Build](https://github.com/shuaiZend/PingWAF/actions/workflows/test.yml/badge.svg)](https://github.com/shuaiZend/PingWAF/actions/workflows/test.yml)
+[![Docker](https://img.shields.io/badge/docker-compose%20ready-2496ED?logo=docker&logoColor=white)](./docker-compose.yml)
 
-Its core strength lies in a powerful plugin system, offering over twenty out-of-the-box features for Authentication (JWT, Key Auth), Security (CSRF, IP/Referer/UA Restrictions), Traffic Control (Rate Limiting, Caching), Content Modification (Redirects, Content Substitution), and Observability (Request ID). This makes `Pingap` not just a proxy, but a flexible and extensible application gateway, engineered to effortlessly handle complex scenarios from API protection to modern web application deployments.
+**[English](./README.md) | [简体中文](./README_zh.md)**
 
+[Quick Start](#-quick-start) · [Architecture](#-architecture) · [Features](#-features) · [Documentation](#-documentation) · [Contributing](./CONTRIBUTING.md)
 
-[中文说明](./README_zh.md) | [Documentation](https://pingap.io/) · [中文文档](https://pingap.io/zh/) | [Examples](./examples/README.md) | [Plugins](./pingap-plugin/README.md) | [Crates](./docs/README.md)
+</div>
+
+---
+
+## 📖 What is PingWAF?
+
+**PingWAF** is a high-performance, open-source **Web Application Firewall (WAF)** that brings Cloudflare-class edge security to your own infrastructure. It is built on top of [`pingap`](https://github.com/vicanso/pingap) — a production reverse proxy powered by Cloudflare's [`Pingora`](https://github.com/cloudflare/pingora) networking framework — and adds a **distributed, centrally-controlled** security layer over it.
+
+A single **control plane** defines sites, rules and policies; one or many **data-plane agents** enforce them at the edge. Rules, logs and metrics flow between the two over persistent **gRPC bidirectional streams**, so a policy change made in the dashboard propagates to every agent in seconds — no reload, no downtime.
+
+- 🎯 **Semantic detection** — SQLi / XSS / RCE / path traversal / command injection via `libinjection` + Aho-Corasick signature matching, anomaly scoring and Cloudflare-style expression rules.
+- 🕸️ **Distributed by design** — run everything in one process (`all-in-one`), or scale the data plane out to many independent edge agents (`server` + `agent`).
+- 🧭 **Batteries included, off by default** — every protection feature ships disabled and is enabled per site, so you stay in full control of your traffic.
+- ⚡ **Rust all the way down** — memory safety, async I/O and a single self-contained binary with the dashboard embedded.
+
+> PingWAF is an independent project. It is not affiliated with, nor endorsed by, Cloudflare or the `pingap` maintainers. See [Acknowledgements](#-acknowledgements).
+
+---
+
+## 🏗️ Architecture
 
 ```mermaid
-flowchart LR
-  internet("Internet") -- request --> pingap["Pingap"]
-  pingap -- proxy:pingap.io/api/* --> apiUpstream["10.1.1.1,10.1.1.2"]
-  pingap -- proxy:cdn.pingap.io --> cdnUpstream["10.1.2.1,10.1.2.2"]
-  pingap -- proxy:/* --> upstream["10.1.3.1,10.1.3.2"]
+graph TB
+    Client[Client / Browser]
+
+    subgraph ControlPlane["Control Plane (pingwaf server)"]
+        Dashboard[Embedded Dashboard + REST API :9080]
+        GRPC[gRPC ControlPlane service :9090]
+        PG[(PostgreSQL 14+)]
+        ES[(Elasticsearch - optional)]
+    end
+
+    subgraph DataPlane["Data Plane (pingwaf agents)"]
+        AgentA[Edge Agent A :80 / :443]
+        AgentB[Edge Agent B :80 / :443]
+    end
+
+    Origin[Origin / Upstream servers]
+
+    Client -->|HTTP / HTTPS| AgentA
+    Client -->|HTTP / HTTPS| AgentB
+    AgentA <-->|gRPC bidi streams| GRPC
+    AgentB <-->|gRPC bidi streams| GRPC
+    Dashboard --> PG
+    GRPC --> PG
+    GRPC --> ES
+    AgentA -->|safe traffic| Origin
+    AgentB -->|safe traffic| Origin
 ```
 
-## Key Features
+The control plane and the data plane talk over the `ControlPlane` gRPC service (defined in [`control_plane.proto`](./pingwaf-proto/proto/control_plane.proto)) with six RPCs:
 
-- 🚀 High Performance & Reliability
-  - Built with Rust for memory safety and top-tier performance.
-  - Powered by Cloudflare Pingora, a battle-tested asynchronous networking library.
-  - Supports HTTP/1.1, HTTP/2, and gRPC-web proxying.
+| RPC | Kind | Purpose |
+| --- | --- | --- |
+| `RegisterAgent` | Unary | An agent joins the fleet and receives its ID + heartbeat interval |
+| `Heartbeat` | Bidirectional stream | Liveness, stats upstream and live commands downstream |
+| `SyncRules` | Server stream | Rule bundles pushed to agents whenever policy changes |
+| `ShipLogs` | Client stream | Batched request/attack logs streamed to the control plane |
+| `ShipMetrics` | Client stream | Batched traffic metrics streamed to the control plane |
+| `GetSiteConfig` | Unary | An agent pulls the full config for a single site |
 
-- 🔧 Dynamic & Easy to Use
-  - Zero-downtime configuration changes with hot-reloading.
-  - Simple, human-readable TOML configuration files.
-  - Full-featured Web UI for intuitive, real-time management.
-  - Supports both file and etcd as configuration backends.
-  - Supports configuration history record, can restore to the history version with one click.
+**Two deployment shapes, one binary:**
 
-- 🧩 Powerful Extensibility
-  - A rich plugin system to handle common gateway tasks.
-  - Advanced routing with host, path, and regex matching.
-  - Built-in service discovery via static lists, DNS, or Docker labels.
-  - Automated HTTPS with Let's Encrypt (supporting both HTTP-01 and DNS-01 challenges).
+- **All-in-One** — control plane + data plane in a single process. Ideal for a single node, small deployments and local evaluation.
+- **Distributed** — one independent `server` (control plane) plus many `agent` processes at the edge. Ideal for fleets, multi-region rollouts and central management.
 
-- 📊 Modern Observability
-  - Native Prometheus metrics for monitoring (pull & push modes).
-  - Integrated OpenTelemetry support for distributed tracing.
-  - Highly customizable access logs with over 30 variables.
-  - Detailed performance metrics, including upstream connect time, processing time, and more.
+---
 
-## 🚀 Getting Started
+## ✨ Features
 
-The easiest way to get started with Pingap is by using Docker Compose.
+### 🛡️ Security Detection
+- **Semantic WAF engine** covering SQL injection, XSS, RCE, path traversal and command injection — powered by `libinjection` heuristics plus Aho-Corasick multi-pattern signature matching.
+- **Four-phase pipeline**: `normalize` (request normalization) → `signatures` (signature / libinjection) → `expression` (rule expressions) → `anomaly score` (weighted scoring).
+- **Cloudflare-style expression rules** — write conditions like `http.request.uri.path contains "/admin" and ip.src in {1.2.3.0/24}`.
+- **Anomaly scoring** with four verdicts: `Pass`, `Monitor`, `Block`, `Challenge`.
+- **Managed rule sets** — curated signatures you can toggle per site.
 
-1. Create a `docker-compose.yml` file:
+### 🤖 CC & Bot Defense
+- **CC protection / 5-second shield** — JavaScript challenge, Proof-of-Work and interactive challenges.
+- **Browser fingerprinting** and **HMAC-signed clearance cookies** to distinguish humans from bots.
+- **Bot protection** rules for automated traffic.
 
-```yaml
-# docker-compose.yml
-version: '3.8'
+### 🚦 Access Control
+- **IP access rules** — `block` / `allow` / `challenge` / `rate_limit`, with CIDR ranges and CSV bulk import.
+- **Geo restriction** — allow or block by country/region.
+- **Multi-dimensional rate limiting** — by IP, path, headers and more.
 
-services:
-  pingap:
-    image: vicanso/pingap:latest # For production, use a specific version like vicanso/pingap:0.12.1-full
-    container_name: pingap-instance
-    restart: always
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      # Mount a local directory to persist all configurations and data
-      - ./pingap_data:/opt/pingap
-    environment:
-      # Configure using environment variables
-      - PINGAP_CONF=/opt/pingap/conf
-      - PINGAP_ADMIN_ADDR=0.0.0.0:80/pingap
-      - PINGAP_ADMIN_USER=pingap
-      - PINGAP_ADMIN_PASSWORD=<YourSecurePassword> # Change this!
-    command:
-      # Start pingap and enable hot-reloading
-      - pingap
-      - --autoreload
-```
+### 🌊 Traffic Management
+- **Edge caching** with per-domain disk quotas and LRU eviction.
+- **Request / response rewriting** — headers, paths and bodies.
+- **Custom error pages** rendered with Tera templates.
 
-2. Create a data directory and run:
+### 🔐 TLS & Certificates
+- **Automatic ACME / Let's Encrypt** issuance and renewal (HTTP-01 and DNS-01).
+- **Multiple DNS providers** for DNS-01 (Aliyun, Cloudflare, Huawei, Tencent, manual).
+
+### 📊 Observability
+- **Full request logging to Elasticsearch** with body truncation and a WAL buffer for reliability.
+- **Analytics** dashboards for traffic and attack trends.
+- Prometheus-style metrics shipped from every agent.
+
+### 🎛️ Management Console
+- **JWT + bcrypt authentication** and **multi-tenant** isolation.
+- **Embedded i18n dashboard** (English / 简体中文 / 日本語), compiled into the binary via `rust-embed`.
+- **Everything is off by default** — enable protections explicitly, per site.
+
+---
+
+## 🧱 Tech Stack
+
+| Layer | Technology |
+| --- | --- |
+| Data plane / proxy | Rust · [`Pingora`](https://github.com/cloudflare/pingora) · [`pingap`](https://github.com/vicanso/pingap) |
+| Control plane API | [`Axum`](https://github.com/tokio-rs/axum) (REST) · [`tonic`](https://github.com/hyperium/tonic) (gRPC) |
+| Persistence | [`SeaORM`](https://www.sea-ql.org/SeaORM/) · PostgreSQL 14+ (16 recommended) |
+| Log storage | Elasticsearch (optional) |
+| Dashboard | React 19 · Vite · Tailwind CSS v4 (embedded with `rust-embed`) |
+| WAF engine | `libinjection` · Aho-Corasick · expression evaluator |
+
+**Core crates:**
+
+| Crate | Responsibility |
+| --- | --- |
+| [`pingwaf-proto`](./pingwaf-proto) | Control-plane gRPC protocol definitions (single source: `control_plane.proto`) |
+| [`pingwaf-server`](./pingwaf-server) | Control plane: Axum REST + tonic gRPC + SeaORM/PostgreSQL + ES logs + embedded frontend + agent health monitoring |
+| [`pingwaf-agent`](./pingwaf-agent) | Data-plane agent: connects to the control plane, caches rules with disk persistence, ships logs/metrics, receives commands |
+| [`pingwaf-waf`](./pingwaf-waf) | Detection engine: normalize → signatures → expression → anomaly score |
+| [`pingwaf-challenge`](./pingwaf-challenge) | Dynamic challenges: JS 5-second shield, interactive challenge, PoW, fingerprinting, HMAC clearance cookies |
+
+---
+
+## 🚀 Quick Start
+
+> **Note:** Prebuilt release binaries are **not published yet**. The recommended paths today are **Docker Compose** and **building from source**. The one-line install script (`install.sh`) will work once release assets are available.
+
+### Option A — Docker Compose (recommended)
+
+The bundled [`docker-compose.yml`](./docker-compose.yml) starts PingWAF in `all-in-one` mode together with PostgreSQL:
 
 ```bash
-mkdir pingap_data
-docker-compose up -d
+git clone https://github.com/shuaiZend/PingWAF.git
+cd PingWAF
+
+# Start the control plane + data plane + PostgreSQL
+docker compose up -d
 ```
 
-3. Access the Admin UI:
+Then open the dashboard:
 
-Your Pingap instance is now running! You can access the web admin interface at http://localhost/pingap with the credentials you set.
+- **URL:** http://localhost:9080
+- **Email:** `admin@pingwaf.local`
+- **Password:** `pingwaf123`
 
-### Install the binary via curl
+> ⚠️ **Change the default admin password and `PINGWAF_JWT_SECRET` before any production use.**
 
-For Linux and macOS, you can install the latest pre-built binary to `/usr/local/bin/pingap` with one command:
+Health check: `GET http://localhost:9080/healthz`.
+
+### Option B — Build from source
+
+**Prerequisites**
+
+| Tool | Version | Notes |
+| --- | --- | --- |
+| Rust | 1.96+ (MSRV) | CI/Docker build with 1.98.0 |
+| Node.js | 22 | Required to build the dashboard |
+| `protoc` | any recent | **Required** — gRPC code generation |
+| `cmake` | any recent | Required to build the TLS backend (OpenSSL) |
+| PostgreSQL | 14+ (16 recommended) | Control-plane datastore |
+
+> ⚠️ **`protoc` is mandatory.** If it is missing, `pingwaf-proto` silently falls back to placeholder files and downstream crates fail to compile. Install it first:
+>
+> ```bash
+> brew install protobuf                 # macOS
+> sudo apt install protobuf-compiler cmake   # Debian / Ubuntu
+> ```
+
+**Build & run**
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/vicanso/pingap/main/install.sh | sh
+git clone https://github.com/shuaiZend/PingWAF.git
+cd PingWAF
+
+# 1. Build the embedded dashboard
+cd web && npm ci && npm run build && cd ..
+
+# 2. Build the pingwaf binary
+cargo build --release --bin pingwaf --features full
+
+# 3. Run in all-in-one mode
+./target/release/pingwaf all-in-one \
+  --db-url "postgres://pingwaf:pingwaf@localhost:5432/pingwaf"
 ```
 
-Optional environment variables:
+👉 For a full walkthrough (database setup, first site, distributed agents, systemd), see **[docs/quick-start.md](./docs/quick-start.md)**.
 
-- `PINGAP_FULL=1` — install the `-full` build (all optional features enabled)
-- `PINGAP_LIBC=gnu` — on Linux, use the glibc build instead of the default musl static build
-- `PINGAP_TLS=rustls` — on Linux, install the `-rustls-full` build (rustls TLS backend, all optional features, no OpenSSL); see [TLS backend](#tls-backend)
+---
+
+## 🧭 Run Modes
+
+PingWAF is a single binary (`pingwaf`) that shares its entry point with `pingap`. It selects a mode from the CLI subcommand **or** the `PINGWAF_MODE` environment variable.
+
+| Mode | Command | Role |
+| --- | --- | --- |
+| **Control plane** | `pingwaf server` | REST API + gRPC server + dashboard + PostgreSQL. Does not proxy traffic. |
+| **Data plane** | `pingwaf agent` | Connects to a remote control plane, enforces rules, proxies traffic on :80/:443. |
+| **All-in-One** | `pingwaf all-in-one` | Both of the above in one process (agent talks to the local server over loopback). |
 
 ```bash
-# Full-featured build
-curl -sSL https://raw.githubusercontent.com/vicanso/pingap/main/install.sh | PINGAP_FULL=1 sh
+# Equivalent to `pingwaf all-in-one`
+PINGWAF_MODE=all-in-one ./pingwaf
 ```
 
-Supported targets: `Linux x86_64/arm64`, `Darwin x86_64/arm64`. See the [releases page](https://github.com/vicanso/pingap/releases) for all available assets.
+---
 
-For more detailed instructions, including running from a binary, check out our [Documentation](https://pingap.io/).
+## ⚙️ Configuration
 
-### Start a proxy without a config file
+PingWAF is configured through **`PINGWAF_*` environment variables** and **CLI flags** (flags take precedence over the environment).
 
-A single command is enough to serve a domain over https and forward it to a backend:
+> ℹ️ The [`pingwaf.toml`](./pingwaf.toml) file in the repository root is a **reference example only** — it is not loaded by the process at runtime. Use environment variables or CLI flags.
 
-```bash
-# certificate requested from let's encrypt
-pingap --domain=pingap.io --upstream=192.168.1.1:3000
+### Key environment variables
 
-# or bring your own certificate
-pingap --domain=pingap.io --upstream=192.168.1.1:3000 --cert=/etc/ssl/pingap.io
-```
+| Variable | Default | Description |
+| --- | --- | --- |
+| `PINGWAF_MODE` | — | `server`, `agent` or `all-in-one` |
+| `PINGWAF_DB_URL` | `postgres://pingwaf:pingwaf@localhost:5432/pingwaf` | PostgreSQL DSN |
+| `PINGWAF_ADMIN_ADDR` | `0.0.0.0:9080` | REST API + dashboard listen address |
+| `PINGWAF_GRPC_ADDR` | `0.0.0.0:9090` | gRPC control-plane listen address |
+| `PINGWAF_JWT_SECRET` | `change-me-in-production` | JWT signing secret (**≥ 16 chars**, change in production) |
+| `PINGWAF_ADMIN_EMAIL` | `admin@pingwaf.local` | Seeded administrator email |
+| `PINGWAF_ADMIN_PASSWORD` | `pingwaf123` | Seeded administrator password (**change in production**) |
+| `PINGWAF_ALLOW_REGISTRATION` | `false` | Whether `POST /api/v1/auth/register` accepts signups |
+| `PINGWAF_HEARTBEAT_INTERVAL` | `15` | Heartbeat interval handed to agents (seconds) |
+| `PINGWAF_SERVER_URL` | `http://localhost:9090` | *(agent)* control-plane gRPC URL |
+| `PINGWAF_API_KEY` | *(empty)* | *(agent)* API key; empty = auto-register over loopback |
+| `PINGWAF_CACHE_DIR` | `./data/cache` | *(agent)* local rule cache directory |
+| `PINGWAF_ES_ENABLED` | `false` | Enable Elasticsearch log shipping |
+| `PINGWAF_ES_URLS` | *(empty)* | Comma-separated Elasticsearch URLs |
 
-Without `--cert`, Pingap asks Let's Encrypt for a certificate through the
-HTTP-01 challenge, so `pingap.io` must resolve to this host and port 80 must be
-reachable from the internet. The issued certificate is kept in
-`~/.pingap/acme/<domains>.toml` and reused on restart — issuing is rate limited,
-so do not delete it. Everything else still comes from the command line: changing
-`--upstream` takes effect on the next start without touching the certificate.
+### Default ports
 
-`--cert` accepts the certificate itself or the directory holding it — the common
-`fullchain.pem` / `privkey.pem`, `cert.pem` / `key.pem` and `tls.crt` / `tls.key`
-layouts are detected automatically, use `--key` for anything else. The listener
-defaults to `0.0.0.0:443` when there is a certificate and `0.0.0.0:80` when there
-is neither a certificate nor a domain, and `--addr` overrides it. `--upstream`
-takes a comma separated list of backends, `--domain` a comma separated list of
-hosts (omit it to serve every host over plain http). Requests for a host that
-is not listed are answered with 404.
+| Port | Purpose |
+| --- | --- |
+| `9080` | REST API + embedded dashboard (health: `GET /healthz`) |
+| `9090` | gRPC control plane (agents connect here) |
+| `80` / `443` | Proxied traffic (bound once you create a site) |
 
-The configuration is generated on every start, so it cannot be edited through
-the admin UI: for anything beyond a single server use `--conf`, which cannot be
-combined with these flags.
+👉 Full configuration reference: **[docs/deployment.md](./docs/deployment.md)** and **[docs/api.md](./docs/api.md)**.
 
+---
 
-## Dynamic Configuration
+## 📚 Documentation
 
-Pingap is designed to adapt to configuration changes without downtime.
+| Document | What you'll find |
+| --- | --- |
+| [docs/quick-start.md](./docs/quick-start.md) | From zero to your first protected site |
+| [docs/deployment.md](./docs/deployment.md) | Docker, binary + systemd, distributed topologies |
+| [docs/user-guide.md](./docs/user-guide.md) | Dashboard walkthrough, sites, rules, policies |
+| [docs/api.md](./docs/api.md) | REST API reference (`http://<host>:9080/api/v1`) |
+| [docs/README.md](./docs/README.md) | Full documentation index |
+| [CONTRIBUTING.md](./CONTRIBUTING.md) | How to contribute |
+| [SECURITY.md](./SECURITY.md) | Vulnerability disclosure policy |
+| [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md) | Community guidelines |
 
-Hot Reload (--autoreload): For most changes—like updating upstreams, locations, or plugins—Pingap applies the new configuration within 10 seconds without a restart. This is the recommended mode for containerized environments.
+---
 
-Graceful Restart (-a or --autorestart): For fundamental changes (like modifying server listen ports), this mode performs a full, zero-downtime restart, ensuring no requests are dropped.
+## 🤝 Contributing
 
-The hand-over is readiness-driven rather than timed: the replacement is started with `-d -u`, reports back over a unix socket next to the upgrade socket the moment it is ready to take over the listeners, and only then does the running process send itself SIGQUIT. If the replacement exits, its daemon dies, or `basic.restart_ready_timeout` (default 1m) passes first, the restart is abandoned and the running process keeps serving.
+Contributions are welcome! Please read **[CONTRIBUTING.md](./CONTRIBUTING.md)** before opening a pull request, and **[SECURITY.md](./SECURITY.md)** for how to responsibly report a vulnerability.
 
+---
 
-## 🔧 Development
+## 🙏 Acknowledgements
 
-```bash
-make dev
-```
+PingWAF stands on the shoulders of excellent open-source projects:
 
-If you need a web admin, you should install nodejs and build web asssets.
+- **[pingap](https://github.com/vicanso/pingap)** by Tree Xie — the reverse-proxy foundation (routing, plugins, ACME, caching, hot reload) that PingWAF's data plane is built on.
+- **[Pingora](https://github.com/cloudflare/pingora)** by Cloudflare — the async networking framework that powers `pingap`.
+- **[libinjection](https://github.com/client9/libinjection)** — SQLi/XSS detection heuristics used by the WAF engine.
 
-```bash
-# generate admin web asset
-cd web
-npm i 
-cd ..
-make build-web
-```
+PingWAF is a derivative work that adds the WAF control plane, data-plane agents and detection engine. It is distributed under the same **[Apache License 2.0](./LICENSE)** as its upstream dependencies, and the original `pingap`/`Pingora` copyright notices are preserved. PingWAF is **not** affiliated with or endorsed by Cloudflare or the `pingap` project.
 
-### TLS backend
-
-The default build terminates TLS with OpenSSL, compiled from source by the `openssl` crate. To build with rustls instead, which drops the OpenSSL source build (a C compiler is still needed: rustls' crypto providers, ring and aws-lc-rs, contain C and assembly):
-
-```bash
-cargo build --release --no-default-features --features tls-rustls
-# with the optional features as well
-cargo build --release --no-default-features --features tls-rustls,full
-```
-
-The rustls build rejects the per-server `tls_min_version`, `tls_max_version`, `tls_cipher_list` and `tls_ciphersuites` settings at config validation (startup, `--test`, auto-restart): it always offers TLS 1.2 and 1.3 with rustls' default cipher suites. The admin UI disables those fields when the running binary is a rustls build. Everything else, including dynamic SNI certificates, self-signed CA issuance, ACME and the upstream `ca` option, behaves the same. Pre-built images carry the same variant: `vicanso/pingap:rustls-full` (and `:<version>-rustls-full` for a release), alongside `:latest` and `:full`. One difference to know about when verifying upstreams: rustls (webpki) rejects a server certificate that carries `CA:TRUE`, which OpenSSL accepts, so a backend using a quick `openssl req -x509` self-signed certificate needs a proper leaf signed by a CA (or a self-signed leaf without the CA flag) before the upstream `ca` option can trust it. `--version` (long form), the startup log and the admin home page all report which backend a binary was built with.
-
-## 📝 Configuration
-
-```hcl
-server "test" {
-  addr = "127.0.0.1:6118"
-
-  location "github-api" {
-    path = "/api"
-    proxy_set_headers = ["Host:api.github.com"]
-    rewrite = "^/api/(?<path>.+)$ /$1"
-
-    upstream "api" {
-      addrs     = ["api.github.com:443"]
-      discovery = "dns"
-      sni       = "api.github.com"
-    }
-  }
-
-  location "static" {
-    plugin "staticServe" {
-      category = "directory"
-      path     = "~/Downloads"
-      step     = "request"
-    }
-  }
-}
-```
-
-```toml
-[upstreams.api]
-addrs = ["api.github.com:443"]
-discovery = "dns"
-sni = "api.github.com"
-
-[plugins.staticServe]
-category = "directory"
-path = "~/Downloads"
-step = "request"
-
-[locations.github-api]
-upstream = "api"
-path = "/api"
-proxy_set_headers = ["Host:api.github.com"]
-rewrite = "^/api/(?<path>.+)$ /$1"
-
-[locations.static]
-plugins = ["staticServe"]
-
-[servers.test]
-addr = "127.0.0.1:6118"
-locations = ["github-api", "static"]
-```
-
-You can find the relevant instructions here: [https://pingap.io/crates/config](https://pingap.io/crates/config).
-
-## 🔄 Proxy step
-
-```mermaid
-graph TD;
-  server["HTTP Server"];
-  locationA["Location A"];
-  locationB["Location B"];
-  locationPluginListA["Proxy Plugin List A"];
-  locationPluginListB["Proxy Plugin List B"];
-  upstreamA1["Upstream A1"];
-  upstreamA2["Upstream A2"];
-  upstreamB1["Upstream B1"];
-  upstreamB2["Upstream B2"];
-  locationResponsePluginListA["Response Plugin List A"];
-  locationResponsePluginListB["Response Plugin List B"];
-
-  start("New Request") --> server
-
-  server -- "host:HostA, Path:/api/*" --> locationA
-
-  server -- "Path:/rest/*"--> locationB
-
-  locationA -- "Exec Proxy Plugins" --> locationPluginListA
-
-  locationB -- "Exec Proxy Plugins" --> locationPluginListB
-
-  locationPluginListA -- "proxy pass: 10.0.0.1:8001" --> upstreamA1
-
-  locationPluginListA -- "proxy pass: 10.0.0.2:8001" --> upstreamA2
-
-  locationPluginListA -- "done" --> response
-
-  locationPluginListB -- "proxy pass: 10.0.0.1:8002" --> upstreamB1
-
-  locationPluginListB -- "proxy pass: 10.0.0.2:8002" --> upstreamB2
-
-  locationPluginListB -- "done" --> response
-
-  upstreamA1 -- "Exec Response Plugins" --> locationResponsePluginListA
-  upstreamA2 -- "Exec Response Plugins" --> locationResponsePluginListA
-
-  upstreamB1 -- "Exec Response Plugins" --> locationResponsePluginListB
-  upstreamB2 -- "Exec Response Plugins" --> locationResponsePluginListB
-
-  locationResponsePluginListA --> response
-  locationResponsePluginListB --> response
-
-  response["HTTP Response"] --> stop("Logging");
-```
-
-## 📊 Performance
-
-CPU: M4 Pro, Thread: 1
-
-### Ping no access log
-
-```bash
-wrk 'http://127.0.0.1:6118/ping' --latency
-
-Running 10s test @ http://127.0.0.1:6118/ping
-  2 threads and 10 connections
-  Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency    66.41us   23.67us   1.11ms   76.54%
-    Req/Sec    73.99k     2.88k   79.77k    68.81%
-  Latency Distribution
-     50%   67.00us
-     75%   80.00us
-     90%   91.00us
-     99%  116.00us
-  1487330 requests in 10.10s, 194.32MB read
-Requests/sec: 147260.15
-Transfer/sec:     19.24MB
-```
-
-
-## 📦 Rust version
-
-Our current MSRV is 1.96
+---
 
 ## 📄 License
 
-This project is Licensed under [Apache License, Version 2.0](./LICENSE).
+PingWAF is released under the **[Apache License 2.0](./LICENSE)**.

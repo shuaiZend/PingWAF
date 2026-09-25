@@ -79,8 +79,10 @@ use sysinfo::System;
 use tracing::{error, info, warn};
 
 mod certificates;
+mod cli;
 mod config_manager;
 mod locations;
+mod pingwaf;
 mod plugin;
 mod process;
 mod quick_start;
@@ -1122,6 +1124,12 @@ fn run() -> Result<(), Box<dyn Error>> {
 }
 
 fn main() {
+    // Check if PingWAF mode is requested (via subcommand or PINGWAF_MODE env)
+    if cli::is_pingwaf_mode() {
+        pingwaf::main();
+        return;
+    }
+
     if let Err(e) = run() {
         // stderr, and unbuffered: everything that can fail here can fail before
         // `logger_try_init`, in which case the `error!` below reaches nobody.

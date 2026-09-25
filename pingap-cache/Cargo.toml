@@ -23,6 +23,7 @@ async-trait = { workspace = true }
 bytes = { workspace = true }
 bytesize = { workspace = true }
 chrono = { workspace = true }
+dashmap = { workspace = true }
 dirs = { workspace = true }
 http = { workspace = true }
 humantime-serde = { workspace = true }
@@ -32,6 +33,7 @@ pingora = { workspace = true }
 prometheus = { workspace = true, optional = true }
 scopeguard = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 serde_qs = { workspace = true }
 snafu = { workspace = true }
 strum = { workspace = true }

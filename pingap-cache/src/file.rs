@@ -360,6 +360,32 @@ impl FileCache {
         }
     }
 
+    /// `(domain, key)` of a cache file: the first path component under the
+    /// backend root is the namespace, which is the unit the per-domain quota
+    /// ledger accounts against, and the file name is the cache key. `None`
+    /// for a file that is not inside a namespace directory.
+    fn quota_key_of(&self, path: &Path) -> Option<(String, String)> {
+        let rel = path.strip_prefix(Path::new(&self.directory)).ok()?;
+        let mut parts = rel.components();
+        let domain = parts.next()?.as_os_str().to_str()?.to_string();
+        // A file directly in the root belongs to no namespace.
+        parts.next()?;
+        let key = path.file_name()?.to_str()?.to_string();
+        Some((domain, key))
+    }
+
+    /// Tells the quota ledger a file is gone. Needed by the sweeps that delete
+    /// files without going through `remove`, otherwise the ledger keeps
+    /// counting bytes that are no longer on disk and evicts for nothing.
+    fn quota_record_removed(&self, path: &Path, len: u64) {
+        let Some(quota) = crate::quota::global_disk_quota() else {
+            return;
+        };
+        if let Some((domain, key)) = self.quota_key_of(path) {
+            quota.record_remove(&domain, &key, len);
+        }
+    }
+
     /// Makes room for `need` more bytes under `max_size` by deleting the
     /// least recently accessed files first. Returns whether the write may
     /// go ahead: an object larger than the whole budget never fits, and
@@ -407,11 +433,13 @@ impl FileCache {
             match fs::remove_file(&file.path).await {
                 Ok(()) => {
                     self.track_removed(file.len);
+                    self.quota_record_removed(&file.path, file.len);
                     evicted += file.len;
                     count += 1;
                 },
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     self.track_removed(file.len);
+                    self.quota_record_removed(&file.path, file.len);
                 },
                 Err(e) => {
                     warn!(
@@ -552,6 +580,14 @@ impl HttpCacheStorage for FileCache {
         // cache get from file, but not in tinyufo, put it to tinyufo
         if let Some(obj) = &obj {
             self.put_hot(key, obj);
+            // LRU clock of the per-domain quota ledger. One hash lookup and a
+            // relaxed atomic store; a domain with no quota returns at once.
+            if let Some(quota) = crate::quota::global_disk_quota() {
+                let domain = namespace_str(namespace);
+                if !domain.is_empty() {
+                    quota.record_access(domain, key);
+                }
+            }
         }
         debug!(
             target: LOG_TARGET,
@@ -646,6 +682,18 @@ impl HttpCacheStorage for FileCache {
         self.write_time.observe(elapsed_second(start));
         result.map_err(|e| Error::Io { source: e })?;
         self.track_written(old_len, new_len);
+        // Per-domain quota accounting. Eviction touches the disk, so it is
+        // never done inline on the request path; the manager serialises one
+        // pass per domain and a losing race is a no-op.
+        if let Some(quota) = crate::quota::global_disk_quota() {
+            let domain = namespace_str(namespace);
+            if !domain.is_empty() && quota.record_write(domain, key, new_len) {
+                let domain = domain.to_string();
+                tokio::spawn(async move {
+                    let _ = quota.evict_to_fit(&domain).await;
+                });
+            }
+        }
         debug!(
             target: LOG_TARGET,
             key,
@@ -678,6 +726,15 @@ impl HttpCacheStorage for FileCache {
             .remove_tracked(&file)
             .await
             .map_err(|e| Error::Io { source: e })?;
+        // Unconditional: a file that is already gone may still have a stale
+        // entry in the quota ledger, and that entry is counted against the
+        // domain's ceiling.
+        if let Some(quota) = crate::quota::global_disk_quota() {
+            let domain = namespace_str(namespace);
+            if !domain.is_empty() {
+                quota.record_remove(domain, key, 0);
+            }
+        }
         if removed {
             debug!(
                 target: LOG_TARGET,
@@ -713,6 +770,7 @@ impl HttpCacheStorage for FileCache {
             match fs::remove_file(&file.path).await {
                 Ok(()) => {
                     self.track_removed(file.len);
+                    self.quota_record_removed(&file.path, file.len);
                     debug!(
                         target: LOG_TARGET,
                         file = %file.path.display(),
@@ -807,6 +865,11 @@ impl HttpCacheStorage for FileCache {
         // directory itself; a concurrent write recreates what it needs.
         let _ =
             tokio::task::spawn_blocking(move || remove_empty_dirs(&dir)).await;
+        // The files are gone, so the per-domain ledger has to be emptied too;
+        // leaving it would keep evicting for bytes that no longer exist.
+        if let Some(quota) = crate::quota::global_disk_quota() {
+            quota.reset_domain(namespace);
+        }
         info!(
             target: LOG_TARGET,
             namespace, success, fail, "purge cache namespace"

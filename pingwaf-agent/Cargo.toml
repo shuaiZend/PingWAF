@@ -1,0 +1,23 @@
+[package]
+name = "pingwaf-agent"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "PingWAF data-plane agent: connects to the control plane over gRPC, caches WAF rules locally with disk persistence, and ships logs and metrics back."
+
+[dependencies]
+pingwaf-proto = { path = "../pingwaf-proto" }
+pingap-cache = { workspace = true }
+tonic = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "signal", "fs"] }
+tokio-stream = { workspace = true, features = ["sync"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+prost-types = { workspace = true }
+dashmap = { workspace = true }
+arc-swap = { workspace = true }
+futures = { workspace = true }

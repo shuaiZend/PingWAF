@@ -1,0 +1,46 @@
+[package]
+name = "pingwaf-server"
+version = "0.1.0"
+edition = "2021"
+description = "PingWAF control plane: REST API for the dashboard, gRPC control plane for agents"
+license = "Apache-2.0"
+
+[dependencies]
+pingwaf-proto = { path = "../pingwaf-proto" }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+axum = { workspace = true }
+bcrypt = { workspace = true }
+chrono = { workspace = true }
+jsonwebtoken = { workspace = true }
+# Used to encode `RuleBundle`/`SiteConfig` so their bytes can be fingerprinted
+# into the `config_hash` agents compare for delta synchronisation.
+prost = { workspace = true }
+# Needed to build the `google.protobuf.Timestamp` fields of the control plane
+# protocol; tonic-prost-build maps well-known types onto this crate by default.
+prost-types = { workspace = true }
+# HTTP client used by the Elasticsearch log shipper. In reqwest 0.13 the
+# workspace's `default-tls` already maps to rustls, so no OpenSSL is pulled in.
+reqwest = { workspace = true }
+rust-embed = { version = "8.12.0", features = ["mime-guess", "compression"], default-features = false }
+sea-orm = { workspace = true }
+sea-orm-migration = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = [
+    "fs",
+    "macros",
+    "net",
+    "rt-multi-thread",
+    "signal",
+    "sync",
+    "time",
+] }
+tokio-stream = { workspace = true, features = ["sync"] }
+tonic = { workspace = true }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

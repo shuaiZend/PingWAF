@@ -1,23 +1,88 @@
-import * as React from "react";
+import { forwardRef, useId, type InputHTMLAttributes, type ReactNode } from 'react'
+import { cn } from '@/lib/utils'
 
-import { cn } from "@/lib/utils";
-
-function Input({ className, type, ...props }: React.ComponentProps<"input">) {
-  return (
-    <input
-      type={type}
-      data-slot="input"
-      className={cn(
-        "h-9 w-full min-w-0 rounded-md border border-input bg-muted/30 px-3 py-1 text-base shadow-none transition-[color,box-shadow] outline-none selection:bg-primary selection:text-primary-foreground file:inline-flex file:h-7 file:border-0 file:bg-transparent file:text-sm file:font-medium file:text-foreground placeholder:text-muted-foreground disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50 md:text-sm dark:bg-input/30",
-        // Fields sit recessed in the plate and lift to the card surface on focus —
-        // the console is dense, and the lift is what marks the active row.
-        "focus-visible:border-ring focus-visible:bg-background focus-visible:ring-[3px] focus-visible:ring-ring/50",
-        "aria-invalid:border-destructive aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40",
-        className,
-      )}
-      {...props}
-    />
-  );
+export interface InputProps extends InputHTMLAttributes<HTMLInputElement> {
+  label?: ReactNode
+  hint?: ReactNode
+  error?: ReactNode
+  prefixIcon?: ReactNode
+  suffixIcon?: ReactNode
+  containerClassName?: string
 }
 
-export { Input };
+export const Input = forwardRef<HTMLInputElement, InputProps>(
+  (
+    {
+      label,
+      hint,
+      error,
+      prefixIcon,
+      suffixIcon,
+      containerClassName,
+      className,
+      id,
+      required,
+      ...props
+    },
+    ref,
+  ) => {
+    const generatedId = useId()
+    const inputId = id ?? generatedId
+    const describedBy = error ? `${inputId}-error` : hint ? `${inputId}-hint` : undefined
+
+    return (
+      <div className={cn('flex flex-col gap-1.5', containerClassName)}>
+        {label && (
+          <label
+            htmlFor={inputId}
+            className="text-[13px] font-medium text-fg-subtle"
+          >
+            {label}
+            {required && <span className="ml-0.5 text-danger">*</span>}
+          </label>
+        )}
+        <div className="relative flex items-center">
+          {prefixIcon && (
+            <span className="pointer-events-none absolute left-3 flex items-center text-fg-subtle [&>svg]:h-4 [&>svg]:w-4">
+              {prefixIcon}
+            </span>
+          )}
+          <input
+            ref={ref}
+            id={inputId}
+            required={required}
+            aria-invalid={error ? true : undefined}
+            aria-describedby={describedBy}
+            className={cn(
+              'h-9 w-full rounded-md border bg-elevated text-sm text-fg placeholder:text-fg-subtle/60',
+              'transition-[border-color,box-shadow] duration-150',
+              'focus:border-focus focus:outline-none focus:ring-2 focus:ring-focus/25',
+              'disabled:cursor-not-allowed disabled:opacity-60',
+              error ? 'border-danger focus:border-danger focus:ring-danger/25' : 'border-line',
+              prefixIcon ? 'pl-9' : 'pl-3',
+              suffixIcon ? 'pr-9' : 'pr-3',
+              className,
+            )}
+            {...props}
+          />
+          {suffixIcon && (
+            <span className="absolute right-3 flex items-center text-fg-subtle [&>svg]:h-4 [&>svg]:w-4">
+              {suffixIcon}
+            </span>
+          )}
+        </div>
+        {error ? (
+          <p id={`${inputId}-error`} className="text-xs text-fg-danger">
+            {error}
+          </p>
+        ) : hint ? (
+          <p id={`${inputId}-hint`} className="text-xs text-fg-subtle">
+            {hint}
+          </p>
+        ) : null}
+      </div>
+    )
+  },
+)
+
+Input.displayName = 'Input'

@@ -44,7 +44,7 @@ use std::sync::LazyLock;
 use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::time::Duration;
-use tracing::{debug, error};
+use tracing::{debug, error, info};
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -174,6 +174,7 @@ impl TryFrom<&PluginConf> for Cache {
     /// - max_ttl: Maximum cache entry lifetime
     /// - max_file_size: Maximum cached file size
     /// - namespace: Cache isolation namespace
+    /// - disk_quota_mb: Per-namespace disk ceiling, 0 = unlimited
     /// - headers: Headers to include in cache key
     /// - predictor: Enables cache prediction
     /// - purge_ip_list: IPs allowed to purge cache
@@ -275,6 +276,48 @@ impl TryFrom<&PluginConf> for Cache {
         } else {
             Some(namespace)
         };
+
+        // Per-domain disk quota. The namespace is the accounting unit of the
+        // ledger, so a quota without one has nothing to charge: refusing the
+        // configuration beats silently letting the site grow without bound.
+        let disk_quota_mb = crate::get_int_conf(value, "disk_quota_mb");
+        if disk_quota_mb < 0 {
+            return Err(Error::Invalid {
+                category: PluginCategory::Cache.to_string(),
+                message: format!(
+                    "disk_quota_mb {disk_quota_mb} is invalid, expected 0 or more"
+                ),
+            });
+        }
+        let disk_quota_mb = disk_quota_mb as u64;
+        // The ledger only exists for file backends: memory caches have no disk
+        // to budget, and a ceiling there would be a lie. `cache.directory` is
+        // what says which kind this plugin got - the mere presence of a global
+        // ledger does not, because another cache plugin in the same process may
+        // have created one for its own directory.
+        let quota = if cache.directory.is_some() {
+            pingap_cache::global_disk_quota()
+        } else {
+            None
+        };
+        if let (Some(namespace), Some(quota)) = (namespace.as_deref(), quota) {
+            // Re-asserted on every build, `0` included. The plugin's hash covers
+            // the whole config map, so dropping the option rebuilds the plugin:
+            // skipping the call there would pin the previous ceiling in the
+            // ledger forever and keep evicting a site that asked to be unlimited.
+            quota.set_quota(namespace, disk_quota_mb);
+            info!(namespace, disk_quota_mb, "cache disk quota for namespace");
+        } else if disk_quota_mb > 0 {
+            let message = if namespace.is_none() {
+                "disk_quota_mb requires the namespace option"
+            } else {
+                "disk_quota_mb requires a file cache backend"
+            };
+            return Err(Error::Invalid {
+                category: PluginCategory::Cache.to_string(),
+                message: message.to_string(),
+            });
+        }
         let headers = get_str_slice_conf(value, "headers");
         let headers = if headers.is_empty() {
             None

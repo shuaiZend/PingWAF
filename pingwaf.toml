@@ -1,0 +1,70 @@
+# PingWAF Configuration
+# This file configures the PingWAF all-in-one instance.
+#
+# Usage:
+#   pingwaf all-in-one --config pingwaf.toml
+#
+# All values can also be set via environment variables (PINGWAF_*)
+# or CLI flags. CLI flags take highest precedence.
+
+[server]
+# PostgreSQL connection string
+db_url = "postgres://pingwaf:pingwaf@localhost:5432/pingwaf"
+# HTTP REST API + dashboard listen address
+http_addr = "0.0.0.0:9080"
+# gRPC control plane listen address (agents connect here)
+grpc_addr = "0.0.0.0:9090"
+# JWT signing secret (must be >= 16 characters, change in production!)
+jwt_secret = "change-me-in-production"
+# Default admin account seeded on first boot
+admin_email = "admin@pingwaf.local"
+admin_password = "pingwaf123"
+# Token lifetimes
+jwt_expiration_hours = 12
+refresh_token_expiration_hours = 720
+# Database pool
+db_max_connections = 20
+db_min_connections = 1
+# Whether new user registration is allowed
+allow_registration = true
+# CORS origins (empty = allow all, for development)
+cors_origins = []
+
+[agent]
+# Control plane gRPC URL (loopback in all-in-one mode)
+server_url = "http://127.0.0.1:9090"
+# API key for agent authentication (generated on first registration)
+api_key = ""
+# Local rule cache directory (persisted across restarts)
+cache_dir = "./data/cache"
+# Heartbeat interval in seconds
+heartbeat_interval_secs = 30
+# Log shipping
+log_batch_size = 100
+log_flush_interval_secs = 5
+max_body_log_size = 8192
+# Whether to allow traffic when disconnected from control plane
+fail_open = true
+# Reconnection backoff
+reconnect_initial_delay_ms = 1000
+reconnect_max_delay_ms = 60000
+
+# ─── Proxy configuration (inherited from pingap) ─────────────────────────
+# Uncomment and configure to also run the pingap reverse proxy alongside
+# the WAF control/data plane.
+#
+# [basic]
+# log_level = "INFO"
+# name = "pingwaf"
+# threads = 4
+#
+# [upstreams.backend]
+# addrs = ["127.0.0.1:3000"]
+#
+# [locations.main]
+# path = "/"
+# upstream = "backend"
+#
+# [servers.http]
+# addr = "0.0.0.0:80"
+# locations = ["main"]
