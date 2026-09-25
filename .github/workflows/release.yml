@@ -177,7 +177,7 @@ jobs:
 
       - name: Docker metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           # ghcr paths must be lowercase regardless of the owner's casing.
           images: ghcr.io/shuaizend/pingwaf
