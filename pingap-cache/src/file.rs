@@ -193,8 +193,7 @@ fn walk_cache_files(dir: &Path, skip_tmp: bool) -> Vec<CacheFile> {
         .filter_map(|item| item.ok())
         .filter(|item| item.file_type().is_file())
         .filter(|item| {
-            !skip_tmp
-                || !item.path().extension().is_some_and(|ext| ext == "tmp")
+            !skip_tmp || item.path().extension().is_none_or(|ext| ext != "tmp")
         })
         .filter_map(|item| {
             let metadata = item.metadata().ok()?;

@@ -110,7 +110,7 @@ async fn update_challenge(
         active.default_level = Set(level);
     }
     if let Some(duration) = payload.clearance_duration_secs {
-        if duration < 60 || duration > 86400 {
+        if !(60..=86400).contains(&duration) {
             return Err(ApiError::BadRequest(
                 "clearance_duration_secs must be between 60 and 86400"
                     .to_string(),
@@ -119,7 +119,7 @@ async fn update_challenge(
         active.clearance_duration_secs = Set(duration);
     }
     if let Some(threshold) = payload.rate_threshold {
-        if threshold < 1 || threshold > 10_000_000 {
+        if !(1..=10_000_000).contains(&threshold) {
             return Err(ApiError::BadRequest(
                 "rate_threshold must be between 1 and 10000000".to_string(),
             ));

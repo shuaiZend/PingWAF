@@ -380,16 +380,20 @@ mod tests {
 
     #[test]
     fn rejects_short_secret() {
-        let mut config = ServerConfig::default();
-        config.jwt_secret = "short".to_string();
+        let config = ServerConfig {
+            jwt_secret: "short".to_string(),
+            ..Default::default()
+        };
         assert!(config.validate().is_err());
     }
 
     #[test]
     fn rejects_refresh_shorter_than_access() {
-        let mut config = ServerConfig::default();
-        config.jwt_expiration_hours = 24;
-        config.refresh_token_expiration_hours = 1;
+        let config = ServerConfig {
+            jwt_expiration_hours: 24,
+            refresh_token_expiration_hours: 1,
+            ..Default::default()
+        };
         assert!(config.validate().is_err());
     }
 

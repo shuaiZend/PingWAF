@@ -5,6 +5,10 @@
 //! `Relation`). The inner modules are re-exported here under their singular
 //! names so call sites read as `models::site::Entity` instead of
 //! `models::sites::sites::Entity`.
+//!
+//! The inner module names necessarily match their file names (SeaORM's
+//! `DeriveEntityModel` shape), so `module_inception` is expected here.
+#![allow(clippy::module_inception)]
 
 pub mod agents;
 pub mod bot_protection;

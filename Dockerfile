@@ -18,6 +18,7 @@ FROM rust:1.98.0-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     protobuf-compiler \
+    libprotobuf-dev \
     cmake \
     libclang-dev \
     pkg-config \
@@ -57,7 +58,11 @@ COPY pingwaf-waf/Cargo.toml pingwaf-waf/
 COPY pingwaf-challenge/Cargo.toml pingwaf-challenge/
 
 # Create dummy source files so cargo can resolve dependencies
+# benches/bench.rs is an explicitly declared [[bench]] target in the root
+# Cargo.toml, so cargo requires the file to exist at manifest-parse time even
+# when only building a binary; provide a placeholder for the dependency warm-up.
 RUN mkdir -p src && echo "fn main() {}" > src/main.rs \
+    && mkdir -p benches && echo "fn main() {}" > benches/bench.rs \
     && for dir in pingap-core pingap-util pingap-config pingap-cache \
        pingap-certificate pingap-discovery pingap-health pingap-location \
        pingap-logger pingap-plugin pingap-proxy pingap-upstream pingap-acme \
@@ -74,6 +79,7 @@ RUN cargo build --release --features full 2>/dev/null || true
 # Copy actual source code
 COPY build.rs ./
 COPY src/ src/
+COPY benches/ benches/
 COPY pingap-core/ pingap-core/
 COPY pingap-util/ pingap-util/
 COPY pingap-config/ pingap-config/
