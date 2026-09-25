@@ -34,8 +34,7 @@ use bytes::{BufMut, BytesMut};
 use dashmap::DashMap;
 use pingap_config::{PluginCategory, PluginConf};
 use pingap_core::{
-    Ctx, HttpResponse, Plugin, PluginStep, RequestPluginResult,
-    ensure_client_ip, get_host,
+    Ctx, Plugin, PluginStep, RequestPluginResult, ensure_client_ip, get_host,
 };
 use pingora::proxy::Session;
 use pingwaf_agent::cache::{
@@ -76,10 +75,17 @@ pub struct WafPlugin {
     /// Locally configured engine; shared and hot-reloadable.
     engine: Arc<RwLock<WafEngine>>,
     mode: WafMode,
+    // TODO: parsed from config but not yet wired into WafEngine (detections/
+    // ml_enabled/ml_threshold are currently ignored at runtime)
+    #[allow(dead_code)]
     paranoia_level: u8,
+    #[allow(dead_code)]
     anomaly_threshold: u32,
+    #[allow(dead_code)]
     detections: Vec<String>,
+    #[allow(dead_code)]
     ml_enabled: bool,
+    #[allow(dead_code)]
     ml_threshold: f64,
     /// Opt-in request-body inspection (kept off by default: reading the body
     /// on every request is expensive and interferes with streaming uploads).

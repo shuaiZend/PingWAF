@@ -244,12 +244,17 @@ struct CompiledErrorPage {
     name: String,
 }
 
+/// Compiled pages indexed by the status code they render for.
+type CompiledErrorPageMap = Arc<HashMap<u16, CompiledErrorPage>>;
+/// A [`Tera`] instance plus the pages whose templates live inside it.
+type CompiledSitePages = (Arc<Tera>, CompiledErrorPageMap);
+
 /// Per-host cache of agent-supplied compiled pages plus the fingerprint they
 /// were built from.
 struct CachedSitePages {
     fingerprint: String,
     tera: Arc<Tera>,
-    pages: Arc<HashMap<u16, CompiledErrorPage>>,
+    pages: CompiledErrorPageMap,
 }
 
 /// Fully replaces the response body with a pre-rendered error page.
@@ -318,10 +323,7 @@ impl ErrorPagePlugin {
 
     /// Resolve the active page set for `host`: agent pages when available,
     /// otherwise the locally configured pages.
-    fn resolve(
-        &self,
-        host: &str,
-    ) -> (Arc<Tera>, Arc<HashMap<u16, CompiledErrorPage>>) {
+    fn resolve(&self, host: &str) -> CompiledSitePages {
         if !host.is_empty()
             && let Some(agent) = PingWafAgent::instance()
             && let Some(site) = agent.get_rules_for_domain(host)
@@ -487,9 +489,7 @@ impl ErrorPagePlugin {
 }
 
 /// Compile agent-supplied error pages into a fresh [`Tera`] + page map.
-fn build_site_pages(
-    pages: &[CustomErrorPage],
-) -> Result<(Arc<Tera>, Arc<HashMap<u16, CompiledErrorPage>>)> {
+fn build_site_pages(pages: &[CustomErrorPage]) -> Result<CompiledSitePages> {
     let mut tera = Tera::default();
     tera.add_raw_template(STYLE_PARTIAL, PW_STYLE)
         .map_err(|e| {
