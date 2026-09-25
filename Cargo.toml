@@ -413,7 +413,7 @@ zstd = "0.14.0"
 
 anyhow = "1"
 axum = { version = "0.8", features = ["macros", "ws"] }
-bcrypt = "0.17"
+bcrypt = "0.19"
 # tonic 0.14 split its prost integration out of the core crate: `tonic-prost`
 # carries the runtime codec and `tonic-prost-build` the code generator. Both pull
 # in prost 0.14, so the workspace pins prost/prost-types to the same minor -
