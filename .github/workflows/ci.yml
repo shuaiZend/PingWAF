@@ -81,9 +81,11 @@ jobs:
         run: cargo test --workspace --features full --no-fail-fast
 
       - name: Check rustls backend compiles
+        if: always()
         run: cargo check --workspace --no-default-features --features tls-rustls,full
 
       - name: Typos
+        if: always()
         uses: crate-ci/typos@master
 
   web:
