@@ -160,7 +160,7 @@ export function CachingPage() {
   }, [appliedQuotaMb])
 
   const invalidate = () => {
-    void queryClient.invalidateQueries({ queryKey: cacheKeys.all(siteId) })
+    void queryClient.invalidateQueries({ queryKey: cacheKeys.site(siteId) })
   }
 
   const patchSettings = (patch: Partial<CacheSettings>) => {
