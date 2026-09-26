@@ -102,15 +102,15 @@ pub struct AuthStatus {
     pub registration_open: bool,
 }
 
-/// Routes mounted under `/api/v1/auth`.
+/// Routes contributed to `/api/v1`.
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/status", get(status))
-        .route("/login", post(login))
-        .route("/register", post(register))
-        .route("/refresh", post(refresh))
-        .route("/me", get(me).put(update_profile))
-        .route("/password", put(change_password))
+        .route("/auth/status", get(status))
+        .route("/auth/login", post(login))
+        .route("/auth/register", post(register))
+        .route("/auth/refresh", post(refresh))
+        .route("/auth/me", get(me).put(update_profile))
+        .route("/auth/password", put(change_password))
 }
 
 /// `GET /api/v1/auth/status`
