@@ -1,21 +1,30 @@
-# PingWAF Multi-stage Dockerfile
+# PingWAF Multi-stage Dockerfile (optimized)
 # ─────────────────────────────────────────────────────────────────────────────
-# Stage 1: Build the React frontend
-# Stage 2: Build the Rust binary (with protoc for gRPC code generation)
-# Stage 3: Minimal runtime image
+# Stage 1: Build the React frontend (npm cache mount)
+# Stage 2: Build the Rust binary (warm-up layer for dependency precompilation)
+# Stage 3: Minimal runtime image (behavior contract unchanged)
 
 # ─── Stage 1: Frontend ───────────────────────────────────────────────────────
 FROM node:22-alpine AS frontend-builder
 
 WORKDIR /app/web
-COPY web/package*.json ./
-RUN npm ci --ignore-scripts
+
+# 1a. 先拷 manifest，最大化层缓存命中（源码变化不会让此层失效）
+COPY web/package.json web/package-lock.json ./
+
+# 1b. npm ci 挂载 npm 缓存目录，消除重复下载（改进：原无 cache mount，每次全量下载）
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --ignore-scripts
+
+# 1c. 拷源码并构建（源码变化只让此层失效，1b 层仍命中）
 COPY web/ ./
 RUN npm run build
 
 # ─── Stage 2: Rust Builder ───────────────────────────────────────────────────
-FROM rust:1.98.0-bookworm AS builder
+# 改进：版本从 1.98.0 升至 1.98.1，与 release.yml 的 dtolnay/rust-toolchain@1.98.1 对齐
+FROM rust:1.98.1-bookworm AS builder
 
+# SYNC: keep this list in lockstep with ci.yml / release.yml
 RUN apt-get update && apt-get install -y --no-install-recommends \
     protobuf-compiler \
     libprotobuf-dev \
@@ -28,8 +37,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Copy manifests first for dependency caching
-COPY Cargo.toml Cargo.lock ./
+# 2b.【关键修复】预热前必须拷入：
+#     - build.rs（根 Cargo.toml 声明 build = "build.rs"，缺失会导致预热 cargo build 立即失败）
+#     - pingwaf-proto/proto/（pingwaf-proto/build.rs 需要 control_plane.proto 生成 gRPC stub）
+#     - 根 Cargo.toml/lock + 全部 24 个成员的 Cargo.toml
+COPY Cargo.toml Cargo.lock build.rs ./
+COPY pingwaf-proto/proto/ pingwaf-proto/proto/
 
 # Copy all workspace member Cargo.toml files for dependency resolution
 COPY pingap-core/Cargo.toml pingap-core/
@@ -57,10 +70,8 @@ COPY pingwaf-agent/Cargo.toml pingwaf-agent/
 COPY pingwaf-waf/Cargo.toml pingwaf-waf/
 COPY pingwaf-challenge/Cargo.toml pingwaf-challenge/
 
-# Create dummy source files so cargo can resolve dependencies
-# benches/bench.rs is an explicitly declared [[bench]] target in the root
-# Cargo.toml, so cargo requires the file to exist at manifest-parse time even
-# when only building a binary; provide a placeholder for the dependency warm-up.
+# 2c. 创建 dummy 源文件，让 cargo 能通过 manifest 解析并编译第三方依赖
+#     benches/bench.rs 是根 Cargo.toml 的 [[bench]] target，manifest 解析期必须存在
 RUN mkdir -p src && echo "fn main() {}" > src/main.rs \
     && mkdir -p benches && echo "fn main() {}" > benches/bench.rs \
     && for dir in pingap-core pingap-util pingap-config pingap-cache \
@@ -73,11 +84,14 @@ RUN mkdir -p src && echo "fn main() {}" > src/main.rs \
     done \
     && mkdir -p pingwaf-proto/src && echo "" > pingwaf-proto/src/lib.rs
 
-# Pre-build dependencies (this layer is cached unless Cargo.toml/lock changes)
-RUN cargo build --release --features full 2>/dev/null || true
+# 2d. 依赖预热构建（修复：build.rs 与 proto/ 已前置 COPY，预热现在真正生效）
+#     编译产物留在镜像层中，供 CI type=gha/type=registry 缓存后端正确导出和恢复
+#     保留 `|| true` 因 dummy 源可能触发个别 crate 的编译错误
+RUN cargo build --release --features full || true; \
+    ls target/release/deps/*.rlib >/dev/null 2>&1 \
+      || { echo "ERROR: dependency warm-up produced no rlib — check build log above" >&2; exit 1; }
 
-# Copy actual source code
-COPY build.rs ./
+# 2e. 拷真实源码（任何源码变化让此层及以下失效，但 2d 的缓存层仍命中）
 COPY src/ src/
 COPY benches/ benches/
 # src/plugin/admin.rs embeds dist/ via rust-embed (resolved against the root
@@ -108,14 +122,16 @@ COPY pingwaf-agent/ pingwaf-agent/
 COPY pingwaf-waf/ pingwaf-waf/
 COPY pingwaf-challenge/ pingwaf-challenge/
 
-# Copy frontend dist for rust-embed (pingwaf-server expects web/dist/)
+# 2f. 前端产物（供 pingwaf-server/src/frontend.rs 的 rust-embed #[folder = "../web/dist/"]）
 COPY --from=frontend-builder /app/web/dist/ web/dist/
 
-# Force rebuild of all crates (touch to invalidate the dummy cache)
-RUN find . -name "*.rs" -exec touch {} + \
+# 2g. 最终构建：touch 使 workspace crate 的 mtime 指纹失效（排除 target/ 避免污染生成代码），
+#     触发 25 个 workspace crate 重编，而第三方 .rlib 从预热层继承、不受影响
+#     （Docker 层叠加：target/ 存在于 2d 预热层的文件系统中，后续 COPY 源码层不会覆盖它）
+RUN find . -path ./target -prune -o -name '*.rs' -print0 | xargs -0 --no-run-if-empty touch \
     && cargo build --release --bin pingwaf --features full
 
-# ─── Stage 3: Runtime ────────────────────────────────────────────────────────
+# ─── Stage 3: Runtime（行为契约保持不变）─────────────────────────────────────
 FROM debian:bookworm-slim AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \

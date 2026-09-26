@@ -73,6 +73,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
+          # SYNC: keep this list in lockstep with Dockerfile / ci.yml
           sudo apt-get install -y --no-install-recommends \
             protobuf-compiler \
             libprotobuf-dev \
@@ -103,6 +104,13 @@ jobs:
           cargo build --release --bin pingwaf ${{ matrix.features }} --target ${{ matrix.target }}
           ls -lh "target/${{ matrix.target }}/release/pingwaf"
 
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pingwaf-binary-${{ matrix.arch }}
+          path: target/${{ matrix.target }}/release/pingwaf
+          retention-days: 1
+
       - name: Package
         shell: bash
         run: |
@@ -131,18 +139,37 @@ jobs:
             pingwaf-${{ matrix.plat }}-${{ matrix.arch }}.tar.gz.sha256
 
   docker:
-    name: Publish Docker image (ghcr.io)
-    runs-on: ubuntu-latest
-    timeout-minutes: 360
+    name: Docker image (${{ matrix.arch }})
+    needs: binaries
+    runs-on: ${{ matrix.runs-on }}
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runs-on: ubuntu-latest
+            platform: linux/amd64
+          - arch: arm64
+            runs-on: ubuntu-22.04-arm
+            platform: linux/arm64
     steps:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+      - name: Download binary artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: pingwaf-binary-${{ matrix.arch }}
+          path: docker-context/
+
+      - name: Prepare build context
+        run: |
+          chmod +x docker-context/pingwaf
+          cp pingwaf.toml docker-context/
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -154,27 +181,45 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Docker metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          # ghcr paths must be lowercase regardless of the owner's casing.
-          images: ghcr.io/shuaizend/pingwaf
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest
-
-      # NOTE: the arm64 leg is cross-built under QEMU emulation and compiles the
-      # full Rust workspace inside the image, so it is slow. The generous
-      # timeout above accounts for it; split into native per-arch builds + a
-      # manifest merge if it ever becomes a bottleneck.
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
-          context: .
-          file: ./Dockerfile
-          platforms: linux/amd64,linux/arm64
+          context: docker-context/
+          file: ./Dockerfile.runtime
+          platforms: ${{ matrix.platform }}
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: ghcr.io/shuaizend/pingwaf:${GITHUB_REF_NAME#v}-${{ matrix.arch }}
+          labels: |
+            org.opencontainers.image.version=${GITHUB_REF_NAME#v}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+  docker-manifest:
+    name: Merge multi-arch Docker manifest
+    needs: docker
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create and push manifests
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          IMAGE="ghcr.io/shuaizend/pingwaf"
+          # Derive major.minor from version (e.g. 0.14.3 -> 0.14)
+          MAJOR_MINOR=$(echo "$VERSION" | cut -d. -f1,2)
+
+          for tag in "$VERSION" "$MAJOR_MINOR" "latest"; do
+            docker manifest create "${IMAGE}:${tag}" \
+              "${IMAGE}:${VERSION}-amd64" \
+              "${IMAGE}:${VERSION}-arm64" \
+              --amend
+            docker manifest push "${IMAGE}:${tag}"
+          done
