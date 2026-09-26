@@ -4,21 +4,14 @@ name: Release
 #
 #   trigger: push of a `v*` tag (e.g. v0.14.3)
 #
-# It produces the four tarballs install.sh downloads, named EXACTLY:
+# It produces the tarballs install.sh downloads, named EXACTLY:
 #   pingwaf-linux-amd64.tar.gz   pingwaf-linux-arm64.tar.gz
-#   pingwaf-darwin-amd64.tar.gz  pingwaf-darwin-arm64.tar.gz
 # install.sh resolves the asset as `pingwaf-${OS}-${ARCH}.tar.gz` from
 #   https://github.com/shuaiZend/PingWAF/releases/download/v${VERSION}/<asset>
 # so these names must not drift. Each tarball also ships a `.sha256` checksum.
 #
-# Backend choice per OS (see matrix):
-#   - Linux  -> OpenSSL (default feature), matching the Dockerfile.
-#   - macOS  -> rustls (`--no-default-features --features tls-rustls,full`).
-#     Intel macOS runners were retired, so darwin/amd64 has to be cross-compiled
-#     on Apple Silicon; rustls cross-compiles cleanly there while OpenSSL would
-#     need x86_64 libs Homebrew no longer provides on arm64. Both macOS binaries
-#     therefore use the same backend. openssl and tls-rustls are mutually
-#     exclusive, hence `--no-default-features` on the rustls leg.
+# Releases are Linux-only (server deployments). Both matrix legs use the
+# default OpenSSL backend, matching the Dockerfile.
 
 on:
   push:
@@ -58,16 +51,6 @@ jobs:
             runs-on: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
             features: "--features full"
-          - plat: darwin
-            arch: amd64
-            runs-on: macos-latest
-            target: x86_64-apple-darwin
-            features: "--no-default-features --features tls-rustls,full"
-          - plat: darwin
-            arch: arm64
-            runs-on: macos-latest
-            target: aarch64-apple-darwin
-            features: "--no-default-features --features tls-rustls,full"
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -87,21 +70,17 @@ jobs:
           npm ci
           npm run build
 
-      - name: Install system dependencies (Linux)
-        if: runner.os == 'Linux'
+      - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             protobuf-compiler \
+            libprotobuf-dev \
             cmake \
             libclang-dev \
             pkg-config \
             libssl-dev \
             nasm
-
-      - name: Install system dependencies (macOS)
-        if: runner.os == 'macOS'
-        run: brew install protobuf cmake nasm
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.98.1
