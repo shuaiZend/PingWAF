@@ -63,6 +63,16 @@ export const rulesApi = {
   /** Shorthand for changing the enforcement mode of a single rule. */
   setMode: (siteId: string, ruleId: string, mode: RuleMode) =>
     apiClient.put<Rule>(`/sites/${siteId}/rules/${ruleId}`, { mode }),
+
+  /** Re-adds missing built-in rules; edited ones are left untouched. */
+  restoreDefaults: (siteId: string) =>
+    apiClient.post<SeedWafDefaultsResult>(`/sites/${siteId}/waf/defaults`),
+}
+
+/** `POST /sites/{site_id}/waf/defaults` ack. */
+export interface SeedWafDefaultsResult {
+  inserted: number
+  total: number
 }
 
 /* ────────────────────────────────────────────────────────────────

@@ -2,12 +2,12 @@
 //! connected, and the commands the dashboard can push at them.
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Json;
 use axum::Router;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use pingwaf_proto::control_plane::{
     BlockIpCommand, PurgeCacheCommand, RestartAgentCommand, ServerCommand,
 };
@@ -23,10 +23,11 @@ use crate::api::common::{
     Pagination,
 };
 use crate::api::error::ApiError;
+use crate::api::keys::mint_key;
 use crate::api::state::AppState;
 use crate::auth::AuthUser;
 use crate::grpc::config::now_timestamp;
-use crate::models::{agent, agent_status, site};
+use crate::models::{agent, agent_status, permission, site};
 
 /// `pingwaf.CommandType` values, spelled out so the control plane does not depend
 /// on prost's enum variant naming.
@@ -96,12 +97,147 @@ fn default_graceful() -> bool {
     true
 }
 
+/// Enrollment options. Everything is optional: the defaults mint a key that is
+/// valid for a day, which is enough to paste the command on a fresh server.
+#[derive(Debug, Deserialize, Default)]
+pub struct EnrollRequest {
+    /// Name recorded on the minted key, so it can be told apart in the key list.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// How long the enrollment stays usable, in hours.
+    #[serde(default)]
+    pub ttl_hours: Option<i64>,
+}
+
+/// Everything the operator needs to bring a node online: the key, the endpoint
+/// to connect to, and the commands that use both.
+#[derive(Debug, Serialize)]
+pub struct EnrollResponse {
+    pub key_id: Uuid,
+    /// Agent API key. Shown once — only its bcrypt hash is stored.
+    pub token: String,
+    pub expires_at: DateTime<Utc>,
+    /// gRPC endpoint the agent connects to.
+    pub server_url: String,
+    /// Docker one-liner, for a host with nothing installed yet.
+    pub docker_command: String,
+    /// Same thing for a host that already has the `pingwaf` binary.
+    pub binary_command: String,
+}
+
+/// Bounds on enrollment validity: a day by default, a month at most.
+const DEFAULT_ENROLL_TTL_HOURS: i64 = 24;
+const MAX_ENROLL_TTL_HOURS: i64 = 24 * 30;
+const AGENT_IMAGE: &str = "ghcr.io/shuaizend/pingwaf:latest";
+
 /// Routes contributed to `/api/v1`.
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/agents", get(list))
+        .route("/agents/enroll", post(enroll))
         .route("/agents/{agent_id}", get(show).delete(remove))
         .route("/agents/{agent_id}/commands", post(send_command))
+}
+
+/// `POST /api/v1/agents/enroll` — mints a short-lived agent key and returns the
+/// command line that installs and starts a node with it.
+///
+/// The agent registers itself over gRPC on first connect, so running the command
+/// is all that is needed for the node to appear in the inventory.
+async fn enroll(
+    State(state): State<AppState>,
+    current: AuthUser,
+    headers: HeaderMap,
+    Json(payload): Json<EnrollRequest>,
+) -> Result<Response, ApiError> {
+    require_write(&current)?;
+
+    let name = non_empty(&payload.name).unwrap_or_else(|| {
+        format!("agent-enrollment-{}", Utc::now().format("%Y%m%d-%H%M%S"))
+    });
+    if name.len() > 100 {
+        return Err(ApiError::BadRequest(
+            "name must be at most 100 characters".to_string(),
+        ));
+    }
+
+    let ttl_hours = payload.ttl_hours.unwrap_or(DEFAULT_ENROLL_TTL_HOURS);
+    if !(1..=MAX_ENROLL_TTL_HOURS).contains(&ttl_hours) {
+        return Err(ApiError::BadRequest(format!(
+            "ttl_hours must be between 1 and {MAX_ENROLL_TTL_HOURS}"
+        )));
+    }
+    let expires_at = Utc::now() + Duration::hours(ttl_hours);
+
+    let (model, token) = mint_key(
+        &state,
+        current.id,
+        name,
+        vec![permission::AGENT.to_string(), permission::READ.to_string()],
+        Some(expires_at),
+    )
+    .await?;
+
+    let server_url = agent_server_url(&state, &headers);
+    let docker_command = format!(
+        "docker run -d --name pingwaf-agent --restart unless-stopped \
+         -p 80:80 -p 443:443 \
+         -e PINGWAF_SERVER_URL={server_url} \
+         -e PINGWAF_API_KEY={token} \
+         -e PINGWAF_CACHE_DIR=/var/lib/pingwaf/cache \
+         -v pingwaf-agent-data:/var/lib/pingwaf \
+         {AGENT_IMAGE} agent"
+    );
+    let binary_command =
+        format!("pingwaf agent --server-url {server_url} --api-key {token}");
+
+    tracing::info!(key_id = %model.id, requested_by = %current.id, "agent enrollment created");
+
+    Ok((
+        StatusCode::CREATED,
+        Json(EnrollResponse {
+            key_id: model.id,
+            token,
+            expires_at,
+            server_url,
+            docker_command,
+            binary_command,
+        }),
+    )
+        .into_response())
+}
+
+/// Best-effort gRPC endpoint for the agent to dial.
+///
+/// The control plane only knows its bind address (`0.0.0.0:9090`), which is not
+/// routable from another server, so the port is combined with the host the
+/// operator reached the dashboard on.
+fn agent_server_url(state: &AppState, headers: &HeaderMap) -> String {
+    let port = state
+        .config
+        .grpc_addr
+        .rsplit(':')
+        .next()
+        .filter(|raw| !raw.is_empty())
+        .unwrap_or("9090");
+    let host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .map(host_without_port)
+        .filter(|host| !host.is_empty() && *host != "localhost")
+        .unwrap_or("localhost");
+    format!("http://{host}:{port}")
+}
+
+/// Strips the port from a `Host` header value, keeping IPv6 literals intact.
+fn host_without_port(raw: &str) -> &str {
+    if let Some(end) = raw.find(']') {
+        return &raw[..=end];
+    }
+    match raw.rsplit_once(':') {
+        Some((host, _)) if !host.is_empty() => host,
+        _ => raw,
+    }
 }
 
 /// `GET /api/v1/agents`

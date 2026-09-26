@@ -3,19 +3,19 @@ import { useParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  Lightning,
-  Plus,
-  PencilSimple,
-  Trash,
   ArrowClockwise,
-  Database,
-  Target,
-  Stack,
+  ArrowCounterClockwise,
   Broom,
+  CheckCircle,
+  Lightning,
+  PencilSimple,
+  Plus,
+  Trash,
 } from '@phosphor-icons/react'
 import { PageHeader } from '@/components/PageHeader'
 import { Card, CardBody, CardHeader } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
+import { Badge } from '@/components/ui/Badge'
 import { Input } from '@/components/ui/Input'
 import { Switch } from '@/components/ui/Switch'
 import { Dialog } from '@/components/ui/Dialog'
@@ -23,21 +23,23 @@ import { Textarea } from '@/components/ui/Textarea'
 import { Table, type Column } from '@/components/ui/Table'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { EmptyState } from '@/components/ui/EmptyState'
-import { SkeletonRows, SkeletonStat } from '@/components/ui/Skeleton'
+import { Skeleton, SkeletonRows } from '@/components/ui/Skeleton'
 import { useToast } from '@/components/ui/Toast'
 import { ErrorState } from '@/components/ErrorState'
 import { cachingApi, cacheKeys } from '@/api/caching'
 import { useCanWrite } from '@/hooks'
 import { cn } from '@/lib/utils'
-import { formatNumber, formatPercent, formatSize } from '@/lib/format'
-import type { CacheRule, CreateCacheRuleRequest } from '@/api/types'
+import { formatDateTime, formatNumber, formatPercent, formatSize } from '@/lib/format'
+import type { CacheRule, CacheSettings, CreateCacheRuleRequest } from '@/api/types'
+
+/** `MAX_DISK_QUOTA_MB` on the server — reject out-of-range values up front. */
+const MAX_QUOTA_MB = 1024 * 1024
 
 interface FormState {
   name: string
   match_expression: string
   edge_ttl_seconds: number
   browser_ttl_seconds: number
-  disk_quota_mb: number
   cache_eligible: boolean
   respect_origin: boolean
   enabled: boolean
@@ -48,7 +50,6 @@ const emptyForm = (): FormState => ({
   match_expression: '',
   edge_ttl_seconds: 3600,
   browser_ttl_seconds: 300,
-  disk_quota_mb: 0,
   cache_eligible: true,
   respect_origin: true,
   enabled: true,
@@ -60,11 +61,14 @@ function formFromRule(rule: CacheRule): FormState {
     match_expression: rule.match_expression,
     edge_ttl_seconds: rule.edge_ttl_seconds,
     browser_ttl_seconds: rule.browser_ttl_seconds,
-    disk_quota_mb: rule.disk_quota_mb,
     cache_eligible: rule.cache_eligible,
     respect_origin: rule.respect_origin,
     enabled: rule.enabled,
   }
+}
+
+function errorText(e: unknown): string {
+  return e instanceof Error ? e.message : String(e)
 }
 
 type Translate = ReturnType<typeof useTranslation>['t']
@@ -90,6 +94,17 @@ export function CachingPage() {
   const [pendingDelete, setPendingDelete] = useState<CacheRule | null>(null)
   const [purgeUrls, setPurgeUrls] = useState('')
   const [purgeAllOpen, setPurgeAllOpen] = useState(false)
+  /** Set right after a successful activation so the built-in set is called out. */
+  const [justActivated, setJustActivated] = useState(false)
+  const [quotaInput, setQuotaInput] = useState('0')
+  const [quotaError, setQuotaError] = useState<string | null>(null)
+
+  /* ── Site-wide cache state (activation + disk budget) ─────────────── */
+  const settingsQuery = useQuery({
+    queryKey: cacheKeys.settings(siteId),
+    queryFn: () => cachingApi.getSettings(siteId),
+    enabled: Boolean(siteId),
+  })
 
   const rulesQuery = useQuery({
     queryKey: cacheKeys.rules(siteId),
@@ -98,10 +113,12 @@ export function CachingPage() {
     select: (page) => page.items,
   })
 
-  const statsQuery = useQuery({
-    queryKey: cacheKeys.stats(siteId),
-    queryFn: () => cachingApi.stats(siteId),
+  /** Edge heartbeats — polled, and refreshable by hand. */
+  const statusQuery = useQuery({
+    queryKey: cacheKeys.status(siteId),
+    queryFn: () => cachingApi.status(siteId),
     enabled: Boolean(siteId),
+    refetchInterval: 30_000,
   })
 
   const rules = useMemo(
@@ -109,15 +126,141 @@ export function CachingPage() {
     [rulesQuery.data],
   )
 
+  const settings = settingsQuery.data
+  const cacheEnabled = settings?.cache_enabled ?? false
+  const enabledRuleCount = settings?.enabled_rule_count ?? 0
+  const ruleCount = settings?.rule_count ?? 0
+  const appliedQuotaMb = settings?.quota_mb ?? 0
+  const quotaDirty = quotaInput.trim() !== String(appliedQuotaMb)
+
+  const status = statusQuery.data
+  const reportingEdges = status?.reporting_edges ?? 0
+  const quotaBytesTotal = status?.quota_bytes_total ?? 0
+  const usagePercent = status?.usage_percent ?? 0
+  const configuredQuotaMb = status?.configured_quota_mb ?? appliedQuotaMb
+  const quotaValueLabel =
+    configuredQuotaMb > 0
+      ? `${formatNumber(configuredQuotaMb)} MiB`
+      : t('pages.caching.unlimited')
+  /** Site setting as stored, i.e. without waiting for an edge heartbeat. */
+  const appliedQuotaLabel =
+    appliedQuotaMb > 0
+      ? `${formatNumber(appliedQuotaMb)} MiB`
+      : t('pages.caching.unlimited')
+
   useEffect(() => {
     if (!dialogOpen) return
     setError(null)
     setForm(editing ? formFromRule(editing) : emptyForm())
   }, [dialogOpen, editing])
 
+  /** Keep the input in step with the server value (also picks up clamping). */
+  useEffect(() => {
+    setQuotaInput(String(appliedQuotaMb))
+  }, [appliedQuotaMb])
+
   const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: cacheKeys.all(siteId) })
   }
+
+  const patchSettings = (patch: Partial<CacheSettings>) => {
+    queryClient.setQueryData<CacheSettings>(cacheKeys.settings(siteId), (prev) =>
+      prev ? { ...prev, ...patch } : prev,
+    )
+  }
+
+  /* ── Activation ───────────────────────────────────────────────────── */
+
+  /**
+   * Turning caching on must not leave the operator with nothing to cache:
+   * built-in rules are restored first (idempotent), then every cache-eligible
+   * rule is enabled. `cache_enabled` is derived from "any rule enabled".
+   */
+  const enable = useMutation({
+    mutationFn: async () => {
+      const seeded = await cachingApi.restoreDefaults(siteId)
+      const page = await cachingApi.listRules(siteId)
+      const eligible = page.items.filter((rule) => rule.cache_eligible)
+      const off = eligible.filter((rule) => !rule.enabled)
+      await Promise.all(off.map((rule) => cachingApi.toggleEnabled(siteId, rule.id, true)))
+      return { seeded, enabled: eligible.length }
+    },
+    onSuccess: ({ seeded, enabled }) => {
+      setJustActivated(enabled > 0)
+      patchSettings({ cache_enabled: enabled > 0, enabled_rule_count: enabled })
+      invalidate()
+      if (enabled === 0) {
+        toast.warning(
+          t('pages.caching.noEligibleRulesTitle'),
+          t('pages.caching.noEligibleRulesHint'),
+        )
+        return
+      }
+      toast.success(
+        t('pages.caching.enableTitle'),
+        t('pages.caching.enableDescription', {
+          enabled,
+          inserted: seeded.inserted,
+          total: seeded.total,
+        }),
+      )
+    },
+    onError: (e) => toast.error(t('pages.caching.actionFailed'), errorText(e)),
+  })
+
+  /** Turning caching off keeps every rule in place, just disabled. */
+  const disable = useMutation({
+    mutationFn: async () => {
+      const page = await cachingApi.listRules(siteId)
+      const on = page.items.filter((rule) => rule.enabled)
+      await Promise.all(on.map((rule) => cachingApi.toggleEnabled(siteId, rule.id, false)))
+      return on.length
+    },
+    onSuccess: (count) => {
+      setJustActivated(false)
+      patchSettings({ cache_enabled: false, enabled_rule_count: 0 })
+      invalidate()
+      toast.success(
+        t('pages.caching.disableTitle'),
+        t('pages.caching.disableDescription', { count: formatNumber(count) }),
+      )
+    },
+    onError: (e) => toast.error(t('pages.caching.actionFailed'), errorText(e)),
+  })
+
+  const restore = useMutation({
+    mutationFn: () => cachingApi.restoreDefaults(siteId),
+    onSuccess: (result) => {
+      toast.success(
+        t('pages.caching.restoredTitle'),
+        t('pages.caching.restoredDescription', {
+          inserted: result.inserted,
+          total: result.total,
+        }),
+      )
+      invalidate()
+    },
+    onError: (e) => toast.error(t('pages.caching.actionFailed'), errorText(e)),
+  })
+
+  const activationBusy = enable.isPending || disable.isPending
+
+  const saveQuota = useMutation({
+    mutationFn: (quota_mb: number) => cachingApi.updateSettings(siteId, { quota_mb }),
+    onSuccess: (next) => {
+      queryClient.setQueryData(cacheKeys.settings(siteId), next)
+      setQuotaInput(String(next.quota_mb))
+      setQuotaError(null)
+      toast.success(
+        t('pages.caching.quotaSaved'),
+        t('pages.caching.quotaSavedDescription', { quota: formatNumber(next.quota_mb) }),
+      )
+      invalidate()
+    },
+    onError: (e) => setQuotaError(errorText(e)),
+  })
+
+  /* ── Rules ────────────────────────────────────────────────────────── */
 
   const save = useMutation({
     mutationFn: (payload: CreateCacheRuleRequest) =>
@@ -132,13 +275,14 @@ export function CachingPage() {
       closeDialog()
       invalidate()
     },
-    onError: (e) => setError(e instanceof Error ? e.message : String(e)),
+    onError: (e) => setError(errorText(e)),
   })
 
   const toggle = useMutation({
     mutationFn: ({ rule, enabled }: { rule: CacheRule; enabled: boolean }) =>
       cachingApi.toggleEnabled(siteId, rule.id, enabled),
     onSuccess: () => invalidate(),
+    onError: (e) => toast.error(t('pages.caching.actionFailed'), errorText(e)),
   })
 
   const remove = useMutation({
@@ -151,17 +295,21 @@ export function CachingPage() {
   })
 
   const purge = useMutation({
-    mutationFn: (payload: { urls?: string[]; all?: boolean }) =>
+    mutationFn: (payload: { urls?: string[]; purge_all?: boolean }) =>
       cachingApi.purge({ site_id: siteId, ...payload }),
     onSuccess: (result, payload) => {
       toast.success(
-        payload.all ? t('pages.caching.purgedAll') : t('pages.caching.purgedUrls'),
-        t('pages.caching.purgedCount', { count: formatNumber(result.purged) }),
+        payload.purge_all ? t('pages.caching.purgedAll') : t('pages.caching.purgedUrls'),
+        t('pages.caching.purgeResult', {
+          delivered: formatNumber(result.delivered),
+          queued: formatNumber(result.queued),
+        }),
       )
-      if (!payload.all) setPurgeUrls('')
+      if (!payload.purge_all) setPurgeUrls('')
       setPurgeAllOpen(false)
       invalidate()
     },
+    onError: (e) => toast.error(t('pages.caching.actionFailed'), errorText(e)),
   })
 
   const closeDialog = () => {
@@ -183,11 +331,20 @@ export function CachingPage() {
       match_expression: form.match_expression.trim(),
       edge_ttl_seconds: form.edge_ttl_seconds,
       browser_ttl_seconds: form.browser_ttl_seconds,
-      disk_quota_mb: form.disk_quota_mb,
       cache_eligible: form.cache_eligible,
       respect_origin: form.respect_origin,
       enabled: form.enabled,
     })
+  }
+
+  const submitQuota = () => {
+    setQuotaError(null)
+    const value = Number(quotaInput)
+    if (!Number.isInteger(value) || value < 0 || value > MAX_QUOTA_MB) {
+      setQuotaError(t('pages.caching.quotaInvalid'))
+      return
+    }
+    saveQuota.mutate(value)
   }
 
   const submitPurgeUrls = () => {
@@ -202,6 +359,14 @@ export function CachingPage() {
     purge.mutate({ urls })
   }
 
+  const refreshAll = () => {
+    void settingsQuery.refetch()
+    void rulesQuery.refetch()
+    void statusQuery.refetch()
+  }
+  const refreshing =
+    settingsQuery.isFetching || rulesQuery.isFetching || statusQuery.isFetching
+
   const columns: Column<CacheRule>[] = [
     {
       key: 'name',
@@ -210,7 +375,14 @@ export function CachingPage() {
       sortable: true,
       cell: (r) => (
         <div className="min-w-0">
-          <p className="truncate text-[13px] font-medium text-fg-strong">{r.name}</p>
+          <div className="flex min-w-0 items-center gap-2">
+            <p className="truncate text-[13px] font-medium text-fg-strong">{r.name}</p>
+            {!r.cache_eligible && (
+              <Badge tone="neutral" size="sm">
+                {t('pages.caching.notEligible')}
+              </Badge>
+            )}
+          </div>
           <p className="pw-mono truncate text-xs text-fg-subtle">
             {r.match_expression || t('pages.caching.allRequests')}
           </p>
@@ -238,18 +410,6 @@ export function CachingPage() {
       cell: (r) => (
         <span className="tabular-nums text-[13px] text-fg-subtle">
           {formatTtl(r.browser_ttl_seconds, t)}
-        </span>
-      ),
-    },
-    {
-      key: 'quota',
-      header: t('pages.caching.diskQuota'),
-      accessor: (r) => r.disk_quota_mb,
-      align: 'right',
-      width: '1%',
-      cell: (r) => (
-        <span className="tabular-nums text-[13px] text-fg-subtle">
-          {r.disk_quota_mb > 0 ? `${formatNumber(r.disk_quota_mb)} MB` : t('pages.caching.unlimited')}
         </span>
       ),
     },
@@ -300,11 +460,8 @@ export function CachingPage() {
     },
   ]
 
-  const stats = statsQuery.data
-  const diskPct =
-    stats && stats.disk_quota_bytes > 0
-      ? Math.min(100, (stats.disk_usage_bytes / stats.disk_quota_bytes) * 100)
-      : 0
+  const settingsFailed = settingsQuery.isError && !settingsQuery.data
+  const rulesFailed = rulesQuery.isError && !rulesQuery.data
 
   return (
     <div className="animate-slide-up">
@@ -315,11 +472,8 @@ export function CachingPage() {
           <div className="flex items-center gap-2">
             <Button
               variant="secondary"
-              loading={rulesQuery.isFetching}
-              onClick={() => {
-                rulesQuery.refetch()
-                statsQuery.refetch()
-              }}
+              loading={refreshing}
+              onClick={refreshAll}
               icon={<ArrowClockwise weight="duotone" className="h-4 w-4" />}
             >
               {t('common.refresh')}
@@ -340,139 +494,364 @@ export function CachingPage() {
         }
       />
 
-      {/* Stats */}
-      <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-3">
-        {statsQuery.isPending && !stats ? (
-          <>
-            <SkeletonStat />
-            <SkeletonStat />
-            <SkeletonStat />
-          </>
-        ) : (
-          <>
-            <StatCard
-              icon={<Target weight="duotone" className="h-4 w-4" />}
-              label={t('pages.caching.hitRate')}
-              value={formatPercent(stats?.hit_rate ?? 0)}
-              hint={t('pages.caching.hitsMisses', {
-                hits: formatNumber(stats?.hits ?? 0),
-                misses: formatNumber(stats?.misses ?? 0),
-              })}
-            />
-            <StatCard
-              icon={<Database weight="duotone" className="h-4 w-4" />}
-              label={t('pages.caching.diskUsage')}
-              value={formatSize(stats?.disk_usage_bytes ?? 0)}
-              hint={
-                stats && stats.disk_quota_bytes > 0
-                  ? `${t('pages.caching.of')} ${formatSize(stats.disk_quota_bytes)}`
-                  : t('pages.caching.unlimited')
-              }
-              progress={stats && stats.disk_quota_bytes > 0 ? diskPct : undefined}
-            />
-            <StatCard
-              icon={<Stack weight="duotone" className="h-4 w-4" />}
-              label={t('pages.caching.cachedItems')}
-              value={formatNumber(stats?.total_items ?? 0)}
-              hint={t('pages.caching.cachedItemsHint')}
-            />
-          </>
-        )}
-      </div>
-
-      {rulesQuery.isError && !rulesQuery.data ? (
+      {settingsFailed || rulesFailed ? (
         <ErrorState
-          error={rulesQuery.error}
-          onRetry={() => rulesQuery.refetch()}
-          retrying={rulesQuery.isFetching}
+          error={settingsQuery.error ?? rulesQuery.error}
+          onRetry={refreshAll}
+          retrying={refreshing}
         />
       ) : (
-        <Card className="mb-6">
-          <CardHeader
-            title={t('pages.caching.rulesTitle')}
-            description={t('pages.caching.rulesHint')}
-          />
-          <CardBody className="p-0">
-            {rulesQuery.isPending ? (
-              <SkeletonRows rows={4} columns={6} />
-            ) : rules.length === 0 ? (
-              <EmptyState
-                className="border-0 py-12"
-                icon={<Lightning weight="duotone" className="h-8 w-8" />}
-                title={t('pages.caching.empty')}
-                description={t('pages.caching.emptyDescription')}
+        <>
+          {/* ── Activation ──────────────────────────────────────────── */}
+          {settingsQuery.isPending && !settings ? (
+            <Skeleton className="mb-4 h-40 w-full rounded-lg" />
+          ) : (
+            <Card className="mb-4">
+              <CardHeader
+                title={t('pages.caching.activationTitle')}
+                description={t('pages.caching.activationHint')}
                 action={
-                  canWrite ? (
-                    <Button
-                      variant="primary"
-                      icon={<Plus weight="bold" className="h-4 w-4" />}
-                      onClick={() => {
-                        setEditing(null)
-                        setDialogOpen(true)
-                      }}
-                    >
-                      {t('pages.caching.addRule')}
-                    </Button>
-                  ) : undefined
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={!canWrite || activationBusy}
+                    loading={restore.isPending}
+                    onClick={() => restore.mutate()}
+                    icon={<ArrowCounterClockwise weight="duotone" className="h-4 w-4" />}
+                  >
+                    {t('pages.caching.restoreButton')}
+                  </Button>
                 }
               />
-            ) : (
-              <Table
-                columns={columns}
-                data={rules}
-                rowKey={(r) => r.id}
-                dense
-                onRowClick={
-                  canWrite
-                    ? (r) => {
-                        setEditing(r)
-                        setDialogOpen(true)
-                      }
-                    : undefined
-                }
-              />
-            )}
-          </CardBody>
-        </Card>
-      )}
+              <CardBody className="flex flex-col gap-4">
+                <div className="flex flex-wrap items-center gap-4">
+                  <span
+                    className={cn(
+                      'flex h-10 w-10 shrink-0 items-center justify-center rounded-lg',
+                      cacheEnabled ? 'bg-brand-soft text-brand' : 'bg-recessed text-fg-subtle',
+                    )}
+                  >
+                    <Lightning weight="duotone" className="h-5 w-5" />
+                  </span>
+                  <Switch
+                    className="min-w-[220px] flex-1"
+                    checked={cacheEnabled}
+                    disabled={!canWrite || activationBusy || settingsQuery.isPending}
+                    onCheckedChange={(next) => {
+                      if (!canWrite || activationBusy) return
+                      if (next) enable.mutate()
+                      else disable.mutate()
+                    }}
+                    label={t('pages.caching.activationSwitch')}
+                    description={t('pages.caching.activationSwitchHint')}
+                  />
+                  <div className="flex shrink-0 flex-wrap items-center gap-3">
+                    <Badge tone={cacheEnabled ? 'success' : 'neutral'} dot>
+                      {cacheEnabled
+                        ? t('pages.caching.stateActive')
+                        : t('pages.caching.stateInactive')}
+                    </Badge>
+                    <span className="text-xs tabular-nums text-fg-subtle">
+                      {t('pages.caching.activationCounts', {
+                        enabled: enabledRuleCount,
+                        total: ruleCount,
+                      })}
+                    </span>
+                    {activationBusy && (
+                      <span className="text-xs text-fg-subtle">
+                        {t('pages.caching.activationPending')}
+                      </span>
+                    )}
+                  </div>
+                </div>
 
-      {/* Purge */}
-      <Card>
-        <CardHeader
-          title={t('pages.caching.purgeTitle')}
-          description={t('pages.caching.purgeHint')}
-        />
-        <CardBody className="flex flex-col gap-4">
-          <Textarea
-            label={t('pages.caching.purgeUrls')}
-            mono
-            rows={4}
-            disabled={!canWrite}
-            value={purgeUrls}
-            placeholder={'https://example.com/index.html\nhttps://example.com/assets/app.css'}
-            hint={t('pages.caching.purgeUrlsHint')}
-            onChange={(e) => setPurgeUrls(e.target.value)}
-          />
-          <div className="flex flex-wrap items-center gap-2">
-            <Button
-              variant="primary"
-              disabled={!canWrite || purge.isPending}
-              loading={purge.isPending}
-              icon={<Broom weight="duotone" className="h-4 w-4" />}
-              onClick={submitPurgeUrls}
-            >
-              {t('pages.caching.purgeUrls')}
-            </Button>
-            <Button
-              variant="danger"
-              disabled={!canWrite || purge.isPending}
-              onClick={() => setPurgeAllOpen(true)}
-            >
-              {t('pages.caching.purgeAll')}
-            </Button>
+                {justActivated && cacheEnabled && (
+                  <div className="flex items-start gap-2 rounded-md border border-success/30 bg-success/8 px-3 py-2">
+                    <CheckCircle
+                      weight="duotone"
+                      className="mt-px h-4 w-4 shrink-0 text-fg-success"
+                    />
+                    <p className="text-xs leading-relaxed text-fg-subtle">
+                      {t('pages.caching.activatedNotice')}
+                    </p>
+                  </div>
+                )}
+
+                <div className="rounded-md border border-line bg-recessed px-3 py-2">
+                  <p className="text-xs leading-relaxed text-fg-subtle">
+                    <span className="font-medium text-fg">
+                      {t('pages.caching.cacheHeaderTitle')}
+                    </span>{' '}
+                    <code className="pw-mono text-fg">x-cache-status</code>{' '}
+                    {t('pages.caching.cacheHeaderNote')}
+                  </p>
+                </div>
+              </CardBody>
+            </Card>
+          )}
+
+          {/* ── Usage + site-wide quota ─────────────────────────────── */}
+          <div className="mb-4 grid grid-cols-1 gap-4 lg:grid-cols-3">
+            <Card className="lg:col-span-2">
+              <CardHeader
+                title={t('pages.caching.usageTitle')}
+                description={t('pages.caching.usageHint')}
+                action={
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    loading={statusQuery.isFetching}
+                    onClick={() => statusQuery.refetch()}
+                    icon={<ArrowClockwise weight="duotone" className="h-4 w-4" />}
+                  >
+                    {t('common.refresh')}
+                  </Button>
+                }
+              />
+              <CardBody className="flex flex-col gap-4">
+                {statusQuery.isPending && !status ? (
+                  <Skeleton className="h-24 w-full" />
+                ) : statusQuery.isError && !status ? (
+                  <ErrorState
+                    variant="inline"
+                    error={statusQuery.error}
+                    onRetry={() => statusQuery.refetch()}
+                    retrying={statusQuery.isFetching}
+                  />
+                ) : reportingEdges === 0 ? (
+                  <>
+                    <div className="rounded-md border border-line bg-recessed px-3 py-2">
+                      <p className="text-xs leading-relaxed text-fg-subtle">
+                        {t('pages.caching.noEdgeReport')}
+                      </p>
+                    </div>
+                    <Metric
+                      label={t('pages.caching.quotaConfigured')}
+                      value={quotaValueLabel}
+                    />
+                  </>
+                ) : (
+                  <>
+                    <div className="grid grid-cols-2 gap-x-6 gap-y-4 lg:grid-cols-3">
+                      <Metric
+                        label={t('pages.caching.quotaConfigured')}
+                        value={quotaValueLabel}
+                        hint={
+                          quotaBytesTotal > 0
+                            ? t('pages.caching.quotaPerEdge', {
+                                size: formatSize(status?.quota_bytes_per_edge ?? 0),
+                              })
+                            : t('pages.caching.unlimited')
+                        }
+                      />
+                      <Metric
+                        label={t('pages.caching.diskUsage')}
+                        value={formatSize(status?.disk_bytes ?? 0)}
+                        hint={
+                          quotaBytesTotal > 0
+                            ? t('pages.caching.diskUsageOf', {
+                                total: formatSize(quotaBytesTotal),
+                              })
+                            : t('pages.caching.unlimited')
+                        }
+                      />
+                      <Metric
+                        label={t('pages.caching.quotaUsed')}
+                        value={
+                          quotaBytesTotal > 0
+                            ? formatPercent(usagePercent / 100)
+                            : t('pages.caching.unlimited')
+                        }
+                      />
+                      <Metric
+                        label={t('pages.caching.cachedItems')}
+                        value={formatNumber(status?.items ?? 0)}
+                        hint={t('pages.caching.cachedItemsHint')}
+                      />
+                      <Metric
+                        label={t('pages.caching.evictions')}
+                        value={formatNumber(status?.evictions_total ?? 0)}
+                      />
+                      <Metric
+                        label={t('pages.caching.lastReported')}
+                        value={formatDateTime(status?.last_reported_at)}
+                      />
+                    </div>
+                    {quotaBytesTotal > 0 ? (
+                      <div>
+                        <div className="h-1.5 w-full overflow-hidden rounded-full bg-recessed">
+                          <div
+                            className={cn(
+                              'h-full rounded-full transition-all',
+                              usagePercent > 85 ? 'bg-danger' : 'bg-brand',
+                            )}
+                            style={{
+                              width: `${Math.max(0, Math.min(100, usagePercent))}%`,
+                            }}
+                          />
+                        </div>
+                        <p className="mt-2 text-xs text-fg-subtle">
+                          {t('pages.caching.reportingEdges', {
+                            count: formatNumber(reportingEdges),
+                          })}
+                        </p>
+                      </div>
+                    ) : (
+                      <p className="text-xs leading-relaxed text-fg-subtle">
+                        {t('pages.caching.noQuotaNote')}
+                      </p>
+                    )}
+                  </>
+                )}
+              </CardBody>
+            </Card>
+
+            <Card>
+              <CardHeader
+                title={t('pages.caching.quotaTitle')}
+                description={t('pages.caching.quotaHint')}
+              />
+              <CardBody className="flex flex-col gap-3">
+                {settingsQuery.isPending && !settings ? (
+                  <Skeleton className="h-20 w-full" />
+                ) : (
+                  <>
+                    <Input
+                      type="number"
+                      label={t('pages.caching.quotaLabel')}
+                      className="tabular-nums"
+                      value={quotaInput}
+                      min={0}
+                      max={MAX_QUOTA_MB}
+                      disabled={!canWrite || saveQuota.isPending}
+                      error={quotaError}
+                      hint={t('pages.caching.quotaFieldHint')}
+                      onChange={(e) => {
+                        setQuotaError(null)
+                        setQuotaInput(e.target.value)
+                      }}
+                    />
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <span className="text-xs text-fg-subtle">
+                        {t('pages.caching.quotaCurrent', { quota: appliedQuotaLabel })}
+                      </span>
+                      <Button
+                        size="sm"
+                        variant="primary"
+                        disabled={!canWrite || !quotaDirty || saveQuota.isPending}
+                        loading={saveQuota.isPending}
+                        onClick={submitQuota}
+                      >
+                        {t('common.save')}
+                      </Button>
+                    </div>
+                  </>
+                )}
+              </CardBody>
+            </Card>
           </div>
-        </CardBody>
-      </Card>
+
+          {/* ── Rules ───────────────────────────────────────────────── */}
+          <Card className="mb-4">
+            <CardHeader
+              title={t('pages.caching.rulesTitle')}
+              description={t('pages.caching.rulesHint')}
+            />
+            <CardBody className="p-0">
+              {rulesQuery.isPending ? (
+                <SkeletonRows rows={4} columns={5} />
+              ) : rules.length === 0 ? (
+                <EmptyState
+                  className="border-0 py-12"
+                  icon={<Lightning weight="duotone" className="h-8 w-8" />}
+                  title={t('pages.caching.empty')}
+                  description={t('pages.caching.emptyDescription')}
+                  action={
+                    canWrite ? (
+                      <div className="flex flex-wrap items-center justify-center gap-2">
+                        <Button
+                          variant="primary"
+                          icon={<Plus weight="bold" className="h-4 w-4" />}
+                          onClick={() => {
+                            setEditing(null)
+                            setDialogOpen(true)
+                          }}
+                        >
+                          {t('pages.caching.addRule')}
+                        </Button>
+                        <Button
+                          variant="secondary"
+                          loading={restore.isPending}
+                          disabled={activationBusy}
+                          onClick={() => restore.mutate()}
+                          icon={
+                            <ArrowCounterClockwise weight="duotone" className="h-4 w-4" />
+                          }
+                        >
+                          {t('pages.caching.restoreButton')}
+                        </Button>
+                      </div>
+                    ) : undefined
+                  }
+                />
+              ) : (
+                <Table
+                  columns={columns}
+                  data={rules}
+                  rowKey={(r) => r.id}
+                  dense
+                  onRowClick={
+                    canWrite
+                      ? (r) => {
+                          setEditing(r)
+                          setDialogOpen(true)
+                        }
+                      : undefined
+                  }
+                />
+              )}
+            </CardBody>
+          </Card>
+
+          {/* ── Purge ───────────────────────────────────────────────── */}
+          <Card>
+            <CardHeader
+              title={t('pages.caching.purgeTitle')}
+              description={t('pages.caching.purgeHint')}
+            />
+            <CardBody className="flex flex-col gap-4">
+              <Textarea
+                label={t('pages.caching.purgeUrls')}
+                mono
+                rows={4}
+                disabled={!canWrite}
+                value={purgeUrls}
+                placeholder={'https://example.com/index.html\nhttps://example.com/assets/app.css'}
+                hint={t('pages.caching.purgeUrlsHint')}
+                onChange={(e) => setPurgeUrls(e.target.value)}
+              />
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  variant="primary"
+                  disabled={!canWrite || purge.isPending}
+                  loading={purge.isPending}
+                  icon={<Broom weight="duotone" className="h-4 w-4" />}
+                  onClick={submitPurgeUrls}
+                >
+                  {t('pages.caching.purgeUrls')}
+                </Button>
+                <Button
+                  variant="danger"
+                  disabled={!canWrite || purge.isPending}
+                  onClick={() => setPurgeAllOpen(true)}
+                >
+                  {t('pages.caching.purgeAll')}
+                </Button>
+              </div>
+            </CardBody>
+          </Card>
+        </>
+      )}
 
       {/* Create / edit */}
       <Dialog
@@ -509,7 +888,7 @@ export function CachingPage() {
             hint={t('pages.caching.matchExpressionHint')}
             onChange={(e) => setForm((f) => ({ ...f, match_expression: e.target.value }))}
           />
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <Input
               type="number"
               label={t('pages.caching.edgeTtl')}
@@ -527,16 +906,6 @@ export function CachingPage() {
               min={0}
               onChange={(e) =>
                 setForm((f) => ({ ...f, browser_ttl_seconds: Number(e.target.value) }))
-              }
-            />
-            <Input
-              type="number"
-              label={t('pages.caching.diskQuota')}
-              value={form.disk_quota_mb}
-              min={0}
-              hint={t('pages.caching.diskQuotaHint')}
-              onChange={(e) =>
-                setForm((f) => ({ ...f, disk_quota_mb: Number(e.target.value) }))
               }
             />
           </div>
@@ -557,6 +926,11 @@ export function CachingPage() {
             onCheckedChange={(enabled) => setForm((f) => ({ ...f, enabled }))}
             label={t('common.enabled')}
           />
+          <div className="rounded-md border border-line bg-recessed px-3 py-2">
+            <p className="text-xs leading-relaxed text-fg-subtle">
+              {t('pages.caching.quotaNotPerRule')}
+            </p>
+          </div>
           {error && (
             <p
               role="alert"
@@ -587,7 +961,7 @@ export function CachingPage() {
       <ConfirmDialog
         open={purgeAllOpen}
         onClose={() => setPurgeAllOpen(false)}
-        onConfirm={() => purge.mutate({ all: true })}
+        onConfirm={() => purge.mutate({ purge_all: true })}
         title={t('pages.caching.purgeAllTitle')}
         description={t('pages.caching.purgeAllDescription')}
         confirmLabel={t('pages.caching.purgeAll')}
@@ -597,43 +971,22 @@ export function CachingPage() {
   )
 }
 
-function StatCard({
-  icon,
+/** Label + value + optional hint, for the compact metric grid inside a card. */
+function Metric({
   label,
   value,
   hint,
-  progress,
 }: {
-  icon: ReactNode
   label: string
-  value: string
-  hint?: string
-  progress?: number
+  value: ReactNode
+  hint?: ReactNode
 }) {
   return (
-    <Card padded>
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <p className="text-xs font-medium uppercase tracking-wide text-fg-subtle">{label}</p>
-          <p className="mt-1.5 text-2xl font-semibold tabular-nums text-fg-strong">{value}</p>
-          {hint && <p className="mt-1 truncate text-xs text-fg-subtle">{hint}</p>}
-        </div>
-        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-brand-soft text-brand">
-          {icon}
-        </span>
-      </div>
-      {progress !== undefined && (
-        <div className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-recessed">
-          <div
-            className={cn(
-              'h-full rounded-full transition-all',
-              progress > 85 ? 'bg-danger' : 'bg-brand',
-            )}
-            style={{ width: `${progress}%` }}
-          />
-        </div>
-      )}
-    </Card>
+    <div className="min-w-0">
+      <p className="text-xs font-medium uppercase tracking-wide text-fg-subtle">{label}</p>
+      <p className="mt-1 text-lg font-semibold tabular-nums text-fg-strong">{value}</p>
+      {hint && <p className="mt-0.5 truncate text-xs text-fg-subtle">{hint}</p>}
+    </div>
   )
 }
 

@@ -1,16 +1,17 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useParams } from 'react-router-dom'
+import { Link, useParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  Lock,
-  Plus,
-  Trash,
   ArrowClockwise,
   ArrowsClockwise,
-  Info,
   Certificate,
+  Check,
+  Info,
+  Lock,
   ShieldCheck,
+  Trash,
+  Warning,
 } from '@phosphor-icons/react'
 import { PageHeader } from '@/components/PageHeader'
 import { Card, CardBody, CardHeader } from '@/components/ui/Card'
@@ -30,40 +31,78 @@ import { useToast } from '@/components/ui/Toast'
 import { ErrorState } from '@/components/ErrorState'
 import { sslApi, sslKeys, daysUntilExpiry, expiryTone } from '@/api/ssl'
 import { useCanWrite, useNow } from '@/hooks'
-import { formatDateTime } from '@/lib/format'
+import { cn } from '@/lib/utils'
+import { formatDate, formatDateTime } from '@/lib/format'
 import {
-  ACME_CHALLENGE_TYPES,
-  ACME_DNS_PROVIDERS,
   TLS_VERSIONS,
-  type CreateSslRequest,
   type SslCertificate,
   type SslSettings,
+  type UpdateSslSettingsRequest,
 } from '@/api/types'
 
-type Mode = 'acme' | 'manual'
+/** Largest HSTS lifetime the server accepts, in seconds (two years). */
+const MAX_HSTS_AGE = 63_072_000
 
-interface FormState {
-  mode: Mode
-  domain: string
-  auto_renew: boolean
-  acme_email: string
-  acme_challenge_type: string
-  acme_dns_provider: string
-  cert_pem: string
-  key_pem: string
+/** Which card a save belongs to — the server merges, so each sends its fields. */
+type SaveScope = 'https' | 'tls' | 'mtls'
+
+interface HttpsDraft {
+  https_enabled: boolean
+  self_signed: boolean
+  certificate_id: string | null
 }
 
-const emptyForm = (): FormState => ({
-  mode: 'acme',
-  domain: '',
-  auto_renew: true,
-  acme_email: '',
-  acme_challenge_type: 'http-01',
-  acme_dns_provider: 'cloudflare',
-  cert_pem: '',
-  key_pem: '',
+interface TlsDraft {
+  min_tls_version: string
+  max_tls_version: string | null
+  hsts_enabled: boolean
+  hsts_max_age: number
+  always_use_https: boolean
+}
+
+interface MtlsDraft {
+  mtls_enabled: boolean
+}
+
+interface PostureDrafts {
+  https: HttpsDraft
+  tls: TlsDraft
+  mtls: MtlsDraft
+}
+
+const toHttpsDraft = (s: SslSettings): HttpsDraft => ({
+  https_enabled: s.https_enabled,
+  self_signed: s.self_signed,
+  certificate_id: s.certificate_id,
 })
 
+const toTlsDraft = (s: SslSettings): TlsDraft => ({
+  min_tls_version: String(s.min_tls_version),
+  max_tls_version: s.max_tls_version ? String(s.max_tls_version) : null,
+  hsts_enabled: s.hsts_enabled,
+  hsts_max_age: s.hsts_max_age,
+  always_use_https: s.always_use_https,
+})
+
+const toMtlsDraft = (s: SslSettings): MtlsDraft => ({ mtls_enabled: s.mtls_enabled })
+
+const toDrafts = (s: SslSettings): PostureDrafts => ({
+  https: toHttpsDraft(s),
+  tls: toTlsDraft(s),
+  mtls: toMtlsDraft(s),
+})
+
+/** A label for the certificate picker: domain plus expiry, when recorded. */
+function certOptionLabel(cert: SslCertificate): string {
+  return cert.expires_at ? `${cert.domain} · ${formatDate(cert.expires_at)}` : cert.domain
+}
+
+/**
+ * Per-site TLS posture: which certificate the site serves (an installed one or
+ * a self-signed fallback), whether HTTPS and mTLS are on, the TLS version
+ * window and HSTS. Issuing and uploading certificates lives on the global
+ * SSL/TLS page; this page only points at it.
+ */
 export function SslPage() {
   const { t } = useTranslation()
   const toast = useToast()
@@ -72,16 +111,19 @@ export function SslPage() {
   const now = useNow(60_000)
   const { siteId = '' } = useParams<{ siteId: string }>()
 
-  const [dialogOpen, setDialogOpen] = useState(false)
-  const [form, setForm] = useState<FormState>(emptyForm())
-  const [error, setError] = useState<string | null>(null)
+  const [drafts, setDrafts] = useState<PostureDrafts | null>(null)
+  const [hasClientCa, setHasClientCa] = useState(false)
+  const [clientCa, setClientCa] = useState('')
+  const [httpsError, setHttpsError] = useState<string | null>(null)
+  const [tlsError, setTlsError] = useState<string | null>(null)
+  const [mtlsError, setMtlsError] = useState<string | null>(null)
   const [pendingDelete, setPendingDelete] = useState<SslCertificate | null>(null)
   const [details, setDetails] = useState<SslCertificate | null>(null)
-  const [settings, setSettings] = useState<SslSettings | null>(null)
 
   const certsQuery = useQuery({
     queryKey: sslKeys.list(siteId),
     queryFn: () => sslApi.list(siteId),
+    select: (page) => page.items,
     enabled: Boolean(siteId),
   })
 
@@ -91,9 +133,18 @@ export function SslPage() {
     enabled: Boolean(siteId),
   })
 
+  const serverSettings = settingsQuery.data
+  const serverMaxVersion = serverSettings?.max_tls_version ?? null
+
+  // Each card edits its own draft so that saving one never discards what is
+  // half-typed in another. The stored client CA is write-only — the GET only
+  // reports whether one exists — so it is tracked as "configured" plus
+  // whatever has been pasted since the last save.
   useEffect(() => {
-    if (settingsQuery.data) setSettings(settingsQuery.data)
-  }, [settingsQuery.data])
+    if (!serverSettings) return
+    setHasClientCa(serverSettings.has_mtls_client_ca)
+    setDrafts((prev) => prev ?? toDrafts(serverSettings))
+  }, [serverSettings])
 
   const certs = useMemo(
     () =>
@@ -105,79 +156,135 @@ export function SslPage() {
     [certsQuery.data, now],
   )
 
-  const invalidate = () => {
-    void queryClient.invalidateQueries({ queryKey: sslKeys.all(siteId) })
+  const currentCert = useMemo(
+    () => certs.find((c) => c.id === drafts?.https.certificate_id) ?? null,
+    [certs, drafts?.https.certificate_id],
+  )
+
+  const patchHttps = (part: Partial<HttpsDraft>) =>
+    setDrafts((prev) => (prev ? { ...prev, https: { ...prev.https, ...part } } : prev))
+
+  const patchTls = (part: Partial<TlsDraft>) =>
+    setDrafts((prev) => (prev ? { ...prev, tls: { ...prev.tls, ...part } } : prev))
+
+  const invalidateCerts = () => {
+    void queryClient.invalidateQueries({ queryKey: sslKeys.list(siteId) })
   }
 
-  const create = useMutation({
-    mutationFn: (payload: CreateSslRequest) => sslApi.create(payload),
-    onSuccess: (cert) => {
-      toast.success(t('pages.ssl.certCreated'), cert.domain)
-      closeDialog()
-      invalidate()
+  /**
+   * One mutation for all three cards: `scope` says which draft to refresh from
+   * the response, so the fields of the other cards survive untouched.
+   */
+  const saveSettings = useMutation({
+    mutationFn: ({
+      payload,
+    }: {
+      scope: SaveScope
+      payload: UpdateSslSettingsRequest
+    }) => sslApi.updateSettings(siteId, payload),
+    onSuccess: (saved, { scope, payload }) => {
+      queryClient.setQueryData(sslKeys.settings(siteId), saved)
+      setDrafts((prev) =>
+        prev
+          ? {
+              https: scope === 'https' ? toHttpsDraft(saved) : prev.https,
+              tls: scope === 'tls' ? toTlsDraft(saved) : prev.tls,
+              mtls: scope === 'mtls' ? toMtlsDraft(saved) : prev.mtls,
+            }
+          : prev,
+      )
+      setHttpsError(null)
+      setTlsError(null)
+      setMtlsError(null)
+      // The CA is never echoed back — drop the pasted copy once it is stored.
+      if (scope === 'mtls' && payload.mtls_client_ca) setClientCa('')
+      toast.success(t('pages.ssl.settingsSaved'))
     },
-    onError: (e) => setError(e instanceof Error ? e.message : String(e)),
   })
+
+  const savingScope = saveSettings.isPending ? saveSettings.variables?.scope ?? null : null
 
   const renew = useMutation({
     mutationFn: (cert: SslCertificate) => sslApi.renew(siteId, cert.id),
-    onSuccess: (cert) => {
-      toast.success(t('pages.ssl.renewStarted'), cert.domain)
-      invalidate()
+    onSuccess: (ack, cert) => {
+      toast.success(t('pages.ssl.renewStarted'), ack.message || cert.domain)
+      invalidateCerts()
     },
   })
 
   const remove = useMutation({
     mutationFn: (id: string) => sslApi.delete(siteId, id),
-    onSuccess: (_d, id) => {
+    onSuccess: (_data, id) => {
       toast.success(t('pages.ssl.certDeleted'), certs.find((c) => c.id === id)?.domain)
+      // A deleted certificate must not stay selected, or the next save would
+      // send an id the server no longer recognises.
+      setDrafts((prev) =>
+        prev && prev.https.certificate_id === id
+          ? { ...prev, https: { ...prev.https, certificate_id: null } }
+          : prev,
+      )
       setPendingDelete(null)
-      invalidate()
+      invalidateCerts()
     },
   })
 
-  const saveSettings = useMutation({
-    mutationFn: (payload: Partial<SslSettings>) => sslApi.updateSettings(siteId, payload),
-    onSuccess: (saved) => {
-      setSettings(saved)
-      toast.success(t('pages.ssl.settingsSaved'))
-      invalidate()
-    },
-  })
-
-  const closeDialog = () => {
-    setDialogOpen(false)
-    setForm(emptyForm())
-    setError(null)
+  const saveHttps = () => {
+    if (!drafts) return
+    setHttpsError(null)
+    saveSettings.mutate({
+      scope: 'https',
+      payload: {
+        https_enabled: drafts.https.https_enabled,
+        self_signed: drafts.https.self_signed,
+        // Null means "leave unchanged" server-side; a self-signed choice
+        // clears the stored id on the server regardless.
+        certificate_id: drafts.https.certificate_id,
+      },
+    })
   }
 
-  const submit = () => {
-    setError(null)
-    const domain = form.domain.trim()
-    if (!domain) {
-      setError(t('pages.ssl.domainRequired'))
+  const saveTls = () => {
+    if (!drafts) return
+    setTlsError(null)
+    const { min_tls_version, max_tls_version } = drafts.tls
+    if (max_tls_version && Number(max_tls_version) < Number(min_tls_version)) {
+      setTlsError(t('pages.ssl.versionRangeInvalid'))
       return
     }
-    const payload: CreateSslRequest = {
-      site_id: siteId,
-      domain,
-      auto_renew: form.auto_renew,
-    }
-    if (form.mode === 'acme') {
-      payload.acme_email = form.acme_email.trim() || null
-      payload.acme_challenge_type = form.acme_challenge_type
-      payload.acme_dns_provider =
-        form.acme_challenge_type === 'dns-01' ? form.acme_dns_provider : null
-    } else {
-      if (!form.cert_pem.trim() || !form.key_pem.trim()) {
-        setError(t('pages.ssl.pemRequired'))
-        return
-      }
-      payload.cert_pem = form.cert_pem
-      payload.key_pem = form.key_pem
-    }
-    create.mutate(payload)
+    saveSettings.mutate({
+      scope: 'tls',
+      payload: {
+        min_tls_version,
+        max_tls_version,
+        hsts_enabled: drafts.tls.hsts_enabled,
+        hsts_max_age: drafts.tls.hsts_max_age,
+        always_use_https: drafts.tls.always_use_https,
+      },
+    })
   }
+
+  const saveMtls = () => {
+    if (!drafts) return
+    setMtlsError(null)
+    const ca = clientCa.trim()
+    if (drafts.mtls.mtls_enabled && !hasClientCa && !ca) {
+      setMtlsError(t('pages.ssl.clientCaRequired'))
+      return
+    }
+    const payload: UpdateSslSettingsRequest = { mtls_enabled: drafts.mtls.mtls_enabled }
+    if (ca) payload.mtls_client_ca = ca
+    saveSettings.mutate({ scope: 'mtls', payload })
+  }
+
+  const setAsCurrent = (cert: SslCertificate) => {
+    saveSettings.mutate(
+      { scope: 'https', payload: { self_signed: false, certificate_id: cert.id } },
+      { onSuccess: () => toast.success(t('pages.ssl.currentSet'), cert.domain) },
+    )
+  }
+
+  const isCurrent = (cert: SslCertificate) =>
+    !drafts?.https.self_signed && drafts?.https.certificate_id === cert.id
 
   const columns: Column<SslCertificate>[] = [
     {
@@ -187,11 +294,25 @@ export function SslPage() {
       sortable: true,
       cell: (c) => (
         <div className="flex items-center gap-2">
-          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-brand-soft text-brand">
+          <span
+            className={cn(
+              'flex h-8 w-8 shrink-0 items-center justify-center rounded-md',
+              isCurrent(c) ? 'bg-brand text-white' : 'bg-brand-soft text-brand',
+            )}
+          >
             <Lock weight="duotone" className="h-4 w-4" />
           </span>
           <div className="min-w-0">
-            <p className="pw-mono truncate text-[13px] font-medium text-fg-strong">{c.domain}</p>
+            <div className="flex items-center gap-2">
+              <p className="pw-mono truncate text-[13px] font-medium text-fg-strong">
+                {c.domain}
+              </p>
+              {isCurrent(c) && (
+                <Badge tone="brand" size="sm">
+                  {t('pages.ssl.current')}
+                </Badge>
+              )}
+            </div>
             <p className="truncate text-xs text-fg-subtle">
               {c.issuer || t('pages.ssl.unknownIssuer')}
             </p>
@@ -212,9 +333,7 @@ export function SslPage() {
             <span className="text-[13px] text-fg">{formatDateTime(c.expires_at)}</span>
             {days !== null && (
               <Badge tone={tone} size="sm" dot>
-                {days < 0
-                  ? t('status.expired')
-                  : t('pages.ssl.daysLeft', { days })}
+                {days < 0 ? t('status.expired') : t('pages.ssl.daysLeft', { days })}
               </Badge>
             )}
           </div>
@@ -254,6 +373,14 @@ export function SslPage() {
           <Button
             size="icon"
             variant="ghost"
+            aria-label={t('pages.ssl.setAsCurrent')}
+            disabled={!canWrite || isCurrent(c) || saveSettings.isPending}
+            onClick={() => setAsCurrent(c)}
+            icon={<Check weight="duotone" className="h-4 w-4" />}
+          />
+          <Button
+            size="icon"
+            variant="ghost"
             aria-label={t('pages.ssl.renew')}
             disabled={!canWrite || renew.isPending}
             onClick={() => renew.mutate(c)}
@@ -278,34 +405,25 @@ export function SslPage() {
     return d !== null && d >= 0 && d < 30
   }).length
 
+  const currentDays = currentCert ? daysUntilExpiry(currentCert.expires_at, now) : null
+
   return (
     <div className="animate-slide-up">
       <PageHeader
         title={t('pages.ssl.title')}
-        description={t('pages.ssl.description')}
+        description={t('pages.ssl.siteDescription')}
         actions={
-          <div className="flex items-center gap-2">
-            <Button
-              variant="secondary"
-              loading={certsQuery.isFetching}
-              onClick={() => certsQuery.refetch()}
-              icon={<ArrowClockwise weight="duotone" className="h-4 w-4" />}
-            >
-              {t('common.refresh')}
-            </Button>
-            {canWrite && (
-              <Button
-                variant="primary"
-                icon={<Plus weight="bold" className="h-4 w-4" />}
-                onClick={() => {
-                  setForm(emptyForm())
-                  setDialogOpen(true)
-                }}
-              >
-                {t('pages.ssl.addCert')}
-              </Button>
-            )}
-          </div>
+          <Button
+            variant="secondary"
+            loading={certsQuery.isFetching || settingsQuery.isFetching}
+            onClick={() => {
+              void certsQuery.refetch()
+              void settingsQuery.refetch()
+            }}
+            icon={<ArrowClockwise weight="duotone" className="h-4 w-4" />}
+          >
+            {t('common.refresh')}
+          </Button>
         }
       />
 
@@ -318,6 +436,298 @@ export function SslPage() {
         </div>
       )}
 
+      {/* HTTPS + certificate source — the posture that matters most */}
+      <Card className="mb-6">
+        <CardHeader
+          title={t('pages.ssl.httpsCardTitle')}
+          description={t('pages.ssl.httpsCardHint')}
+          action={
+            canWrite &&
+            drafts && (
+              <Button
+                variant="primary"
+                size="sm"
+                loading={savingScope === 'https'}
+                onClick={saveHttps}
+              >
+                {t('common.save')}
+              </Button>
+            )
+          }
+        />
+        <CardBody className="flex flex-col gap-5">
+          {settingsQuery.isPending && !drafts ? (
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <SkeletonStat />
+              <SkeletonStat />
+            </div>
+          ) : !drafts ? (
+            <ErrorState
+              variant="inline"
+              error={settingsQuery.error}
+              onRetry={() => settingsQuery.refetch()}
+              retrying={settingsQuery.isFetching}
+            />
+          ) : (
+            <>
+              <Switch
+                checked={drafts.https.https_enabled}
+                disabled={!canWrite}
+                onCheckedChange={(https_enabled) => patchHttps({ https_enabled })}
+                label={t('pages.ssl.httpsEnabled')}
+                description={t('pages.ssl.httpsEnabledHint')}
+              />
+
+              {/* At a glance: what this site serves right now (as edited). */}
+              <div className="rounded-md border border-line bg-recessed px-4 py-3">
+                <p className="text-xs text-fg-subtle">{t('pages.ssl.currentCertificate')}</p>
+                <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                  {!drafts.https.https_enabled && (
+                    <Badge tone="neutral" size="sm">
+                      {t('pages.ssl.httpsOff')}
+                    </Badge>
+                  )}
+                  {drafts.https.self_signed ? (
+                    <Badge tone="warning" size="sm" dot>
+                      {t('pages.ssl.selfSignedInUse')}
+                    </Badge>
+                  ) : currentCert ? (
+                    <>
+                      <span className="pw-mono text-[13px] font-medium text-fg-strong">
+                        {currentCert.domain}
+                      </span>
+                      <span className="text-xs text-fg-subtle">
+                        {currentCert.issuer || t('pages.ssl.unknownIssuer')}
+                      </span>
+                      {currentDays !== null && (
+                        <Badge tone={expiryTone(currentDays)} size="sm" dot>
+                          {currentDays < 0
+                            ? t('status.expired')
+                            : t('pages.ssl.daysLeft', { days: currentDays })}
+                        </Badge>
+                      )}
+                    </>
+                  ) : (
+                    <span className="flex items-center gap-1.5 text-[13px] text-fg-subtle">
+                      <Warning weight="duotone" className="h-4 w-4 shrink-0 text-warning" />
+                      {t('pages.ssl.noCertificateWarning')}
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              <div className="flex flex-col gap-3">
+                <p className="text-[13px] font-medium text-fg-subtle">
+                  {t('pages.ssl.certSource')}
+                </p>
+                <Tabs
+                  variant="pill"
+                  value={drafts.https.self_signed ? 'self-signed' : 'certificate'}
+                  onChange={(value) => {
+                    const self_signed = value === 'self-signed'
+                    patchHttps({
+                      self_signed,
+                      // Pre-select a usable installed certificate so the
+                      // "use a certificate" mode is never empty by accident.
+                      certificate_id:
+                        !self_signed && !drafts.https.certificate_id
+                          ? (certs.find((c) => c.status === 'active') ?? certs[0])?.id ?? null
+                          : drafts.https.certificate_id,
+                    })
+                  }}
+                  items={[
+                    { value: 'self-signed', label: t('pages.ssl.selfSigned') },
+                    { value: 'certificate', label: t('pages.ssl.useCertificate') },
+                  ]}
+                />
+
+                {drafts.https.self_signed ? (
+                  <p className="max-w-2xl text-xs leading-relaxed text-fg-subtle">
+                    {t('pages.ssl.selfSignedHint')}
+                  </p>
+                ) : (
+                  <div className="flex flex-col gap-2">
+                    <Select
+                      label={t('pages.ssl.certificate')}
+                      value={drafts.https.certificate_id ?? ''}
+                      disabled={!canWrite}
+                      containerClassName="max-w-md"
+                      hint={t('pages.ssl.certificateSelectHint')}
+                      options={[
+                        { value: '', label: t('pages.ssl.selectCertificate') },
+                        ...certs.map((c) => ({ value: c.id, label: certOptionLabel(c) })),
+                      ]}
+                      onChange={(e) =>
+                        patchHttps({ certificate_id: e.target.value || null })
+                      }
+                    />
+                    {certs.length === 0 && (
+                      <p className="text-xs leading-relaxed text-fg-subtle">
+                        {t('pages.ssl.emptyDescription')} {t('pages.ssl.issueElsewhereHint')}
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <CardError message={httpsError} />
+            </>
+          )}
+        </CardBody>
+      </Card>
+
+      {/* TLS version window + HSTS */}
+      {drafts && (
+        <Card className="mb-6">
+          <CardHeader
+            title={t('pages.ssl.settingsTitle')}
+            description={t('pages.ssl.settingsHint')}
+            action={
+              canWrite && (
+                <Button
+                  variant="primary"
+                  size="sm"
+                  loading={savingScope === 'tls'}
+                  onClick={saveTls}
+                >
+                  {t('common.save')}
+                </Button>
+              )
+            }
+          />
+          <CardBody className="flex flex-col gap-5">
+            <div className="grid max-w-2xl grid-cols-1 gap-4 sm:grid-cols-2">
+              <Select
+                label={t('pages.ssl.minVersion')}
+                value={drafts.tls.min_tls_version}
+                disabled={!canWrite}
+                hint={t('pages.ssl.minVersionHint')}
+                options={TLS_VERSIONS.map((v) => ({ value: v, label: `TLS ${v}` }))}
+                onChange={(e) => patchTls({ min_tls_version: e.target.value })}
+              />
+              <Select
+                label={t('pages.ssl.maxVersion')}
+                value={drafts.tls.max_tls_version ?? ''}
+                disabled={!canWrite}
+                hint={t('pages.ssl.maxVersionHint')}
+                options={[
+                  { value: '', label: t('pages.ssl.noUpperBound') },
+                  ...TLS_VERSIONS.map((v) => ({ value: v, label: `TLS ${v}` })),
+                ]}
+                onChange={(e) => patchTls({ max_tls_version: e.target.value || null })}
+              />
+            </div>
+            {drafts.tls.max_tls_version === null && serverMaxVersion && (
+              <p className="-mt-3 text-xs text-fg-subtle">{t('pages.ssl.maxVersionSticky')}</p>
+            )}
+
+            <Switch
+              checked={drafts.tls.hsts_enabled}
+              disabled={!canWrite}
+              onCheckedChange={(hsts_enabled) => patchTls({ hsts_enabled })}
+              label={t('pages.ssl.hsts')}
+              description={t('pages.ssl.hstsHint')}
+            />
+            {drafts.tls.hsts_enabled && (
+              <Input
+                type="number"
+                label={t('pages.ssl.hstsMaxAge')}
+                value={drafts.tls.hsts_max_age}
+                min={0}
+                max={MAX_HSTS_AGE}
+                disabled={!canWrite}
+                containerClassName="max-w-xs"
+                hint={t('pages.ssl.hstsMaxAgeHint')}
+                onChange={(e) => patchTls({ hsts_max_age: Number(e.target.value) })}
+              />
+            )}
+            <Switch
+              checked={drafts.tls.always_use_https}
+              disabled={!canWrite}
+              onCheckedChange={(always_use_https) => patchTls({ always_use_https })}
+              label={t('pages.ssl.alwaysHttps')}
+              description={t('pages.ssl.alwaysHttpsHint')}
+            />
+
+            <CardError message={tlsError} />
+          </CardBody>
+        </Card>
+      )}
+
+      {/* Mutual TLS */}
+      {drafts && (
+        <Card className="mb-6">
+          <CardHeader
+            title={t('pages.ssl.mtlsTitle')}
+            description={t('pages.ssl.mtlsHint')}
+            action={
+              canWrite && (
+                <Button
+                  variant="primary"
+                  size="sm"
+                  loading={savingScope === 'mtls'}
+                  onClick={saveMtls}
+                >
+                  {t('common.save')}
+                </Button>
+              )
+            }
+          />
+          <CardBody className="flex flex-col gap-5">
+            <Switch
+              checked={drafts.mtls.mtls_enabled}
+              disabled={!canWrite}
+              onCheckedChange={(mtls_enabled) => {
+                setDrafts((prev) => (prev ? { ...prev, mtls: { mtls_enabled } } : prev))
+              }}
+              label={t('pages.ssl.mtlsEnabled')}
+              description={t('pages.ssl.mtlsEnabledHint')}
+            />
+
+            {drafts.mtls.mtls_enabled && !drafts.https.https_enabled && (
+              <p className="flex items-center gap-1.5 text-xs text-fg-subtle">
+                <Warning weight="duotone" className="h-4 w-4 shrink-0 text-warning" />
+                {t('pages.ssl.mtlsNeedsHttps')}
+              </p>
+            )}
+
+            <div className="flex flex-wrap items-center gap-2">
+              {hasClientCa ? (
+                <Badge tone="success" size="sm" dot>
+                  {t('pages.ssl.clientCaConfigured')}
+                </Badge>
+              ) : (
+                <Badge tone="neutral" size="sm" dot>
+                  {t('pages.ssl.clientCaNotSet')}
+                </Badge>
+              )}
+              {clientCa.trim() !== '' && (
+                <Badge tone="warning" size="sm">
+                  {t('pages.ssl.clientCaPending')}
+                </Badge>
+              )}
+            </div>
+
+            {drafts.mtls.mtls_enabled && (
+              <Textarea
+                label={t('pages.ssl.clientCa')}
+                mono
+                rows={6}
+                value={clientCa}
+                disabled={!canWrite}
+                containerClassName="max-w-2xl"
+                placeholder={'-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----'}
+                hint={t('pages.ssl.clientCaHint')}
+                onChange={(e) => setClientCa(e.target.value)}
+              />
+            )}
+
+            <CardError message={mtlsError} />
+          </CardBody>
+        </Card>
+      )}
+
+      {/* Certificates installed on this site */}
       {certsQuery.isError && !certsQuery.data ? (
         <ErrorState
           error={certsQuery.error}
@@ -325,10 +735,17 @@ export function SslPage() {
           retrying={certsQuery.isFetching}
         />
       ) : (
-        <Card className="mb-6">
+        <Card>
           <CardHeader
             title={t('pages.ssl.certificates')}
             description={t('pages.ssl.certificatesHint')}
+            action={
+              <Link to="/ssl">
+                <Button variant="ghost" size="sm">
+                  {t('pages.ssl.openGlobalSsl')}
+                </Button>
+              </Link>
+            }
           />
           <CardBody className="p-0">
             {certsQuery.isPending ? (
@@ -339,17 +756,6 @@ export function SslPage() {
                 icon={<Certificate weight="duotone" className="h-8 w-8" />}
                 title={t('pages.ssl.empty')}
                 description={t('pages.ssl.emptyDescription')}
-                action={
-                  canWrite ? (
-                    <Button
-                      variant="primary"
-                      icon={<Plus weight="bold" className="h-4 w-4" />}
-                      onClick={() => setDialogOpen(true)}
-                    >
-                      {t('pages.ssl.addCert')}
-                    </Button>
-                  ) : undefined
-                }
               />
             ) : (
               <Table
@@ -360,211 +766,13 @@ export function SslPage() {
                 onRowClick={(c) => setDetails(c)}
               />
             )}
+            <div className="flex items-center gap-2 border-t border-line px-5 py-3 text-xs text-fg-subtle">
+              <Info weight="duotone" className="h-4 w-4 shrink-0" />
+              <span>{t('pages.ssl.issueElsewhereHint')}</span>
+            </div>
           </CardBody>
         </Card>
       )}
-
-      {/* SSL settings */}
-      <Card>
-        <CardHeader
-          title={t('pages.ssl.settingsTitle')}
-          description={t('pages.ssl.settingsHint')}
-          action={
-            canWrite && (
-              <Button
-                variant="primary"
-                size="sm"
-                loading={saveSettings.isPending}
-                disabled={!settings}
-                onClick={() =>
-                  settings &&
-                  saveSettings.mutate({
-                    min_tls_version: settings.min_tls_version,
-                    hsts_enabled: settings.hsts_enabled,
-                    hsts_max_age: settings.hsts_max_age,
-                    always_use_https: settings.always_use_https,
-                  })
-                }
-              >
-                {t('common.save')}
-              </Button>
-            )
-          }
-        />
-        <CardBody>
-          {settingsQuery.isPending && !settings ? (
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <SkeletonStat />
-              <SkeletonStat />
-            </div>
-          ) : settings ? (
-            <div className="flex flex-col gap-5">
-              <Select
-                label={t('pages.ssl.minVersion')}
-                value={String(settings.min_tls_version)}
-                disabled={!canWrite}
-                containerClassName="max-w-xs"
-                options={TLS_VERSIONS.map((v) => ({ value: v, label: `TLS ${v}` }))}
-                onChange={(e) =>
-                  setSettings((s) => (s ? { ...s, min_tls_version: e.target.value } : s))
-                }
-              />
-              <Switch
-                checked={settings.hsts_enabled}
-                disabled={!canWrite}
-                onCheckedChange={(hsts_enabled) =>
-                  setSettings((s) => (s ? { ...s, hsts_enabled } : s))
-                }
-                label={t('pages.ssl.hsts')}
-                description={t('pages.ssl.hstsHint')}
-              />
-              {settings.hsts_enabled && (
-                <Input
-                  type="number"
-                  label={t('pages.ssl.hstsMaxAge')}
-                  value={settings.hsts_max_age}
-                  min={0}
-                  disabled={!canWrite}
-                  containerClassName="max-w-xs"
-                  hint={t('pages.ssl.hstsMaxAgeHint')}
-                  onChange={(e) =>
-                    setSettings((s) =>
-                      s ? { ...s, hsts_max_age: Number(e.target.value) } : s,
-                    )
-                  }
-                />
-              )}
-              <Switch
-                checked={settings.always_use_https}
-                disabled={!canWrite}
-                onCheckedChange={(always_use_https) =>
-                  setSettings((s) => (s ? { ...s, always_use_https } : s))
-                }
-                label={t('pages.ssl.alwaysHttps')}
-                description={t('pages.ssl.alwaysHttpsHint')}
-              />
-            </div>
-          ) : (
-            <ErrorState
-              variant="inline"
-              error={settingsQuery.error}
-              onRetry={() => settingsQuery.refetch()}
-              retrying={settingsQuery.isFetching}
-            />
-          )}
-        </CardBody>
-      </Card>
-
-      {/* Add certificate */}
-      <Dialog
-        open={dialogOpen}
-        onClose={create.isPending ? () => undefined : closeDialog}
-        size="lg"
-        title={t('pages.ssl.addCert')}
-        description={t('pages.ssl.addCertDescription')}
-        footer={
-          <>
-            <Button variant="ghost" onClick={closeDialog} disabled={create.isPending}>
-              {t('common.cancel')}
-            </Button>
-            <Button variant="primary" onClick={submit} loading={create.isPending}>
-              {t('common.create')}
-            </Button>
-          </>
-        }
-      >
-        <div className="flex flex-col gap-4">
-          <Input
-            label={t('pages.ssl.domain')}
-            value={form.domain}
-            autoFocus
-            placeholder="example.com"
-            onChange={(e) => setForm((f) => ({ ...f, domain: e.target.value }))}
-            required
-          />
-
-          <Tabs
-            variant="pill"
-            value={form.mode}
-            onChange={(mode) => setForm((f) => ({ ...f, mode: mode as Mode }))}
-            items={[
-              { value: 'acme', label: t('pages.ssl.acme') },
-              { value: 'manual', label: t('pages.ssl.manualUpload') },
-            ]}
-          />
-
-          {form.mode === 'acme' ? (
-            <div className="flex flex-col gap-4">
-              <Input
-                type="email"
-                label={t('pages.ssl.acmeEmail')}
-                value={form.acme_email}
-                placeholder="admin@example.com"
-                hint={t('pages.ssl.acmeEmailHint')}
-                onChange={(e) => setForm((f) => ({ ...f, acme_email: e.target.value }))}
-              />
-              <Select
-                label={t('pages.ssl.challengeType')}
-                value={form.acme_challenge_type}
-                options={ACME_CHALLENGE_TYPES.map((c) => ({
-                  value: c,
-                  label: c.toUpperCase(),
-                }))}
-                onChange={(e) =>
-                  setForm((f) => ({ ...f, acme_challenge_type: e.target.value }))
-                }
-              />
-              {form.acme_challenge_type === 'dns-01' && (
-                <Select
-                  label={t('pages.ssl.dnsProvider')}
-                  value={form.acme_dns_provider}
-                  options={ACME_DNS_PROVIDERS.map((p) => ({
-                    value: p,
-                    label: p === 'manual' ? t('pages.ssl.manualDns') : p,
-                  }))}
-                  onChange={(e) =>
-                    setForm((f) => ({ ...f, acme_dns_provider: e.target.value }))
-                  }
-                />
-              )}
-              <Switch
-                checked={form.auto_renew}
-                onCheckedChange={(auto_renew) => setForm((f) => ({ ...f, auto_renew }))}
-                label={t('pages.ssl.autoRenew')}
-                description={t('pages.ssl.autoRenewHint')}
-              />
-            </div>
-          ) : (
-            <div className="flex flex-col gap-4">
-              <Textarea
-                label={t('pages.ssl.certPem')}
-                mono
-                rows={6}
-                value={form.cert_pem}
-                placeholder={'-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----'}
-                onChange={(e) => setForm((f) => ({ ...f, cert_pem: e.target.value }))}
-              />
-              <Textarea
-                label={t('pages.ssl.keyPem')}
-                mono
-                rows={6}
-                value={form.key_pem}
-                placeholder={'-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----'}
-                onChange={(e) => setForm((f) => ({ ...f, key_pem: e.target.value }))}
-              />
-            </div>
-          )}
-
-          {error && (
-            <p
-              role="alert"
-              className="rounded-md border border-danger/40 bg-danger/8 px-3 py-2 text-[13px] text-fg-danger"
-            >
-              {error}
-            </p>
-          )}
-        </div>
-      </Dialog>
 
       {/* Certificate details */}
       <Dialog
@@ -582,30 +790,18 @@ export function SslPage() {
           <dl className="grid grid-cols-1 gap-x-6 gap-y-3 text-sm sm:grid-cols-2">
             <Detail label={t('pages.ssl.domain')} value={details.domain} mono />
             <Detail label={t('pages.ssl.issuer')} value={details.issuer || '—'} />
-            <Detail
-              label={t('pages.ssl.expires')}
-              value={formatDateTime(details.expires_at)}
-            />
+            <Detail label={t('pages.ssl.expires')} value={formatDateTime(details.expires_at)} />
             <Detail
               label={t('pages.ssl.autoRenew')}
               value={details.auto_renew ? t('common.yes') : t('common.no')}
             />
-            <Detail
-              label={t('pages.ssl.acmeEmail')}
-              value={details.acme_email || '—'}
-            />
+            <Detail label={t('pages.ssl.acmeEmail')} value={details.acme_email || '—'} />
             <Detail
               label={t('pages.ssl.challengeType')}
               value={(details.acme_challenge_type || '—').toUpperCase()}
             />
-            <Detail
-              label={t('pages.ssl.dnsProvider')}
-              value={details.acme_dns_provider || '—'}
-            />
-            <Detail
-              label={t('pages.ssl.created')}
-              value={formatDateTime(details.created_at)}
-            />
+            <Detail label={t('pages.ssl.dnsProvider')} value={details.acme_dns_provider || '—'} />
+            <Detail label={t('pages.ssl.created')} value={formatDateTime(details.created_at)} />
           </dl>
         )}
       </Dialog>
@@ -628,6 +824,19 @@ export function SslPage() {
         )}
       </ConfirmDialog>
     </div>
+  )
+}
+
+/** Inline validation notice for a card; server errors surface as toasts. */
+function CardError({ message }: { message: string | null }) {
+  if (!message) return null
+  return (
+    <p
+      role="alert"
+      className="rounded-md border border-danger/40 bg-danger/8 px-3 py-2 text-[13px] text-fg-danger"
+    >
+      {message}
+    </p>
   )
 }
 

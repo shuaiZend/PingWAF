@@ -3,6 +3,8 @@ import type {
   Agent,
   AgentCommandRequest,
   AgentCommandResult,
+  AgentEnrollRequest,
+  AgentEnrollResponse,
   AgentListQuery,
   Page,
 } from './types'
@@ -10,8 +12,10 @@ import type {
 /**
  * Agents — `/api/v1/agents`.
  *
- * Agents are registered implicitly when they first connect with an API key, so
- * the console can only list, inspect, command and deregister them.
+ * An agent appears in the inventory the first time it connects with an agent
+ * API key, so enrolling a node means handing the operator a key and the command
+ * that uses it: `POST /agents/enroll` mints that key and returns the ready-to-run
+ * command lines.
  */
 export const agentsApi = {
   list: (query: AgentListQuery = {}) =>
@@ -20,6 +24,10 @@ export const agentsApi = {
   get: (id: string) => apiClient.get<Agent>(`/agents/${id}`),
 
   remove: (id: string) => apiClient.delete<void>(`/agents/${id}`),
+
+  /** Mints an agent key and returns the command that brings a node online. */
+  enroll: (data: AgentEnrollRequest = {}) =>
+    apiClient.post<AgentEnrollResponse>('/agents/enroll', data),
 
   /**
    * Queues a command for the agent. Answers `202` immediately; `delivered` is

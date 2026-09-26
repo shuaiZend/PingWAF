@@ -169,31 +169,50 @@ export function WafPage() {
 
   /**
    * Detection families are tag-driven: turning one on enables every rule that
-   * carries the family's tag, turning it off disables them.
+   * carries the family's tag, turning it off disables them. A family with no
+   * matching rule means the operator deleted the built-ins — restores them
+   * transparently instead of asking for a hand-written rule.
    */
   const applyDetection = useMutation({
     mutationFn: async ({ key, enabled }: { key: WafDetection; enabled: boolean }) => {
-      const targets = rulesForDetection(allRules, key).filter((r) => r.enabled !== enabled)
-      await Promise.all(
-        targets.map((r) => rulesApi.toggleEnabled(siteId, r.id, enabled)),
-      )
-      return { key, enabled, changed: targets.length }
+      let rules = allRules
+      let restored = 0
+      if (enabled && rulesForDetection(rules, key).length === 0) {
+        const result = await rulesApi.restoreDefaults(siteId)
+        restored = result.inserted
+        if (restored > 0) {
+          const page = await rulesApi.list(siteId)
+          rules = page.items
+        }
+      }
+      const targets = rulesForDetection(rules, key).filter((r) => r.enabled !== enabled)
+      await Promise.all(targets.map((r) => rulesApi.toggleEnabled(siteId, r.id, enabled)))
+      return { key, enabled, changed: targets.length, restored }
     },
-    onSuccess: ({ key, enabled, changed }) => {
-      if (changed === 0 && enabled) {
-        toast.warning(
-          t('pages.waf.detectionNoRules'),
-          t('pages.waf.detectionNoRulesHint', {
-            detection: t(`pages.waf.${DETECTION_META[key].labelKey}`),
-          }),
+    onSuccess: ({ key, enabled, restored }) => {
+      const detection = t(`pages.waf.${DETECTION_META[key].labelKey}`)
+      if (restored > 0) {
+        toast.success(
+          t('pages.waf.detectionRestored', { count: restored }),
+          `${detection} · ${enabled ? t('common.enabled') : t('common.disabled')}`,
         )
-        setPresetTags([key])
-        setEditing(null)
-        setDialogOpen(true)
+      } else {
+        toast.success(detection, enabled ? t('common.enabled') : t('common.disabled'))
+      }
+      invalidate()
+    },
+  })
+
+  /** Re-adds the built-in rule pack for a site whose rules were deleted. */
+  const restoreBuiltins = useMutation({
+    mutationFn: () => rulesApi.restoreDefaults(siteId),
+    onSuccess: (result) => {
+      if (result.inserted === 0) {
+        toast.info(t('pages.waf.restoreNothing'), t('pages.waf.restoreNothingHint'))
       } else {
         toast.success(
-          t(`pages.waf.${DETECTION_META[key].labelKey}`),
-          enabled ? t('common.enabled') : t('common.disabled'),
+          t('pages.waf.restoreDone', { count: result.inserted }),
+          t('pages.waf.restoreDoneHint'),
         )
       }
       invalidate()
@@ -225,7 +244,7 @@ export function WafPage() {
     },
   })
 
-  const busy = applyMode.isPending || applyDetection.isPending
+  const busy = applyMode.isPending || applyDetection.isPending || restoreBuiltins.isPending
 
   const openCreate = (tags?: string[]) => {
     setEditing(null)
@@ -502,6 +521,17 @@ export function WafPage() {
                 <Badge tone={MODE_TONE[waf.mode] ?? 'neutral'} dot>
                   {t(`pages.waf.mode_${waf.mode}`)}
                 </Badge>
+                {canWrite && (
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    loading={restoreBuiltins.isPending}
+                    onClick={() => restoreBuiltins.mutate()}
+                    icon={<ArrowClockwise weight="duotone" className="h-3.5 w-3.5" />}
+                  >
+                    {t('pages.waf.restoreBuiltins')}
+                  </Button>
+                )}
               </div>
             </div>
           )}
@@ -591,7 +621,9 @@ export function WafPage() {
                                 {t(`pages.waf.${meta.labelKey}`)}
                               </span>
                               <span className="block text-xs text-fg-subtle">
-                                {t('pages.waf.detectionRuleCount', { count: matching.length })}
+                                {matching.length === 0
+                                  ? t('pages.waf.detectionRestoreHint')
+                                  : t('pages.waf.detectionRuleCount', { count: matching.length })}
                               </span>
                             </span>
                           </span>
@@ -761,15 +793,27 @@ export function WafPage() {
                       : t('pages.waf.noResultsDescription')
                   }
                   action={
-                    allRules.length === 0 && canWrite ? (
-                      <Button
-                        variant="primary"
-                        icon={<Plus weight="bold" className="h-4 w-4" />}
-                        onClick={() => openCreate()}
-                      >
-                        {t('pages.waf.addRule')}
-                      </Button>
-                    ) : allRules.length === 0 ? undefined : (
+                    allRules.length === 0 ? (
+                      canWrite ? (
+                        <div className="flex items-center gap-2">
+                          <Button
+                            variant="primary"
+                            loading={restoreBuiltins.isPending}
+                            onClick={() => restoreBuiltins.mutate()}
+                            icon={<ShieldCheck weight="duotone" className="h-4 w-4" />}
+                          >
+                            {t('pages.waf.restoreBuiltins')}
+                          </Button>
+                          <Button
+                            variant="secondary"
+                            icon={<Plus weight="bold" className="h-4 w-4" />}
+                            onClick={() => openCreate()}
+                          >
+                            {t('pages.waf.addRule')}
+                          </Button>
+                        </div>
+                      ) : undefined
+                    ) : (
                       <Button
                         variant="secondary"
                         onClick={() => {

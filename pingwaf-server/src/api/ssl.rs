@@ -1,5 +1,7 @@
 //! SSL/TLS certificate management: upload, ACME issuance, renewal and settings.
 
+use std::collections::HashMap;
+
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -8,21 +10,25 @@ use axum::Json;
 use axum::Router;
 use chrono::{DateTime, Utc};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter,
-    QueryOrder, Set,
+    ActiveModelTrait, ColumnTrait, Condition, EntityTrait, PaginatorTrait,
+    QueryFilter, QueryOrder, Set,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::api::common::{
-    load_site_read, load_site_write, non_empty, parse_uuid, Page, Pagination,
+    load_site_read, load_site_write, non_empty, parse_uuid, scope_site, Page,
+    Pagination,
 };
 use crate::api::error::ApiError;
-use crate::api::sites::touch_site;
+use crate::api::sites::{
+    load_tls_posture, save_tls_posture, touch_site, TlsPosture,
+    TlsPostureRequest,
+};
 use crate::api::state::AppState;
 use crate::auth::AuthUser;
 use crate::grpc::notify_config_changed;
-use crate::models::{acme_challenge, site_certificates, site_ssl};
+use crate::models::{acme_challenge, site, site_certificates};
 
 /// Certificate status values.
 mod cert_status {
@@ -83,22 +89,33 @@ impl From<site_certificates::Model> for CertificateResponse {
 /// SSL settings response (from site_ssl or derived).
 #[derive(Debug, Serialize)]
 pub struct SslSettingsResponse {
+    pub https_enabled: bool,
     pub min_tls_version: String,
+    pub max_tls_version: Option<String>,
+    pub self_signed: bool,
+    pub certificate_id: Option<Uuid>,
+    pub mtls_enabled: bool,
+    pub has_mtls_client_ca: bool,
     pub hsts_enabled: bool,
-    pub hsts_max_age: u32,
+    pub hsts_max_age: i32,
     pub always_use_https: bool,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct UpdateSslSettingsRequest {
-    #[serde(default)]
-    pub min_tls_version: Option<String>,
-    #[serde(default)]
-    pub hsts_enabled: Option<bool>,
-    #[serde(default)]
-    pub hsts_max_age: Option<u32>,
-    #[serde(default)]
-    pub always_use_https: Option<bool>,
+impl From<TlsPosture> for SslSettingsResponse {
+    fn from(posture: TlsPosture) -> Self {
+        Self {
+            https_enabled: posture.https_enabled,
+            min_tls_version: posture.min_tls_version,
+            max_tls_version: posture.max_tls_version,
+            self_signed: posture.self_signed,
+            certificate_id: posture.certificate_id,
+            mtls_enabled: posture.mtls_enabled,
+            has_mtls_client_ca: posture.mtls_client_ca.is_some(),
+            hsts_enabled: posture.hsts_enabled,
+            hsts_max_age: posture.hsts_max_age,
+            always_use_https: posture.always_use_https,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -130,6 +147,13 @@ pub struct CreateCertificateRequest {
     pub acme_dns_provider: Option<String>,
     #[serde(default)]
     pub acme_dns_config: Option<serde_json::Value>,
+    /// Site the certificate is uploaded for, when it is not created through the
+    /// site's own certificate list.
+    #[serde(default)]
+    pub site_id: Option<Uuid>,
+    /// Attach the certificate to its site (and turn HTTPS on) right away.
+    #[serde(default)]
+    pub activate: bool,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -189,6 +213,24 @@ pub fn routes() -> Router<AppState> {
             "/sites/{site_id}/ssl-settings",
             get(get_ssl_settings).put(update_ssl_settings),
         )
+        // Global aliases. The dashboard's SSL/TLS page spans sites: it lists
+        // every application, uploads or renews a certificate for a chosen site,
+        // and summarises what is about to lapse.
+        .route(
+            "/certificates",
+            get(list_all_certificates).post(create_global_certificate),
+        )
+        .route("/certificates/summary", get(certificate_summary))
+        .route(
+            "/certificates/{cert_id}",
+            get(show_global_certificate)
+                .put(update_global_certificate)
+                .delete(delete_global_certificate),
+        )
+        .route(
+            "/certificates/{cert_id}/renew",
+            axum::routing::post(renew_global_certificate),
+        )
 }
 
 /// `GET /api/v1/sites/{site_id}/certificates`
@@ -224,6 +266,19 @@ async fn create_certificate(
     let id = parse_uuid(&site_id, "site id")?;
     load_site_write(&state.db, id, &current).await?;
 
+    let model = insert_certificate(&state, id, payload).await?;
+    Ok(
+        (StatusCode::CREATED, Json(CertificateResponse::from(model)))
+            .into_response(),
+    )
+}
+
+/// Validates and stores one certificate row, then tells the site's agents.
+async fn insert_certificate(
+    state: &AppState,
+    site_id: Uuid,
+    payload: CreateCertificateRequest,
+) -> Result<site_certificates::Model, ApiError> {
     let domain = payload.domain.trim().to_lowercase();
     if domain.is_empty() || domain.len() > 255 {
         return Err(ApiError::BadRequest(
@@ -248,7 +303,7 @@ async fn create_certificate(
     let timestamp = Utc::now();
     let model = site_certificates::ActiveModel {
         id: Set(Uuid::new_v4()),
-        site_id: Set(id),
+        site_id: Set(site_id),
         domain: Set(domain),
         cert_pem: Set(payload.cert_pem),
         key_pem: Set(payload.key_pem),
@@ -267,14 +322,11 @@ async fn create_certificate(
     .insert(&state.db)
     .await?;
 
-    tracing::info!(site_id = %id, cert_id = %model.id, "certificate created");
-    touch_site(&state, id).await?;
-    notify_config_changed(&state, id).await;
+    tracing::info!(site_id = %site_id, cert_id = %model.id, "certificate created");
+    touch_site(state, site_id).await?;
+    notify_config_changed(state, site_id).await;
 
-    Ok(
-        (StatusCode::CREATED, Json(CertificateResponse::from(model)))
-            .into_response(),
-    )
+    Ok(model)
 }
 
 /// `GET /api/v1/sites/{site_id}/certificates/{cert_id}`
@@ -424,58 +476,30 @@ async fn get_ssl_settings(
     let id = parse_uuid(&site_id, "site id")?;
     load_site_read(&state.db, id, &current).await?;
 
-    // The ssl settings are derived from the site_ssl row or defaults
-    let ssl_row = site_ssl::Entity::find()
-        .filter(site_ssl::Column::SiteId.eq(id))
-        .one(&state.db)
-        .await?;
-
-    let settings = match ssl_row {
-        Some(_row) => SslSettingsResponse {
-            min_tls_version: "1.2".to_string(),
-            hsts_enabled: false,
-            hsts_max_age: 0,
-            always_use_https: false,
-        },
-        None => SslSettingsResponse {
-            min_tls_version: "1.2".to_string(),
-            hsts_enabled: false,
-            hsts_max_age: 0,
-            always_use_https: false,
-        },
-    };
-
-    Ok(Json(settings))
+    let posture = load_tls_posture(&state, id).await?;
+    Ok(Json(posture.into()))
 }
 
 /// `PUT /api/v1/sites/{site_id}/ssl-settings`
+///
+/// Persists the TLS switches on the site's `site_ssl` row, creating the row if
+/// the site has none yet — the settings and the certificate share the row, so
+/// either endpoint can establish it.
 async fn update_ssl_settings(
     State(state): State<AppState>,
     current: AuthUser,
     Path(site_id): Path<String>,
-    Json(payload): Json<UpdateSslSettingsRequest>,
+    Json(payload): Json<TlsPostureRequest>,
 ) -> Result<Json<SslSettingsResponse>, ApiError> {
     let id = parse_uuid(&site_id, "site id")?;
-    load_site_write(&state.db, id, &current).await?;
+    let site = load_site_write(&state.db, id, &current).await?;
 
-    // For now, SSL settings are stored at the site level via the site_ssl row.
-    // We acknowledge the request and return the (static) settings.
-    // A full implementation would persist these to a dedicated ssl_settings column.
-    tracing::info!(site_id = %id, "SSL settings update requested");
-
-    let settings = SslSettingsResponse {
-        min_tls_version: payload
-            .min_tls_version
-            .unwrap_or_else(|| "1.2".to_string()),
-        hsts_enabled: payload.hsts_enabled.unwrap_or(false),
-        hsts_max_age: payload.hsts_max_age.unwrap_or(0),
-        always_use_https: payload.always_use_https.unwrap_or(false),
-    };
-
+    let posture = save_tls_posture(&state, &site, &payload).await?;
+    tracing::info!(site_id = %id, "SSL settings updated");
     touch_site(&state, id).await?;
     notify_config_changed(&state, id).await;
 
-    Ok(Json(settings))
+    Ok(Json(posture.into()))
 }
 
 /// Loads a certificate scoped to a site.
@@ -486,6 +510,273 @@ async fn find_certificate(
 ) -> Result<site_certificates::Model, ApiError> {
     site_certificates::Entity::find_by_id(cert_id)
         .filter(site_certificates::Column::SiteId.eq(site_id))
+        .one(&state.db)
+        .await?
+        .ok_or_else(|| {
+            ApiError::NotFound(format!("certificate {cert_id} not found"))
+        })
+}
+
+// ─── Global certificate management ─────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct GlobalListQuery {
+    /// Restrict the list to one site. Optional for administrators, who would
+    /// otherwise have to walk their sites one by one.
+    #[serde(default)]
+    pub site_id: Option<String>,
+    /// Filter on the certificate status (`active`, `pending`, …).
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(flatten)]
+    pub pagination: Pagination,
+}
+
+/// A certificate plus the site it belongs to, for the cross-site list.
+#[derive(Debug, Serialize)]
+pub struct CertificateWithSite {
+    #[serde(flatten)]
+    pub certificate: CertificateResponse,
+    pub site_domain: String,
+    pub site_name: String,
+}
+
+/// Counts behind the global SSL/TLS overview.
+#[derive(Debug, Serialize)]
+pub struct CertificateSummary {
+    pub total: usize,
+    pub active: usize,
+    pub pending: usize,
+    pub failed: usize,
+    pub expired: usize,
+    /// Certificates that lapse within the next 30 days, lapsed ones included.
+    pub expiring_soon: usize,
+}
+
+/// Sites the caller may see, mapped to `(domain, name)`.
+async fn visible_sites(
+    state: &AppState,
+    current: &AuthUser,
+) -> Result<HashMap<Uuid, (String, String)>, ApiError> {
+    let mut condition = Condition::all();
+    if !current.is_admin() {
+        condition = condition.add(site::Column::UserId.eq(current.id));
+    }
+    let rows = site::Entity::find()
+        .filter(condition)
+        .all(&state.db)
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(|model| (model.id, (model.domain, model.name)))
+        .collect())
+}
+
+/// `GET /api/v1/certificates` — certificate applications across every site the
+/// caller sees, newest first.
+async fn list_all_certificates(
+    State(state): State<AppState>,
+    current: AuthUser,
+    Query(query): Query<GlobalListQuery>,
+) -> Result<Json<Page<CertificateWithSite>>, ApiError> {
+    let requested = match query.site_id.as_deref() {
+        Some(raw) => Some(parse_uuid(raw, "site id")?),
+        None => None,
+    };
+    let sites = visible_sites(&state, &current).await?;
+    let pagination = query.pagination.normalise();
+
+    let mut condition = Condition::all();
+    if let Some(id) = scope_site(requested, &current)? {
+        if !sites.contains_key(&id) {
+            return Err(ApiError::NotFound(format!("site {id} not found")));
+        }
+        condition = condition.add(site_certificates::Column::SiteId.eq(id));
+    }
+    if let Some(status) = non_empty(&query.status) {
+        if !cert_status::is_valid(&status) {
+            return Err(ApiError::BadRequest(format!(
+                "invalid status '{status}' (supported: active, pending, expired, failed)"
+            )));
+        }
+        condition = condition.add(site_certificates::Column::Status.eq(status));
+    }
+
+    let paginator = site_certificates::Entity::find()
+        .filter(condition)
+        .order_by_desc(site_certificates::Column::CreatedAt)
+        .paginate(&state.db, pagination.limit());
+
+    let total = paginator.num_items().await?;
+    let rows = paginator.fetch_page(pagination.index()).await?;
+    let items: Vec<CertificateWithSite> = rows
+        .into_iter()
+        .map(|row| {
+            let (site_domain, site_name) =
+                sites.get(&row.site_id).cloned().unwrap_or_default();
+            CertificateWithSite {
+                certificate: CertificateResponse::from(row),
+                site_domain,
+                site_name,
+            }
+        })
+        .collect();
+    Ok(Json(Page::new(items, total, pagination)))
+}
+
+/// `POST /api/v1/certificates` — upload a certificate or apply for one on
+/// behalf of a site.
+///
+/// `activate` attaches it to its site and turns HTTPS on in the same call, so
+/// the dashboard does not have to make a second request.
+async fn create_global_certificate(
+    State(state): State<AppState>,
+    current: AuthUser,
+    Json(payload): Json<CreateCertificateRequest>,
+) -> Result<Response, ApiError> {
+    let Some(raw_site) = payload.site_id else {
+        return Err(ApiError::BadRequest(
+            "site_id is required: a certificate belongs to a site".to_string(),
+        ));
+    };
+    let site_id = parse_uuid(&raw_site.to_string(), "site id")?;
+    let site = load_site_write(&state.db, site_id, &current).await?;
+    let activate = payload.activate;
+
+    let model = insert_certificate(&state, site_id, payload).await?;
+
+    if activate {
+        let posture = TlsPostureRequest {
+            https_enabled: Some(true),
+            certificate_id: Some(model.id),
+            ..Default::default()
+        };
+        save_tls_posture(&state, &site, &posture).await?;
+        tracing::info!(site_id = %site_id, cert_id = %model.id, "certificate activated");
+        touch_site(&state, site_id).await?;
+        notify_config_changed(&state, site_id).await;
+    }
+
+    Ok(
+        (StatusCode::CREATED, Json(CertificateResponse::from(model)))
+            .into_response(),
+    )
+}
+
+/// `GET /api/v1/certificates/{cert_id}`
+async fn show_global_certificate(
+    State(state): State<AppState>,
+    current: AuthUser,
+    Path(cert_id): Path<String>,
+) -> Result<Json<CertificateResponse>, ApiError> {
+    let target = parse_uuid(&cert_id, "certificate id")?;
+    let row = find_certificate_by_id(&state, target).await?;
+    load_site_read(&state.db, row.site_id, &current).await?;
+    Ok(Json(CertificateResponse::from(row)))
+}
+
+/// `PUT /api/v1/certificates/{cert_id}`
+async fn update_global_certificate(
+    State(state): State<AppState>,
+    current: AuthUser,
+    Path(cert_id): Path<String>,
+    payload: Json<UpdateCertificateRequest>,
+) -> Result<Json<CertificateResponse>, ApiError> {
+    let target = parse_uuid(&cert_id, "certificate id")?;
+    let row = find_certificate_by_id(&state, target).await?;
+    update_certificate(
+        State(state),
+        current,
+        Path((row.site_id.to_string(), cert_id)),
+        payload,
+    )
+    .await
+}
+
+/// `DELETE /api/v1/certificates/{cert_id}`
+async fn delete_global_certificate(
+    State(state): State<AppState>,
+    current: AuthUser,
+    Path(cert_id): Path<String>,
+) -> Result<Response, ApiError> {
+    let target = parse_uuid(&cert_id, "certificate id")?;
+    let row = find_certificate_by_id(&state, target).await?;
+    delete_certificate(
+        State(state),
+        current,
+        Path((row.site_id.to_string(), cert_id)),
+    )
+    .await
+}
+
+/// `POST /api/v1/certificates/{cert_id}/renew`
+async fn renew_global_certificate(
+    State(state): State<AppState>,
+    current: AuthUser,
+    Path(cert_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let target = parse_uuid(&cert_id, "certificate id")?;
+    let row = find_certificate_by_id(&state, target).await?;
+    renew_certificate(
+        State(state),
+        current,
+        Path((row.site_id.to_string(), cert_id)),
+    )
+    .await
+}
+
+/// `GET /api/v1/certificates/summary`
+async fn certificate_summary(
+    State(state): State<AppState>,
+    current: AuthUser,
+) -> Result<Json<CertificateSummary>, ApiError> {
+    let sites = visible_sites(&state, &current).await?;
+    let mut summary = CertificateSummary {
+        total: 0,
+        active: 0,
+        pending: 0,
+        failed: 0,
+        expired: 0,
+        expiring_soon: 0,
+    };
+    if !current.is_admin() && sites.is_empty() {
+        return Ok(Json(summary));
+    }
+
+    let mut condition = Condition::all();
+    if !current.is_admin() {
+        condition = condition.add(
+            site_certificates::Column::SiteId.is_in(sites.keys().copied()),
+        );
+    }
+    let rows = site_certificates::Entity::find()
+        .filter(condition)
+        .all(&state.db)
+        .await?;
+
+    let soon = Utc::now() + chrono::Duration::days(30);
+    summary.total = rows.len();
+    for row in &rows {
+        match row.status.as_str() {
+            cert_status::ACTIVE => summary.active += 1,
+            cert_status::PENDING => summary.pending += 1,
+            cert_status::FAILED => summary.failed += 1,
+            cert_status::EXPIRED => summary.expired += 1,
+            _ => {},
+        }
+        if row.expires_at.is_some_and(|expires_at| expires_at <= soon) {
+            summary.expiring_soon += 1;
+        }
+    }
+    Ok(Json(summary))
+}
+
+/// Looks a certificate up by id alone; the caller authorises through its site.
+async fn find_certificate_by_id(
+    state: &AppState,
+    cert_id: Uuid,
+) -> Result<site_certificates::Model, ApiError> {
+    site_certificates::Entity::find_by_id(cert_id)
         .one(&state.db)
         .await?
         .ok_or_else(|| {

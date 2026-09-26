@@ -23,6 +23,8 @@ import { GeoPage } from '@/pages/sites/GeoPage'
 import { CachingPage } from '@/pages/sites/CachingPage'
 import { SslPage } from '@/pages/sites/SslPage'
 import { TrafficPage } from '@/pages/sites/TrafficPage'
+import { GlobalSslPage } from '@/pages/GlobalSslPage'
+import { GlobalTrafficPage } from '@/pages/GlobalTrafficPage'
 import { RewritePage } from '@/pages/sites/RewritePage'
 import { ErrorPagesPage } from '@/pages/sites/ErrorPagesPage'
 import { SiteSettingsPage } from '@/pages/placeholders'
@@ -90,6 +92,9 @@ export const router = createBrowserRouter([
       },
       { path: 'logs', element: <LogsPage /> },
       { path: 'agents', element: <AgentsPage /> },
+      // Global surfaces. The per-site counterparts live under `/sites/:siteId`.
+      { path: 'ssl', element: <GlobalSslPage /> },
+      { path: 'traffic', element: <GlobalTrafficPage /> },
       { path: 'settings', element: <SettingsPage /> },
       { path: '*', element: <NotFoundPage /> },
     ],

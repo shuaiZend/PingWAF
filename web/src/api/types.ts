@@ -82,6 +82,8 @@ export interface Site {
   domain: string
   status: SiteStatus | string
   plan: string
+  /** Disk budget, in MiB, the agents may use for this site's cache. */
+  cache_quota_mb: number
   user_id: string
   created_at: string
   updated_at: string
@@ -130,6 +132,13 @@ export interface SiteDetail {
 export interface CreateSiteRequest {
   name: string
   domain: string
+  /**
+   * Origin the site proxies to — a CDN/WAF hostname or the application itself.
+   * Required: a site without an origin cannot serve traffic.
+   */
+  upstream_address: string
+  upstream_name?: string
+  upstream_tls?: boolean
   status?: string
   plan?: string
 }
@@ -612,6 +621,23 @@ export interface AgentCommandResult {
   queued: boolean
 }
 
+/** `api::agents::EnrollRequest` */
+export interface AgentEnrollRequest {
+  name?: string
+  /** Validity of the minted agent key; 1–720 hours, 24 by default. */
+  ttl_hours?: number
+}
+
+/** `api::agents::EnrollResponse` — the token is shown once and never stored. */
+export interface AgentEnrollResponse {
+  key_id: string
+  token: string
+  expires_at: string
+  server_url: string
+  docker_command: string
+  binary_command: string
+}
+
 /* ── Elasticsearch settings ───────────────────────────────────────── */
 
 /** `es::config::EsConfig` — secrets come back masked as `***`. */
@@ -716,50 +742,103 @@ export type TlsVersion = '1.0' | '1.1' | '1.2' | '1.3'
 
 export const TLS_VERSIONS: TlsVersion[] = ['1.0', '1.1', '1.2', '1.3']
 
-/** A certificate row as returned by `GET /api/v1/ssl`. Never carries the key. */
+/** `api::ssl::cert_status` */
+export type CertificateStatus = 'active' | 'pending' | 'expired' | 'failed'
+
+export const CERTIFICATE_STATUSES: CertificateStatus[] = [
+  'active',
+  'pending',
+  'expired',
+  'failed',
+]
+
+/** `api::ssl::CertificateResponse` — never carries the private key. */
 export interface SslCertificate {
   id: string
   site_id: string
   domain: string
   issuer: string | null
+  not_before: string | null
   expires_at: string | null
   auto_renew: boolean
   acme_email: string | null
-  acme_challenge_type: string | null
+  acme_challenge_type: string
   acme_dns_provider: string | null
+  acme_dns_config: unknown | null
+  status: CertificateStatus | string
   has_certificate: boolean
   has_private_key: boolean
   created_at: string
+  updated_at: string
+}
+
+/** `api::ssl::CertificateWithSite` — a row of the cross-site certificate list. */
+export interface CertificateWithSite extends SslCertificate {
+  site_domain: string
+  site_name: string
+}
+
+/** `api::ssl::CertificateSummary` */
+export interface CertificateSummary {
+  total: number
+  active: number
+  pending: number
+  failed: number
+  expired: number
+  expiring_soon: number
+}
+
+/** `api::ssl::GlobalListQuery` */
+export interface CertificateListQuery extends PaginationQuery {
+  site_id?: string
+  status?: string
 }
 
 export interface CreateSslRequest {
-  site_id: string
+  /** Required by the global `/certificates` endpoint, ignored by the per-site one. */
+  site_id?: string
   domain: string
   /** ACME automation. */
   auto_renew?: boolean
   acme_email?: string | null
   acme_challenge_type?: AcmeChallengeType | string | null
   acme_dns_provider?: string | null
+  acme_dns_config?: unknown | null
   /** Manual upload. */
   cert_pem?: string | null
   key_pem?: string | null
   issuer?: string | null
+  not_before?: string | null
   expires_at?: string | null
+  /** Global endpoint only: attach to the site and turn HTTPS on. */
+  activate?: boolean
 }
 
-export type UpdateSslRequest = Partial<Omit<CreateSslRequest, 'site_id'>>
+export type UpdateSslRequest = Partial<Omit<CreateSslRequest, 'site_id' | 'activate'>>
 
-/** Site-wide TLS posture stored separately from individual certificates. */
+/** `api::ssl::SslSettingsResponse` — the site's TLS posture. */
 export interface SslSettings {
-  site_id: string
+  https_enabled: boolean
   min_tls_version: TlsVersion | string
+  max_tls_version: TlsVersion | string | null
+  self_signed: boolean
+  certificate_id: string | null
+  mtls_enabled: boolean
+  has_mtls_client_ca: boolean
   hsts_enabled: boolean
   hsts_max_age: number
   always_use_https: boolean
 }
 
+/** `api::sites::TlsPostureRequest` — the write side of `SslSettings`. */
 export interface UpdateSslSettingsRequest {
+  https_enabled?: boolean
   min_tls_version?: TlsVersion | string
+  max_tls_version?: TlsVersion | string | null
+  self_signed?: boolean
+  certificate_id?: string | null
+  mtls_enabled?: boolean
+  mtls_client_ca?: string | null
   hsts_enabled?: boolean
   hsts_max_age?: number
   always_use_https?: boolean
@@ -780,25 +859,60 @@ export interface CreateCacheRuleRequest {
 
 export type UpdateCacheRuleRequest = Partial<CreateCacheRuleRequest>
 
-/** Aggregate cache counters rendered as stat cards. */
-export interface CacheStats {
-  hit_rate: number
-  disk_usage_bytes: number
-  disk_quota_bytes: number
-  total_items: number
-  hits: number
-  misses: number
+/**
+ * `api::cache::CacheSettingsResponse`. The disk budget belongs to the site, not
+ * to an individual rule — the agent enforces one ceiling per hostname, and all
+ * of a site's hostnames share it.
+ */
+export interface CacheSettings {
+  site_id: string
+  quota_mb: number
+  /** True while at least one cache rule of the site is enabled. */
+  cache_enabled: boolean
+  rule_count: number
+  enabled_rule_count: number
+}
+
+export interface UpdateCacheSettingsRequest {
+  quota_mb?: number
+}
+
+/**
+ * `api::cache::CacheStatusView`. The `configured_*` figures come from the
+ * database; the rest comes from agent heartbeats and stays zero until one
+ * reports — `reporting_edges === 0` is how the two are told apart.
+ */
+export interface CacheStatus {
+  site_id: string
+  domain: string
+  configured_quota_mb: number
+  enabled_rule_count: number
+  reporting_edges: number
+  disk_bytes: number
+  quota_bytes_per_edge: number
+  quota_bytes_total: number
+  items: number
+  evictions_total: number
+  usage_percent: number
+  last_reported_at: string | null
 }
 
 export interface PurgeCacheRequest {
   site_id: string
-  /** Explicit URLs; omit/empty together with `all` to purge everything. */
+  /** Explicit URLs; ignored when `purge_all` is set. */
   urls?: string[]
-  all?: boolean
+  purge_all?: boolean
 }
 
+/** `api::cache::PurgeResponse` */
 export interface PurgeCacheResult {
-  purged: number
+  site_id: string
+  purge_all: boolean
+  urls: number
+  /** Agents the command reached over a live stream. */
+  delivered: number
+  /** Agents it was queued for; delivered on their next heartbeat. */
+  queued: number
 }
 
 /* ── CC protection / challenge ────────────────────────────────────── */

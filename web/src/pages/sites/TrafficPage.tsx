@@ -57,15 +57,23 @@ const tooltipStyle = {
   color: 'var(--color-text-default)',
 }
 
-export function TrafficPage() {
+/**
+ * Every traffic widget, for one site or for the whole fleet.
+ *
+ * Passing `siteId` scopes the query to that site; omitting it asks the control
+ * plane for the aggregate across every site the caller may see, which is what
+ * the global traffic page renders.
+ */
+export function TrafficPanels({ siteId }: { siteId?: string }) {
   const { t } = useTranslation()
-  const { siteId = '' } = useParams<{ siteId: string }>()
   const [range, setRange] = useState<TrafficRange>('24h')
+
+  const scoped = siteId !== undefined
 
   const overviewQuery = useQuery({
     queryKey: trafficKeys.overview(siteId, range),
     queryFn: () => trafficApi.overview(siteId, range),
-    enabled: Boolean(siteId),
+    enabled: scoped ? Boolean(siteId) : true,
     refetchInterval: 60_000,
   })
 
@@ -184,40 +192,35 @@ export function TrafficPage() {
   ]
 
   return (
-    <div className="animate-slide-up">
-      <PageHeader
-        title={t('pages.traffic.title')}
-        description={t('pages.traffic.description')}
-        actions={
-          <div className="flex items-center gap-2">
-            <div className="flex items-center gap-1 rounded-lg bg-recessed p-1">
-              {TRAFFIC_RANGES.map((r) => (
-                <button
-                  key={r}
-                  type="button"
-                  onClick={() => setRange(r)}
-                  className={cn(
-                    'rounded-md px-2.5 py-1 text-xs font-medium transition-colors',
-                    range === r
-                      ? 'bg-elevated text-fg-strong shadow-sm'
-                      : 'text-fg-subtle hover:text-fg',
-                  )}
-                >
-                  {r}
-                </button>
-              ))}
-            </div>
-            <Button
-              variant="secondary"
-              loading={overviewQuery.isFetching}
-              onClick={() => overviewQuery.refetch()}
-              icon={<ArrowClockwise weight="duotone" className="h-4 w-4" />}
+    <>
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        <div className="flex items-center gap-1 rounded-lg bg-recessed p-1">
+          {TRAFFIC_RANGES.map((r) => (
+            <button
+              key={r}
+              type="button"
+              onClick={() => setRange(r)}
+              className={cn(
+                'rounded-md px-2.5 py-1 text-xs font-medium transition-colors',
+                range === r
+                  ? 'bg-elevated text-fg-strong shadow-sm'
+                  : 'text-fg-subtle hover:text-fg',
+              )}
             >
-              {t('common.refresh')}
-            </Button>
-          </div>
-        }
-      />
+              {r}
+            </button>
+          ))}
+        </div>
+        <Button
+          className="ml-auto"
+          variant="secondary"
+          loading={overviewQuery.isFetching}
+          onClick={() => overviewQuery.refetch()}
+          icon={<ArrowClockwise weight="duotone" className="h-4 w-4" />}
+        >
+          {t('common.refresh')}
+        </Button>
+      </div>
 
       {/* Summary */}
       <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -429,6 +432,22 @@ export function TrafficPage() {
           </div>
         </div>
       )}
+    </>
+  )
+}
+
+/** One site's traffic — the panels scoped to the `:siteId` route param. */
+export function TrafficPage() {
+  const { t } = useTranslation()
+  const { siteId = '' } = useParams<{ siteId: string }>()
+
+  return (
+    <div className="animate-slide-up">
+      <PageHeader
+        title={t('pages.traffic.title')}
+        description={t('pages.traffic.description')}
+      />
+      <TrafficPanels siteId={siteId} />
     </div>
   )
 }

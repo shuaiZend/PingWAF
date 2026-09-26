@@ -15,12 +15,12 @@ import type {
 /**
  * Site traffic analytics — `/api/v1/analytics/traffic`.
  *
- * A thin site-scoped wrapper over the analytics endpoints. The traffic page
- * fans out one request per widget and resolves them together so a slow series
- * cannot block the summary cards from painting.
+ * A thin site-scoped wrapper over the analytics endpoints. Omitting `siteId`
+ * asks for the fleet-wide aggregate, which is what the global traffic page
+ * shows; administrators may span every site, other roles only their own.
  */
 export const trafficApi = {
-  overview: (siteId: string, range: TrafficRange = '24h') =>
+  overview: (siteId?: string, range: TrafficRange = '24h') =>
     fetchTrafficOverview(siteId, range),
 
   summary: (siteId: string, params: RangeQuery = {}) =>
@@ -74,10 +74,10 @@ export function rangeQueryFor(range: TrafficRange): RangeQuery {
 
 /** Resolves every widget the traffic page renders in one pass. */
 export async function fetchTrafficOverview(
-  siteId: string,
+  siteId?: string,
   range: TrafficRange = '24h',
 ): Promise<TrafficOverview> {
-  const params: RangeQuery = { site_id: siteId, ...rangeQueryFor(range) }
+  const params: RangeQuery = { ...(siteId ? { site_id: siteId } : {}), ...rangeQueryFor(range) }
   const [summary, series, topPaths, topIps, topRules, statusCodes] = await Promise.all([
     analyticsApi.summary(params),
     analyticsApi.requestsOverTime(params),
@@ -113,9 +113,9 @@ export function groupStatusCodes(
 }
 
 export const trafficKeys = {
-  all: (siteId: string) => ['traffic', siteId] as const,
-  overview: (siteId: string, range: TrafficRange) =>
-    ['traffic', siteId, 'overview', range] as const,
+  all: (siteId?: string) => ['traffic', siteId ?? 'all'] as const,
+  overview: (siteId: string | undefined, range: TrafficRange) =>
+    ['traffic', siteId ?? 'all', 'overview', range] as const,
 }
 
 export default trafficApi

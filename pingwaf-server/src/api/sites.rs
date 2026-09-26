@@ -24,7 +24,7 @@ use crate::auth::AuthUser;
 use crate::grpc::notify_config_changed;
 use crate::models::{
     acme_challenge, cache_rules, rate_limit_rules, rule, rule_groups, site,
-    site_ssl, site_status, site_upstreams,
+    site_certificates, site_ssl, site_status, site_upstreams, tls_version,
 };
 
 /// Public representation of a site.
@@ -35,6 +35,8 @@ pub struct SiteResponse {
     pub domain: String,
     pub status: String,
     pub plan: String,
+    /// Disk budget, in MiB, the agents may use for this site's cache.
+    pub cache_quota_mb: i32,
     pub user_id: Uuid,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -48,6 +50,7 @@ impl From<site::Model> for SiteResponse {
             domain: model.domain,
             status: model.status,
             plan: model.plan,
+            cache_quota_mb: model.cache_quota_mb,
             user_id: model.user_id,
             created_at: model.created_at,
             updated_at: model.updated_at,
@@ -82,6 +85,16 @@ pub struct SslResponse {
     pub acme_challenge_type: Option<String>,
     pub acme_dns_provider: Option<String>,
     pub acme_dns_config: Option<serde_json::Value>,
+    pub https_enabled: bool,
+    pub min_tls_version: String,
+    pub max_tls_version: Option<String>,
+    pub self_signed: bool,
+    pub certificate_id: Option<Uuid>,
+    pub mtls_enabled: bool,
+    pub has_mtls_client_ca: bool,
+    pub hsts_enabled: bool,
+    pub hsts_max_age: i32,
+    pub always_use_https: bool,
     pub created_at: DateTime<Utc>,
 }
 
@@ -106,6 +119,19 @@ impl From<site_ssl::Model> for SslResponse {
             acme_challenge_type: model.acme_challenge_type,
             acme_dns_provider: model.acme_dns_provider,
             acme_dns_config: model.acme_dns_config,
+            https_enabled: model.https_enabled,
+            min_tls_version: model.min_tls_version,
+            max_tls_version: model.max_tls_version,
+            self_signed: model.self_signed,
+            certificate_id: model.certificate_id,
+            mtls_enabled: model.mtls_enabled,
+            has_mtls_client_ca: model
+                .mtls_client_ca
+                .as_ref()
+                .is_some_and(|v| !v.is_empty()),
+            hsts_enabled: model.hsts_enabled,
+            hsts_max_age: model.hsts_max_age,
+            always_use_https: model.always_use_https,
             created_at: model.created_at,
         }
     }
@@ -123,6 +149,13 @@ pub struct ListQuery {
 pub struct CreateSiteRequest {
     pub name: String,
     pub domain: String,
+    /// Origin the site proxies to — a CDN/WAF hostname or the application
+    /// itself. Required: a site without an origin cannot serve traffic.
+    pub upstream_address: String,
+    #[serde(default)]
+    pub upstream_name: Option<String>,
+    #[serde(default)]
+    pub upstream_tls: Option<bool>,
     #[serde(default)]
     pub status: Option<String>,
     #[serde(default)]
@@ -190,6 +223,264 @@ pub struct UpsertSslRequest {
     pub acme_dns_provider: Option<String>,
     #[serde(default)]
     pub acme_dns_config: Option<serde_json::Value>,
+    #[serde(flatten)]
+    pub tls: TlsPostureRequest,
+}
+
+/// The TLS switches a site is served with. Shared by the certificate upload and
+/// the SSL settings endpoints, which both edit the same `site_ssl` row.
+#[derive(Debug, Deserialize, Default)]
+pub struct TlsPostureRequest {
+    #[serde(default)]
+    pub https_enabled: Option<bool>,
+    #[serde(default)]
+    pub min_tls_version: Option<String>,
+    #[serde(default)]
+    pub max_tls_version: Option<String>,
+    #[serde(default)]
+    pub self_signed: Option<bool>,
+    #[serde(default)]
+    pub certificate_id: Option<Uuid>,
+    #[serde(default)]
+    pub mtls_enabled: Option<bool>,
+    #[serde(default)]
+    pub mtls_client_ca: Option<String>,
+    #[serde(default)]
+    pub hsts_enabled: Option<bool>,
+    #[serde(default)]
+    pub hsts_max_age: Option<i32>,
+    #[serde(default)]
+    pub always_use_https: Option<bool>,
+}
+
+/// Largest HSTS lifetime accepted, in seconds (two years).
+pub(crate) const MAX_HSTS_AGE: i32 = 63_072_000;
+
+/// The effective TLS posture of a site, as stored on `site_ssl`.
+#[derive(Debug, Clone)]
+pub(crate) struct TlsPosture {
+    pub https_enabled: bool,
+    pub min_tls_version: String,
+    pub max_tls_version: Option<String>,
+    pub self_signed: bool,
+    pub certificate_id: Option<Uuid>,
+    pub mtls_enabled: bool,
+    pub mtls_client_ca: Option<String>,
+    pub hsts_enabled: bool,
+    pub hsts_max_age: i32,
+    pub always_use_https: bool,
+}
+
+impl TlsPosture {
+    /// Posture of a site that has no `site_ssl` row yet: plain HTTP, and ready
+    /// for a certificate to be attached.
+    pub(crate) fn unset() -> Self {
+        Self {
+            https_enabled: false,
+            min_tls_version: tls_version::TLS_12.to_string(),
+            max_tls_version: None,
+            self_signed: false,
+            certificate_id: None,
+            mtls_enabled: false,
+            mtls_client_ca: None,
+            hsts_enabled: false,
+            hsts_max_age: 0,
+            always_use_https: false,
+        }
+    }
+
+    pub(crate) fn from_model(model: &site_ssl::Model) -> Self {
+        Self {
+            https_enabled: model.https_enabled,
+            min_tls_version: model.min_tls_version.clone(),
+            max_tls_version: model.max_tls_version.clone(),
+            self_signed: model.self_signed,
+            certificate_id: model.certificate_id,
+            mtls_enabled: model.mtls_enabled,
+            mtls_client_ca: model.mtls_client_ca.clone(),
+            hsts_enabled: model.hsts_enabled,
+            hsts_max_age: model.hsts_max_age,
+            always_use_https: model.always_use_https,
+        }
+    }
+
+    /// Overlays the request's switches, rejecting combinations an agent could
+    /// not serve.
+    fn merged(&self, req: &TlsPostureRequest) -> Result<Self, ApiError> {
+        let mut next = self.clone();
+        if let Some(value) = req.https_enabled {
+            next.https_enabled = value;
+        }
+        if let Some(value) = req.self_signed {
+            next.self_signed = value;
+        }
+        if let Some(value) = req.certificate_id {
+            next.certificate_id = Some(value);
+        }
+        if let Some(value) = req.mtls_enabled {
+            next.mtls_enabled = value;
+        }
+        if let Some(value) = req.hsts_enabled {
+            next.hsts_enabled = value;
+        }
+        if let Some(value) = req.always_use_https {
+            next.always_use_https = value;
+        }
+        if let Some(raw) = non_empty(&req.min_tls_version) {
+            next.min_tls_version = normalise_tls_version(&raw)?;
+        }
+        if let Some(raw) = non_empty(&req.max_tls_version) {
+            next.max_tls_version = Some(normalise_tls_version(&raw)?);
+        }
+        if let Some(raw) = non_empty(&req.mtls_client_ca) {
+            next.mtls_client_ca = Some(raw);
+        }
+        if let Some(age) = req.hsts_max_age {
+            if !(0..=MAX_HSTS_AGE).contains(&age) {
+                return Err(ApiError::BadRequest(format!(
+                    "hsts_max_age must be between 0 and {MAX_HSTS_AGE}"
+                )));
+            }
+            next.hsts_max_age = age;
+        }
+
+        let (Some(min), Some(max)) = (
+            tls_version::rank(&next.min_tls_version),
+            next.max_tls_version.as_deref().and_then(tls_version::rank),
+        ) else {
+            return Err(ApiError::BadRequest(format!(
+                "unsupported TLS version (supported: {})",
+                tls_version::ALL.join(", ")
+            )));
+        };
+        if min > max {
+            return Err(ApiError::BadRequest(format!(
+                "min_tls_version {} is above max_tls_version {}",
+                next.min_tls_version,
+                next.max_tls_version.unwrap_or_default()
+            )));
+        }
+        if next.mtls_enabled && next.mtls_client_ca.is_none() {
+            return Err(ApiError::BadRequest(
+                "mtls_enabled requires the client CA bundle".to_string(),
+            ));
+        }
+        if next.self_signed {
+            next.certificate_id = None;
+            next.https_enabled = true;
+        }
+
+        Ok(next)
+    }
+
+    pub(crate) fn apply_to(&self, active: &mut site_ssl::ActiveModel) {
+        active.https_enabled = Set(self.https_enabled);
+        active.min_tls_version = Set(self.min_tls_version.clone());
+        active.max_tls_version = Set(self.max_tls_version.clone());
+        active.self_signed = Set(self.self_signed);
+        active.certificate_id = Set(self.certificate_id);
+        active.mtls_enabled = Set(self.mtls_enabled);
+        active.mtls_client_ca = Set(self.mtls_client_ca.clone());
+        active.hsts_enabled = Set(self.hsts_enabled);
+        active.hsts_max_age = Set(self.hsts_max_age);
+        active.always_use_https = Set(self.always_use_https);
+    }
+}
+
+/// Applies a TLS posture request to the site's `site_ssl` row, creating the row
+/// when the site has none. Returns the stored posture.
+pub(crate) async fn save_tls_posture(
+    state: &AppState,
+    site: &site::Model,
+    req: &TlsPostureRequest,
+) -> Result<TlsPosture, ApiError> {
+    let existing = site_ssl::Entity::find()
+        .filter(site_ssl::Column::SiteId.eq(site.id))
+        .one(&state.db)
+        .await?;
+
+    if let Some(cert_id) = req.certificate_id {
+        let owned = site_certificates::Entity::find_by_id(cert_id)
+            .filter(site_certificates::Column::SiteId.eq(site.id))
+            .one(&state.db)
+            .await?
+            .is_some();
+        if !owned {
+            return Err(ApiError::BadRequest(format!(
+                "certificate {cert_id} does not belong to this site"
+            )));
+        }
+    }
+
+    let current = match &existing {
+        Some(row) => TlsPosture::from_model(row),
+        None => TlsPosture::unset(),
+    };
+    let next = current.merged(req)?;
+
+    match existing {
+        Some(row) => {
+            let mut active: site_ssl::ActiveModel = row.into();
+            next.apply_to(&mut active);
+            active.update(&state.db).await?;
+        },
+        None => {
+            let mut active = site_ssl::ActiveModel {
+                id: Set(Uuid::new_v4()),
+                site_id: Set(site.id),
+                cert_pem: Set(None),
+                key_pem: Set(None),
+                issuer: Set(None),
+                domain: Set(site.domain.clone()),
+                expires_at: Set(None),
+                auto_renew: Set(true),
+                acme_email: Set(None),
+                acme_challenge_type: Set(None),
+                acme_dns_provider: Set(None),
+                acme_dns_config: Set(None),
+                https_enabled: Set(false),
+                min_tls_version: Set(tls_version::TLS_12.to_string()),
+                max_tls_version: Set(None),
+                self_signed: Set(false),
+                certificate_id: Set(None),
+                mtls_enabled: Set(false),
+                mtls_client_ca: Set(None),
+                hsts_enabled: Set(false),
+                hsts_max_age: Set(0),
+                always_use_https: Set(false),
+                created_at: Set(Utc::now()),
+            };
+            next.apply_to(&mut active);
+            active.insert(&state.db).await?;
+        },
+    }
+
+    Ok(next)
+}
+
+/// Reads the site's TLS posture, falling back to the defaults for a site that
+/// has no `site_ssl` row yet.
+pub(crate) async fn load_tls_posture(
+    state: &AppState,
+    site_id: Uuid,
+) -> Result<TlsPosture, ApiError> {
+    let row = site_ssl::Entity::find()
+        .filter(site_ssl::Column::SiteId.eq(site_id))
+        .one(&state.db)
+        .await?;
+    Ok(match row {
+        Some(row) => TlsPosture::from_model(&row),
+        None => TlsPosture::unset(),
+    })
+}
+
+fn normalise_tls_version(value: &str) -> Result<String, ApiError> {
+    tls_version::normalise(value).ok_or_else(|| {
+        ApiError::BadRequest(format!(
+            "unsupported TLS version '{value}' (supported: {})",
+            tls_version::ALL.join(", ")
+        ))
+    })
 }
 
 fn default_true() -> bool {
@@ -274,9 +565,16 @@ async fn create(
         ));
     }
     let domain = normalise_domain(&payload.domain)?;
+    let upstream_name = non_empty(&payload.upstream_name)
+        .unwrap_or_else(|| "origin".to_string());
+    let upstream_address = payload.upstream_address.trim().to_string();
+    validate_upstream(&upstream_name, &upstream_address, default_weight())?;
+
+    // New sites are live immediately; the dashboard toggles them between
+    // active and paused afterwards.
     let status = payload
         .status
-        .unwrap_or_else(|| site_status::PENDING.to_string());
+        .unwrap_or_else(|| site_status::ACTIVE.to_string());
     if !site_status::is_valid(&status) {
         return Err(ApiError::BadRequest(format!(
             "unknown site status '{status}'"
@@ -298,13 +596,32 @@ async fn create(
         domain: Set(domain.clone()),
         status: Set(status),
         plan: Set(plan),
+        cache_quota_mb: Set(crate::defaults::DEFAULT_CACHE_QUOTA_MB),
         created_at: Set(timestamp),
         updated_at: Set(timestamp),
     }
     .insert(&state.db)
     .await?;
 
-    tracing::info!(%id, %domain, owner = %current.id, "site created");
+    site_upstreams::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        site_id: Set(id),
+        name: Set(upstream_name),
+        address: Set(upstream_address.clone()),
+        weight: Set(default_weight()),
+        tls: Set(payload.upstream_tls.unwrap_or(false)),
+        health_status: Set("unknown".to_string()),
+        created_at: Set(timestamp),
+    }
+    .insert(&state.db)
+    .await?;
+
+    // Built-in WAF (monitor mode) and cache rules ship with every new site.
+    if let Err(err) = crate::defaults::seed_site_defaults(&state.db, id).await {
+        tracing::error!(%id, error = %err, "failed to seed built-in rules");
+    }
+
+    tracing::info!(%id, %domain, upstream = %upstream_address, owner = %current.id, "site created");
     notify_config_changed(&state, id).await;
 
     Ok((StatusCode::CREATED, Json(SiteResponse::from(model))).into_response())
@@ -571,7 +888,7 @@ async fn upsert_ssl(
     Json(payload): Json<UpsertSslRequest>,
 ) -> Result<Json<SslResponse>, ApiError> {
     let id = parse_uuid(&site_id, "site id")?;
-    load_site_write(&state.db, id, &current).await?;
+    let site = load_site_write(&state.db, id, &current).await?;
 
     let domain = normalise_domain(&payload.domain)?;
     if let Some(challenge) = non_empty(&payload.acme_challenge_type) {
@@ -587,6 +904,17 @@ async fn upsert_ssl(
         },
         None => None,
     };
+
+    // Uploading a certificate turns HTTPS on unless the caller said otherwise:
+    // a certificate nothing serves would otherwise look broken.
+    let mut tls = payload.tls;
+    if tls.https_enabled.is_none()
+        && payload.cert_pem.is_some()
+        && payload.key_pem.is_some()
+    {
+        tls.https_enabled = Some(true);
+    }
+    let posture = save_tls_posture(&state, &site, &tls).await?;
 
     let existing = site_ssl::Entity::find()
         .filter(site_ssl::Column::SiteId.eq(id))
@@ -615,13 +943,14 @@ async fn upsert_ssl(
             if let Some(config) = payload.acme_dns_config {
                 active.acme_dns_config = Set(Some(config));
             }
+            posture.apply_to(&mut active);
             let updated = active.update(&state.db).await?;
             tracing::info!(site_id = %id, ssl = %row_id, "SSL configuration updated");
             updated
         },
         None => {
             let row_id = Uuid::new_v4();
-            let active = site_ssl::ActiveModel {
+            let mut active = site_ssl::ActiveModel {
                 id: Set(row_id),
                 site_id: Set(id),
                 cert_pem: Set(non_empty(&payload.cert_pem)),
@@ -636,8 +965,19 @@ async fn upsert_ssl(
                 )),
                 acme_dns_provider: Set(non_empty(&payload.acme_dns_provider)),
                 acme_dns_config: Set(payload.acme_dns_config),
+                https_enabled: Set(false),
+                min_tls_version: Set(tls_version::TLS_12.to_string()),
+                max_tls_version: Set(None),
+                self_signed: Set(false),
+                certificate_id: Set(None),
+                mtls_enabled: Set(false),
+                mtls_client_ca: Set(None),
+                hsts_enabled: Set(false),
+                hsts_max_age: Set(0),
+                always_use_https: Set(false),
                 created_at: Set(Utc::now()),
             };
+            posture.apply_to(&mut active);
             let inserted = active.insert(&state.db).await?;
             tracing::info!(site_id = %id, ssl = %row_id, "SSL configuration created");
             inserted
