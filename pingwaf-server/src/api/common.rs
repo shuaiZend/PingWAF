@@ -20,7 +20,10 @@ pub const MAX_PAGE_SIZE: u64 = 200;
 pub struct Pagination {
     #[serde(default = "default_page", deserialize_with = "deserialize_u64")]
     pub page: u64,
-    #[serde(default = "default_page_size", deserialize_with = "deserialize_u64")]
+    #[serde(
+        default = "default_page_size",
+        deserialize_with = "deserialize_u64"
+    )]
     pub page_size: u64,
 }
 
@@ -43,10 +46,7 @@ where
     impl<'de> Visitor<'de> for U64Visitor {
         type Value = u64;
 
-        fn expecting(
-            &self,
-            formatter: &mut fmt::Formatter<'_>,
-        ) -> fmt::Result {
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
             formatter.write_str("an unsigned integer or a decimal string")
         }
 
