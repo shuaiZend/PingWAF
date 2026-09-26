@@ -33,11 +33,15 @@ service ControlPlane {
 message RegisterAgentRequest {
   string api_key = 1;
   string hostname = 2;
-  string ip_address = 3;
+  string ip_address = 3;   // Primary address the control plane should dial
   string version = 4;
   string os_info = 5;
   uint32 cpu_cores = 6;
   uint64 memory_bytes = 7;
+  // Egress address as seen by the public internet, empty when unknown.
+  string public_ip = 8;
+  // First non-virtual LAN address (docker/veth/bridge and loopback excluded).
+  string private_ip = 9;
 }
 
 message RegisterAgentResponse {
@@ -63,6 +67,11 @@ message AgentHeartbeat {
   AgentHealthStatus health = 9;
   string config_hash = 10;  // Current running config hash
   repeated SiteStatus site_statuses = 11;
+
+  // Host probe samples collected since the previous heartbeat (oldest first).
+  repeated HostSample host_samples = 12;
+  string public_ip = 13;
+  string private_ip = 14;
 }
 
 enum AgentHealthStatus {
@@ -87,6 +96,30 @@ message SiteStatus {
   uint64 cache_items = 10;        // Tracked cache entries
   uint64 cache_evictions = 11;    // Entries evicted to stay under quota
   uint64 cache_quota_bytes = 12;  // Configured ceiling, 0 = unlimited
+}
+
+// One host probe sample, taken every few seconds by the agent's probe thread.
+// Cumulative counters (net/disk) are shipped raw and differenced by consumers.
+message HostSample {
+  int64 ts_millis = 1;                 // Unix epoch milliseconds
+  double cpu_usage_percent = 2;
+  double load1 = 3;
+  double load5 = 4;
+  double load15 = 5;
+  uint64 memory_total_bytes = 6;
+  uint64 memory_used_bytes = 7;
+  uint64 memory_available_bytes = 8;
+  uint64 swap_total_bytes = 9;
+  uint64 swap_used_bytes = 10;
+  uint64 disk_total_bytes = 11;        // Filesystem holding the probe path
+  uint64 disk_used_bytes = 12;
+  uint64 net_rx_bytes = 13;
+  uint64 net_tx_bytes = 14;
+  uint64 disk_read_bytes = 15;
+  uint64 disk_write_bytes = 16;
+  uint32 process_count = 17;
+  uint32 tcp_connections = 18;
+  uint64 uptime_secs = 19;
 }
 
 message ServerCommand {

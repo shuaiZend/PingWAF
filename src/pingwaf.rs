@@ -73,6 +73,8 @@ fn agent_config_from_opts(opts: &AgentOpts) -> AgentConfig {
         reconnect_initial_delay_ms: 1000,
         reconnect_max_delay_ms: 60000,
         fail_open: opts.fail_open,
+        probe_interval_secs: pingwaf_agent::probe::DEFAULT_INTERVAL_SECS,
+        probe_disk_path: "/".to_string(),
     }
 }
 
@@ -95,6 +97,8 @@ fn agent_config_from_all_in_one(opts: &AllInOneOpts) -> AgentConfig {
         reconnect_initial_delay_ms: 1000,
         reconnect_max_delay_ms: 60000,
         fail_open: opts.fail_open,
+        probe_interval_secs: pingwaf_agent::probe::DEFAULT_INTERVAL_SECS,
+        probe_disk_path: "/".to_string(),
     }
 }
 

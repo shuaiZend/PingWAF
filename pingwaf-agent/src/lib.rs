@@ -2,6 +2,7 @@ pub mod cache;
 pub mod client;
 pub mod config;
 pub mod heartbeat;
+pub mod probe;
 
 use std::sync::Arc;
 

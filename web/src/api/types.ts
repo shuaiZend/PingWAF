@@ -575,6 +575,10 @@ export interface Agent {
   site_domain: string | null
   hostname: string
   ip_address: string
+  /** Egress address as seen from the public internet; null when unknown. */
+  public_ip: string | null
+  /** LAN address, with loopback and container bridges filtered out. */
+  private_ip: string | null
   version: string | null
   os_info: string | null
   cpu_cores: number | null
@@ -592,6 +596,42 @@ export interface AgentListQuery extends PaginationQuery {
   site_id?: string
   status?: string
   search?: string
+}
+
+/**
+ * `models::host_samples::Model` — one point of the agent's 5-second host probe.
+ *
+ * Network and disk totals are cumulative counters; consecutive rows are
+ * differenced client-side to draw throughput.
+ */
+export interface HostSample {
+  id: number
+  agent_id: string
+  sampled_at: string
+  cpu_usage_percent: number | null
+  load1: number | null
+  load5: number | null
+  load15: number | null
+  memory_total_bytes: number | null
+  memory_used_bytes: number | null
+  memory_available_bytes: number | null
+  swap_total_bytes: number | null
+  swap_used_bytes: number | null
+  disk_total_bytes: number | null
+  disk_used_bytes: number | null
+  net_rx_bytes: number | null
+  net_tx_bytes: number | null
+  disk_read_bytes: number | null
+  disk_write_bytes: number | null
+  process_count: number | null
+  tcp_connections: number | null
+  uptime_secs: number | null
+  created_at: string
+}
+
+export interface AgentSamplesQuery extends PaginationQuery {
+  from?: string
+  to?: string
 }
 
 export type AgentCommand =
@@ -624,17 +664,14 @@ export interface AgentCommandResult {
 /** `api::agents::EnrollRequest` */
 export interface AgentEnrollRequest {
   name?: string
-  /** Validity of the minted agent key; 1–720 hours, 24 by default. */
-  ttl_hours?: number
 }
 
 /** `api::agents::EnrollResponse` — the token is shown once and never stored. */
 export interface AgentEnrollResponse {
   key_id: string
   token: string
-  expires_at: string
   server_url: string
-  docker_command: string
+  install_command: string
   binary_command: string
 }
 

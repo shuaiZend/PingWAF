@@ -36,6 +36,12 @@ pub struct AgentConfig {
     /// Whether to fail-open when disconnected (true = allow traffic, false = use cached rules)
     #[serde(default = "default_fail_open")]
     pub fail_open: bool,
+    /// Host probe sampling interval in seconds
+    #[serde(default = "default_probe_interval")]
+    pub probe_interval_secs: u64,
+    /// Filesystem to report disk usage for ("/" by default)
+    #[serde(default = "default_probe_disk_path")]
+    pub probe_disk_path: String,
 }
 
 fn default_heartbeat_interval() -> u64 {
@@ -62,6 +68,12 @@ fn default_reconnect_max_delay() -> u64 {
 fn default_fail_open() -> bool {
     true
 }
+fn default_probe_interval() -> u64 {
+    crate::probe::DEFAULT_INTERVAL_SECS
+}
+fn default_probe_disk_path() -> String {
+    "/".to_string()
+}
 
 impl Default for AgentConfig {
     fn default() -> Self {
@@ -77,6 +89,8 @@ impl Default for AgentConfig {
             reconnect_initial_delay_ms: default_reconnect_initial_delay(),
             reconnect_max_delay_ms: default_reconnect_max_delay(),
             fail_open: default_fail_open(),
+            probe_interval_secs: default_probe_interval(),
+            probe_disk_path: default_probe_disk_path(),
         }
     }
 }
