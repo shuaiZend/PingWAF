@@ -8,7 +8,19 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
-## [PingWAF 0.14.3] — Unreleased (initial version)
+## [PingWAF 0.14.4] — 2026-09-27
+
+### 🐛 Bug Fixes
+
+- *(server)* Mount the auth routes under `/api/v1/auth` (`login`, `register`,
+  `refresh`, `status`, `me`, `password`). They were registered at the service root,
+  so the dashboard login failed with `404 no route matches /auth/login`.
+- *(server)* Accept `page` / `page_size` as strings in query structs that flatten
+  `Pagination`. Query-string extraction buffers flattened values as strings, which
+  made every paginated list endpoint reject `?page_size=200` with
+  `invalid type: string "200", expected u64` and broke the dashboard list views.
+
+## [PingWAF 0.14.3] — 2026-09-26 (initial version)
 
 The first PingWAF release line. Version numbering continues from `pingap`
 (0.14.x) because PingWAF ships the same proxy data plane inside its binary.
