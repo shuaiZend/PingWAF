@@ -11,10 +11,11 @@
 services:
   # ─── PingWAF All-in-One (control plane + data plane) ───────────────────────
   pingwaf:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: pingwaf:latest
+    image: ghcr.io/shuaizend/pingwaf:latest
+    # To build from source instead of pulling the pre-built image, uncomment:
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile
     container_name: pingwaf
     ports:
       - "80:80"       # HTTP traffic (proxied)
@@ -80,10 +81,10 @@ services:
   # PINGWAF_MODE to "server" (control plane only).
   #
   # pingwaf-agent:
-  #   build:
-  #     context: .
-  #     dockerfile: Dockerfile
-  #   image: pingwaf:latest
+  #   image: ghcr.io/shuaizend/pingwaf:latest
+  #   # build:
+  #   #   context: .
+  #   #   dockerfile: Dockerfile
   #   container_name: pingwaf-agent
   #   entrypoint: ["pingwaf", "agent"]
   #   command:
