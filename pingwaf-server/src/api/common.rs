@@ -18,10 +18,56 @@ pub const MAX_PAGE_SIZE: u64 = 200;
 /// `?page=&page_size=` query parameters.
 #[derive(Debug, Clone, Copy, Deserialize)]
 pub struct Pagination {
-    #[serde(default = "default_page")]
+    #[serde(default = "default_page", deserialize_with = "deserialize_u64")]
     pub page: u64,
-    #[serde(default = "default_page_size")]
+    #[serde(default = "default_page_size", deserialize_with = "deserialize_u64")]
     pub page_size: u64,
+}
+
+/// Accepts an integer whether it arrives as a number or as a string.
+///
+/// The list handlers flatten [`Pagination`] into their own query struct, and
+/// the query-string extractor hands the buffered flattened values over as
+/// strings; the default `u64` visitor would reject `page_size=200` with
+/// "invalid type: string \"200\", expected u64".
+fn deserialize_u64<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use std::fmt;
+
+    use serde::de::{Error, Visitor};
+
+    struct U64Visitor;
+
+    impl<'de> Visitor<'de> for U64Visitor {
+        type Value = u64;
+
+        fn expecting(
+            &self,
+            formatter: &mut fmt::Formatter<'_>,
+        ) -> fmt::Result {
+            formatter.write_str("an unsigned integer or a decimal string")
+        }
+
+        fn visit_u64<E: Error>(self, value: u64) -> Result<u64, E> {
+            Ok(value)
+        }
+
+        fn visit_i64<E: Error>(self, value: i64) -> Result<u64, E> {
+            u64::try_from(value)
+                .map_err(|_| E::custom("expected a non-negative integer"))
+        }
+
+        fn visit_str<E: Error>(self, value: &str) -> Result<u64, E> {
+            value
+                .trim()
+                .parse()
+                .map_err(|_| E::custom(format!("invalid integer '{value}'")))
+        }
+    }
+
+    deserializer.deserialize_any(U64Visitor)
 }
 
 fn default_page() -> u64 {
@@ -274,6 +320,38 @@ mod tests {
         };
         assert_eq!(third.index(), 2);
         assert_eq!(third.offset(), 40);
+    }
+
+    #[test]
+    fn pagination_accepts_flattened_strings() {
+        #[derive(Debug, Deserialize)]
+        struct ListQuery {
+            #[serde(flatten)]
+            pagination: Pagination,
+            search: Option<String>,
+        }
+
+        // Flattened values reach the struct buffered as strings, exactly like
+        // `?page_size=200` in a real query string.
+        let query: ListQuery = serde_json::from_str(
+            r#"{"page_size":"200","page":"2","search":"web"}"#,
+        )
+        .expect("string values are accepted");
+        assert_eq!(query.pagination.page, 2);
+        assert_eq!(query.pagination.page_size, 200);
+        assert_eq!(query.search.as_deref(), Some("web"));
+
+        // Numbers and absent keys still work.
+        let query: ListQuery =
+            serde_json::from_str(r#"{"page_size":20}"#).unwrap();
+        assert_eq!(query.pagination.page, 1);
+        assert_eq!(query.pagination.page_size, 20);
+
+        let query: ListQuery = serde_json::from_str("{}").unwrap();
+        assert_eq!(query.pagination.page_size, DEFAULT_PAGE_SIZE);
+
+        // Garbage is still a hard error.
+        assert!(serde_json::from_str::<ListQuery>(r#"{"page":"abc"}"#).is_err());
     }
 
     #[test]
