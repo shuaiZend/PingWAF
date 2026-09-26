@@ -1,7 +1,9 @@
 # PingWAF Runtime-only Dockerfile
 # 用于 release workflow：从预编译二进制构建最小运行时镜像
 # 完整源码构建请使用 Dockerfile
-FROM debian:bookworm-slim
+# Must use trixie (glibc 2.40) because binaries job compiles on
+# ubuntu-latest (glibc 2.39); bookworm (glibc 2.36) is too old.
+FROM debian:trixie-slim
 
 # SYNC: keep in lockstep with Dockerfile / ci.yml / release.yml
 RUN apt-get update && apt-get install -y --no-install-recommends \

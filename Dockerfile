@@ -139,7 +139,8 @@ RUN find . -path ./target -prune -o -name '*.rs' -print0 | xargs -0 --no-run-if-
     && cargo build --release --bin pingwaf --features full
 
 # ─── Stage 3: Runtime（行为契约保持不变）─────────────────────────────────────
-FROM debian:bookworm-slim AS runtime
+# Must use trixie (glibc 2.40) to match the builder's glibc.
+FROM debian:trixie-slim AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
