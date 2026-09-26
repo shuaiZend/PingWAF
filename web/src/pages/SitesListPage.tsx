@@ -13,8 +13,7 @@ import { PageHeader } from '@/components/PageHeader'
 import { Card, CardBody } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
-import { Select } from '@/components/ui/Select'
-import { Badge } from '@/components/ui/Badge'
+import { Switch } from '@/components/ui/Switch'
 import { Table, type Column } from '@/components/ui/Table'
 import { Dialog } from '@/components/ui/Dialog'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
@@ -26,28 +25,29 @@ import { sitesApi, siteKeys } from '@/api/sites'
 import { analyticsApi, analyticsKeys } from '@/api/analytics'
 import { useCanWrite, useDebouncedValue } from '@/hooks'
 import { formatCompactNumber, formatDateTime, formatNumber } from '@/lib/format'
-import type { CreateSiteRequest, Site, SiteStatus } from '@/api/types'
+import { cn } from '@/lib/utils'
+import type { CreateSiteRequest, Site, SiteStatus, UpdateSiteRequest } from '@/api/types'
 
-const STATUS_TONE: Record<SiteStatus, 'success' | 'warning' | 'neutral'> = {
-  active: 'success',
-  paused: 'warning',
-  pending: 'neutral',
+const STATUS_DOT: Record<SiteStatus, string> = {
+  active: 'bg-success',
+  paused: 'bg-warning',
+  pending: 'bg-fg-subtle',
 }
-
-const PLANS = ['free', 'pro', 'business', 'enterprise']
 
 interface SiteFormState {
   name: string
   domain: string
-  plan: string
-  status: string
+  upstreamAddress: string
+  upstreamName: string
+  upstreamTls: boolean
 }
 
 const emptyForm: SiteFormState = {
   name: '',
   domain: '',
-  plan: 'free',
-  status: 'active',
+  upstreamAddress: '',
+  upstreamName: '',
+  upstreamTls: false,
 }
 
 export function SitesListPage() {
@@ -105,11 +105,24 @@ export function SitesListPage() {
   })
 
   const updateSite = useMutation({
-    mutationFn: ({ id, data }: { id: string; data: CreateSiteRequest }) =>
+    mutationFn: ({ id, data }: { id: string; data: UpdateSiteRequest }) =>
       sitesApi.update(id, data),
     onSuccess: (site) => {
       toast.success(t('pages.sites.updated'), site.domain)
       closeDialog()
+      invalidate()
+    },
+  })
+
+  /** The status column is a one-click activate / pause toggle. */
+  const toggleStatus = useMutation({
+    mutationFn: ({ site, status }: { site: Site; status: SiteStatus }) =>
+      sitesApi.update(site.id, { status }),
+    onSuccess: (site) => {
+      toast.success(
+        site.status === 'active' ? t('pages.sites.activated') : t('pages.sites.deactivated'),
+        site.domain,
+      )
       invalidate()
     },
   })
@@ -134,10 +147,9 @@ export function SitesListPage() {
   const openEdit = (site: Site) => {
     setEditing(site)
     setForm({
+      ...emptyForm,
       name: site.name,
       domain: site.domain,
-      plan: site.plan,
-      status: site.status,
     })
     setFormError(null)
     setDialogOpen(true)
@@ -164,9 +176,26 @@ export function SitesListPage() {
       return
     }
 
-    const payload: CreateSiteRequest = { name, domain, plan: form.plan, status: form.status }
-    if (editing) updateSite.mutate({ id: editing.id, data: payload })
-    else createSite.mutate(payload)
+    if (editing) {
+      updateSite.mutate({ id: editing.id, data: { name, domain } })
+      return
+    }
+
+    const upstreamAddress = form.upstreamAddress.trim()
+    if (!upstreamAddress) {
+      setFormError(t('pages.sites.upstreamRequired'))
+      return
+    }
+
+    const payload: CreateSiteRequest = {
+      name,
+      domain,
+      upstream_address: upstreamAddress,
+    }
+    const upstreamName = form.upstreamName.trim()
+    if (upstreamName) payload.upstream_name = upstreamName
+    if (form.upstreamTls) payload.upstream_tls = true
+    createSite.mutate(payload)
   }
 
   const pending = createSite.isPending || updateSite.isPending
@@ -192,12 +221,31 @@ export function SitesListPage() {
     {
       key: 'status',
       header: t('common.status'),
-      accessor: (r) => r.status,
-      cell: (r) => (
-        <Badge tone={STATUS_TONE[r.status as SiteStatus] ?? 'neutral'} dot>
-          {t(`status.${r.status}`, r.status)}
-        </Badge>
-      ),
+      accessor: (r) => (r.status === 'active' ? 1 : 0),
+      width: '1%',
+      cell: (r) => {
+        const active = r.status === 'active'
+        return (
+          <Button
+            size="sm"
+            variant={active ? 'secondary' : 'primary'}
+            loading={toggleStatus.isPending && toggleStatus.variables?.site.id === r.id}
+            disabled={!canWrite || toggleStatus.isPending}
+            onClick={(e) => {
+              e.stopPropagation()
+              toggleStatus.mutate({ site: r, status: active ? 'paused' : 'active' })
+            }}
+          >
+            <span
+              className={cn(
+                'h-1.5 w-1.5 rounded-full',
+                STATUS_DOT[r.status as SiteStatus] ?? 'bg-fg-subtle',
+              )}
+            />
+            {active ? t('pages.sites.deactivate') : t('pages.sites.activate')}
+          </Button>
+        )
+      },
     },
     {
       key: 'plan',
@@ -398,23 +446,35 @@ export function SitesListPage() {
             onChange={(e) => setForm((f) => ({ ...f, domain: e.target.value }))}
             required
           />
-          <div className="grid grid-cols-2 gap-3">
-            <Select
-              label={t('pages.sites.plan')}
-              value={form.plan}
-              options={PLANS.map((p) => ({ value: p, label: t(`plans.${p}`, p) }))}
-              onChange={(e) => setForm((f) => ({ ...f, plan: e.target.value }))}
-            />
-            <Select
-              label={t('common.status')}
-              value={form.status}
-              options={['active', 'paused', 'pending'].map((s) => ({
-                value: s,
-                label: t(`status.${s}`, s),
-              }))}
-              onChange={(e) => setForm((f) => ({ ...f, status: e.target.value }))}
-            />
-          </div>
+
+          {!editing && (
+            <>
+              <Input
+                label={t('pages.sites.upstream')}
+                value={form.upstreamAddress}
+                placeholder="origin.example.com:443"
+                hint={t('pages.sites.upstreamHint')}
+                onChange={(e) => setForm((f) => ({ ...f, upstreamAddress: e.target.value }))}
+                required
+              />
+              <div className="grid grid-cols-2 gap-3">
+                <Input
+                  label={t('pages.sites.upstreamName')}
+                  value={form.upstreamName}
+                  placeholder="origin-1"
+                  onChange={(e) => setForm((f) => ({ ...f, upstreamName: e.target.value }))}
+                />
+                <div className="flex items-end pb-1">
+                  <Switch
+                    checked={form.upstreamTls}
+                    onCheckedChange={(upstreamTls) => setForm((f) => ({ ...f, upstreamTls }))}
+                    label={t('pages.sites.upstreamTls')}
+                    description={t('pages.sites.upstreamTlsHint')}
+                  />
+                </div>
+              </div>
+            </>
+          )}
         </div>
       </Dialog>
 

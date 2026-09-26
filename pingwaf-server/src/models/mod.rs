@@ -35,6 +35,7 @@ pub use security_events::{
 };
 pub use sites::{
     acme_challenge, site_ssl, site_status, site_upstreams, sites as site,
+    tls_version,
 };
 pub use users::{api_keys as api_key, permission, role, users as user};
 

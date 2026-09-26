@@ -154,26 +154,8 @@ async fn create(
         None => None,
     };
 
-    let plaintext = generate_key();
-    let key_hash = hash_password_with_cost(&plaintext, KEY_HASH_COST)
-        .map_err(ApiError::internal)?;
-    let id = Uuid::new_v4();
-
-    let model = api_key::ActiveModel {
-        id: Set(id),
-        user_id: Set(current.id),
-        name: Set(name),
-        key_hash: Set(key_hash),
-        key_prefix: Set(plaintext[..KEY_PREFIX_LENGTH].to_string()),
-        permissions: Set(permissions),
-        expires_at: Set(expires_at),
-        last_used_at: Set(None),
-        created_at: Set(Utc::now()),
-    }
-    .insert(&state.db)
-    .await?;
-
-    tracing::info!(key_id = %id, owner = %current.id, "API key created");
+    let (model, plaintext) =
+        mint_key(&state, current.id, name, permissions, expires_at).await?;
 
     let mut body = ApiKeyResponse::from(model);
     body.key = Some(plaintext);
@@ -205,6 +187,37 @@ async fn remove(
 /// Generates a `pwk_…` key with 128 bits of entropy from two UUIDv4 payloads.
 pub fn generate_key() -> String {
     format!("pwk_{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
+}
+
+/// Stores a new API key and hands back the plaintext, which the caller shows
+/// once and nothing persists.
+pub(crate) async fn mint_key(
+    state: &AppState,
+    user_id: Uuid,
+    name: String,
+    permissions: Vec<String>,
+    expires_at: Option<DateTime<Utc>>,
+) -> Result<(api_key::Model, String), ApiError> {
+    let plaintext = generate_key();
+    let key_hash = hash_password_with_cost(&plaintext, KEY_HASH_COST)
+        .map_err(ApiError::internal)?;
+
+    let model = api_key::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        user_id: Set(user_id),
+        name: Set(name),
+        key_hash: Set(key_hash),
+        key_prefix: Set(plaintext[..KEY_PREFIX_LENGTH].to_string()),
+        permissions: Set(permissions),
+        expires_at: Set(expires_at),
+        last_used_at: Set(None),
+        created_at: Set(Utc::now()),
+    }
+    .insert(&state.db)
+    .await?;
+
+    tracing::info!(key_id = %model.id, owner = %user_id, "API key created");
+    Ok((model, plaintext))
 }
 
 /// Validates, de-duplicates and sorts the requested permission set.

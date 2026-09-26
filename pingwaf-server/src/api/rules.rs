@@ -145,6 +145,36 @@ pub fn routes() -> Router<AppState> {
             "/sites/{site_id}/rules/{rule_id}",
             get(show_rule).put(update_rule).delete(delete_rule),
         )
+        .route(
+            "/sites/{site_id}/waf/defaults",
+            axum::routing::post(seed_defaults),
+        )
+}
+
+/// `POST /api/v1/sites/{site_id}/waf/defaults`
+///
+/// Re-adds any built-in rule that is missing from the site. Rules the operator
+/// edited or deleted are left as they are — only absent ones come back.
+async fn seed_defaults(
+    State(state): State<AppState>,
+    current: AuthUser,
+    Path(site_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let id = parse_uuid(&site_id, "site id")?;
+    load_site_write(&state.db, id, &current).await?;
+
+    let inserted = crate::defaults::seed_waf_defaults(&state.db, id).await?;
+    tracing::info!(site_id = %id, inserted, "built-in WAF rules restored");
+
+    if inserted > 0 {
+        touch_site(&state, id).await?;
+        notify_config_changed(&state, id).await;
+    }
+
+    Ok(Json(serde_json::json!({
+        "inserted": inserted,
+        "total": crate::defaults::waf_rules().len(),
+    })))
 }
 
 /// Validates and normalises a tag list.

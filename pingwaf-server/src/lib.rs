@@ -11,6 +11,7 @@
 pub mod api;
 pub mod auth;
 pub mod config;
+pub mod defaults;
 pub mod es;
 pub mod frontend;
 pub mod grpc;

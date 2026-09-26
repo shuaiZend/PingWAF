@@ -10,6 +10,9 @@ import {
   Plugs,
   Cpu,
   HardDrives,
+  Copy,
+  Plus,
+  Warning,
 } from '@phosphor-icons/react'
 import { PageHeader } from '@/components/PageHeader'
 import { Card, CardBody } from '@/components/ui/Card'
@@ -29,7 +32,7 @@ import { analyticsApi } from '@/api/analytics'
 import { useCanWrite, useDebouncedValue, useNow, useSitesList } from '@/hooks'
 import { cn } from '@/lib/utils'
 import { formatDateTime, formatNumber, formatRelative, formatSize } from '@/lib/format'
-import type { Agent, AgentCommand, AgentStatus } from '@/api/types'
+import type { Agent, AgentCommand, AgentEnrollRequest, AgentEnrollResponse, AgentStatus } from '@/api/types'
 
 const STATUS_TONE: Record<AgentStatus, 'success' | 'warning' | 'neutral'> = {
   online: 'success',
@@ -48,6 +51,16 @@ const REFRESH_MS = 30_000
 
 const COMMANDS: AgentCommand[] = ['reload', 'restart', 'purge_cache']
 
+/** TTL choices for a one-off enrolment token, in hours. */
+const ENROLL_TTL_OPTIONS = [
+  { value: 1, labelKey: 'pages.agents.ttl_1h' },
+  { value: 24, labelKey: 'pages.agents.ttl_24h' },
+  { value: 168, labelKey: 'pages.agents.ttl_7d' },
+  { value: 720, labelKey: 'pages.agents.ttl_30d' },
+] as const
+
+const DEFAULT_ENROLL_TTL = 24
+
 export function AgentsPage() {
   const { t } = useTranslation()
   const toast = useToast()
@@ -62,6 +75,10 @@ export function AgentsPage() {
   const [detail, setDetail] = useState<Agent | null>(null)
   const [pendingDelete, setPendingDelete] = useState<Agent | null>(null)
   const [pendingCommand, setPendingCommand] = useState<{ agent: Agent; command: AgentCommand } | null>(null)
+  const [enrollOpen, setEnrollOpen] = useState(false)
+  const [enrollName, setEnrollName] = useState('')
+  const [enrollTtl, setEnrollTtl] = useState(DEFAULT_ENROLL_TTL)
+  const [enrollResult, setEnrollResult] = useState<AgentEnrollResponse | null>(null)
 
   const { data: sites } = useSitesList()
 
@@ -94,6 +111,43 @@ export function AgentsPage() {
 
   const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: agentKeys.all })
+  }
+
+  const enroll = useMutation({
+    mutationFn: (data: AgentEnrollRequest) => agentsApi.enroll(data),
+    onSuccess: (data) => setEnrollResult(data),
+  })
+
+  const submitEnroll = () => {
+    enroll.mutate({ name: enrollName.trim() || undefined, ttl_hours: enrollTtl })
+  }
+
+  const openEnroll = () => {
+    enroll.reset()
+    setEnrollName('')
+    setEnrollTtl(DEFAULT_ENROLL_TTL)
+    setEnrollResult(null)
+    setEnrollOpen(true)
+  }
+
+  const closeEnroll = () => {
+    setEnrollOpen(false)
+    enroll.reset()
+    setEnrollResult(null)
+  }
+
+  const finishEnroll = () => {
+    closeEnroll()
+    invalidate()
+  }
+
+  const copyText = async (value: string) => {
+    try {
+      await navigator.clipboard.writeText(value)
+      toast.success(t('pages.agents.copied'))
+    } catch {
+      toast.error(t('pages.agents.copyFailed'))
+    }
   }
 
   const remove = useMutation({
@@ -286,14 +340,25 @@ export function AgentsPage() {
         title={t('pages.agents.title')}
         description={t('pages.agents.description')}
         actions={
-          <Button
-            variant="secondary"
-            loading={agentsQuery.isFetching}
-            onClick={() => agentsQuery.refetch()}
-            icon={<ArrowClockwise weight="duotone" className="h-4 w-4" />}
-          >
-            {t('common.refresh')}
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="secondary"
+              loading={agentsQuery.isFetching}
+              onClick={() => agentsQuery.refetch()}
+              icon={<ArrowClockwise weight="duotone" className="h-4 w-4" />}
+            >
+              {t('common.refresh')}
+            </Button>
+            {canWrite && (
+              <Button
+                variant="primary"
+                icon={<Plus weight="bold" className="h-4 w-4" />}
+                onClick={openEnroll}
+              >
+                {t('pages.agents.addNode')}
+              </Button>
+            )}
+          </div>
         }
       />
 
@@ -575,6 +640,138 @@ export function AgentsPage() {
           </div>
         )}
       </ConfirmDialog>
+
+      {/* Enrol a new node */}
+      <Dialog
+        open={enrollOpen}
+        onClose={closeEnroll}
+        size="md"
+        title={t('pages.agents.addNode')}
+        description={enrollResult ? undefined : t('pages.agents.addNodeDescription')}
+        footer={
+          enrollResult ? (
+            <Button variant="primary" onClick={finishEnroll}>
+              {t('pages.agents.done')}
+            </Button>
+          ) : (
+            <>
+              <Button variant="ghost" onClick={closeEnroll}>
+                {t('common.cancel')}
+              </Button>
+              <Button variant="primary" loading={enroll.isPending} onClick={submitEnroll}>
+                {t('pages.agents.generateCommand')}
+              </Button>
+            </>
+          )
+        }
+      >
+        <div className="flex flex-col gap-4">
+          {enroll.isError && (
+            <ErrorState
+              variant="inline"
+              error={enroll.error}
+              onRetry={submitEnroll}
+              retrying={enroll.isPending}
+            />
+          )}
+
+          {enrollResult ? (
+            <>
+              <p className="text-[13px] leading-relaxed text-fg-subtle">
+                {t('pages.agents.enrollIntro')}
+              </p>
+
+              <CommandBlock
+                caption={t('pages.agents.dockerDeploy')}
+                command={enrollResult.docker_command}
+                onCopy={copyText}
+              />
+              <CommandBlock
+                caption={t('pages.agents.binaryDeploy')}
+                command={enrollResult.binary_command}
+                onCopy={copyText}
+              />
+
+              <p className="flex items-start gap-2 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs leading-relaxed text-fg">
+                <Warning weight="duotone" className="mt-0.5 h-4 w-4 shrink-0 text-fg-warning" />
+                <span>
+                  {t('pages.agents.enrollExpires', { time: formatDateTime(enrollResult.expires_at) })}
+                </span>
+              </p>
+
+              <details className="rounded-md border border-line bg-recessed px-3 py-2">
+                <summary className="cursor-pointer select-none text-xs text-fg-subtle">
+                  {t('pages.agents.showToken')}
+                </summary>
+                <div className="mt-2 flex items-start gap-3">
+                  <p className="pw-mono min-w-0 flex-1 break-all text-xs text-fg-subtle">
+                    {enrollResult.token}
+                  </p>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="shrink-0"
+                    aria-label={`${t('pages.agents.copy')}: ${t('pages.agents.showToken')}`}
+                    icon={<Copy weight="duotone" className="h-3.5 w-3.5" />}
+                    onClick={() => copyText(enrollResult.token)}
+                  >
+                    {t('pages.agents.copy')}
+                  </Button>
+                </div>
+              </details>
+            </>
+          ) : (
+            <>
+              <Input
+                label={t('common.name')}
+                value={enrollName}
+                autoFocus
+                disabled={enroll.isPending}
+                placeholder={t('pages.agents.nodeNamePlaceholder')}
+                hint={t('pages.agents.nodeNameHint')}
+                onChange={(e) => setEnrollName(e.target.value)}
+              />
+              <Select
+                label={t('pages.agents.keyTtl')}
+                value={String(enrollTtl)}
+                disabled={enroll.isPending}
+                options={ENROLL_TTL_OPTIONS.map((o) => ({ value: String(o.value), label: t(o.labelKey) }))}
+                onChange={(e) => setEnrollTtl(Number(e.target.value))}
+              />
+            </>
+          )}
+        </div>
+      </Dialog>
+    </div>
+  )
+}
+
+/** One of the ready-to-paste enrolment commands, with its own copy button. */
+function CommandBlock({
+  caption,
+  command,
+  onCopy,
+}: {
+  caption: string
+  command: string
+  onCopy: (value: string) => void
+}) {
+  const { t } = useTranslation()
+  return (
+    <div>
+      <div className="mb-1.5 flex items-center justify-between gap-2">
+        <span className="text-xs text-fg-subtle">{caption}</span>
+        <Button
+          size="sm"
+          variant="ghost"
+          aria-label={`${t('pages.agents.copy')}: ${caption}`}
+          icon={<Copy weight="duotone" className="h-3.5 w-3.5" />}
+          onClick={() => onCopy(command)}
+        >
+          {t('pages.agents.copy')}
+        </Button>
+      </div>
+      <pre className="pw-mono break-all whitespace-pre-wrap rounded-md border border-line bg-recessed px-3 py-2 text-xs text-fg">{command}</pre>
     </div>
   )
 }

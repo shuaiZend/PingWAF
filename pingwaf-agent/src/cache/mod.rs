@@ -346,6 +346,15 @@ pub struct SslConfig {
     pub hsts_enabled: bool,
     pub hsts_max_age: u32,
     pub always_use_https: bool,
+    /// Whether the site serves HTTPS at all.
+    pub enabled: bool,
+    pub max_tls_version: String,
+    /// The edge issues certificates on the fly instead of using `cert_pem`.
+    pub self_signed: bool,
+    pub mtls_enabled: bool,
+    pub mtls_client_ca: String,
+    /// Id of the `site_certificates` row this posture selects, when any.
+    pub certificate_id: String,
 }
 
 // ─── Upstream ───────────────────────────────────────────────
@@ -1147,6 +1156,12 @@ impl RuleCache {
             hsts_enabled: s.hsts_enabled,
             hsts_max_age: s.hsts_max_age,
             always_use_https: s.always_use_https,
+            enabled: s.enabled,
+            max_tls_version: s.max_tls_version.clone(),
+            self_signed: s.self_signed,
+            mtls_enabled: s.mtls_enabled,
+            mtls_client_ca: s.mtls_client_ca.clone(),
+            certificate_id: s.certificate_id.clone(),
         }
     }
 

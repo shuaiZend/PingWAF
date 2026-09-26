@@ -1,47 +1,82 @@
 import { apiClient } from './client'
 import type {
+  CertificateListQuery,
+  CertificateSummary,
+  CertificateWithSite,
   CreateSslRequest,
+  Page,
   SslCertificate,
   SslSettings,
   UpdateSslRequest,
   UpdateSslSettingsRequest,
 } from './types'
 
+/** `POST /sites/{site_id}/certificates/{id}/renew` ack. */
+export interface RenewalAck {
+  message: string
+  certificate_id: string
+  status: string
+}
+
 /**
- * SSL / TLS — `/api/v1/ssl`.
+ * SSL / TLS — two surfaces over the same certificate rows.
  *
- * Certificates are site-scoped and addressed with `?site_id=`. The private key
- * is write-only: it can be uploaded but never read back. Site-wide TLS posture
- * (minimum version, HSTS, always-HTTPS) lives on a sibling `/ssl/settings`
- * record so it survives certificate churn.
+ * - **Per site**: the certificates that site may serve and its TLS posture —
+ *   HTTPS on/off, which certificate (or a self-signed one), mTLS, the TLS
+ *   version window and HSTS.
+ * - **Global** (`/certificates`): the same rows across every site the caller
+ *   sees, which is what the SSL/TLS overview page lists, filters and renews.
+ *
+ * The private key is write-only: it can be uploaded but never read back.
  */
 export const sslApi = {
+  /* ── Per site ────────────────────────────────────────────────────── */
   list: (siteId: string) =>
-    apiClient.get<SslCertificate[]>('/ssl', { query: { site_id: siteId } }),
-
-  get: (siteId: string, id: string) =>
-    apiClient.get<SslCertificate>(`/ssl/${id}`, { query: { site_id: siteId } }),
-
-  create: (data: CreateSslRequest) => apiClient.post<SslCertificate>('/ssl', data),
-
-  update: (siteId: string, id: string, data: UpdateSslRequest) =>
-    apiClient.put<SslCertificate>(`/ssl/${id}`, data, { query: { site_id: siteId } }),
-
-  delete: (siteId: string, id: string) =>
-    apiClient.delete<void>(`/ssl/${id}`, { query: { site_id: siteId } }),
-
-  /** Triggers an out-of-band ACME renewal for one certificate. */
-  renew: (siteId: string, id: string) =>
-    apiClient.post<SslCertificate>(`/ssl/${id}/renew`, undefined, {
-      query: { site_id: siteId },
+    apiClient.get<Page<SslCertificate>>(`/sites/${siteId}/certificates`, {
+      query: { page_size: 200 },
     }),
 
-  /* ── Site-wide TLS posture ───────────────────────────────────────── */
+  get: (siteId: string, id: string) =>
+    apiClient.get<SslCertificate>(`/sites/${siteId}/certificates/${id}`),
+
+  create: (siteId: string, data: CreateSslRequest) =>
+    apiClient.post<SslCertificate>(`/sites/${siteId}/certificates`, data),
+
+  update: (siteId: string, id: string, data: UpdateSslRequest) =>
+    apiClient.put<SslCertificate>(`/sites/${siteId}/certificates/${id}`, data),
+
+  delete: (siteId: string, id: string) =>
+    apiClient.delete<void>(`/sites/${siteId}/certificates/${id}`),
+
+  /** Starts an out-of-band ACME renewal; ACME-managed certificates only. */
+  renew: (siteId: string, id: string) =>
+    apiClient.post<RenewalAck>(`/sites/${siteId}/certificates/${id}/renew`),
+
   getSettings: (siteId: string) =>
-    apiClient.get<SslSettings>('/ssl/settings', { query: { site_id: siteId } }),
+    apiClient.get<SslSettings>(`/sites/${siteId}/ssl-settings`),
 
   updateSettings: (siteId: string, data: UpdateSslSettingsRequest) =>
-    apiClient.put<SslSettings>('/ssl/settings', data, { query: { site_id: siteId } }),
+    apiClient.put<SslSettings>(`/sites/${siteId}/ssl-settings`, data),
+
+  /* ── Global ──────────────────────────────────────────────────────── */
+  listAll: (query: CertificateListQuery = {}) =>
+    apiClient.get<Page<CertificateWithSite>>('/certificates', {
+      query: { page_size: 200, ...query },
+    }),
+
+  summary: () => apiClient.get<CertificateSummary>('/certificates/summary'),
+
+  /** Uploads a certificate, or applies for one, on a site's behalf. */
+  createGlobal: (data: CreateSslRequest & { site_id: string }) =>
+    apiClient.post<SslCertificate>('/certificates', data),
+
+  updateGlobal: (id: string, data: UpdateSslRequest) =>
+    apiClient.put<SslCertificate>(`/certificates/${id}`, data),
+
+  deleteGlobal: (id: string) => apiClient.delete<void>(`/certificates/${id}`),
+
+  renewGlobal: (id: string) =>
+    apiClient.post<RenewalAck>(`/certificates/${id}/renew`),
 }
 
 /**
@@ -66,10 +101,13 @@ export function expiryTone(
 }
 
 export const sslKeys = {
-  all: (siteId: string) => ['ssl', siteId] as const,
-  list: (siteId: string) => ['ssl', siteId, 'list'] as const,
-  detail: (siteId: string, id: string) => ['ssl', siteId, 'detail', id] as const,
-  settings: (siteId: string) => ['ssl', siteId, 'settings'] as const,
+  all: ['ssl'] as const,
+  site: (siteId: string) => [...sslKeys.all, 'site', siteId] as const,
+  list: (siteId: string) => [...sslKeys.site(siteId), 'list'] as const,
+  detail: (siteId: string, id: string) => [...sslKeys.site(siteId), 'detail', id] as const,
+  settings: (siteId: string) => [...sslKeys.site(siteId), 'settings'] as const,
+  global: (query?: CertificateListQuery) => [...sslKeys.all, 'global', query ?? {}] as const,
+  summary: () => [...sslKeys.all, 'summary'] as const,
 }
 
 export default sslApi

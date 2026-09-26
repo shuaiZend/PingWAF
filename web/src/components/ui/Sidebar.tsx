@@ -86,8 +86,10 @@ export function Sidebar({ collapsed, onNavigate }: SidebarProps) {
       ],
     },
     { kind: 'leaf', to: site('caching'), labelKey: 'nav.caching', icon: Lightning },
-    { kind: 'leaf', to: site('ssl'), labelKey: 'nav.ssl', icon: Lock },
-    { kind: 'leaf', to: site('traffic'), labelKey: 'nav.traffic', icon: ChartLine },
+    // SSL/TLS and traffic in the sidebar are the *global* surfaces; each site's
+    // own certificates and traffic live in that site's tab bar.
+    { kind: 'leaf', to: '/ssl', labelKey: 'nav.ssl', icon: Lock },
+    { kind: 'leaf', to: '/traffic', labelKey: 'nav.traffic', icon: ChartLine },
     { kind: 'leaf', to: '/logs', labelKey: 'nav.logs', icon: List },
     { kind: 'leaf', to: '/agents', labelKey: 'nav.agents', icon: Desktop },
     { kind: 'leaf', to: '/settings', labelKey: 'nav.settings', icon: Gear },

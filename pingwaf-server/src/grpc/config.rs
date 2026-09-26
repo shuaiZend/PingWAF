@@ -281,14 +281,22 @@ fn rate_limit_to_proto(row: &rate_limit_rules::Model) -> RateLimitRule {
     }
 }
 
-fn cache_rule_to_proto(row: &cache_rules::Model) -> CacheRule {
+/// Turns a stored cache rule into its protocol representation.
+///
+/// `site_quota_mb` is the disk budget the agent enforces for the site; it is
+/// carried on every rule because the budget is site-wide, and the agent applies
+/// what it reads per hostname.
+fn cache_rule_to_proto(
+    row: &cache_rules::Model,
+    site_quota_mb: i32,
+) -> CacheRule {
     CacheRule {
         id: row.id.to_string(),
         name: row.name.clone(),
         match_expression: row.match_expression.clone(),
         edge_ttl_seconds: row.edge_ttl_seconds.max(0) as u32,
         browser_ttl_seconds: row.browser_ttl_seconds.max(0) as u32,
-        disk_quota_mb: row.disk_quota_mb.max(0) as u32,
+        disk_quota_mb: site_quota_mb.max(0) as u32,
         cache_eligible: row.cache_eligible,
         cache_key_headers: Vec::new(),
         respect_origin_headers: row.respect_origin,
@@ -309,10 +317,19 @@ fn ssl_to_proto(row: &site_ssl::Model) -> SslConfig {
         ),
         acme_dns_provider: row.acme_dns_provider.clone().unwrap_or_default(),
         acme_dns_config: json_to_string_map(&row.acme_dns_config),
-        min_tls_version: String::new(),
-        hsts_enabled: false,
-        hsts_max_age: 0,
-        always_use_https: false,
+        min_tls_version: row.min_tls_version.clone(),
+        hsts_enabled: row.hsts_enabled,
+        hsts_max_age: row.hsts_max_age.max(0) as u32,
+        always_use_https: row.always_use_https,
+        enabled: row.https_enabled,
+        max_tls_version: row.max_tls_version.clone().unwrap_or_default(),
+        self_signed: row.self_signed,
+        mtls_enabled: row.mtls_enabled,
+        mtls_client_ca: row.mtls_client_ca.clone().unwrap_or_default(),
+        certificate_id: row
+            .certificate_id
+            .map(|id| id.to_string())
+            .unwrap_or_default(),
     }
 }
 
@@ -563,7 +580,10 @@ pub async fn build_rule_bundle(
         rate_limit_rules: rate_limits.iter().map(rate_limit_to_proto).collect(),
         ip_access_rules: ip_rules.iter().map(ip_access_rule_to_proto).collect(),
         geo: Some(geo_to_proto(geo.as_ref())),
-        cache_rules: caches.iter().map(cache_rule_to_proto).collect(),
+        cache_rules: caches
+            .iter()
+            .map(|row| cache_rule_to_proto(row, site_row.cache_quota_mb))
+            .collect(),
         challenge: Some(challenge_to_proto(challenge.as_ref())),
         rewrite_rules: rewrites.iter().map(rewrite_rule_to_proto).collect(),
         error_pages: err_pages.iter().map(error_page_to_proto).collect(),

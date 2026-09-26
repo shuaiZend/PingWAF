@@ -397,6 +397,16 @@ message SslConfig {
   bool hsts_enabled = 9;
   uint32 hsts_max_age = 10;
   bool always_use_https = 11;
+  // Whether the site serves HTTPS at all.
+  bool enabled = 12;
+  string max_tls_version = 13;
+  // When set, the edge issues certificates on the fly instead of using
+  // `cert_pem`/`key_pem`.
+  bool self_signed = 14;
+  bool mtls_enabled = 15;
+  string mtls_client_ca = 16;
+  // Id of the `site_certificates` row this posture selects, when any.
+  string certificate_id = 17;
 }
 
 enum AcmeChallengeType {

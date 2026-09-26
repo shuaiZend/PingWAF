@@ -5335,6 +5335,7 @@ dependencies = [
  "chrono",
  "jsonwebtoken",
  "pingwaf-proto",
+ "pingwaf-waf",
  "prost",
  "prost-types",
  "reqwest 0.13.5",

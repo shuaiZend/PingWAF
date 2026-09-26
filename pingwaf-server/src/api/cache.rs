@@ -108,6 +108,11 @@ pub fn routes() -> Router<AppState> {
             "/sites/{site_id}/cache-rules/{rule_id}",
             put(update).delete(remove),
         )
+        .route("/sites/{site_id}/cache/defaults", post(seed_defaults))
+        .route(
+            "/sites/{site_id}/cache-settings",
+            get(get_settings).put(update_settings),
+        )
         // Flat aliases. The dashboard's cache page spans sites, so it needs
         // endpoints that are not nested under a single one: usage across every
         // site, a purge by site id, and rule CRUD addressed by rule id.
@@ -423,6 +428,87 @@ async fn remove_by_id(
     remove(state, current, Path((row.site_id.to_string(), rule_id))).await
 }
 
+// ─── Site-wide cache settings ──────────────────────────────────────────────
+
+/// Site-wide cache settings.
+///
+/// The disk budget belongs to the site, not to an individual rule: the agent
+/// enforces one ceiling per hostname, and every hostname of a site shares the
+/// same budget.
+#[derive(Debug, Serialize)]
+pub struct CacheSettingsResponse {
+    pub site_id: Uuid,
+    /// Disk budget, in MiB, the agents may use for this site's cache.
+    pub quota_mb: i32,
+    /// Whether any cache rule of the site is enabled.
+    pub cache_enabled: bool,
+    pub rule_count: usize,
+    pub enabled_rule_count: usize,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateCacheSettingsRequest {
+    #[serde(default)]
+    pub quota_mb: Option<i32>,
+}
+
+async fn settings_view(
+    state: &AppState,
+    model: &site::Model,
+) -> Result<CacheSettingsResponse, ApiError> {
+    let rules = cache_rules::Entity::find()
+        .filter(cache_rules::Column::SiteId.eq(model.id))
+        .all(&state.db)
+        .await?;
+    Ok(CacheSettingsResponse {
+        site_id: model.id,
+        quota_mb: model.cache_quota_mb,
+        cache_enabled: rules.iter().any(|rule| rule.enabled),
+        rule_count: rules.len(),
+        enabled_rule_count: rules.iter().filter(|rule| rule.enabled).count(),
+    })
+}
+
+/// `GET /api/v1/sites/{site_id}/cache-settings`
+async fn get_settings(
+    State(state): State<AppState>,
+    current: AuthUser,
+    Path(site_id): Path<String>,
+) -> Result<Json<CacheSettingsResponse>, ApiError> {
+    let id = parse_uuid(&site_id, "site id")?;
+    let model = load_site_read(&state.db, id, &current).await?;
+    Ok(Json(settings_view(&state, &model).await?))
+}
+
+/// `PUT /api/v1/sites/{site_id}/cache-settings`
+async fn update_settings(
+    State(state): State<AppState>,
+    current: AuthUser,
+    Path(site_id): Path<String>,
+    Json(payload): Json<UpdateCacheSettingsRequest>,
+) -> Result<Json<CacheSettingsResponse>, ApiError> {
+    let id = parse_uuid(&site_id, "site id")?;
+    let model = load_site_write(&state.db, id, &current).await?;
+
+    if let Some(quota) = payload.quota_mb {
+        if !(0..=MAX_DISK_QUOTA_MB).contains(&quota) {
+            return Err(ApiError::BadRequest(format!(
+                "quota_mb must be between 0 and {MAX_DISK_QUOTA_MB}"
+            )));
+        }
+        let mut active: site::ActiveModel = model.clone().into();
+        active.cache_quota_mb = Set(quota);
+        active.update(&state.db).await?;
+
+        tracing::info!(site_id = %id, quota_mb = quota, "cache quota updated");
+        touch_site(&state, id).await?;
+        notify_config_changed(&state, id).await;
+    }
+
+    let refreshed = load_site_read(&state.db, id, &current).await?;
+    Ok(Json(settings_view(&state, &refreshed).await?))
+}
+
 // ─── Usage reporting ───────────────────────────────────────────────────────
 
 /// Cache usage and quota of one site.
@@ -434,7 +520,8 @@ async fn remove_by_id(
 pub struct CacheStatusView {
     pub site_id: Uuid,
     pub domain: String,
-    /// Largest `disk_quota_mb` among the site's enabled, cache-eligible rules.
+    /// Disk budget of the site, in MiB — a site-wide setting, not a property
+    /// of any single rule.
     pub configured_quota_mb: i32,
     pub enabled_rule_count: usize,
     /// Edges that reported this site.
@@ -450,26 +537,34 @@ pub struct CacheStatusView {
     pub last_reported_at: Option<DateTime<Utc>>,
 }
 
-/// `(configured quota in MB, number of enabled rules)` per site, in one query.
+/// `(site quota in MB, number of enabled cache-eligible rules)` per site.
+///
+/// The quota is the site's own `cache_quota_mb`: the budget is site-wide, so a
+/// rule never overrides it.
 async fn rule_summary(
     state: &AppState,
-    site_ids: &[Uuid],
+    sites: &[site::Model],
 ) -> Result<HashMap<Uuid, (i32, usize)>, ApiError> {
     let mut out: HashMap<Uuid, (i32, usize)> = HashMap::new();
-    if site_ids.is_empty() {
+    if sites.is_empty() {
         return Ok(out);
     }
+    let ids: Vec<Uuid> = sites.iter().map(|model| model.id).collect();
+    for model in sites {
+        out.insert(model.id, (model.cache_quota_mb, 0));
+    }
+
     let rules = cache_rules::Entity::find()
-        .filter(cache_rules::Column::SiteId.is_in(site_ids.iter().copied()))
+        .filter(cache_rules::Column::SiteId.is_in(ids))
         .all(&state.db)
         .await?;
     for rule in rules {
         if !rule.enabled || !rule.cache_eligible {
             continue;
         }
-        let entry = out.entry(rule.site_id).or_insert((0, 0));
-        entry.0 = entry.0.max(rule.disk_quota_mb);
-        entry.1 += 1;
+        if let Some(entry) = out.get_mut(&rule.site_id) {
+            entry.1 += 1;
+        }
     }
     Ok(out)
 }
@@ -529,8 +624,7 @@ async fn status_all(
         .all(&state.db)
         .await?;
 
-    let ids: Vec<Uuid> = sites.iter().map(|model| model.id).collect();
-    let configured = rule_summary(&state, &ids).await?;
+    let configured = rule_summary(&state, &sites).await?;
     let reported = state.cache_status.all().await;
 
     let views = sites
@@ -557,7 +651,7 @@ async fn status_site(
 ) -> Result<Json<CacheStatusView>, ApiError> {
     let id = parse_uuid(&site_id, "site id")?;
     let model = load_site_read(&state.db, id, &current).await?;
-    let configured = rule_summary(&state, &[id]).await?;
+    let configured = rule_summary(&state, std::slice::from_ref(&model)).await?;
     let reported = state.cache_status.site(id).await;
     Ok(Json(status_view(
         &model,
@@ -697,6 +791,32 @@ async fn purge(
         delivered,
         queued: targets.len() - delivered,
     }))
+}
+
+/// `POST /api/v1/sites/{site_id}/cache/defaults`
+///
+/// Re-adds any missing built-in cache rule, disabled, so the operator can turn
+/// caching on with a single switch instead of writing rules from scratch.
+async fn seed_defaults(
+    State(state): State<AppState>,
+    current: AuthUser,
+    Path(site_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let id = parse_uuid(&site_id, "site id")?;
+    load_site_write(&state.db, id, &current).await?;
+
+    let inserted = crate::defaults::seed_cache_defaults(&state.db, id).await?;
+    tracing::info!(site_id = %id, inserted, "built-in cache rules restored");
+
+    if inserted > 0 {
+        touch_site(&state, id).await?;
+        notify_config_changed(&state, id).await;
+    }
+
+    Ok(Json(serde_json::json!({
+        "inserted": inserted,
+        "total": crate::defaults::cache_rules_defaults().len(),
+    })))
 }
 
 #[cfg(test)]

@@ -32,6 +32,8 @@ pub mod sites {
         pub domain: String,
         pub status: String,
         pub plan: String,
+        /// Disk budget, in MiB, the agents may use for this site's cache.
+        pub cache_quota_mb: i32,
         pub created_at: DateTimeUtc,
         pub updated_at: DateTimeUtc,
     }
@@ -94,6 +96,21 @@ pub mod site_ssl {
         pub acme_dns_provider: Option<String>,
         #[sea_orm(column_type = "JsonBinary")]
         pub acme_dns_config: Option<Json>,
+        /// Whether the domain is served over HTTPS at all.
+        pub https_enabled: bool,
+        pub min_tls_version: String,
+        /// `None` means "up to whatever the agent's TLS stack supports".
+        pub max_tls_version: Option<String>,
+        /// Fall back to a generated certificate when none is configured.
+        pub self_signed: bool,
+        /// Certificate picked from `site_certificates` for this site.
+        pub certificate_id: Option<Uuid>,
+        pub mtls_enabled: bool,
+        #[sea_orm(column_type = "Text")]
+        pub mtls_client_ca: Option<String>,
+        pub hsts_enabled: bool,
+        pub hsts_max_age: i32,
+        pub always_use_https: bool,
         pub created_at: DateTimeUtc,
     }
 
@@ -110,5 +127,36 @@ pub mod acme_challenge {
 
     pub fn is_valid(challenge: &str) -> bool {
         matches!(challenge, HTTP_01 | DNS_01)
+    }
+}
+
+/// TLS protocol versions accepted in `site_ssl.min_tls_version` and
+/// `site_ssl.max_tls_version`.
+pub mod tls_version {
+    pub const TLS_10: &str = "1.0";
+    pub const TLS_11: &str = "1.1";
+    pub const TLS_12: &str = "1.2";
+    pub const TLS_13: &str = "1.3";
+
+    pub const ALL: [&str; 4] = [TLS_10, TLS_11, TLS_12, TLS_13];
+
+    pub fn is_valid(value: &str) -> bool {
+        ALL.contains(&value)
+    }
+
+    /// Position in `ALL`, used to check that a lower bound is not above the
+    /// upper bound.
+    pub fn rank(value: &str) -> Option<usize> {
+        ALL.iter().position(|item| *item == value)
+    }
+
+    /// Canonicalises `TLSv1.2`, `tls1.2` and `1.2` to `1.2`.
+    pub fn normalise(value: &str) -> Option<String> {
+        let lower = value.trim().to_ascii_lowercase();
+        let stripped = lower
+            .strip_prefix("tlsv")
+            .or_else(|| lower.strip_prefix("tls"))
+            .unwrap_or(&lower);
+        is_valid(stripped).then(|| stripped.to_string())
     }
 }
