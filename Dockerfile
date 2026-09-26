@@ -71,7 +71,10 @@ COPY pingwaf-waf/Cargo.toml pingwaf-waf/
 COPY pingwaf-challenge/Cargo.toml pingwaf-challenge/
 
 # 2c. 创建 dummy 源文件，让 cargo 能通过 manifest 解析并编译第三方依赖
-#     benches/bench.rs 是根 Cargo.toml 的 [[bench]] target，manifest 解析期必须存在
+#     benches/bench.rs 是根 Cargo.toml 的 [[bench]] target，manifest 解析期必须存在；
+#     pingap-{core,cache,util,location,logger,proxy,upstream} 这 7 个成员 crate 也声明了
+#     [[bench]] name = "bench"，即使 cargo build 不构建 bench target，manifest 解析期
+#     仍要求各自 benches/bench.rs 存在，否则整个预热构建直接失败
 RUN mkdir -p src && echo "fn main() {}" > src/main.rs \
     && mkdir -p benches && echo "fn main() {}" > benches/bench.rs \
     && for dir in pingap-core pingap-util pingap-config pingap-cache \
@@ -81,6 +84,10 @@ RUN mkdir -p src && echo "fn main() {}" > src/main.rs \
        pingap-imageoptim pingap-webhook pingwaf-server pingwaf-agent \
        pingwaf-waf pingwaf-challenge; do \
        mkdir -p "$dir/src" && echo "" > "$dir/src/lib.rs"; \
+    done \
+    && for bench_dir in pingap-core pingap-cache pingap-util pingap-location \
+       pingap-logger pingap-proxy pingap-upstream; do \
+       mkdir -p "$bench_dir/benches" && echo "fn main() {}" > "$bench_dir/benches/bench.rs"; \
     done \
     && mkdir -p pingwaf-proto/src && echo "" > pingwaf-proto/src/lib.rs
 
