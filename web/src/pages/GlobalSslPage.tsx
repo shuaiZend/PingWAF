@@ -514,7 +514,7 @@ export function GlobalSslPage() {
           <CardHeader
             title={t('pages.ssl.certificates')}
             description={t('pages.sslGlobal.certificatesHint')}
-            actions={
+            action={
               <div className="flex flex-wrap items-center gap-2">
                 <Select
                   aria-label={t('pages.sslGlobal.site')}
