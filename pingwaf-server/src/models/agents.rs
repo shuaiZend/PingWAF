@@ -38,6 +38,10 @@ pub mod agents {
         pub site_id: Option<Uuid>,
         pub hostname: String,
         pub ip_address: String,
+        /// Egress address as seen by the public internet, empty when unknown.
+        pub public_ip: Option<String>,
+        /// First non-virtual LAN address reported by the probe.
+        pub private_ip: Option<String>,
         pub version: Option<String>,
         pub os_info: Option<String>,
         pub cpu_cores: Option<i32>,

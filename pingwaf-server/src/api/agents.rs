@@ -7,7 +7,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Json;
 use axum::Router;
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use pingwaf_proto::control_plane::{
     BlockIpCommand, PurgeCacheCommand, RestartAgentCommand, ServerCommand,
 };
@@ -19,15 +19,15 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::api::common::{
-    load_site_read, non_empty, parse_uuid, require_write, scope_site, Page,
-    Pagination,
+    load_site_read, non_empty, parse_optional_datetime, parse_uuid,
+    require_write, scope_site, Page, Pagination,
 };
 use crate::api::error::ApiError;
 use crate::api::keys::mint_key;
 use crate::api::state::AppState;
 use crate::auth::AuthUser;
 use crate::grpc::config::now_timestamp;
-use crate::models::{agent, agent_status, permission, site};
+use crate::models::{agent, agent_status, host_sample, permission, site};
 
 /// `pingwaf.CommandType` values, spelled out so the control plane does not depend
 /// on prost's enum variant naming.
@@ -49,6 +49,10 @@ pub struct AgentResponse {
     pub site_domain: Option<String>,
     pub hostname: String,
     pub ip_address: String,
+    /// Egress address as seen from the public internet, empty when unknown.
+    pub public_ip: Option<String>,
+    /// First LAN address that is not loopback or a container/bridge interface.
+    pub private_ip: Option<String>,
     pub version: Option<String>,
     pub os_info: Option<String>,
     pub cpu_cores: Option<i32>,
@@ -71,6 +75,17 @@ pub struct ListQuery {
     pub site_id: Option<String>,
     pub status: Option<String>,
     pub search: Option<String>,
+}
+
+/// Window and paging for the probe history endpoint.
+#[derive(Debug, Deserialize)]
+pub struct SamplesQuery {
+    #[serde(flatten)]
+    pub pagination: Pagination,
+    /// Inclusive lower bound, RFC 3339.
+    pub from: Option<String>,
+    /// Exclusive upper bound, RFC 3339.
+    pub to: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -97,16 +112,13 @@ fn default_graceful() -> bool {
     true
 }
 
-/// Enrollment options. Everything is optional: the defaults mint a key that is
-/// valid for a day, which is enough to paste the command on a fresh server.
+/// Enrollment options. The minted key does not expire: a node is admitted as
+/// long as the token is valid, and it is revoked by deleting the key.
 #[derive(Debug, Deserialize, Default)]
 pub struct EnrollRequest {
     /// Name recorded on the minted key, so it can be told apart in the key list.
     #[serde(default)]
     pub name: Option<String>,
-    /// How long the enrollment stays usable, in hours.
-    #[serde(default)]
-    pub ttl_hours: Option<i64>,
 }
 
 /// Everything the operator needs to bring a node online: the key, the endpoint
@@ -116,19 +128,18 @@ pub struct EnrollResponse {
     pub key_id: Uuid,
     /// Agent API key. Shown once — only its bcrypt hash is stored.
     pub token: String,
-    pub expires_at: DateTime<Utc>,
     /// gRPC endpoint the agent connects to.
     pub server_url: String,
-    /// Docker one-liner, for a host with nothing installed yet.
-    pub docker_command: String,
+    /// Installer one-liner, for a host with nothing installed yet.
+    pub install_command: String,
     /// Same thing for a host that already has the `pingwaf` binary.
     pub binary_command: String,
 }
 
-/// Bounds on enrollment validity: a day by default, a month at most.
-const DEFAULT_ENROLL_TTL_HOURS: i64 = 24;
-const MAX_ENROLL_TTL_HOURS: i64 = 24 * 30;
-const AGENT_IMAGE: &str = "ghcr.io/shuaizend/pingwaf:latest";
+/// Installer published with the repository root, fetched over HTTPS so a bare
+/// host needs nothing but `curl`.
+const INSTALL_SCRIPT_URL: &str =
+    "https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh";
 
 /// Routes contributed to `/api/v1`.
 pub fn routes() -> Router<AppState> {
@@ -136,11 +147,12 @@ pub fn routes() -> Router<AppState> {
         .route("/agents", get(list))
         .route("/agents/enroll", post(enroll))
         .route("/agents/{agent_id}", get(show).delete(remove))
+        .route("/agents/{agent_id}/samples", get(samples))
         .route("/agents/{agent_id}/commands", post(send_command))
 }
 
-/// `POST /api/v1/agents/enroll` — mints a short-lived agent key and returns the
-/// command line that installs and starts a node with it.
+/// `POST /api/v1/agents/enroll` — mints an agent key and returns the command
+/// line that installs and starts a node with it.
 ///
 /// The agent registers itself over gRPC on first connect, so running the command
 /// is all that is needed for the node to appear in the inventory.
@@ -161,32 +173,19 @@ async fn enroll(
         ));
     }
 
-    let ttl_hours = payload.ttl_hours.unwrap_or(DEFAULT_ENROLL_TTL_HOURS);
-    if !(1..=MAX_ENROLL_TTL_HOURS).contains(&ttl_hours) {
-        return Err(ApiError::BadRequest(format!(
-            "ttl_hours must be between 1 and {MAX_ENROLL_TTL_HOURS}"
-        )));
-    }
-    let expires_at = Utc::now() + Duration::hours(ttl_hours);
-
     let (model, token) = mint_key(
         &state,
         current.id,
         name,
         vec![permission::AGENT.to_string(), permission::READ.to_string()],
-        Some(expires_at),
+        None,
     )
     .await?;
 
     let server_url = agent_server_url(&state, &headers);
-    let docker_command = format!(
-        "docker run -d --name pingwaf-agent --restart unless-stopped \
-         -p 80:80 -p 443:443 \
-         -e PINGWAF_SERVER_URL={server_url} \
-         -e PINGWAF_API_KEY={token} \
-         -e PINGWAF_CACHE_DIR=/var/lib/pingwaf/cache \
-         -v pingwaf-agent-data:/var/lib/pingwaf \
-         {AGENT_IMAGE} agent"
+    let install_command = format!(
+        "curl -fsSL {INSTALL_SCRIPT_URL} | sudo bash -s -- --mode agent \
+         --server-url {server_url} --api-key {token}"
     );
     let binary_command =
         format!("pingwaf agent --server-url {server_url} --api-key {token}");
@@ -198,9 +197,8 @@ async fn enroll(
         Json(EnrollResponse {
             key_id: model.id,
             token,
-            expires_at,
             server_url,
-            docker_command,
+            install_command,
             binary_command,
         }),
     )
@@ -314,6 +312,43 @@ async fn show(
     Ok(Json(items.remove(0)))
 }
 
+/// `GET /api/v1/agents/{agent_id}/samples` — host probe history, newest first.
+///
+/// Cumulative counters (network and disk totals) are returned raw; the caller
+/// differences consecutive rows to obtain rates.
+async fn samples(
+    State(state): State<AppState>,
+    current: AuthUser,
+    Path(agent_id): Path<String>,
+    Query(query): Query<SamplesQuery>,
+) -> Result<Json<Page<host_sample::Model>>, ApiError> {
+    let id = parse_uuid(&agent_id, "agent id")?;
+    load_agent(&state, id, &current).await?;
+
+    let pagination = query.pagination.normalise();
+    let from = parse_optional_datetime(&query.from, "from")?;
+    let to = parse_optional_datetime(&query.to, "to")?;
+
+    let mut condition =
+        Condition::all().add(host_sample::Column::AgentId.eq(id));
+    if let Some(at) = from {
+        condition = condition.add(host_sample::Column::SampledAt.gte(at));
+    }
+    if let Some(at) = to {
+        condition = condition.add(host_sample::Column::SampledAt.lt(at));
+    }
+
+    let paginator = host_sample::Entity::find()
+        .filter(condition)
+        .order_by_desc(host_sample::Column::SampledAt)
+        .paginate(&state.db, pagination.limit());
+
+    let total = paginator.num_items().await?;
+    let items = paginator.fetch_page(pagination.index()).await?;
+
+    Ok(Json(Page::new(items, total, pagination)))
+}
+
 /// `DELETE /api/v1/agents/{agent_id}` — de-registers an agent.
 async fn remove(
     State(state): State<AppState>,
@@ -425,6 +460,8 @@ async fn enrich(
             site_id: row.site_id,
             hostname: row.hostname,
             ip_address: row.ip_address,
+            public_ip: row.public_ip,
+            private_ip: row.private_ip,
             version: row.version,
             os_info: row.os_info,
             cpu_cores: row.cpu_cores,

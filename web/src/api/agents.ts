@@ -6,6 +6,8 @@ import type {
   AgentEnrollRequest,
   AgentEnrollResponse,
   AgentListQuery,
+  AgentSamplesQuery,
+  HostSample,
   Page,
 } from './types'
 
@@ -22,6 +24,15 @@ export const agentsApi = {
     apiClient.get<Page<Agent>>('/agents', { query: { page_size: 200, ...query } }),
 
   get: (id: string) => apiClient.get<Agent>(`/agents/${id}`),
+
+  /**
+   * Host probe history, newest first. The agent samples every 5 seconds and the
+   * control plane keeps a day of it, so `page_size` is the window size here.
+   */
+  samples: (id: string, query: AgentSamplesQuery = {}) =>
+    apiClient.get<Page<HostSample>>(`/agents/${id}/samples`, {
+      query: { page_size: 200, ...query },
+    }),
 
   remove: (id: string) => apiClient.delete<void>(`/agents/${id}`),
 
@@ -52,6 +63,8 @@ export const agentKeys = {
   all: ['agents'] as const,
   list: (query?: AgentListQuery) => [...agentKeys.all, 'list', query ?? {}] as const,
   detail: (id: string) => [...agentKeys.all, 'detail', id] as const,
+  samples: (id: string, query?: AgentSamplesQuery) =>
+    [...agentKeys.all, 'samples', id, query ?? {}] as const,
 }
 
 export default agentsApi

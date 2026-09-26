@@ -5,12 +5,13 @@
 //! and every other RPC verifies that token before touching the database.
 
 use std::pin::Pin;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use pingwaf_proto::control_plane::{
     control_plane_server::ControlPlane as ControlPlaneTrait, AgentHeartbeat,
-    GetSiteConfigRequest, LogAck, LogEntry, MetricAck, MetricBatch,
+    GetSiteConfigRequest, HostSample, LogAck, LogEntry, MetricAck, MetricBatch,
     RegisterAgentRequest, RegisterAgentResponse, RuleBundle, ServerCommand,
     SiteConfig, SyncRulesRequest,
 };
@@ -35,7 +36,8 @@ use crate::grpc::config::{
 };
 use crate::grpc::registry::{AgentRegistry, COMMAND_CHANNEL_CAPACITY};
 use crate::models::{
-    access_log, action, agent, agent_status, api_key, security_event, site,
+    access_log, action, agent, agent_status, api_key, host_sample,
+    security_event, site,
 };
 
 /// Stream type returned by the server-streaming RPCs.
@@ -58,6 +60,14 @@ const MAX_COUNTRY: usize = 2;
 const MAX_CACHE_STATUS: usize = 20;
 const MAX_TLS_VERSION: usize = 10;
 const MAX_UPSTREAM: usize = 255;
+
+/// Probe samples are kept for a day: at a 5-second cadence a single agent
+/// writes roughly 17k rows a day, so expired rows are pruned while ingesting.
+const HOST_SAMPLE_RETENTION_HOURS: i64 = 24;
+
+/// Epoch seconds of the last retention sweep, so that a busy fleet does not
+/// pay for a `DELETE` on every heartbeat.
+static LAST_SAMPLE_SWEEP: AtomicI64 = AtomicI64::new(0);
 
 /// The gRPC control plane service.
 pub struct ControlPlaneService {
@@ -207,6 +217,8 @@ impl ControlPlaneTrait for ControlPlaneService {
                 active.status = Set(status);
                 active.api_key_id = Set(Some(key.id));
                 active.last_heartbeat = Set(Some(now));
+                active.public_ip = Set(optional(&payload.public_ip));
+                active.private_ip = Set(optional(&payload.private_ip));
                 let updated =
                     active.update(&self.db).await.map_err(db_status)?;
                 tracing::info!(%agent_id, hostname = %payload.hostname, "agent re-registered");
@@ -230,6 +242,8 @@ impl ControlPlaneTrait for ControlPlaneService {
                     config_hash: Set(None),
                     last_heartbeat: Set(Some(now)),
                     registered_at: Set(now),
+                    public_ip: Set(optional(&payload.public_ip)),
+                    private_ip: Set(optional(&payload.private_ip)),
                 }
                 .insert(&self.db)
                 .await
@@ -311,6 +325,7 @@ impl ControlPlaneTrait for ControlPlaneService {
             .await;
         tokio::spawn(async move {
             persist_heartbeat(&db, agent_id, &first).await;
+            persist_host_samples(&db, agent_id, &first.host_samples).await;
             while let Some(message) = match inbound.message().await {
                 Ok(Some(message)) => Some(message),
                 Ok(None) => None,
@@ -323,6 +338,8 @@ impl ControlPlaneTrait for ControlPlaneService {
                     .record_heartbeat(agent_id, &message.site_statuses)
                     .await;
                 persist_heartbeat(&db, agent_id, &message).await;
+                persist_host_samples(&db, agent_id, &message.host_samples)
+                    .await;
             }
             mark_offline(&db, agent_id).await;
             registry.disconnect(&agent_id).await;
@@ -588,6 +605,105 @@ async fn persist_heartbeat(
     if let Err(err) = active.update(db).await {
         tracing::warn!(%agent_id, error = %err, "could not persist heartbeat");
     }
+}
+
+/// Persists the probe samples carried by one heartbeat and prunes expired rows.
+///
+/// The agent samples every few seconds and buffers locally, so a single message
+/// normally carries several points.
+async fn persist_host_samples(
+    db: &DatabaseConnection,
+    agent_id: Uuid,
+    samples: &[HostSample],
+) {
+    if samples.is_empty() {
+        return;
+    }
+    let now = Utc::now();
+    let rows: Vec<host_sample::ActiveModel> = samples
+        .iter()
+        .map(|sample| host_sample::ActiveModel {
+            agent_id: Set(agent_id),
+            sampled_at: Set(sample_time(sample.ts_millis, now)),
+            cpu_usage_percent: Set(Some(sample.cpu_usage_percent)),
+            load1: Set(Some(sample.load1)),
+            load5: Set(Some(sample.load5)),
+            load15: Set(Some(sample.load15)),
+            memory_total_bytes: Set(sample_i64(sample.memory_total_bytes)),
+            memory_used_bytes: Set(sample_i64(sample.memory_used_bytes)),
+            memory_available_bytes: Set(sample_i64(
+                sample.memory_available_bytes,
+            )),
+            swap_total_bytes: Set(sample_i64(sample.swap_total_bytes)),
+            swap_used_bytes: Set(sample_i64(sample.swap_used_bytes)),
+            disk_total_bytes: Set(sample_i64(sample.disk_total_bytes)),
+            disk_used_bytes: Set(sample_i64(sample.disk_used_bytes)),
+            net_rx_bytes: Set(sample_i64(sample.net_rx_bytes)),
+            net_tx_bytes: Set(sample_i64(sample.net_tx_bytes)),
+            disk_read_bytes: Set(sample_i64(sample.disk_read_bytes)),
+            disk_write_bytes: Set(sample_i64(sample.disk_write_bytes)),
+            process_count: Set(i32::try_from(sample.process_count).ok()),
+            tcp_connections: Set(i32::try_from(sample.tcp_connections).ok()),
+            uptime_secs: Set(sample_i64(sample.uptime_secs)),
+            created_at: Set(now),
+            ..Default::default()
+        })
+        .collect();
+
+    if let Err(err) = host_sample::Entity::insert_many(rows).exec(db).await {
+        tracing::warn!(%agent_id, error = %err, "could not persist host samples");
+        return;
+    }
+
+    sweep_host_samples(db).await;
+}
+
+/// Ages out samples past the retention window, at most once an hour.
+async fn sweep_host_samples(db: &DatabaseConnection) {
+    let now = Utc::now();
+    let previous = LAST_SAMPLE_SWEEP.swap(now.timestamp(), Ordering::Relaxed);
+    let swept_recently = DateTime::from_timestamp(previous, 0)
+        .is_some_and(|at| at > now - chrono::Duration::hours(1));
+    if swept_recently {
+        return;
+    }
+
+    let cutoff = now - chrono::Duration::hours(HOST_SAMPLE_RETENTION_HOURS);
+    match host_sample::Entity::delete_many()
+        .filter(host_sample::Column::SampledAt.lt(cutoff))
+        .exec(db)
+        .await
+    {
+        Ok(result) if result.rows_affected > 0 => {
+            tracing::info!(
+                deleted = result.rows_affected,
+                %cutoff,
+                "pruned expired host samples"
+            );
+        },
+        Ok(_) => {},
+        Err(err) => {
+            tracing::warn!(error = %err, "could not prune host samples");
+        },
+    }
+}
+
+/// Timestamps come from the agent's own clock. Anything outside the retention
+/// window — including a clock that runs ahead — is stored as `now`, so that the
+/// row still ages out instead of becoming unprunable.
+fn sample_time(ts_millis: i64, now: DateTime<Utc>) -> DateTime<Utc> {
+    DateTime::from_timestamp_millis(ts_millis)
+        .filter(|ts| {
+            *ts <= now
+                && *ts
+                    > now - chrono::Duration::hours(HOST_SAMPLE_RETENTION_HOURS)
+        })
+        .unwrap_or(now)
+}
+
+/// Cumulative counters arrive as `u64`; zero means "not reported".
+fn sample_i64(value: u64) -> Option<i64> {
+    (value > 0).then(|| value.min(i64::MAX as u64) as i64)
 }
 
 /// Flips an agent to `offline` when its stream ends, unless a newer heartbeat has

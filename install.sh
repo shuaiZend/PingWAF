@@ -7,10 +7,12 @@
 #   ./install.sh [--version X.Y.Z] [--mode all-in-one|server|agent]
 #
 # Options:
-#   --version   Install a specific version (default: latest)
-#   --mode      Operating mode: all-in-one, server, agent (default: all-in-one)
+#   --version     Install a specific version (default: latest)
+#   --mode        Operating mode: all-in-one, server, agent (default: all-in-one)
+#   --server-url  Control plane gRPC URL (agent mode)
+#   --api-key     Agent enrollment token (agent mode)
 #   --no-systemd  Skip systemd service creation
-#   --help      Show this help message
+#   --help        Show this help message
 # ─────────────────────────────────────────────────────────────────────────────
 
 set -euo pipefail
@@ -45,6 +47,8 @@ VERSION=""
 MODE="all-in-one"
 SKIP_SYSTEMD=false
 DB_URL="postgres://pingwaf:pingwaf@localhost:5432/pingwaf"
+SERVER_URL=""
+API_KEY=""
 
 # ─── Argument Parsing ─────────────────────────────────────────────────────────
 show_help() {
@@ -54,20 +58,27 @@ PingWAF Installation Script
 Usage: $(basename "$0") [OPTIONS]
 
 Options:
-  --version VERSION   Install a specific version (default: latest release)
-  --mode MODE         Operating mode: all-in-one, server, agent
-  --no-systemd        Skip systemd service file creation
-  --db-url URL        PostgreSQL connection string
-  --help              Show this help message
+  --version VERSION     Install a specific version (default: latest release)
+  --mode MODE           Operating mode: all-in-one, server, agent
+  --server-url URL      Control plane gRPC URL (agent mode)
+  --api-key KEY         Agent enrollment token (agent mode)
+  --no-systemd          Skip systemd service file creation
+  --db-url URL          PostgreSQL connection string
+  --help                Show this help message
 
 Environment Variables:
-  PINGWAF_VERSION     Same as --version
-  PINGWAF_MODE        Same as --mode
-  PINGWAF_DB_URL      Same as --db-url
+  PINGWAF_VERSION       Same as --version
+  PINGWAF_MODE          Same as --mode
+  PINGWAF_SERVER_URL    Same as --server-url
+  PINGWAF_API_KEY       Same as --api-key
+  PINGWAF_DB_URL        Same as --db-url
 
 Examples:
   # Install latest, all-in-one mode
   curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh | bash
+
+  # Install a node as an agent, pointing at the control plane
+  ./install.sh --mode agent --server-url http://10.0.0.1:9090 --api-key pwk_xxx
 
   # Install specific version as agent only
   ./install.sh --version 0.14.4 --mode agent
@@ -79,12 +90,14 @@ EOF
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --version)   VERSION="$2"; shift 2 ;;
-        --mode)      MODE="$2"; shift 2 ;;
-        --db-url)    DB_URL="$2"; shift 2 ;;
+        --version)    VERSION="$2"; shift 2 ;;
+        --mode)       MODE="$2"; shift 2 ;;
+        --db-url)     DB_URL="$2"; shift 2 ;;
+        --server-url) SERVER_URL="$2"; shift 2 ;;
+        --api-key)    API_KEY="$2"; shift 2 ;;
         --no-systemd) SKIP_SYSTEMD=true; shift ;;
-        --help|-h)   show_help; exit 0 ;;
-        *)           fatal "Unknown option: $1 (use --help for usage)" ;;
+        --help|-h)    show_help; exit 0 ;;
+        *)            fatal "Unknown option: $1 (use --help for usage)" ;;
     esac
 done
 
@@ -92,12 +105,24 @@ done
 VERSION="${VERSION:-${PINGWAF_VERSION:-}}"
 MODE="${MODE:-${PINGWAF_MODE:-all-in-one}}"
 DB_URL="${DB_URL:-${PINGWAF_DB_URL:-$DB_URL}}"
+# Agent mode reads its settings from the command line or the environment, so
+# these are what the systemd unit is built from.
+SERVER_URL="${SERVER_URL:-${PINGWAF_SERVER_URL:-}}"
+API_KEY="${API_KEY:-${PINGWAF_API_KEY:-}}"
 
 # Validate mode
 case "$MODE" in
     all-in-one|server|agent) ;;
     *) fatal "Invalid mode: $MODE (must be: all-in-one, server, agent)" ;;
 esac
+
+# Agents talk to the control plane, never to PostgreSQL.
+if [[ "$MODE" == "agent" ]]; then
+    SERVER_URL="${SERVER_URL:-http://127.0.0.1:9090}"
+    if [[ -z "$API_KEY" ]]; then
+        warn "No --api-key given: start the agent with PINGWAF_API_KEY set, or it cannot register."
+    fi
+fi
 
 # ─── Platform Detection ───────────────────────────────────────────────────────
 detect_os() {
@@ -249,6 +274,13 @@ fi
 
 # ─── Write Default Configuration ─────────────────────────────────────────────
 write_config() {
+    # The agent binary takes everything from flags/env vars (there is no config
+    # file loader), so there is nothing useful to write for a node.
+    if [[ "$MODE" == "agent" ]]; then
+        info "Agent mode: settings live in the service environment, skipping ${CONFIG_DIR}/pingwaf.toml."
+        return
+    fi
+
     local config_file="${CONFIG_DIR}/pingwaf.toml"
     if [[ -f "$config_file" ]]; then
         warn "Config file already exists at ${config_file}, skipping."
@@ -322,6 +354,18 @@ install_systemd() {
     local service_file="/etc/systemd/system/${SERVICE_NAME}.service"
     local exec_start="${INSTALL_DIR}/${BINARY_NAME} ${MODE}"
 
+    # An agent is a pure data plane: it needs the network and nothing else.
+    local unit_after="After=network.target postgresql.service"
+    local unit_wants="Wants=postgresql.service"
+    local agent_env=""
+    if [[ "$MODE" == "agent" ]]; then
+        unit_after="After=network-online.target"
+        unit_wants="Wants=network-online.target"
+        agent_env="Environment=PINGWAF_SERVER_URL=${SERVER_URL}
+Environment=PINGWAF_API_KEY=${API_KEY}
+Environment=PINGWAF_CACHE_DIR=${DATA_DIR}/cache"
+    fi
+
     info "Creating systemd service..."
 
     local cmd=""
@@ -331,8 +375,8 @@ install_systemd() {
 [Unit]
 Description=PingWAF - High Performance Web Application Firewall
 Documentation=https://github.com/${REPO}
-After=network.target postgresql.service
-Wants=postgresql.service
+${unit_after}
+${unit_wants}
 
 [Service]
 Type=simple
@@ -344,6 +388,7 @@ Restart=always
 RestartSec=5
 LimitNOFILE=65536
 Environment=PINGWAF_CONFIG=${CONFIG_DIR}/pingwaf.toml
+${agent_env}
 Environment=RUST_LOG=info
 
 # Security hardening
@@ -412,13 +457,31 @@ check_postgres() {
     fi
 }
 
-check_postgres
+if [[ "$MODE" == "agent" ]]; then
+    info "Agent mode: skipping the PostgreSQL check, nodes keep no database."
+else
+    check_postgres
+fi
 
 # ─── Firewall Hints ───────────────────────────────────────────────────────────
 print_firewall_hints() {
     if [[ "$OS" != "linux" ]]; then return; fi
 
     echo ""
+    if [[ "$MODE" == "agent" ]]; then
+        info "Firewall ports:"
+        echo "    80/tcp   — HTTP traffic (proxied sites)"
+        echo "    443/tcp  — HTTPS traffic (proxied sites)"
+        echo "  Outbound to the control plane (${SERVER_URL}) must be allowed."
+        echo ""
+        if has ufw; then
+            echo "  With UFW:"
+            echo "    sudo ufw allow 80/tcp"
+            echo "    sudo ufw allow 443/tcp"
+        fi
+        return
+    fi
+
     info "Firewall ports to open:"
     echo "    80/tcp   — HTTP traffic (proxied sites)"
     echo "    443/tcp  — HTTPS traffic (proxied sites)"
@@ -444,24 +507,40 @@ echo "${BOLD}${GREEN}═══════════════════�
 echo ""
 echo "  Binary:    ${INSTALL_DIR}/${BINARY_NAME}"
 if [[ "$OS" == "linux" ]]; then
-    echo "  Config:    ${CONFIG_DIR}/pingwaf.toml"
-    echo "  Data:      ${DATA_DIR}/"
+    if [[ "$MODE" == "agent" ]]; then
+        echo "  Data:      ${DATA_DIR}/"
+    else
+        echo "  Config:    ${CONFIG_DIR}/pingwaf.toml"
+        echo "  Data:      ${DATA_DIR}/"
+    fi
     echo "  Service:   systemctl ${start|stop|restart|status} ${SERVICE_NAME}"
 fi
-echo ""
-echo "  Quick start:"
-echo "    ${BINARY_NAME} ${MODE} --db-url \"${DB_URL}\""
-echo ""
-echo "  Dashboard: http://localhost:9080"
-echo "  Default credentials:"
-echo "    Email:    admin@pingwaf.local"
-echo "    Password: pingwaf123"
-echo ""
-echo "  ${YELLOW}⚠ Change the default admin password and JWT secret in production!${NO_COLOR}"
-echo ""
-echo "  Next steps:"
-echo "    1. Ensure PostgreSQL is running and accessible"
-echo "    2. Edit ${CONFIG_DIR}/pingwaf.toml with your settings"
-echo "    3. Start the service: sudo systemctl enable --now ${SERVICE_NAME}"
-echo "    4. Open the dashboard and add your first site"
-echo ""
+
+if [[ "$MODE" == "agent" ]]; then
+    echo ""
+    echo "  Quick start:"
+    echo "    ${BINARY_NAME} agent --server-url \"${SERVER_URL}\" --api-key \"${API_KEY}\""
+    echo ""
+    echo "  Next steps:"
+    echo "    1. Start the service: sudo systemctl enable --now ${SERVICE_NAME}"
+    echo "    2. Confirm the node appears under Nodes in the dashboard"
+    echo ""
+else
+    echo ""
+    echo "  Quick start:"
+    echo "    ${BINARY_NAME} ${MODE} --db-url \"${DB_URL}\""
+    echo ""
+    echo "  Dashboard: http://localhost:9080"
+    echo "  Default credentials:"
+    echo "    Email:    admin@pingwaf.local"
+    echo "    Password: pingwaf123"
+    echo ""
+    echo "  ${YELLOW}⚠ Change the default admin password and JWT secret in production!${NO_COLOR}"
+    echo ""
+    echo "  Next steps:"
+    echo "    1. Ensure PostgreSQL is running and accessible"
+    echo "    2. Edit ${CONFIG_DIR}/pingwaf.toml with your settings"
+    echo "    3. Start the service: sudo systemctl enable --now ${SERVICE_NAME}"
+    echo "    4. Open the dashboard and add your first site"
+    echo ""
+fi

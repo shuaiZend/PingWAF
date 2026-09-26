@@ -16,6 +16,7 @@ pub mod certificates;
 pub mod challenge_settings;
 pub mod error_pages;
 pub mod geo_rules;
+pub mod host_samples;
 pub mod ip_access_rules;
 pub mod rate_limit_stats;
 pub mod rewrite_rules;
@@ -26,6 +27,7 @@ pub mod users;
 
 pub use agents::{agent_status, agents as agent};
 pub use certificates::site_certificates;
+pub use host_samples::host_samples as host_sample;
 pub use rules::{
     action, cache_rules, characteristic, mode, rate_limit_rules, rule_groups,
     rules as rule,

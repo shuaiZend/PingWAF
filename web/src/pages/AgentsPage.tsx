@@ -24,6 +24,7 @@ import { Dialog } from '@/components/ui/Dialog'
 import { Table, type Column } from '@/components/ui/Table'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { EmptyState } from '@/components/ui/EmptyState'
+import { AgentProbePanel } from '@/components/agents/AgentProbePanel'
 import { SkeletonRows } from '@/components/ui/Skeleton'
 import { useToast } from '@/components/ui/Toast'
 import { ErrorState } from '@/components/ErrorState'
@@ -51,16 +52,6 @@ const REFRESH_MS = 30_000
 
 const COMMANDS: AgentCommand[] = ['reload', 'restart', 'purge_cache']
 
-/** TTL choices for a one-off enrolment token, in hours. */
-const ENROLL_TTL_OPTIONS = [
-  { value: 1, labelKey: 'pages.agents.ttl_1h' },
-  { value: 24, labelKey: 'pages.agents.ttl_24h' },
-  { value: 168, labelKey: 'pages.agents.ttl_7d' },
-  { value: 720, labelKey: 'pages.agents.ttl_30d' },
-] as const
-
-const DEFAULT_ENROLL_TTL = 24
-
 export function AgentsPage() {
   const { t } = useTranslation()
   const toast = useToast()
@@ -77,7 +68,6 @@ export function AgentsPage() {
   const [pendingCommand, setPendingCommand] = useState<{ agent: Agent; command: AgentCommand } | null>(null)
   const [enrollOpen, setEnrollOpen] = useState(false)
   const [enrollName, setEnrollName] = useState('')
-  const [enrollTtl, setEnrollTtl] = useState(DEFAULT_ENROLL_TTL)
   const [enrollResult, setEnrollResult] = useState<AgentEnrollResponse | null>(null)
 
   const { data: sites } = useSitesList()
@@ -119,13 +109,12 @@ export function AgentsPage() {
   })
 
   const submitEnroll = () => {
-    enroll.mutate({ name: enrollName.trim() || undefined, ttl_hours: enrollTtl })
+    enroll.mutate({ name: enrollName.trim() || undefined })
   }
 
   const openEnroll = () => {
     enroll.reset()
     setEnrollName('')
-    setEnrollTtl(DEFAULT_ENROLL_TTL)
     setEnrollResult(null)
     setEnrollOpen(true)
   }
@@ -575,6 +564,8 @@ export function AgentsPage() {
 
             <dl className="grid grid-cols-1 gap-x-6 gap-y-2 sm:grid-cols-2">
               <DetailRow label={t('pages.agents.site')} value={detail.site_domain ?? t('pages.agents.unassigned')} />
+              <DetailRow label={t('pages.agents.publicIp')} value={detail.public_ip} mono />
+              <DetailRow label={t('pages.agents.privateIp')} value={detail.private_ip} mono />
               <DetailRow label={t('pages.agents.ipAddress')} value={detail.ip_address} />
               <DetailRow
                 label={t('pages.agents.lastHeartbeat')}
@@ -589,6 +580,18 @@ export function AgentsPage() {
               <DetailRow label={t('pages.agents.configHash')} value={detail.config_hash} mono />
               <DetailRow label={t('pages.agents.apiKeyId')} value={detail.api_key_id} mono />
             </dl>
+
+            <div className="border-t border-line pt-4">
+              <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
+                <h3 className="text-[13px] font-semibold text-fg-strong">
+                  {t('pages.agents.probe.title')}
+                </h3>
+                <span className="text-[11px] text-fg-subtle">
+                  {t('pages.agents.probe.cadence')}
+                </span>
+              </div>
+              <AgentProbePanel agentId={detail.id} />
+            </div>
           </div>
         )}
       </Dialog>
@@ -682,8 +685,8 @@ export function AgentsPage() {
               </p>
 
               <CommandBlock
-                caption={t('pages.agents.dockerDeploy')}
-                command={enrollResult.docker_command}
+                caption={t('pages.agents.installDeploy')}
+                command={enrollResult.install_command}
                 onCopy={copyText}
               />
               <CommandBlock
@@ -694,9 +697,7 @@ export function AgentsPage() {
 
               <p className="flex items-start gap-2 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs leading-relaxed text-fg">
                 <Warning weight="duotone" className="mt-0.5 h-4 w-4 shrink-0 text-fg-warning" />
-                <span>
-                  {t('pages.agents.enrollExpires', { time: formatDateTime(enrollResult.expires_at) })}
-                </span>
+                <span>{t('pages.agents.enrollNeverExpires')}</span>
               </p>
 
               <details className="rounded-md border border-line bg-recessed px-3 py-2">
@@ -730,13 +731,6 @@ export function AgentsPage() {
                 placeholder={t('pages.agents.nodeNamePlaceholder')}
                 hint={t('pages.agents.nodeNameHint')}
                 onChange={(e) => setEnrollName(e.target.value)}
-              />
-              <Select
-                label={t('pages.agents.keyTtl')}
-                value={String(enrollTtl)}
-                disabled={enroll.isPending}
-                options={ENROLL_TTL_OPTIONS.map((o) => ({ value: String(o.value), label: t(o.labelKey) }))}
-                onChange={(e) => setEnrollTtl(Number(e.target.value))}
               />
             </>
           )}

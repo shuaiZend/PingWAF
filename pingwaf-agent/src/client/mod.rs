@@ -15,6 +15,7 @@ use pingwaf_proto::control_plane::{
 use crate::cache::RuleCache;
 use crate::config::AgentConfig;
 use crate::heartbeat::{MetricsCollector, SystemMetrics};
+use crate::probe::{self, HostSample, ProbeBuffer};
 
 /// Log entry that can be queued for shipping to the control plane.
 /// This is a simplified local type that gets converted to proto at send time.
@@ -97,6 +98,8 @@ pub struct ControlPlaneClient {
     log_receiver: Arc<tokio::sync::Mutex<mpsc::Receiver<LogEntry>>>,
     /// Optional command handlers
     command_handlers: Arc<tokio::sync::RwLock<CommandHandlers>>,
+    /// Buffered host probe samples, shipped with each heartbeat
+    probe: Arc<ProbeBuffer>,
 }
 
 impl ControlPlaneClient {
@@ -149,6 +152,7 @@ impl ControlPlaneClient {
             log_sender: log_tx,
             log_receiver: Arc::new(tokio::sync::Mutex::new(log_rx)),
             command_handlers: Arc::new(tokio::sync::RwLock::new(handlers)),
+            probe: Arc::new(ProbeBuffer::new()),
         }
     }
 
@@ -209,6 +213,7 @@ impl ControlPlaneClient {
 
         let hostname = get_hostname();
         let (cpu_cores, memory_bytes, os_info) = get_system_info();
+        let addresses = self.probe.addresses();
 
         let request = proto::RegisterAgentRequest {
             api_key: self.config.api_key.clone(),
@@ -218,6 +223,8 @@ impl ControlPlaneClient {
             os_info,
             cpu_cores,
             memory_bytes,
+            public_ip: addresses.public_ip,
+            private_ip: addresses.private_ip,
         };
 
         let response = client.register_agent(request).await?.into_inner();
@@ -253,6 +260,15 @@ impl ControlPlaneClient {
         self: &Arc<Self>,
     ) -> anyhow::Result<Vec<JoinHandle<()>>> {
         let mut handles = Vec::new();
+
+        // Host probe runs on its own thread: reading /proc and shelling out to
+        // `df`/`ip` must never stall the async runtime.
+        probe::spawn(
+            Arc::clone(&self.probe),
+            self.config.probe_interval_secs,
+            self.config.probe_disk_path.clone(),
+            Arc::clone(&self.shutdown_signal),
+        );
 
         // Spawn the connection manager with reconnection logic
         let this = Arc::clone(self);
@@ -369,6 +385,7 @@ impl ControlPlaneClient {
         let metrics = Arc::clone(&self.metrics);
         let rule_cache = Arc::clone(&self.rule_cache);
         let shutdown = Arc::clone(&self.shutdown_signal);
+        let probe = Arc::clone(&self.probe);
 
         let sender_task = tokio::spawn(async move {
             let mut interval = tokio::time::interval(heartbeat_interval);
@@ -384,6 +401,7 @@ impl ControlPlaneClient {
                 }
 
                 let system_metrics = metrics.collect();
+                let addresses = probe.addresses();
                 let hb = proto::AgentHeartbeat {
                     agent_id: agent_id.clone(),
                     agent_token: agent_token.clone(),
@@ -403,6 +421,15 @@ impl ControlPlaneClient {
                     // ledger; this is what the control plane's
                     // `/api/v1/cache/status` reports.
                     site_statuses: rule_cache.cache_statuses(),
+                    // Everything sampled since the last heartbeat, oldest
+                    // first; draining keeps each sample shipped exactly once.
+                    host_samples: probe
+                        .drain()
+                        .iter()
+                        .map(to_proto_sample)
+                        .collect(),
+                    public_ip: addresses.public_ip,
+                    private_ip: addresses.private_ip,
                 };
 
                 if hb_tx.send(hb).await.is_err() {
@@ -722,6 +749,31 @@ impl ControlPlaneClient {
 // ─────────────────────────────────────────────────────────────
 // Helper functions for system information
 // ─────────────────────────────────────────────────────────────
+
+/// Convert a probe sample into its wire representation.
+fn to_proto_sample(sample: &HostSample) -> proto::HostSample {
+    proto::HostSample {
+        ts_millis: sample.ts_millis,
+        cpu_usage_percent: sample.cpu_usage_percent,
+        load1: sample.load1,
+        load5: sample.load5,
+        load15: sample.load15,
+        memory_total_bytes: sample.memory_total_bytes,
+        memory_used_bytes: sample.memory_used_bytes,
+        memory_available_bytes: sample.memory_available_bytes,
+        swap_total_bytes: sample.swap_total_bytes,
+        swap_used_bytes: sample.swap_used_bytes,
+        disk_total_bytes: sample.disk_total_bytes,
+        disk_used_bytes: sample.disk_used_bytes,
+        net_rx_bytes: sample.net_rx_bytes,
+        net_tx_bytes: sample.net_tx_bytes,
+        disk_read_bytes: sample.disk_read_bytes,
+        disk_write_bytes: sample.disk_write_bytes,
+        process_count: sample.process_count,
+        tcp_connections: sample.tcp_connections,
+        uptime_secs: sample.uptime_secs,
+    }
+}
 
 fn get_hostname() -> String {
     std::fs::read_to_string("/etc/hostname")

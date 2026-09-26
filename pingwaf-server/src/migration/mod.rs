@@ -12,6 +12,7 @@ pub mod m20240101_000004_create_agents;
 pub mod m20240101_000005_create_logs;
 pub mod m20240101_000006_create_additional_tables;
 pub mod m20240101_000007_site_settings;
+pub mod m20240101_000008_agent_host_samples;
 
 use sea_orm_migration::prelude::*;
 
@@ -29,6 +30,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20240101_000005_create_logs::Migration),
             Box::new(m20240101_000006_create_additional_tables::Migration),
             Box::new(m20240101_000007_site_settings::Migration),
+            Box::new(m20240101_000008_agent_host_samples::Migration),
         ]
     }
 }
@@ -40,7 +42,7 @@ mod tests {
     #[test]
     fn migrations_are_ordered_and_unique() {
         let migrations = Migrator::migrations();
-        assert_eq!(migrations.len(), 7);
+        assert_eq!(migrations.len(), 8);
         let names: Vec<String> =
             migrations.iter().map(|m| m.name().to_owned()).collect();
         let mut sorted = names.clone();
