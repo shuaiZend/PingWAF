@@ -192,6 +192,10 @@ jobs:
           file: ./Dockerfile.runtime
           platforms: ${{ matrix.platform }}
           push: true
+          # Disable provenance/SBOM so each per-arch tag is a plain image
+          # manifest (not a manifest list), which docker manifest create requires.
+          provenance: false
+          sbom: false
           tags: ghcr.io/shuaizend/pingwaf:${{ steps.version.outputs.value }}-${{ matrix.arch }}
           labels: |
             org.opencontainers.image.version=${{ steps.version.outputs.value }}
