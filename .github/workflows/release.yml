@@ -157,6 +157,10 @@ jobs:
             runs-on: ubuntu-22.04-arm
             platform: linux/arm64
     steps:
+      - name: Derive version
+        id: version
+        run: echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
       - name: Checkout
         uses: actions/checkout@v7
 
@@ -188,9 +192,9 @@ jobs:
           file: ./Dockerfile.runtime
           platforms: ${{ matrix.platform }}
           push: true
-          tags: ghcr.io/shuaizend/pingwaf:${GITHUB_REF_NAME#v}-${{ matrix.arch }}
+          tags: ghcr.io/shuaizend/pingwaf:${{ steps.version.outputs.value }}-${{ matrix.arch }}
           labels: |
-            org.opencontainers.image.version=${GITHUB_REF_NAME#v}
+            org.opencontainers.image.version=${{ steps.version.outputs.value }}
             org.opencontainers.image.revision=${{ github.sha }}
 
   docker-manifest:
