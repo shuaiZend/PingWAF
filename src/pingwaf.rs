@@ -36,7 +36,9 @@ use pingap_config::{
     BasicConf, CertificateConf, LocationConf, PingapConfig,
     ServerConf as PingapServerConf, UpstreamConf,
 };
-use pingap_proxy::{AppContext, Server as ProxyServer, ServerConf, parse_from_conf};
+use pingap_proxy::{
+    AppContext, Server as ProxyServer, ServerConf, parse_from_conf,
+};
 use pingora::server;
 use pingora::server::configuration::Opt;
 use pingwaf_agent::cache::RuleCache;
@@ -149,9 +151,7 @@ pub fn build_run_mode(cli: PingWafCli) -> RunMode {
 /// Each site becomes a set of upstream + location entries, and all sites
 /// share a single server that listens on ports 80 and 443 with TLS
 /// enabled via the global certificate store.
-fn build_pingap_config(
-    rule_cache: &RuleCache,
-) -> Option<PingapConfig> {
+fn build_pingap_config(rule_cache: &RuleCache) -> Option<PingapConfig> {
     let cached = rule_cache.all_sites();
     if cached.sites.is_empty() {
         return None;
@@ -189,9 +189,7 @@ fn build_pingap_config(
 
             let algo = match up.algorithm.as_str() {
                 "LbConsistentHash" => Some("hash:ip".to_string()),
-                "LbLeastConnections" => {
-                    Some("least_connections".to_string())
-                },
+                "LbLeastConnections" => Some("least_connections".to_string()),
                 "LbRandom" => Some("random".to_string()),
                 _ => None, // round_robin is the default
             };
@@ -200,9 +198,7 @@ fn build_pingap_config(
                 addrs,
                 algo,
                 connection_timeout: if up.connection_timeout_ms > 0 {
-                    Some(Duration::from_millis(
-                        up.connection_timeout_ms as u64,
-                    ))
+                    Some(Duration::from_millis(up.connection_timeout_ms as u64))
                 } else {
                     None
                 },
@@ -246,24 +242,25 @@ fn build_pingap_config(
         }
 
         // Convert SSL certificate
-        if let Some(ref ssl) = site.ssl_config {
-            if ssl.enabled && !ssl.cert_pem.is_empty() {
-                let cert_name = format!("{}_cert", site_id);
-                let domains = if site.alternate_domains.is_empty() {
-                    site.domain.clone()
-                } else {
-                    let mut d = vec![site.domain.clone()];
-                    d.extend(site.alternate_domains.clone());
-                    d.join(",")
-                };
-                let cert = CertificateConf {
-                    domains: Some(domains),
-                    tls_cert: Some(ssl.cert_pem.clone()),
-                    tls_key: Some(ssl.key_pem.clone()),
-                    ..Default::default()
-                };
-                certificates.insert(cert_name, cert);
-            }
+        if let Some(ref ssl) = site.ssl_config
+            && ssl.enabled
+            && !ssl.cert_pem.is_empty()
+        {
+            let cert_name = format!("{}_cert", site_id);
+            let domains = if site.alternate_domains.is_empty() {
+                site.domain.clone()
+            } else {
+                let mut d = vec![site.domain.clone()];
+                d.extend(site.alternate_domains.clone());
+                d.join(",")
+            };
+            let cert = CertificateConf {
+                domains: Some(domains),
+                tls_cert: Some(ssl.cert_pem.clone()),
+                tls_key: Some(ssl.key_pem.clone()),
+                ..Default::default()
+            };
+            certificates.insert(cert_name, cert);
         }
     }
 
@@ -307,9 +304,7 @@ pub async fn start_data_plane(
             break;
         }
         if i == 0 {
-            info!(
-                "data plane: waiting for control plane configuration..."
-            );
+            info!("data plane: waiting for control plane configuration...");
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
@@ -317,9 +312,7 @@ pub async fn start_data_plane(
     let config = match build_pingap_config(&rule_cache) {
         Some(config) => config,
         None => {
-            warn!(
-                "data plane: no sites configured, proxy not started"
-            );
+            warn!("data plane: no sites configured, proxy not started");
             // Keep waiting — the agent may receive config later
             loop {
                 tokio::time::sleep(Duration::from_secs(5)).await;
@@ -347,18 +340,14 @@ pub async fn start_data_plane(
     let toml_str = toml::to_string_pretty(&config).map_err(|e| {
         anyhow::anyhow!("failed to serialize proxy config: {}", e)
     })?;
-    let config_manager =
-        try_init_memory_config_manager(&toml_str, None).map_err(|e| {
-            anyhow::anyhow!("failed to init config manager: {}", e)
-        })?;
+    let config_manager = try_init_memory_config_manager(&toml_str, None)
+        .map_err(|e| anyhow::anyhow!("failed to init config manager: {}", e))?;
 
     // Initialize providers from the converted config
-    try_init_upstreams(&config.upstreams, None).map_err(|e| {
-        anyhow::anyhow!("failed to init upstreams: {}", e)
-    })?;
-    try_init_locations(&config.locations).map_err(|e| {
-        anyhow::anyhow!("failed to init locations: {}", e)
-    })?;
+    try_init_upstreams(&config.upstreams, None)
+        .map_err(|e| anyhow::anyhow!("failed to init upstreams: {}", e))?;
+    try_init_locations(&config.locations)
+        .map_err(|e| anyhow::anyhow!("failed to init locations: {}", e))?;
     try_init_server_locations(&config.servers, &config.locations).map_err(
         |e| anyhow::anyhow!("failed to init server locations: {}", e),
     )?;
@@ -366,13 +355,9 @@ pub async fn start_data_plane(
     // Initialize certificates
     let cert_provider = new_certificate_provider();
     if !config.certificates.is_empty() {
-        let (updated, errors) =
-            try_update_certificates(&config.certificates);
+        let (updated, errors) = try_update_certificates(&config.certificates);
         if !updated.is_empty() {
-            info!(
-                certs = updated.join(","),
-                "data plane: certificates loaded"
-            );
+            info!(certs = updated.join(","), "data plane: certificates loaded");
         }
         if !errors.is_empty() {
             error!(error = errors, "data plane: certificate parse errors");
@@ -404,9 +389,7 @@ pub async fn start_data_plane(
             .add_dependency(&bootstrap_handle);
     }
 
-    info!(
-        "data plane: proxy server is running on 0.0.0.0:80,0.0.0.0:443"
-    );
+    info!("data plane: proxy server is running on 0.0.0.0:80,0.0.0.0:443");
 
     // Block until shutdown
     let handle = std::thread::spawn(move || {
@@ -442,12 +425,11 @@ pub async fn run(mode: RunMode) -> anyhow::Result<()> {
 
             // Start the data plane proxy in the background
             let rule_cache = Arc::clone(&agent.rule_cache);
-            let proxy_handle =
-                tokio::spawn(async move {
-                    if let Err(e) = start_data_plane(rule_cache).await {
-                        error!(error = %e, "data plane proxy exited with error");
-                    }
-                });
+            let proxy_handle = tokio::spawn(async move {
+                if let Err(e) = start_data_plane(rule_cache).await {
+                    error!(error = %e, "data plane proxy exited with error");
+                }
+            });
 
             // Wait for shutdown signal
             shutdown_signal().await;
@@ -522,7 +504,8 @@ async fn bootstrap_agent_key(
 }
 
 /// Wait for SIGINT or SIGTERM.
-async fn shutdown_signal() {    let ctrl_c = async {
+async fn shutdown_signal() {
+    let ctrl_c = async {
         tokio::signal::ctrl_c()
             .await
             .expect("failed to install Ctrl+C handler");

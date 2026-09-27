@@ -290,7 +290,9 @@ pub async fn seed_bootstrap_api_key(
         .filter(user::Column::Role.eq("admin"))
         .one(db)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("no admin user found for bootstrap key"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("no admin user found for bootstrap key")
+        })?;
 
     if let Some(existing) = api_key::Entity::find()
         .filter(api_key::Column::Name.eq(BOOTSTRAP_KEY_NAME))
