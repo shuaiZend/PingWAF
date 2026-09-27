@@ -151,12 +151,25 @@ pub async fn run(mode: RunMode) -> anyhow::Result<()> {
             agent.shutdown().await;
             Ok(())
         },
-        RunMode::AllInOne(server_config, agent_config) => {
+        RunMode::AllInOne(server_config, mut agent_config) => {
             info!(
                 http_addr = %server_config.http_addr,
                 grpc_addr = %server_config.grpc_addr,
                 "starting PingWAF in All-in-One mode (control plane + data plane)"
             );
+
+            // Auto-provision a bootstrap API key when none is configured so the
+            // embedded agent can authenticate with the local gRPC server.
+            if agent_config.api_key.is_empty() {
+                match bootstrap_agent_key(&server_config).await {
+                    Ok(key) => {
+                        agent_config.api_key = key;
+                    },
+                    Err(e) => {
+                        error!(error = %e, "failed to create bootstrap API key for embedded agent");
+                    },
+                }
+            }
 
             // Start the agent in the background first.
             // It will retry connecting to the server until it comes up.
@@ -181,9 +194,16 @@ pub async fn run(mode: RunMode) -> anyhow::Result<()> {
     }
 }
 
+/// Connect to the database, run migrations, and create a bootstrap API key
+/// for the embedded agent in all-in-one mode.
+async fn bootstrap_agent_key(
+    config: &pingwaf_server::ServerConfig,
+) -> anyhow::Result<String> {
+    pingwaf_server::bootstrap_and_seed_api_key(config).await
+}
+
 /// Wait for SIGINT or SIGTERM.
-async fn shutdown_signal() {
-    let ctrl_c = async {
+async fn shutdown_signal() {    let ctrl_c = async {
         tokio::signal::ctrl_c()
             .await
             .expect("failed to install Ctrl+C handler");

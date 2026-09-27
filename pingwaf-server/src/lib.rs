@@ -248,6 +248,82 @@ async fn seed_admin(
     Ok(())
 }
 
+/// Full bootstrap for all-in-one mode: connect to the database, run
+/// migrations, seed the admin user, and create a bootstrap API key.
+/// Returns the plaintext API key for the embedded agent.
+pub async fn bootstrap_and_seed_api_key(
+    config: &ServerConfig,
+) -> anyhow::Result<String> {
+    let mut opts = ConnectOptions::new(config.db_url.as_str());
+    opts.max_connections(2).sqlx_logging(false);
+
+    let db = Database::connect(opts).await.map_err(|err| {
+        anyhow::anyhow!("bootstrap: failed to connect to PostgreSQL: {err}")
+    })?;
+
+    Migrator::up(&db, None)
+        .await
+        .map_err(|err| anyhow::anyhow!("bootstrap: migration failed: {err}"))?;
+
+    seed_admin(&db, config).await?;
+    seed_bootstrap_api_key(&db).await
+}
+
+/// Seeds a bootstrap API key for all-in-one mode.
+///
+/// Creates a fresh API key each startup so the embedded agent can
+/// authenticate with the local gRPC server. Any previous bootstrap key is
+/// replaced. Returns the plaintext key value.
+pub async fn seed_bootstrap_api_key(
+    db: &sea_orm::DatabaseConnection,
+) -> anyhow::Result<String> {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+    use crate::api::keys::generate_key;
+    use crate::auth::password::hash_password_with_cost;
+    use crate::models::{api_key, user};
+
+    const BOOTSTRAP_KEY_NAME: &str = "_all-in-one-bootstrap";
+    const KEY_HASH_COST: u32 = 10;
+
+    let admin = user::Entity::find()
+        .filter(user::Column::Role.eq("admin"))
+        .one(db)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("no admin user found for bootstrap key"))?;
+
+    if let Some(existing) = api_key::Entity::find()
+        .filter(api_key::Column::Name.eq(BOOTSTRAP_KEY_NAME))
+        .one(db)
+        .await?
+    {
+        api_key::Entity::delete_by_id(existing.id).exec(db).await?;
+        tracing::debug!(old_key_id = %existing.id, "rotated bootstrap API key");
+    }
+
+    let plaintext = generate_key();
+    let key_hash = hash_password_with_cost(&plaintext, KEY_HASH_COST)
+        .map_err(|e| anyhow::anyhow!("failed to hash bootstrap key: {e}"))?;
+
+    let model = api_key::ActiveModel {
+        id: sea_orm::Set(uuid::Uuid::new_v4()),
+        user_id: sea_orm::Set(admin.id),
+        name: sea_orm::Set(BOOTSTRAP_KEY_NAME.to_string()),
+        key_hash: sea_orm::Set(key_hash),
+        key_prefix: sea_orm::Set(plaintext[..8].to_string()),
+        permissions: sea_orm::Set(vec!["agent".to_string()]),
+        expires_at: sea_orm::Set(None),
+        last_used_at: sea_orm::Set(None),
+        created_at: sea_orm::Set(chrono::Utc::now()),
+    };
+
+    use sea_orm::ActiveModelTrait;
+    model.insert(db).await?;
+
+    tracing::info!("bootstrap API key created for all-in-one agent");
+    Ok(plaintext)
+}
+
 /// Returns a future that resolves when the process receives SIGINT or SIGTERM.
 async fn shutdown_signal() {
     let ctrl_c = async {
