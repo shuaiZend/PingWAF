@@ -179,10 +179,15 @@ fn build_pingap_config(rule_cache: &RuleCache) -> Option<PingapConfig> {
                 .peers
                 .iter()
                 .map(|p| {
+                    let addr = p
+                        .address
+                        .strip_prefix("https://")
+                        .or_else(|| p.address.strip_prefix("http://"))
+                        .unwrap_or(&p.address);
                     if p.weight > 1 {
-                        format!("{} {}", p.address, p.weight)
+                        format!("{} {}", addr, p.weight)
                     } else {
-                        p.address.clone()
+                        addr.to_string()
                     }
                 })
                 .collect();
