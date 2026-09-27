@@ -192,8 +192,8 @@ impl ControlPlaneClient {
     async fn create_channel(&self) -> anyhow::Result<Channel> {
         let endpoint = Endpoint::from_shared(self.config.server_url.clone())
             .map_err(|e| anyhow::anyhow!("Invalid server URL: {}", e))?
-            .timeout(Duration::from_secs(10))
             .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(300))
             .keep_alive_while_idle(true)
             .http2_keep_alive_interval(Duration::from_secs(30))
             .tcp_nodelay(true);
