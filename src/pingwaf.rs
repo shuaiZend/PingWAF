@@ -407,6 +407,10 @@ pub async fn start_data_plane(
         None,
     );
     let hc_name = upstream_health_check_task.name().to_string();
+    info!(
+        service_name = %hc_name,
+        "data plane: registering upstream health check background service"
+    );
     my_server
         .add_service(background_service(&hc_name, upstream_health_check_task));
 
