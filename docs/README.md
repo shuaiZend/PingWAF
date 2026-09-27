@@ -15,6 +15,7 @@ centrally-controlled Web Application Firewall built on
 | [deployment.md](./deployment.md) | Docker Compose, binary + systemd, and distributed (server + agents) topologies |
 | [user-guide.md](./user-guide.md) | Dashboard walkthrough — sites, rules, policies, IP access, rate limiting |
 | [api.md](./api.md) | REST API reference (base URL `http://<host>:9080/api/v1`) |
+| [profiling.md](./profiling.md) | Built-in profiling: `go tool pprof` captures, SVG flame graphs, memory snapshots |
 
 ## 🧭 Project & community
 

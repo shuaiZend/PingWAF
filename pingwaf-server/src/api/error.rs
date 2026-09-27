@@ -36,6 +36,9 @@ pub enum ApiError {
     Conflict(String),
     /// Semantically invalid payload (well-formed JSON, bad values).
     Unprocessable(String),
+    /// The endpoint exists but cannot run on this deployment, e.g. CPU
+    /// profiling on non-Linux platforms.
+    NotImplemented(String),
     /// Unexpected failure; the message is logged in full and a generic text is
     /// returned to the client.
     Internal(String),
@@ -51,6 +54,7 @@ impl ApiError {
             ApiError::NotFound(_) => "not_found",
             ApiError::Conflict(_) => "conflict",
             ApiError::Unprocessable(_) => "unprocessable_entity",
+            ApiError::NotImplemented(_) => "not_implemented",
             ApiError::Internal(_) => "internal_error",
         }
     }
@@ -64,6 +68,7 @@ impl ApiError {
             ApiError::NotFound(_) => StatusCode::NOT_FOUND,
             ApiError::Conflict(_) => StatusCode::CONFLICT,
             ApiError::Unprocessable(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            ApiError::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
             ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -90,6 +95,7 @@ impl std::fmt::Display for ApiError {
             | ApiError::NotFound(msg)
             | ApiError::Conflict(msg)
             | ApiError::Unprocessable(msg)
+            | ApiError::NotImplemented(msg)
             | ApiError::Internal(msg) => f.write_str(msg),
         }
     }
