@@ -43,6 +43,8 @@ services:
     volumes:
       - pingwaf-data:/var/lib/pingwaf
       - pingwaf-certs:/etc/pingwaf/certs
+    cap_add:
+      - NET_BIND_SERVICE
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:9080/healthz || exit 1"]
