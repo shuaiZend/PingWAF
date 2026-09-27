@@ -24,6 +24,7 @@ concurrency:
 
 permissions:
   contents: read
+  packages: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -115,10 +116,10 @@ jobs:
       - name: Build
         run: npm run build
 
-  # Verifies the multi-stage Dockerfile still builds. Only on main: a PR run
-  # would burn a lot of minutes for little signal, and this job never pushes.
+  # Verifies the multi-stage Dockerfile still builds and pushes :latest to GHCR.
+  # Only on main: a PR run would burn a lot of minutes for little signal.
   docker:
-    name: Docker build (verify)
+    name: Docker build & push :latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -129,12 +130,20 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build image (no push)
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
           platforms: linux/amd64
-          push: false
+          push: true
+          tags: ghcr.io/shuaizend/pingwaf:latest
           cache-from: type=gha,scope=docker
           cache-to: type=gha,scope=docker,mode=max
