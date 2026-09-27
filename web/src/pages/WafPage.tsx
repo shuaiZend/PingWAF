@@ -95,8 +95,8 @@ export function WafPage() {
     enabled: Boolean(siteId),
   })
 
-  const allRules = rulesQuery.data ?? []
-  const groups = groupsQuery.data ?? []
+  const allRules = useMemo(() => rulesQuery.data ?? [], [rulesQuery.data])
+  const groups = useMemo(() => groupsQuery.data ?? [], [groupsQuery.data])
 
   /** Derived exactly the way the control plane derives it for the agents. */
   const waf = useMemo(
