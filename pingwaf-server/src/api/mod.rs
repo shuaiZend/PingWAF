@@ -15,6 +15,7 @@ pub mod debug;
 pub mod error;
 pub mod error_pages;
 pub mod geo;
+pub mod ip_groups;
 pub mod ip_rules;
 pub mod keys;
 pub mod logs;
@@ -61,6 +62,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(settings::routes())
         .merge(ssl::routes())
         .merge(ip_rules::routes())
+        .merge(ip_groups::routes())
         .merge(geo::routes())
         .merge(bot::routes())
         .merge(challenge::routes())

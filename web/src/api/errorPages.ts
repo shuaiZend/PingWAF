@@ -2,6 +2,7 @@ import { apiClient } from './client'
 import type {
   ErrorPage,
   ErrorPageContentType,
+  Page,
   UpsertErrorPageRequest,
 } from './types'
 
@@ -14,7 +15,7 @@ import type {
  */
 export const errorPagesApi = {
   list: (siteId: string) =>
-    apiClient.get<ErrorPage[]>(`/sites/${siteId}/error-pages`),
+    apiClient.get<Page<ErrorPage>>(`/sites/${siteId}/error-pages`),
 
   upsert: (siteId: string, data: UpsertErrorPageRequest) =>
     apiClient.post<ErrorPage>(`/sites/${siteId}/error-pages`, data),

@@ -28,7 +28,9 @@ use crate::api::sites::{
 use crate::api::state::AppState;
 use crate::auth::AuthUser;
 use crate::grpc::notify_config_changed;
-use crate::models::{acme_challenge, site, site_certificates};
+use crate::models::{
+    acme_challenge, certificate_events, site, site_certificates,
+};
 
 /// Certificate status values.
 mod cert_status {
@@ -231,6 +233,11 @@ pub fn routes() -> Router<AppState> {
             "/certificates/{cert_id}/renew",
             axum::routing::post(renew_global_certificate),
         )
+        .route(
+            "/certificates/{cert_id}/events",
+            get(list_certificate_events),
+        )
+        .route("/ssl-events", get(list_all_events))
 }
 
 /// `GET /api/v1/sites/{site_id}/certificates`
@@ -323,6 +330,18 @@ async fn insert_certificate(
     .await?;
 
     tracing::info!(site_id = %site_id, cert_id = %model.id, "certificate created");
+    write_cert_event(
+        &state.db,
+        model.id,
+        site_id,
+        "created",
+        format!(
+            "Certificate for {} created (status: {})",
+            model.domain, model.status
+        ),
+        None,
+    )
+    .await;
     touch_site(state, site_id).await?;
     notify_config_changed(state, site_id).await;
 
@@ -429,6 +448,15 @@ async fn delete_certificate(
         .await?;
 
     tracing::info!(site_id = %id, cert_id = %target, "certificate deleted");
+    write_cert_event(
+        &state.db,
+        target,
+        id,
+        "deleted",
+        "Certificate deleted".to_string(),
+        None,
+    )
+    .await;
     touch_site(&state, id).await?;
     notify_config_changed(&state, id).await;
 
@@ -452,6 +480,7 @@ async fn renew_certificate(
         ));
     }
 
+    let domain = row.domain.clone();
     // Mark as pending renewal
     let mut active: site_certificates::ActiveModel = row.into();
     active.status = Set(cert_status::PENDING.to_string());
@@ -459,6 +488,15 @@ async fn renew_certificate(
     active.update(&state.db).await?;
 
     tracing::info!(site_id = %id, cert_id = %target, "certificate renewal triggered");
+    write_cert_event(
+        &state.db,
+        target,
+        id,
+        "renewal_requested",
+        format!("Manual renewal requested for {}", domain),
+        None,
+    )
+    .await;
 
     Ok(Json(serde_json::json!({
         "message": "renewal initiated",
@@ -782,4 +820,174 @@ async fn find_certificate_by_id(
         .ok_or_else(|| {
             ApiError::NotFound(format!("certificate {cert_id} not found"))
         })
+}
+
+// ─── Certificate event audit trail ──────────────────────────────────────────
+
+/// Certificate event response.
+#[derive(Debug, Serialize)]
+pub struct CertificateEventResponse {
+    pub id: Uuid,
+    pub certificate_id: Uuid,
+    pub site_id: Option<Uuid>,
+    pub event_type: String,
+    pub message: String,
+    pub details: Option<serde_json::Value>,
+    pub created_at: DateTime<Utc>,
+    pub domain: Option<String>,
+    pub site_domain: Option<String>,
+}
+
+/// Writes one row into `certificate_events`. Best-effort: logs on failure but
+/// does not propagate the error, so event recording never breaks the main flow.
+async fn write_cert_event(
+    db: &sea_orm::DatabaseConnection,
+    certificate_id: Uuid,
+    site_id: Uuid,
+    event_type: &str,
+    message: String,
+    details: Option<serde_json::Value>,
+) {
+    let event = certificate_events::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        certificate_id: Set(certificate_id),
+        site_id: Set(Some(site_id)),
+        event_type: Set(event_type.to_string()),
+        message: Set(message),
+        details: Set(details),
+        created_at: Set(Utc::now()),
+    };
+    if let Err(err) = event.insert(db).await {
+        tracing::warn!(%err, "failed to write certificate event");
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EventsQuery {
+    #[serde(default)]
+    pub certificate_id: Option<String>,
+    #[serde(default)]
+    pub event_type: Option<String>,
+    #[serde(flatten)]
+    pub pagination: Pagination,
+}
+
+/// `GET /api/v1/certificates/{cert_id}/events`
+async fn list_certificate_events(
+    State(state): State<AppState>,
+    current: AuthUser,
+    Path(cert_id): Path<String>,
+    Query(query): Query<EventsQuery>,
+) -> Result<Json<Page<CertificateEventResponse>>, ApiError> {
+    let target = parse_uuid(&cert_id, "certificate id")?;
+    let row = find_certificate_by_id(&state, target).await?;
+    load_site_read(&state.db, row.site_id, &current).await?;
+
+    let pagination = query.pagination.normalise();
+    let mut condition = Condition::all()
+        .add(certificate_events::Column::CertificateId.eq(target));
+    if let Some(ref et) = non_empty(&query.event_type) {
+        condition = condition
+            .add(certificate_events::Column::EventType.eq(et.as_str()));
+    }
+
+    let paginator = certificate_events::Entity::find()
+        .filter(condition)
+        .order_by_desc(certificate_events::Column::CreatedAt)
+        .paginate(&state.db, pagination.limit());
+
+    let total = paginator.num_items().await?;
+    let rows = paginator.fetch_page(pagination.index()).await?;
+
+    let items = rows
+        .into_iter()
+        .map(|e| CertificateEventResponse {
+            id: e.id,
+            certificate_id: e.certificate_id,
+            site_id: e.site_id,
+            event_type: e.event_type,
+            message: e.message,
+            details: e.details,
+            created_at: e.created_at,
+            domain: Some(row.domain.clone()),
+            site_domain: None,
+        })
+        .collect();
+    Ok(Json(Page::new(items, total, pagination)))
+}
+
+/// `GET /api/v1/ssl-events` — cross-certificate event log for the SSL/TLS page.
+async fn list_all_events(
+    State(state): State<AppState>,
+    current: AuthUser,
+    Query(query): Query<EventsQuery>,
+) -> Result<Json<Page<CertificateEventResponse>>, ApiError> {
+    let sites = visible_sites(&state, &current).await?;
+    let pagination = query.pagination.normalise();
+
+    let mut condition = Condition::all();
+    if !current.is_admin() {
+        condition = condition.add(
+            certificate_events::Column::SiteId.is_in(sites.keys().copied()),
+        );
+    }
+    if let Some(ref cid) = non_empty(&query.certificate_id) {
+        let cert_uuid = parse_uuid(cid, "certificate id")?;
+        condition = condition
+            .add(certificate_events::Column::CertificateId.eq(cert_uuid));
+    }
+    if let Some(ref et) = non_empty(&query.event_type) {
+        condition = condition
+            .add(certificate_events::Column::EventType.eq(et.as_str()));
+    }
+
+    let paginator = certificate_events::Entity::find()
+        .filter(condition)
+        .order_by_desc(certificate_events::Column::CreatedAt)
+        .paginate(&state.db, pagination.limit());
+
+    let total = paginator.num_items().await?;
+    let rows = paginator.fetch_page(pagination.index()).await?;
+
+    let cert_ids: Vec<Uuid> = rows
+        .iter()
+        .map(|e| e.certificate_id)
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    let certs = if cert_ids.is_empty() {
+        HashMap::new()
+    } else {
+        site_certificates::Entity::find()
+            .filter(site_certificates::Column::Id.is_in(cert_ids))
+            .all(&state.db)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|c| (c.id, c))
+            .collect()
+    };
+
+    let items = rows
+        .into_iter()
+        .map(|e| {
+            let cert = certs.get(&e.certificate_id);
+            let site_domain = e
+                .site_id
+                .and_then(|sid| sites.get(&sid))
+                .map(|(d, _)| d.clone());
+            CertificateEventResponse {
+                id: e.id,
+                certificate_id: e.certificate_id,
+                site_id: e.site_id,
+                event_type: e.event_type,
+                message: e.message,
+                details: e.details,
+                created_at: e.created_at,
+                domain: cert.map(|c| c.domain.clone()),
+                site_domain,
+            }
+        })
+        .collect();
+    Ok(Json(Page::new(items, total, pagination)))
 }

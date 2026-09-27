@@ -881,6 +881,35 @@ export interface UpdateSslSettingsRequest {
   always_use_https?: boolean
 }
 
+/* ── Certificate events ────────────────────────────────────────────── */
+
+export type CertEventType = 'created' | 'renewal_requested' | 'renewed' | 'failed' | 'deleted'
+
+export const CERT_EVENT_TYPES: CertEventType[] = [
+  'created',
+  'renewal_requested',
+  'renewed',
+  'failed',
+  'deleted',
+]
+
+export interface CertificateEvent {
+  id: string
+  certificate_id: string
+  site_id: string | null
+  event_type: CertEventType | string
+  message: string
+  details: Record<string, unknown> | null
+  created_at: string
+  domain: string | null
+  site_domain: string | null
+}
+
+export interface CertificateEventListQuery extends PaginationQuery {
+  certificate_id?: string
+  event_type?: string
+}
+
 /* ── Cache rules ──────────────────────────────────────────────────── */
 
 export interface CreateCacheRuleRequest {
@@ -1180,4 +1209,50 @@ export interface TrafficOverview {
   topIps: TopIp[]
   topRules: TopRule[]
   statusCodes: StatusCodeCount[]
+}
+
+/* ── IP groups (blacklist / whitelist) ────────────────────────────── */
+
+export type IpGroupAction = 'block' | 'allow'
+
+export const IP_GROUP_ACTIONS: IpGroupAction[] = ['block', 'allow']
+
+export interface IpGroup {
+  id: string
+  name: string
+  description: string | null
+  ip_ranges: string[]
+  action: IpGroupAction | string
+  is_global: boolean
+  source_url: string | null
+  sync_interval_minutes: number | null
+  last_synced_at: string | null
+  enabled: boolean
+  created_at: string
+  updated_at: string
+}
+
+/** Returned by list/show endpoints — includes the associated site count. */
+export interface IpGroupResponse {
+  group: IpGroup
+  site_count: number
+}
+
+export interface CreateIpGroupRequest {
+  name: string
+  description?: string | null
+  ip_ranges: string[]
+  action?: IpGroupAction | string
+  is_global?: boolean
+  source_url?: string | null
+  sync_interval_minutes?: number | null
+  enabled?: boolean
+}
+
+export type UpdateIpGroupRequest = Partial<CreateIpGroupRequest>
+
+export interface IpGroupListQuery extends PaginationQuery {
+  action?: string
+  is_global?: boolean
+  enabled?: boolean
 }

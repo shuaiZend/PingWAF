@@ -1,5 +1,7 @@
 import { apiClient } from './client'
 import type {
+  CertificateEvent,
+  CertificateEventListQuery,
   CertificateListQuery,
   CertificateSummary,
   CertificateWithSite,
@@ -77,6 +79,17 @@ export const sslApi = {
 
   renewGlobal: (id: string) =>
     apiClient.post<RenewalAck>(`/certificates/${id}/renew`),
+
+  /* ── Certificate events ──────────────────────────────────────────── */
+  listCertEvents: (certId: string, query: CertificateEventListQuery = {}) =>
+    apiClient.get<Page<CertificateEvent>>(`/certificates/${certId}/events`, {
+      query: { page_size: 50, ...query },
+    }),
+
+  listAllEvents: (query: CertificateEventListQuery = {}) =>
+    apiClient.get<Page<CertificateEvent>>('/ssl-events', {
+      query: { page_size: 50, ...query },
+    }),
 }
 
 /**
@@ -108,6 +121,10 @@ export const sslKeys = {
   settings: (siteId: string) => [...sslKeys.site(siteId), 'settings'] as const,
   global: (query?: CertificateListQuery) => [...sslKeys.all, 'global', query ?? {}] as const,
   summary: () => [...sslKeys.all, 'summary'] as const,
+  events: (query?: CertificateEventListQuery) =>
+    [...sslKeys.all, 'events', query ?? {}] as const,
+  certEvents: (certId: string, query?: CertificateEventListQuery) =>
+    [...sslKeys.all, 'cert', certId, 'events', query ?? {}] as const,
 }
 
 export default sslApi

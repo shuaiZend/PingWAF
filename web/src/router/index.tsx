@@ -25,6 +25,7 @@ import { SslPage } from '@/pages/sites/SslPage'
 import { TrafficPage } from '@/pages/sites/TrafficPage'
 import { GlobalSslPage } from '@/pages/GlobalSslPage'
 import { GlobalTrafficPage } from '@/pages/GlobalTrafficPage'
+import { IpGroupsPage } from '@/pages/IpGroupsPage'
 import { RewritePage } from '@/pages/sites/RewritePage'
 import { ErrorPagesPage } from '@/pages/sites/ErrorPagesPage'
 import { SiteSettingsPage } from '@/pages/placeholders'
@@ -92,6 +93,7 @@ export const router = createBrowserRouter([
       },
       { path: 'logs', element: <LogsPage /> },
       { path: 'agents', element: <AgentsPage /> },
+      { path: 'ip-groups', element: <IpGroupsPage /> },
       // Global surfaces. The per-site counterparts live under `/sites/:siteId`.
       { path: 'ssl', element: <GlobalSslPage /> },
       { path: 'traffic', element: <GlobalTrafficPage /> },

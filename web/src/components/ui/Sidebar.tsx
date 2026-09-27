@@ -15,6 +15,7 @@ import {
   Robot,
   Cloud,
   IdentificationCard,
+  FunnelSimple,
   CaretDown,
   type Icon,
 } from '@phosphor-icons/react'
@@ -92,6 +93,7 @@ export function Sidebar({ collapsed, onNavigate }: SidebarProps) {
       ],
     },
     { kind: 'leaf', to: site('caching'), labelKey: 'nav.caching', icon: Lightning, requiresSite: true },
+    { kind: 'leaf', to: '/ip-groups', labelKey: 'nav.ipGroups', icon: FunnelSimple },
     // SSL/TLS and traffic in the sidebar are the *global* surfaces; each site's
     // own certificates and traffic live in that site's tab bar.
     { kind: 'leaf', to: '/ssl', labelKey: 'nav.ssl', icon: Lock },
