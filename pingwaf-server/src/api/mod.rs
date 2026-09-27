@@ -11,6 +11,7 @@ pub mod bot;
 pub mod cache;
 pub mod challenge;
 pub mod common;
+pub mod debug;
 pub mod error;
 pub mod error_pages;
 pub mod geo;
@@ -65,6 +66,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(challenge::routes())
         .merge(rewrite::routes())
         .merge(error_pages::routes())
+        .merge(debug::routes())
         .route("/health", get(health))
         .route("/version", get(version))
         .fallback(api_not_found);

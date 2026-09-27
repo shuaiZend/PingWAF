@@ -22,4 +22,9 @@ ignore = [
     # PostgreSQL, so that code path is never exercised.
     # Remove once rsa ships a constant-time fix.
     "RUSTSEC-2023-0071",
+
+    # rustls-pemfile 2.2 (RUSTSEC-2025-0134) is unmaintained, not vulnerable.
+    # It is required by Pingora 0.9's optional rustls backend; the current
+    # upstream main branch still depends on it. Remove when Pingora replaces it.
+    "RUSTSEC-2025-0134",
 ]

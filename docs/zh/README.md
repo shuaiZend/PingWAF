@@ -6,7 +6,7 @@
 
 | | |
 | --- | --- |
-| **从这里开始** | [快速开始](#快速开始docker) · [插件](plugins/) · [组件](crates/) · [架构](guide/modules.md) · [示例](guide/examples.md) |
+| **从这里开始** | [快速开始](#快速开始docker) · [插件](plugins/) · [组件](crates/) · [架构](guide/modules.md) · [示例](guide/examples.md) · [内置性能剖析](profiling.md) |
 | **链接** | [English](/) · [GitHub](https://github.com/vicanso/pingap) · [Releases](https://github.com/vicanso/pingap/releases) |
 
 ## 核心特性

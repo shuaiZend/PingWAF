@@ -10,6 +10,8 @@ pingwaf-proto = { path = "../pingwaf-proto" }
 # The control plane validates the built-in rule expressions with the same
 # parser the data plane evaluates them with.
 pingwaf-waf = { path = "../pingwaf-waf" }
+# Built-in pprof-style profiling endpoints (/api/v1/debug/...).
+pingwaf-pprof = { path = "../pingwaf-pprof" }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }

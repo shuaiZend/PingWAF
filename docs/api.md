@@ -910,6 +910,55 @@ Test Elasticsearch connectivity.
 
 ---
 
+## Debug & Profiling
+
+Built-in pprof-style profiling of the control-plane process. All endpoints require an admin token. Sampling is process-global: while a capture is running, further requests return `409 Conflict`.
+
+CPU sampling requires Linux (the only platform with a signal-safe unwinder for the sampling handler); on other platforms the capture endpoints return `501 Not Implemented`, while `/debug/pprof/memory` works everywhere.
+
+Symbols are resolved from the binary's symbol table. The default `release` profile strips symbols, so most frames read `Unknown` — profile a `release-perf` build (`make release-perf`) to get readable flame graphs.
+
+### GET /debug/pprof/profile
+
+Capture CPU samples and return a gzip-compressed pprof protobuf consumable by `go tool pprof` and speedscope.
+
+**Query:** `?seconds=30&frequency=99` — capture window (1-120 s, default 30) and sampling frequency in Hz (1-1000, default 99).
+
+```bash
+go tool pprof -http=: http://localhost:8080/api/v1/debug/pprof/profile?seconds=30
+```
+
+### GET /debug/pprof/flamegraph
+
+Capture CPU samples and return an SVG flamegraph viewable directly in a browser. Same query parameters as above.
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8080/api/v1/debug/pprof/flamegraph?seconds=30" > flamegraph.svg
+```
+
+### GET /debug/pprof/memory
+
+JSON snapshot of process RSS and system memory (no sampling, returns immediately).
+
+**Response (200):**
+```json
+{
+  "rss_bytes": 120258048,
+  "virtual_bytes": 805984256,
+  "total_memory_bytes": 17179869184,
+  "used_memory_bytes": 9663676416,
+  "rss": "121.2 MB",
+  "total_memory": "16.0 GB",
+  "used_memory": "9.0 GB",
+  "collected_at_ms": 1727443200000
+}
+```
+
+The data plane (pingap) exposes the same three endpoints under its admin path: `GET {admin-path}/api/pprof/profile`, `.../flamegraph` and `.../memory`, authenticated by the admin plugin's credentials. See [Profiling](profiling.md).
+
+---
+
 ## Error Responses
 
 All errors follow a consistent format:

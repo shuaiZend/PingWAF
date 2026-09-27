@@ -72,6 +72,7 @@ pingap-util = { workspace = true }
 pingap-webhook = { workspace = true }
 pingwaf-server = { path = "pingwaf-server" }
 pingwaf-agent = { path = "pingwaf-agent" }
+pingwaf-pprof = { workspace = true }
 anyhow = { workspace = true }
 pingora = { workspace = true }
 regex = { workspace = true }
@@ -87,7 +88,7 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 snafu = { workspace = true }
 substring = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time"] }
 toml = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -237,6 +238,7 @@ members = [
     "pingap-webhook",
     "pingwaf-server",
     "pingwaf-proto",
+    "pingwaf-pprof",
     "pingwaf-waf",
     "pingwaf-challenge",
     "pingwaf-agent",
@@ -331,6 +333,7 @@ pingap-sentry = { version = "0.14.4", path = "pingap-sentry" }
 pingap-upstream = { version = "0.14.4", path = "pingap-upstream", default-features = false }
 pingap-util = { version = "0.14.4", path = "pingap-util" }
 pingap-webhook = { version = "0.14.4", path = "pingap-webhook" }
+pingwaf-pprof = { version = "0.1.0", path = "pingwaf-pprof" }
 # Released crates.io versions; all three must stay on the same version so cargo
 # resolves one copy of pingora-core.
 # The TLS backend (`openssl` or `rustls`) is chosen by the top-level
