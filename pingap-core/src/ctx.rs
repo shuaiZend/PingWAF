@@ -299,6 +299,9 @@ pub struct CacheInfo {
     /// Request headers the origin's `Vary` response header may turn into
     /// cache variants (lowercased); `None` honours every header it names.
     pub vary_headers: Option<Arc<Vec<String>>>,
+    /// Browser-facing `Cache-Control: max-age` (seconds) pinned by a matched
+    /// cache rule; `None` leaves the origin's header untouched.
+    pub browser_ttl: Option<u32>,
     /// The number of cache read operations performed.
     pub reading_count: Option<u32>,
     /// The number of cache write operations performed.

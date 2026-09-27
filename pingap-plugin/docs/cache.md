@@ -102,6 +102,29 @@ in a multi-instance deployment, issue the request on every node.
 - Cache read/write counts are recorded into the request context and are available
   in access logs as `{:cache_lookup_time}` / `{:cache_lock_time}`.
 
+## Control plane rules (agent mode)
+
+When the data plane runs under a PingWAF agent, the control plane can attach
+per-site cache rules. Each rule carries a Cloudflare-style
+`match_expression` (same syntax as the [waf](waf.md) plugin's expressions)
+and the first matching rule redefines the request's cache behaviour:
+
+| Rule field | Effect on a matched request |
+| --- | --- |
+| `cache_eligible = false` | The request bypasses the cache entirely (`PURGE` still works). |
+| `edge_ttl_seconds` | Overrides the static `max_ttl` (`0` keeps the static value). |
+| `browser_ttl_seconds` | Pins the browser-facing `Cache-Control: max-age` on hits and misses alike (`0` leaves the origin header untouched). |
+| `respect_origin_headers` | Overrides `check_cache_control`. |
+| `cache_key_headers` | Additional request headers folded into the cache key, on top of the static `headers`. |
+
+Matched entries are stored under the site's canonical control-plane domain as
+the namespace — the same unit the agent's per-domain `disk_quota_mb` ledger
+charges — regardless of which of the site's domains the request used.
+`PURGE /*` empties that dynamic namespace.
+
+Requests that match no rule, hosts unknown to the agent, and standalone
+deployments keep the static configuration above unchanged.
+
 ## Usage notes
 
 - **`eviction` needs a bounded backend.** It is only wired up when the backend

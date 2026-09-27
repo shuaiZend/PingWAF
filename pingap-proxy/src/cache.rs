@@ -71,6 +71,23 @@ pub(crate) fn handle_cache_headers(
     let cache_status = session.cache.phase().as_str();
     let _ = upstream_response.insert_header("x-cache-status", cache_status);
 
+    // A matched cache rule may pin what browsers are told, independently of
+    // the edge's own freshness (the stored meta keeps the origin's
+    // Cache-Control). pingora runs this filter on hits and misses alike, so
+    // both get the browser-facing TTL. `Expires` is dropped with it, since a
+    // stale `Expires` next to the override would send contradictory hints.
+    if let Some(secs) = ctx.cache.as_ref().and_then(|cache| cache.browser_ttl)
+        && secs > 0
+    {
+        let mut buffer = itoa::Buffer::new();
+        let mut value_bytes = Vec::with_capacity(24);
+        value_bytes.extend_from_slice(b"public, max-age=");
+        value_bytes
+            .extend_from_slice(buffer.format(u64::from(secs)).as_bytes());
+        let _ = upstream_response.insert_header("Cache-Control", value_bytes);
+        let _ = upstream_response.remove_header("Expires");
+    }
+
     // process lookup duration
     let lookup_duration_str = process_cache_timing(
         session.cache.lookup_duration(),

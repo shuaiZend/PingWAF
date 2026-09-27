@@ -190,6 +190,11 @@ category = "cache"
 # Only cache responses that include a Cache-Control header
 # check_cache_control = true
 
+# In agent mode, per-site cache rules from the control plane are wired in
+# dynamically: the first matching rule overrides the eligibility, edge/browser
+# TTL and cache key headers above, and the namespace becomes the site's domain.
+# These static options remain the fallback for hosts without a matching rule.
+
 
 ###
 # Plugin RequestId Config
