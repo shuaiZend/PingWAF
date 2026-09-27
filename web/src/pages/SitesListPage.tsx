@@ -222,7 +222,7 @@ export function SitesListPage() {
       key: 'status',
       header: t('common.status'),
       accessor: (r) => (r.status === 'active' ? 1 : 0),
-      width: '1%',
+      width: '140px',
       cell: (r) => {
         const active = r.status === 'active'
         return (
@@ -246,12 +246,6 @@ export function SitesListPage() {
           </Button>
         )
       },
-    },
-    {
-      key: 'plan',
-      header: t('pages.sites.plan'),
-      accessor: (r) => r.plan,
-      cell: (r) => <span className="text-[13px] capitalize text-fg-subtle">{r.plan}</span>,
     },
     {
       key: 'requests',
@@ -364,7 +358,7 @@ export function SitesListPage() {
         <Card>
           <CardBody className="p-0">
             {sitesQuery.isPending ? (
-              <SkeletonRows rows={6} columns={6} />
+              <SkeletonRows rows={6} columns={5} />
             ) : sites.length === 0 ? (
               debouncedQuery ? (
                 <EmptyState

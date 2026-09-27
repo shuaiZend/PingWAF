@@ -17,6 +17,7 @@ use prost::Message;
 use prost_types::Timestamp;
 use sea_orm::{
     ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder,
+    QuerySelect, QueryTrait,
 };
 use uuid::Uuid;
 
@@ -24,9 +25,9 @@ use crate::api::challenge::challenge_level;
 use crate::api::ip_rules::ip_action;
 use crate::models::{
     acme_challenge, action, cache_rules, challenge_settings, characteristic,
-    error_pages, geo_rules, ip_access_rules, mode, rate_limit_rules,
-    rewrite_rules, rule, rule_groups, site, site_ssl, site_status,
-    site_upstreams,
+    error_pages, geo_rules, ip_access_rules, ip_group_sites, ip_groups, mode,
+    rate_limit_rules, rewrite_rules, rule, rule_groups, site, site_ssl,
+    site_status, site_upstreams,
 };
 
 /// `pingwaf.WafMode` values from control_plane.proto.
@@ -197,6 +198,30 @@ async fn load_ip_access_rules(
         .filter(ip_access_rules::Column::SiteId.eq(site_id))
         .filter(ip_access_rules::Column::Enabled.eq(true))
         .order_by_asc(ip_access_rules::Column::Priority)
+        .all(db)
+        .await
+}
+
+/// Loads enabled IP groups that apply to a site: all global groups plus any
+/// non-global group explicitly linked to the site via `ip_group_sites`.
+async fn load_ip_groups(
+    db: &DatabaseConnection,
+    site_id: Uuid,
+) -> Result<Vec<ip_groups::Model>, sea_orm::DbErr> {
+    let linked_ids = ip_group_sites::Entity::find()
+        .filter(ip_group_sites::Column::SiteId.eq(site_id))
+        .select_only()
+        .column(ip_group_sites::Column::IpGroupId)
+        .into_query();
+
+    ip_groups::Entity::find()
+        .filter(ip_groups::Column::Enabled.eq(true))
+        .filter(
+            ip_groups::Column::IsGlobal
+                .eq(true)
+                .or(ip_groups::Column::Id.in_subquery(linked_ids)),
+        )
+        .order_by_asc(ip_groups::Column::Name)
         .all(db)
         .await
 }
@@ -425,6 +450,19 @@ fn ip_access_rule_to_proto(row: &ip_access_rules::Model) -> IpAccessRule {
     }
 }
 
+/// Converts an IP group row into the same `IpAccessRule` proto message so that
+/// agents can apply group-level allow/block lists alongside per-site rules.
+fn ip_group_to_proto(row: &ip_groups::Model) -> IpAccessRule {
+    IpAccessRule {
+        id: row.id.to_string(),
+        name: row.name.clone(),
+        ip_ranges: row.ip_ranges.clone(),
+        action: ip_action::to_proto(&row.action),
+        note: row.description.clone().unwrap_or_default(),
+        enabled: row.enabled,
+    }
+}
+
 /// Converts stored geo rules into the protocol representation.
 fn geo_to_proto(row: Option<&geo_rules::Model>) -> GeoConfig {
     match row {
@@ -563,6 +601,7 @@ pub async fn build_rule_bundle(
     let upstreams = load_upstreams(db, site_row.id).await?;
     let ssl = load_ssl(db, site_row.id).await?;
     let ip_rules = load_ip_access_rules(db, site_row.id).await?;
+    let ip_groups = load_ip_groups(db, site_row.id).await?;
     let geo = load_geo_rules(db, site_row.id).await?;
     let challenge = load_challenge_settings(db, site_row.id).await?;
     let rewrites = load_rewrite_rules(db, site_row.id).await?;
@@ -578,7 +617,11 @@ pub async fn build_rule_bundle(
         updated_at: to_timestamp(site_row.updated_at),
         waf: Some(waf_config_to_proto(&custom_rules, &groups)),
         rate_limit_rules: rate_limits.iter().map(rate_limit_to_proto).collect(),
-        ip_access_rules: ip_rules.iter().map(ip_access_rule_to_proto).collect(),
+        ip_access_rules: ip_rules
+            .iter()
+            .map(ip_access_rule_to_proto)
+            .chain(ip_groups.iter().map(ip_group_to_proto))
+            .collect(),
         geo: Some(geo_to_proto(geo.as_ref())),
         cache_rules: caches
             .iter()

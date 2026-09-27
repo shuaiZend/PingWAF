@@ -12,12 +12,15 @@
 
 pub mod agents;
 pub mod bot_protection;
+pub mod certificate_events;
 pub mod certificates;
 pub mod challenge_settings;
 pub mod error_pages;
 pub mod geo_rules;
 pub mod host_samples;
 pub mod ip_access_rules;
+pub mod ip_group_sites;
+pub mod ip_groups;
 pub mod rate_limit_stats;
 pub mod rewrite_rules;
 pub mod rules;

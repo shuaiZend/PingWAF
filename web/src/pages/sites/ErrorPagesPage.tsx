@@ -63,6 +63,7 @@ export function ErrorPagesPage() {
   const pagesQuery = useQuery({
     queryKey: errorPageKeys.list(siteId),
     queryFn: () => errorPagesApi.list(siteId),
+    select: (res) => res.items,
     enabled: Boolean(siteId),
   })
 

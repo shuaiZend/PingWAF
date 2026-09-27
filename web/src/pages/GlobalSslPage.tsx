@@ -34,7 +34,9 @@ import { formatDateTime } from '@/lib/format'
 import {
   ACME_CHALLENGE_TYPES,
   ACME_DNS_PROVIDERS,
+  CERT_EVENT_TYPES,
   CERTIFICATE_STATUSES,
+  type CertificateEvent,
   type CertificateListQuery,
   type CertificateWithSite,
   type CreateSslRequest,
@@ -94,6 +96,7 @@ export function GlobalSslPage() {
   const [form, setForm] = useState<FormState>(emptyForm())
   const [formError, setFormError] = useState<string | null>(null)
   const [pendingDelete, setPendingDelete] = useState<CertificateWithSite | null>(null)
+  const [eventTypeFilter, setEventTypeFilter] = useState('')
 
   const sitesQuery = useSitesList()
   const sites = sitesQuery.data ?? []
@@ -110,6 +113,16 @@ export function GlobalSslPage() {
   const certsQuery = useQuery({
     queryKey: sslKeys.global(filter),
     queryFn: () => sslApi.listAll(filter),
+  })
+
+  const eventsQuery = useQuery({
+    queryKey: sslKeys.events({
+      event_type: eventTypeFilter || undefined,
+    }),
+    queryFn: () =>
+      sslApi.listAllEvents({
+        event_type: eventTypeFilter || undefined,
+      }),
   })
 
   const certs = useMemo(() => certsQuery.data?.items ?? [], [certsQuery.data])
@@ -320,87 +333,61 @@ export function GlobalSslPage() {
     },
   ]
 
-  /** ACME applications, newest first — the same rows viewed as an audit trail. */
-  const acmeLog = useMemo(
-    () =>
-      certs
-        .filter(isAcme)
-        .slice()
-        .sort((a, b) => b.created_at.localeCompare(a.created_at)),
-    [certs],
-  )
+  const EVENT_TONE: Record<string, BadgeTone> = {
+    created: 'success',
+    renewal_requested: 'info',
+    renewed: 'success',
+    failed: 'danger',
+    deleted: 'warning',
+  }
 
-  const logColumns: Column<CertificateWithSite>[] = [
+  const events = useMemo(() => eventsQuery.data?.items ?? [], [eventsQuery.data])
+
+  const logColumns: Column<CertificateEvent>[] = [
     {
-      key: 'created',
-      header: t('pages.ssl.created'),
+      key: 'created_at',
+      header: t('pages.sslGlobal.eventTime'),
       accessor: (r) => r.created_at,
       sortable: true,
+      width: '180px',
       cell: (r) => (
-        <div className="flex flex-col gap-0.5">
-          <span className="text-fg">{formatDateTime(r.created_at)}</span>
-          <span className="text-xs text-fg-subtle">{formatDateTime(r.updated_at)}</span>
-        </div>
+        <span className="text-fg">{formatDateTime(r.created_at)}</span>
       ),
     },
     {
-      key: 'domain',
-      header: t('pages.ssl.domain'),
-      accessor: (r) => r.domain,
-      sortable: true,
-      cell: (r) => <span className="font-medium text-fg-strong">{r.domain}</span>,
-    },
-    {
-      key: 'site',
-      header: t('pages.sslGlobal.site'),
-      accessor: (r) => r.site_domain,
-      sortable: true,
-      cell: (r) => <span className="text-fg-subtle">{r.site_domain}</span>,
-    },
-    {
-      key: 'challenge',
-      header: t('pages.ssl.challengeType'),
-      accessor: (r) => r.acme_challenge_type,
+      key: 'event_type',
+      header: t('pages.sslGlobal.eventType'),
+      accessor: (r) => r.event_type,
       cell: (r) => (
-        <span className="pw-mono text-xs text-fg-subtle">
-          {r.acme_challenge_type}
-          {r.acme_dns_provider ? ` · ${r.acme_dns_provider}` : ''}
-        </span>
-      ),
-    },
-    {
-      key: 'status',
-      header: t('common.status'),
-      accessor: (r) => r.status,
-      cell: (r) => (
-        <Badge tone={STATUS_TONE[r.status] ?? 'neutral'} dot size="sm">
-          {t(`pages.sslGlobal.status_${r.status}`, { defaultValue: r.status })}
+        <Badge tone={EVENT_TONE[r.event_type] ?? 'neutral'} dot size="sm">
+          {t(`pages.sslGlobal.event_${r.event_type}`, { defaultValue: r.event_type })}
         </Badge>
       ),
     },
     {
-      key: 'expires',
-      header: t('pages.ssl.expires'),
-      accessor: (r) => r.expires_at ?? '',
-      sortable: true,
-      cell: expiryCell,
+      key: 'domain',
+      header: t('pages.sslGlobal.eventDomain'),
+      accessor: (r) => r.domain ?? '',
+      cell: (r) => (
+        <span className="pw-mono text-[13px] text-fg-strong">
+          {r.domain ?? '—'}
+        </span>
+      ),
     },
     {
-      key: 'actions',
-      header: '',
-      align: 'right',
-      width: '140px',
+      key: 'site_domain',
+      header: t('pages.sslGlobal.eventSite'),
+      accessor: (r) => r.site_domain ?? '',
       cell: (r) => (
-        <Button
-          size="sm"
-          variant="secondary"
-          disabled={!canWrite || renewCert.isPending}
-          loading={renewCert.isPending && renewCert.variables === r.id}
-          onClick={() => renewCert.mutate(r.id)}
-        >
-          <ArrowsClockwise weight="duotone" className="h-4 w-4" />
-          {t('pages.ssl.renew')}
-        </Button>
+        <span className="text-fg-subtle">{r.site_domain ?? '—'}</span>
+      ),
+    },
+    {
+      key: 'message',
+      header: t('pages.sslGlobal.eventMessage'),
+      accessor: (r) => r.message,
+      cell: (r) => (
+        <span className="text-[13px] text-fg-subtle line-clamp-2">{r.message}</span>
       ),
     },
   ]
@@ -590,13 +577,28 @@ export function GlobalSslPage() {
           <CardHeader
             title={t('pages.sslGlobal.tabLog')}
             description={t('pages.sslGlobal.logHint')}
+            action={
+              <Select
+                aria-label={t('pages.sslGlobal.eventType')}
+                className="h-9 w-44"
+                options={[
+                  { value: '', label: t('pages.sslGlobal.eventFilterAll') },
+                  ...CERT_EVENT_TYPES.map((et) => ({
+                    value: et,
+                    label: t(`pages.sslGlobal.event_${et}`, { defaultValue: et }),
+                  })),
+                ]}
+                value={eventTypeFilter}
+                onChange={(e) => setEventTypeFilter(e.target.value)}
+              />
+            }
           />
           <CardBody className="p-0">
             <Table
               columns={logColumns}
-              data={acmeLog}
-              rowKey={(r) => `log-${r.id}`}
-              loading={certsQuery.isLoading}
+              data={events}
+              rowKey={(r) => r.id}
+              loading={eventsQuery.isLoading}
               pageSize={20}
               empty={
                 <EmptyState
