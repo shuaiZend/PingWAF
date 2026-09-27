@@ -1232,9 +1232,8 @@ export interface IpGroup {
   updated_at: string
 }
 
-/** Returned by list/show endpoints — includes the associated site count. */
-export interface IpGroupResponse {
-  group: IpGroup
+/** Returned by list/show endpoints — flat model fields plus the associated site count. */
+export interface IpGroupResponse extends IpGroup {
   site_count: number
 }
 

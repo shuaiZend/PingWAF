@@ -92,24 +92,24 @@ export function IpGroupsPage() {
       {
         key: 'name',
         header: t('pages.ipGroups.colName'),
-        accessor: (row) => row.group.name,
+        accessor: (row) => row.name,
       },
       {
         key: 'action',
         header: t('pages.ipGroups.colAction'),
-        accessor: (row) => row.group.action,
+        accessor: (row) => row.action,
         cell: (row) => (
-          <Badge tone={ACTION_TONE[row.group.action] ?? 'neutral'}>
-            {t(`pages.ipGroups.action_${row.group.action}`)}
+          <Badge tone={ACTION_TONE[row.action] ?? 'neutral'}>
+            {t(`pages.ipGroups.action_${row.action}`)}
           </Badge>
         ),
       },
       {
         key: 'scope',
         header: t('pages.ipGroups.colScope'),
-        accessor: (row) => (row.group.is_global ? 'global' : 'site'),
+        accessor: (row) => (row.is_global ? 'global' : 'site'),
         cell: (row) =>
-          row.group.is_global ? (
+          row.is_global ? (
             <Badge tone="info">{t('pages.ipGroups.scopeGlobal')}</Badge>
           ) : (
             <span className="text-fg-subtle">
@@ -120,16 +120,16 @@ export function IpGroupsPage() {
       {
         key: 'ipCount',
         header: t('pages.ipGroups.colIpCount'),
-        accessor: (row) => row.group.ip_ranges.length,
+        accessor: (row) => row.ip_ranges.length,
       },
       {
         key: 'source',
         header: t('pages.ipGroups.colSource'),
-        accessor: (row) => row.group.source_url ?? '',
+        accessor: (row) => row.source_url ?? '',
         cell: (row) =>
-          row.group.source_url ? (
-            <span className="truncate text-xs text-fg-subtle" title={row.group.source_url}>
-              {row.group.source_url}
+          row.source_url ? (
+            <span className="truncate text-xs text-fg-subtle" title={row.source_url}>
+              {row.source_url}
             </span>
           ) : (
             <span className="text-fg-subtle">—</span>
@@ -138,11 +138,11 @@ export function IpGroupsPage() {
       {
         key: 'lastSync',
         header: t('pages.ipGroups.colLastSync'),
-        accessor: (row) => row.group.last_synced_at ?? '',
+        accessor: (row) => row.last_synced_at ?? '',
         cell: (row) =>
-          row.group.last_synced_at ? (
-            <span title={formatDateTime(row.group.last_synced_at)}>
-              {formatRelative(row.group.last_synced_at)}
+          row.last_synced_at ? (
+            <span title={formatDateTime(row.last_synced_at)}>
+              {formatRelative(row.last_synced_at)}
             </span>
           ) : (
             <span className="text-fg-subtle">—</span>
@@ -154,11 +154,11 @@ export function IpGroupsPage() {
         width: '1%',
         cell: (row) => (
           <div className="flex items-center justify-end gap-1">
-            {row.group.source_url && (
+            {row.source_url && (
               <Button
                 size="sm"
                 variant="ghost"
-                onClick={() => syncMutation.mutate(row.group.id)}
+                onClick={() => syncMutation.mutate(row.id)}
                 title={t('pages.ipGroups.syncNow')}
               >
                 <ArrowClockwise className="h-4 w-4" />
@@ -252,7 +252,7 @@ export function IpGroupsPage() {
               }
             />
           ) : (
-            <Table columns={columns} data={groups} rowKey={(row) => row.group.id} />
+            <Table columns={columns} data={groups} rowKey={(row) => row.id} />
           )}
         </CardBody>
       </Card>
@@ -284,12 +284,12 @@ export function IpGroupsPage() {
         open={Boolean(pendingDelete)}
         title={t('pages.ipGroups.confirmDeleteTitle')}
         description={t('pages.ipGroups.confirmDeleteDesc', {
-          name: pendingDelete?.group.name,
+          name: pendingDelete?.name,
         })}
         confirmLabel={t('common.delete')}
         tone="danger"
         onConfirm={() => {
-          if (pendingDelete) deleteMutation.mutate(pendingDelete.group.id)
+          if (pendingDelete) deleteMutation.mutate(pendingDelete.id)
           setPendingDelete(null)
         }}
         onClose={() => setPendingDelete(null)}
@@ -313,21 +313,21 @@ function GroupDialog({ initial, sites, onClose, onSaved }: GroupDialogProps) {
   const queryClient = useQueryClient()
   const isEdit = Boolean(initial)
 
-  const [name, setName] = useState(initial?.group.name ?? '')
-  const [description, setDescription] = useState(initial?.group.description ?? '')
-  const [action, setAction] = useState(initial?.group.action ?? 'block')
-  const [isGlobal, setIsGlobal] = useState(initial?.group.is_global ?? true)
-  const [sourceUrl, setSourceUrl] = useState(initial?.group.source_url ?? '')
-  const [enabled, setEnabled] = useState(initial?.group.enabled ?? true)
-  const [ipText, setIpText] = useState(initial?.group.ip_ranges.join('\n') ?? '')
+  const [name, setName] = useState(initial?.name ?? '')
+  const [description, setDescription] = useState(initial?.description ?? '')
+  const [action, setAction] = useState(initial?.action ?? 'block')
+  const [isGlobal, setIsGlobal] = useState(initial?.is_global ?? true)
+  const [sourceUrl, setSourceUrl] = useState(initial?.source_url ?? '')
+  const [enabled, setEnabled] = useState(initial?.enabled ?? true)
+  const [ipText, setIpText] = useState(initial?.ip_ranges.join('\n') ?? '')
   const [selectedSites, setSelectedSites] = useState<Set<string>>(
     () => new Set(),
   )
 
   // Load associated sites for edit mode
   useQuery({
-    queryKey: ipGroupKeys.sites(initial?.group.id ?? ''),
-    queryFn: () => ipGroupsApi.listSites(initial!.group.id),
+    queryKey: ipGroupKeys.sites(initial?.id ?? ''),
+    queryFn: () => ipGroupsApi.listSites(initial!.id),
     enabled: isEdit && !isGlobal,
     select: (data) => {
       setSelectedSites(new Set(data.map((s) => s.id)))
@@ -353,10 +353,10 @@ function GroupDialog({ initial, sites, onClose, onSaved }: GroupDialogProps) {
       }
 
       if (isEdit && initial) {
-        await ipGroupsApi.update(initial.group.id, payload)
+        await ipGroupsApi.update(initial.id, payload)
         if (!isGlobal) {
           await ipGroupsApi.setSites(
-            initial.group.id,
+            initial.id,
             Array.from(selectedSites),
           )
         }
