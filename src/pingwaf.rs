@@ -39,8 +39,10 @@ use pingap_config::{
 use pingap_proxy::{
     AppContext, Server as ProxyServer, ServerConf, parse_from_conf,
 };
+use pingap_upstream::new_upstream_health_check_task;
 use pingora::server;
 use pingora::server::configuration::Opt;
+use pingora::services::background::background_service;
 use pingwaf_agent::cache::RuleCache;
 use pingwaf_agent::config::AgentConfig;
 use pingwaf_server::ServerConfig;
@@ -395,6 +397,18 @@ pub async fn start_data_plane(
     }
 
     info!("data plane: proxy server is running on 0.0.0.0:80,0.0.0.0:443");
+
+    // Start the upstream health check background task.
+    // This also drives periodic DNS discovery updates — without it,
+    // DNS-based backends are never resolved and requests get 503.
+    let upstream_health_check_task = new_upstream_health_check_task(
+        new_upstream_provider(),
+        Duration::from_secs(10),
+        None,
+    );
+    let hc_name = upstream_health_check_task.name().to_string();
+    my_server
+        .add_service(background_service(&hc_name, upstream_health_check_task));
 
     // Run Pingora in a dedicated OS thread. Do NOT join it here —
     // joining would block the tokio worker thread permanently and starve
