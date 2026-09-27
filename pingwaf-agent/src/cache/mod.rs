@@ -61,6 +61,10 @@ pub struct SiteRules {
     pub error_pages: Vec<CustomErrorPage>,
     pub ssl_config: Option<SslConfig>,
     pub upstreams: Vec<UpstreamConfig>,
+    /// Path routes to origin pools; empty for caches written before pools
+    /// existed.
+    #[serde(default)]
+    pub routes: Vec<RouteConfig>,
 }
 
 impl SiteRules {
@@ -373,6 +377,21 @@ pub struct UpstreamConfig {
     pub connection_timeout_ms: u32,
     pub read_timeout_ms: u32,
     pub write_timeout_ms: u32,
+    /// Origin pool identity; empty for caches written before pools existed.
+    #[serde(default)]
+    pub pool_id: String,
+    /// Complete pingap LB spec (`round_robin` or `hash:<type>[:<key>]`),
+    /// superseding `algorithm`.
+    #[serde(default)]
+    pub algo: String,
+    /// Non-empty enables TLS to the origin and sets the SNI.
+    #[serde(default)]
+    pub sni: String,
+    /// `None` keeps the proxy default (verification on).
+    #[serde(default)]
+    pub verify_cert: Option<bool>,
+    #[serde(default)]
+    pub is_default: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -380,6 +399,21 @@ pub struct UpstreamPeer {
     pub address: String,
     pub weight: u32,
     pub tls: bool,
+}
+
+/// A path-based route directing matching requests to an origin pool.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouteConfig {
+    pub id: String,
+    pub name: String,
+    /// prefix | exact | regex
+    pub match_type: String,
+    /// Raw path; the data plane adds the `=`/`~` marker.
+    pub path: String,
+    /// Manual location weight; `None` uses pingap's auto weight.
+    pub priority: Option<i32>,
+    pub enabled: bool,
+    pub pool_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -988,6 +1022,11 @@ impl RuleCache {
                 .iter()
                 .map(Self::convert_upstream_config)
                 .collect(),
+            routes: bundle
+                .routes
+                .iter()
+                .map(Self::convert_route_config)
+                .collect(),
         }
     }
 
@@ -1187,6 +1226,18 @@ impl RuleCache {
                     tls: p.tls,
                 })
                 .collect(),
+            // `algo` carries the full pingap spec; the legacy enum is kept for
+            // caches that predate it.
+            algo: if u.algo.is_empty() {
+                format!(
+                    "{:?}",
+                    proto::LoadBalanceAlgorithm::try_from(u.algorithm)
+                        .unwrap_or(proto::LoadBalanceAlgorithm::LbRoundRobin)
+                )
+                .to_lowercase()
+            } else {
+                u.algo.clone()
+            },
             algorithm: format!(
                 "{:?}",
                 proto::LoadBalanceAlgorithm::try_from(u.algorithm)
@@ -1203,6 +1254,140 @@ impl RuleCache {
             connection_timeout_ms: u.connection_timeout_ms,
             read_timeout_ms: u.read_timeout_ms,
             write_timeout_ms: u.write_timeout_ms,
+            pool_id: u.pool_id.clone(),
+            sni: u.sni.clone(),
+            verify_cert: u.verify_cert,
+            is_default: u.is_default,
         }
+    }
+
+    fn convert_route_config(r: &proto::RouteConfig) -> RouteConfig {
+        RouteConfig {
+            id: r.id.clone(),
+            name: r.name.clone(),
+            match_type: r.match_type.clone(),
+            path: r.path.clone(),
+            priority: r.priority,
+            enabled: r.enabled,
+            pool_id: r.pool_id.clone(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `sites.json` written before origin pools existed carries none of the
+    /// new fields; it must still load.
+    #[test]
+    fn old_cache_format_still_deserializes() {
+        let old = serde_json::json!({
+            "sites": {
+                "site-1": {
+                    "site_id": "site-1",
+                    "domain": "example.com",
+                    "alternate_domains": [],
+                    "rate_limit_rules": [],
+                    "ip_access_rules": [],
+                    "cache_rules": [],
+                    "rewrite_rules": [],
+                    "error_pages": [],
+                    "upstreams": [
+                        {
+                            "name": "example.com",
+                            "peers": [{"address": "10.0.0.1:80", "weight": 1, "tls": false}],
+                            "algorithm": "LbRoundRobin",
+                            "connection_timeout_ms": 0,
+                            "read_timeout_ms": 0,
+                            "write_timeout_ms": 0
+                        }
+                    ]
+                }
+            },
+            "domain_index": {"example.com": "site-1"},
+            "updated_at": "2026-01-01T00:00:00Z",
+            "config_hash": "abc"
+        });
+        let cached: CachedRules =
+            serde_json::from_str(&old.to_string()).expect("old format loads");
+        let site = cached.sites.get("site-1").expect("site present");
+        assert!(site.routes.is_empty());
+        assert_eq!(site.upstreams.len(), 1);
+        assert!(site.upstreams[0].pool_id.is_empty());
+        assert!(!site.upstreams[0].is_default);
+    }
+
+    #[test]
+    fn new_format_roundtrips() {
+        let cached = CachedRules {
+            sites: [(
+                "site-1".to_string(),
+                Arc::new(SiteRules {
+                    site_id: "site-1".to_string(),
+                    domain: "example.com".to_string(),
+                    alternate_domains: Vec::new(),
+                    waf_config: None,
+                    rate_limit_rules: Vec::new(),
+                    ip_access_rules: Vec::new(),
+                    geo_config: None,
+                    cache_rules: Vec::new(),
+                    challenge_config: None,
+                    rewrite_rules: Vec::new(),
+                    error_pages: Vec::new(),
+                    ssl_config: None,
+                    upstreams: vec![UpstreamConfig {
+                        name: "default".to_string(),
+                        peers: Vec::new(),
+                        algorithm: "LbRoundRobin".to_string(),
+                        health_check: None,
+                        connection_timeout_ms: 0,
+                        read_timeout_ms: 0,
+                        write_timeout_ms: 0,
+                        pool_id: "pool-1".to_string(),
+                        algo: "hash:header:x-user".to_string(),
+                        sni: "origin.example.com".to_string(),
+                        verify_cert: Some(false),
+                        is_default: true,
+                    }],
+                    routes: vec![RouteConfig {
+                        id: "route-1".to_string(),
+                        name: "api".to_string(),
+                        match_type: "exact".to_string(),
+                        path: "/api".to_string(),
+                        priority: Some(10),
+                        enabled: true,
+                        pool_id: "pool-1".to_string(),
+                    }],
+                }),
+            )]
+            .into_iter()
+            .collect(),
+            domain_index: HashMap::new(),
+            updated_at: Utc::now(),
+            config_hash: "abc".to_string(),
+        };
+        let json = serde_json::to_string(&cached).expect("serialize");
+        let back: CachedRules =
+            serde_json::from_str(&json).expect("deserialize");
+        let site = back.sites.get("site-1").expect("site present");
+        assert_eq!(site.routes.len(), 1);
+        assert_eq!(site.routes[0].path, "/api");
+        assert_eq!(site.upstreams[0].algo, "hash:header:x-user");
+        assert_eq!(site.upstreams[0].sni, "origin.example.com");
+    }
+
+    #[test]
+    fn proto_algo_supersedes_legacy_algorithm() {
+        let mut u = proto::UpstreamConfig {
+            algorithm: 1, // LB_CONSISTENT_HASH
+            ..Default::default()
+        };
+        let converted = RuleCache::convert_upstream_config(&u);
+        assert_eq!(converted.algo, "lbconsistenthash");
+
+        u.algo = "hash:cookie:session".to_string();
+        let converted = RuleCache::convert_upstream_config(&u);
+        assert_eq!(converted.algo, "hash:cookie:session");
     }
 }

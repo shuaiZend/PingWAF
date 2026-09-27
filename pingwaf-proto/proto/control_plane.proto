@@ -230,6 +230,9 @@ message RuleBundle {
 
   // Upstream Config
   repeated UpstreamConfig upstreams = 19;
+
+  // Origin pools and routes
+  repeated RouteConfig routes = 20;
 }
 
 message WafConfig {
@@ -455,12 +458,36 @@ message UpstreamConfig {
   uint32 connection_timeout_ms = 5;
   uint32 read_timeout_ms = 6;
   uint32 write_timeout_ms = 7;
+
+  // Origin pool identity and pingap-level settings. `algo` carries the
+  // complete pingap LB spec (`round_robin` or `hash:<type>[:<key>]`) and
+  // supersedes `algorithm`, which stays for backward compatibility.
+  string pool_id = 8;
+  string algo = 9;
+  // Non-empty enables TLS to the origin and sets the SNI.
+  string sni = 10;
+  optional bool verify_cert = 11;
+  bool is_default = 12;
 }
 
 message UpstreamPeer {
   string address = 1;    // host:port
   uint32 weight = 2;
   bool tls = 3;
+}
+
+// A path-based route directing matching requests to an origin pool.
+message RouteConfig {
+  string id = 1;
+  string name = 2;
+  // prefix | exact | regex
+  string match_type = 3;
+  // Raw path, no pingap marker; the data plane adds "=" / "~" as needed.
+  string path = 4;
+  // Manual location weight; unset uses pingap's auto weight.
+  optional int32 priority = 5;
+  bool enabled = 6;
+  string pool_id = 7;
 }
 
 enum LoadBalanceAlgorithm {

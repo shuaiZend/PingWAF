@@ -93,11 +93,39 @@ export interface Site {
 export interface Upstream {
   id: string
   site_id: string
+  pool_id: string
   name: string
   address: string
   weight: number
   tls: boolean
   health_status: string
+  created_at: string
+}
+
+/** `models::sites::site_upstream_pools::Model` */
+export interface UpstreamPool {
+  id: string
+  site_id: string
+  name: string
+  /** `round_robin` or `hash:<type>[:<key>]`. */
+  lb_algorithm: string
+  /** Non-empty SNI enables HTTPS origin; `null` means plain HTTP. */
+  sni: string | null
+  verify_cert: boolean | null
+  is_default: boolean
+  created_at: string
+}
+
+/** `models::sites::site_routes::Model` */
+export interface Route {
+  id: string
+  site_id: string
+  name: string
+  match_type: 'prefix' | 'exact' | 'regex' | string
+  path: string
+  priority: number | null
+  enabled: boolean
+  pool_id: string
   created_at: string
 }
 
@@ -155,6 +183,51 @@ export interface CreateUpstreamRequest {
   address: string
   weight?: number
   tls?: boolean
+  /** Omitted → the site's default pool. */
+  pool_id?: string
+}
+
+export interface UpdateUpstreamRequest {
+  name?: string
+  address?: string
+  weight?: number
+  tls?: boolean
+  pool_id?: string
+  health_status?: string
+}
+
+export interface CreatePoolRequest {
+  name: string
+  lb_algorithm?: string
+  sni?: string | null
+  verify_cert?: boolean | null
+}
+
+export interface UpdatePoolRequest {
+  name?: string
+  lb_algorithm?: string
+  /** Empty string clears SNI (disables HTTPS origin). */
+  sni?: string | null
+  verify_cert?: boolean | null
+}
+
+export interface CreateRouteRequest {
+  name: string
+  match_type: string
+  path: string
+  priority?: number | null
+  enabled?: boolean
+  pool_id: string
+}
+
+export interface UpdateRouteRequest {
+  name?: string
+  match_type?: string
+  path?: string
+  /** `0` clears the priority back to the auto weight. */
+  priority?: number | null
+  enabled?: boolean
+  pool_id?: string
 }
 
 export interface UpsertSslRequest {

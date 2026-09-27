@@ -5,13 +5,13 @@
 //! of SQL and lets the REST API reuse the exact same builder when it pushes a
 //! configuration update to a connected agent.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, TimeZone, Utc};
 use pingwaf_proto::control_plane::{
     CacheRule, ChallengeConfig, CustomErrorPage, GeoConfig, HeaderOperation,
-    IpAccessRule, RateLimitRule, RewriteRule, RuleBundle, Site, SiteConfig,
-    SslConfig, UpstreamConfig, UpstreamPeer, WafConfig, WafRule,
+    IpAccessRule, RateLimitRule, RewriteRule, RouteConfig, RuleBundle, Site,
+    SiteConfig, SslConfig, UpstreamConfig, UpstreamPeer, WafConfig, WafRule,
 };
 use prost::Message;
 use prost_types::Timestamp;
@@ -26,8 +26,8 @@ use crate::api::ip_rules::ip_action;
 use crate::models::{
     acme_challenge, action, cache_rules, challenge_settings, characteristic,
     error_pages, geo_rules, ip_access_rules, ip_group_sites, ip_groups, mode,
-    rate_limit_rules, rewrite_rules, rule, rule_groups, site, site_ssl,
-    site_status, site_upstreams,
+    rate_limit_rules, rewrite_rules, rule, rule_groups, site, site_routes,
+    site_ssl, site_status, site_upstream_pools, site_upstreams,
 };
 
 /// `pingwaf.WafMode` values from control_plane.proto.
@@ -176,6 +176,30 @@ async fn load_upstreams(
     site_upstreams::Entity::find()
         .filter(site_upstreams::Column::SiteId.eq(site_id))
         .order_by_desc(site_upstreams::Column::Weight)
+        .all(db)
+        .await
+}
+
+async fn load_pools(
+    db: &DatabaseConnection,
+    site_id: Uuid,
+) -> Result<Vec<site_upstream_pools::Model>, sea_orm::DbErr> {
+    site_upstream_pools::Entity::find()
+        .filter(site_upstream_pools::Column::SiteId.eq(site_id))
+        .order_by_desc(site_upstream_pools::Column::IsDefault)
+        .order_by_asc(site_upstream_pools::Column::CreatedAt)
+        .all(db)
+        .await
+}
+
+async fn load_routes(
+    db: &DatabaseConnection,
+    site_id: Uuid,
+) -> Result<Vec<site_routes::Model>, sea_orm::DbErr> {
+    site_routes::Entity::find()
+        .filter(site_routes::Column::SiteId.eq(site_id))
+        .order_by_desc(site_routes::Column::Priority)
+        .order_by_asc(site_routes::Column::CreatedAt)
         .all(db)
         .await
 }
@@ -358,31 +382,74 @@ fn ssl_to_proto(row: &site_ssl::Model) -> SslConfig {
     }
 }
 
-fn upstreams_to_proto(
-    site_name: &str,
-    rows: &[site_upstreams::Model],
+/// Turns origin pools into one `UpstreamConfig` per pool.
+///
+/// Pools without nodes are skipped: an empty upstream would make the agent
+/// build a proxy with no peers to send traffic to.
+fn pools_to_proto(
+    pools: &[site_upstream_pools::Model],
+    upstreams: &[site_upstreams::Model],
 ) -> Vec<UpstreamConfig> {
-    if rows.is_empty() {
-        return Vec::new();
+    let mut configs = Vec::with_capacity(pools.len());
+    for pool in pools {
+        let peers: Vec<UpstreamPeer> = upstreams
+            .iter()
+            .filter(|row| row.pool_id == pool.id)
+            .map(|row| UpstreamPeer {
+                address: row.address.clone(),
+                weight: row.weight.max(0) as u32,
+                tls: row.tls,
+            })
+            .collect();
+        if peers.is_empty() {
+            continue;
+        }
+        configs.push(UpstreamConfig {
+            name: pool.name.clone(),
+            peers,
+            // LB_ROUND_ROBIN — the legacy enum, superseded by `algo`.
+            algorithm: 0,
+            health_check: None,
+            connection_timeout_ms: 0,
+            read_timeout_ms: 0,
+            write_timeout_ms: 0,
+            pool_id: pool.id.to_string(),
+            algo: pool.lb_algorithm.clone(),
+            sni: pool.sni.clone().unwrap_or_default(),
+            verify_cert: pool.verify_cert,
+            is_default: pool.is_default,
+        });
     }
-    let peers = rows
+    configs
+}
+
+/// Turns stored routes into their protocol representation, dropping routes
+/// that are disabled or point at a pool without nodes (the agent would have
+/// no upstream to serve them with). The path is passed through verbatim; the
+/// data plane adds the `=`/`~` marker pingap's location syntax expects.
+fn routes_to_proto(
+    routes: &[site_routes::Model],
+    pools: &[site_upstream_pools::Model],
+    upstreams: &[site_upstreams::Model],
+) -> Vec<RouteConfig> {
+    let served: HashSet<Uuid> = pools
         .iter()
-        .map(|row| UpstreamPeer {
-            address: row.address.clone(),
-            weight: row.weight.max(0) as u32,
-            tls: row.tls,
-        })
+        .filter(|pool| upstreams.iter().any(|row| row.pool_id == pool.id))
+        .map(|pool| pool.id)
         .collect();
-    vec![UpstreamConfig {
-        name: site_name.to_string(),
-        peers,
-        // LB_ROUND_ROBIN — the only algorithm the schema records today.
-        algorithm: 0,
-        health_check: None,
-        connection_timeout_ms: 0,
-        read_timeout_ms: 0,
-        write_timeout_ms: 0,
-    }]
+    routes
+        .iter()
+        .filter(|route| route.enabled && served.contains(&route.pool_id))
+        .map(|route| RouteConfig {
+            id: route.id.to_string(),
+            name: route.name.clone(),
+            match_type: route.match_type.clone(),
+            path: route.path.clone(),
+            priority: route.priority,
+            enabled: route.enabled,
+            pool_id: route.pool_id.to_string(),
+        })
+        .collect()
 }
 
 /// Derives the site-wide WAF switches from the rules that are actually enabled.
@@ -599,6 +666,8 @@ pub async fn build_rule_bundle(
     let rate_limits = load_rate_limits(db, site_row.id).await?;
     let caches = load_cache_rules(db, site_row.id).await?;
     let upstreams = load_upstreams(db, site_row.id).await?;
+    let pools = load_pools(db, site_row.id).await?;
+    let routes = load_routes(db, site_row.id).await?;
     let ssl = load_ssl(db, site_row.id).await?;
     let ip_rules = load_ip_access_rules(db, site_row.id).await?;
     let ip_groups = load_ip_groups(db, site_row.id).await?;
@@ -631,7 +700,8 @@ pub async fn build_rule_bundle(
         rewrite_rules: rewrites.iter().map(rewrite_rule_to_proto).collect(),
         error_pages: err_pages.iter().map(error_page_to_proto).collect(),
         ssl: ssl.as_ref().map(ssl_to_proto),
-        upstreams: upstreams_to_proto(&site_row.name, &upstreams),
+        upstreams: pools_to_proto(&pools, &upstreams),
+        routes: routes_to_proto(&routes, &pools, &upstreams),
     };
 
     bundle.config_hash = fingerprint(&bundle);
@@ -690,6 +760,7 @@ pub async fn build_site_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::route_match_type;
 
     #[test]
     fn timestamps_roundtrip() {
@@ -770,22 +841,127 @@ mod tests {
         assert_eq!(config.mode, WAF_MODE_OFF);
     }
 
-    #[test]
-    fn upstreams_collapse_into_a_single_pool() {
-        let rows = vec![site_upstreams::Model {
+    fn pool_model(
+        name: &str,
+        lb_algorithm: &str,
+        sni: Option<&str>,
+        is_default: bool,
+    ) -> site_upstream_pools::Model {
+        site_upstream_pools::Model {
             id: Uuid::new_v4(),
             site_id: Uuid::nil(),
+            name: name.into(),
+            lb_algorithm: lb_algorithm.into(),
+            sni: sni.map(Into::into),
+            verify_cert: None,
+            is_default,
+            created_at: Utc::now(),
+        }
+    }
+
+    fn node_model(
+        pool_id: Uuid,
+        address: &str,
+        weight: i32,
+    ) -> site_upstreams::Model {
+        site_upstreams::Model {
+            id: Uuid::new_v4(),
+            site_id: Uuid::nil(),
+            pool_id,
             name: "origin".into(),
-            address: "10.0.0.1:8080".into(),
-            weight: 3,
-            tls: true,
+            address: address.into(),
+            weight,
+            tls: false,
             health_status: "unknown".into(),
             created_at: Utc::now(),
-        }];
-        let pools = upstreams_to_proto("example.com", &rows);
-        assert_eq!(pools.len(), 1);
-        assert_eq!(pools[0].peers.len(), 1);
-        assert_eq!(pools[0].peers[0].weight, 3);
-        assert!(upstreams_to_proto("example.com", &[]).is_empty());
+        }
+    }
+
+    #[test]
+    fn pools_group_their_nodes_and_skip_empty_ones() {
+        let default_pool = pool_model("default", "round_robin", None, true);
+        let tls_pool =
+            pool_model("static", "hash:path", Some("cdn.example.com"), false);
+        let empty_pool = pool_model("empty", "round_robin", None, false);
+
+        let nodes = vec![
+            node_model(default_pool.id, "10.0.0.1:8080", 3),
+            node_model(default_pool.id, "10.0.0.2:8080", 1),
+            node_model(tls_pool.id, "10.0.0.3:9090", 2),
+        ];
+
+        let configs = pools_to_proto(
+            &[default_pool.clone(), tls_pool, empty_pool],
+            &nodes,
+        );
+        assert_eq!(configs.len(), 2);
+
+        assert_eq!(configs[0].name, "default");
+        assert_eq!(configs[0].pool_id, default_pool.id.to_string());
+        assert!(configs[0].is_default);
+        assert_eq!(configs[0].algo, "round_robin");
+        assert_eq!(configs[0].algorithm, 0);
+        assert_eq!(configs[0].peers.len(), 2);
+        assert_eq!(configs[0].peers[0].weight, 3);
+        assert_eq!(configs[0].sni, "");
+
+        assert_eq!(configs[1].name, "static");
+        assert_eq!(configs[1].algo, "hash:path");
+        assert_eq!(configs[1].sni, "cdn.example.com");
+        assert_eq!(configs[1].peers.len(), 1);
+        assert!(!configs[1].is_default);
+
+        assert!(pools_to_proto(&[], &nodes).is_empty());
+    }
+
+    #[test]
+    fn pools_pass_verify_cert_through() {
+        let mut pool = pool_model("default", "round_robin", None, true);
+        pool.verify_cert = Some(false);
+        let nodes = vec![node_model(pool.id, "10.0.0.1:8080", 1)];
+        let configs = pools_to_proto(&[pool], &nodes);
+        assert_eq!(configs[0].verify_cert, Some(false));
+    }
+
+    fn route_model(
+        enabled: bool,
+        priority: Option<i32>,
+        pool_id: Uuid,
+    ) -> site_routes::Model {
+        site_routes::Model {
+            id: Uuid::new_v4(),
+            site_id: Uuid::nil(),
+            name: "r".into(),
+            match_type: route_match_type::EXACT.into(),
+            path: "/api".into(),
+            priority,
+            enabled,
+            pool_id,
+            created_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn routes_skip_disabled_and_nodeless_pools() {
+        let pool = pool_model("default", "round_robin", None, true);
+        let empty = pool_model("empty", "round_robin", None, false);
+        let nodes = vec![node_model(pool.id, "10.0.0.1:8080", 1)];
+
+        let routes = vec![
+            route_model(true, Some(10), pool.id),
+            route_model(false, None, pool.id),
+            route_model(true, None, empty.id),
+        ];
+        let protos =
+            routes_to_proto(&routes, &[pool.clone(), empty.clone()], &nodes);
+        assert_eq!(protos.len(), 1);
+        assert_eq!(protos[0].pool_id, routes[0].pool_id.to_string());
+        assert_eq!(protos[0].match_type, route_match_type::EXACT);
+        assert_eq!(protos[0].path, "/api");
+        assert_eq!(protos[0].priority, Some(10));
+
+        // Losing the last node drops the route along with the pool.
+        let protos = routes_to_proto(&routes, &[pool, empty], &[]);
+        assert!(protos.is_empty());
     }
 }

@@ -6,6 +6,7 @@ description = "PingWAF control plane: REST API for the dashboard, gRPC control p
 license = "Apache-2.0"
 
 [dependencies]
+regex = { workspace = true, features = ["std", "unicode-case", "unicode-perl"] }
 pingwaf-proto = { path = "../pingwaf-proto" }
 # The control plane validates the built-in rule expressions with the same
 # parser the data plane evaluates them with.

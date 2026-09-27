@@ -15,6 +15,7 @@ import {
   IdentificationCard,
   GlobeHemisphereWest,
   FileHtml,
+  Network,
 } from '@phosphor-icons/react'
 import { Link } from 'react-router-dom'
 import { cn } from '@/lib/utils'
@@ -45,6 +46,7 @@ export function SiteDetailPage() {
 
   const base = `/sites/${siteId}`
   const tabs = [
+    { to: `${base}/origin`, label: t('nav.origin'), icon: Network },
     { to: `${base}/security/waf`, label: t('nav.securityWaf'), icon: Shield },
     {
       to: `${base}/security/rate-limiting`,

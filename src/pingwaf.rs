@@ -43,7 +43,7 @@ use pingap_upstream::new_upstream_health_check_task;
 use pingora::server;
 use pingora::server::configuration::Opt;
 use pingora::services::background::background_service;
-use pingwaf_agent::cache::RuleCache;
+use pingwaf_agent::cache::{CachedRules, RuleCache};
 use pingwaf_agent::config::AgentConfig;
 use pingwaf_server::ServerConfig;
 use tracing::{error, info, warn};
@@ -148,13 +148,40 @@ pub fn build_run_mode(cli: PingWafCli) -> RunMode {
     }
 }
 
+/// Sanitize a control-plane LB algorithm into a pingap `algo` value.
+///
+/// pingap accepts only `round_robin` (its default) and
+/// `hash:<type>[:<key>]` with type in {ip, url, path, header, cookie,
+/// query}; anything else — including legacy enum Debug names such as
+/// `lbconsistenthash` — is a hard error at upstream construction, so it
+/// must collapse to the default here.
+fn sanitize_algo(algo: &str) -> Option<String> {
+    let algo = algo.trim();
+    if algo.is_empty() || algo == "round_robin" {
+        return None;
+    }
+    let spec = algo.strip_prefix("hash:")?;
+    let hash_type = spec.split(':').next().unwrap_or_default();
+    if matches!(
+        hash_type,
+        "ip" | "url" | "path" | "header" | "cookie" | "query"
+    ) {
+        Some(algo.to_string())
+    } else {
+        None
+    }
+}
+
 /// Build a `PingapConfig` from the agent's cached site rules.
 ///
-/// Each site becomes a set of upstream + location entries, and all sites
-/// share a single server that listens on ports 80 and 443 with TLS
-/// enabled via the global certificate store.
-fn build_pingap_config(rule_cache: &RuleCache) -> Option<PingapConfig> {
-    let cached = rule_cache.all_sites();
+/// Each origin pool becomes one upstream keyed by its pool id (or the
+/// legacy per-site name for caches written before pools existed). The
+/// default pool — or the only pool, when no routes exist — receives the
+/// site's `/` fallback location, and every enabled route becomes an
+/// additional location carrying the pingap path marker for its match
+/// type. All sites share a single server listening on ports 80 and 443
+/// with TLS enabled via the global certificate store.
+fn cached_rules_to_pingap_config(cached: &CachedRules) -> Option<PingapConfig> {
     if cached.sites.is_empty() {
         return None;
     }
@@ -169,12 +196,22 @@ fn build_pingap_config(rule_cache: &RuleCache) -> Option<PingapConfig> {
             continue;
         }
 
-        // Convert upstreams
+        // One upstream per origin pool. Pools without peers are skipped:
+        // an address-less upstream cannot be constructed.
+        let mut pool_keys: Vec<String> = Vec::new();
+        let mut default_key: Option<String> = None;
         for (i, up) in site.upstreams.iter().enumerate() {
-            let name = if site.upstreams.len() == 1 {
-                format!("{}_upstream", site_id)
+            if up.peers.is_empty() {
+                continue;
+            }
+            let name = if up.pool_id.is_empty() {
+                if site.upstreams.len() == 1 {
+                    format!("{site_id}_upstream")
+                } else {
+                    format!("{site_id}_upstream_{i}")
+                }
             } else {
-                format!("{}_upstream_{}", site_id, i)
+                up.pool_id.clone()
             };
 
             let addrs: Vec<String> = up
@@ -194,16 +231,15 @@ fn build_pingap_config(rule_cache: &RuleCache) -> Option<PingapConfig> {
                 })
                 .collect();
 
-            let algo = match up.algorithm.as_str() {
-                "LbConsistentHash" => Some("hash:ip".to_string()),
-                "LbLeastConnections" => Some("least_connections".to_string()),
-                "LbRandom" => Some("random".to_string()),
-                _ => None, // round_robin is the default
-            };
-
             let conf = UpstreamConf {
                 addrs,
-                algo,
+                algo: sanitize_algo(&up.algo),
+                sni: if up.sni.is_empty() {
+                    None
+                } else {
+                    Some(up.sni.clone())
+                },
+                verify_cert: up.verify_cert,
                 connection_timeout: if up.connection_timeout_ms > 0 {
                     Some(Duration::from_millis(up.connection_timeout_ms as u64))
                 } else {
@@ -226,25 +262,70 @@ fn build_pingap_config(rule_cache: &RuleCache) -> Option<PingapConfig> {
                     .map(|h| h.path.clone()),
                 ..Default::default()
             };
-            upstreams.insert(name.clone(), conf);
+            if up.is_default {
+                default_key = Some(name.clone());
+            }
+            pool_keys.push(name.clone());
+            upstreams.insert(name, conf);
+        }
 
-            // Create a location for this site pointing to the upstream
-            let loc_name = format!("{}_loc", site_id);
-            let host = if site.alternate_domains.is_empty() {
-                site.domain.clone()
+        // The `/` fallback location points at the default pool. Caches
+        // written before pools existed mark nothing default, so the only
+        // pool serves when no routes exist.
+        let fallback_key = default_key.or_else(|| {
+            if site.routes.is_empty() {
+                pool_keys.first().cloned()
             } else {
-                let mut hosts = vec![site.domain.clone()];
-                hosts.extend(site.alternate_domains.clone());
-                hosts.join(",")
-            };
+                None
+            }
+        });
 
-            let loc = LocationConf {
-                upstream: Some(name),
-                host: Some(host),
-                path: Some("/".to_string()),
-                ..Default::default()
+        let host = if site.alternate_domains.is_empty() {
+            site.domain.clone()
+        } else {
+            let mut hosts = vec![site.domain.clone()];
+            hosts.extend(site.alternate_domains.clone());
+            hosts.join(",")
+        };
+
+        if let Some(key) = fallback_key {
+            let loc_name = format!("{site_id}_loc");
+            locations.insert(
+                loc_name.clone(),
+                LocationConf {
+                    upstream: Some(key),
+                    host: Some(host.clone()),
+                    path: Some("/".to_string()),
+                    ..Default::default()
+                },
+            );
+            location_names.push(loc_name);
+        }
+
+        for route in &site.routes {
+            // Route only to pools this site actually built — an empty
+            // pool has no upstream to receive traffic.
+            if !route.enabled || !pool_keys.contains(&route.pool_id) {
+                continue;
+            }
+            let path = match route.match_type.as_str() {
+                "exact" => format!("={}", route.path),
+                "regex" => format!("~{}", route.path),
+                _ => route.path.clone(),
             };
-            locations.insert(loc_name.clone(), loc);
+            let loc_name = format!("{site_id}_route_{}", route.id);
+            locations.insert(
+                loc_name.clone(),
+                LocationConf {
+                    upstream: Some(route.pool_id.clone()),
+                    host: Some(host.clone()),
+                    path: Some(path),
+                    weight: route
+                        .priority
+                        .map(|p| p.clamp(1, u16::MAX as i32) as u16),
+                    ..Default::default()
+                },
+            );
             location_names.push(loc_name);
         }
 
@@ -253,7 +334,7 @@ fn build_pingap_config(rule_cache: &RuleCache) -> Option<PingapConfig> {
             && ssl.enabled
             && !ssl.cert_pem.is_empty()
         {
-            let cert_name = format!("{}_cert", site_id);
+            let cert_name = format!("{site_id}_cert");
             let domains = if site.alternate_domains.is_empty() {
                 site.domain.clone()
             } else {
@@ -294,6 +375,11 @@ fn build_pingap_config(rule_cache: &RuleCache) -> Option<PingapConfig> {
         certificates,
         ..Default::default()
     })
+}
+
+/// Build a `PingapConfig` from the agent's cached rules.
+fn build_pingap_config(rule_cache: &RuleCache) -> Option<PingapConfig> {
+    cached_rules_to_pingap_config(&rule_cache.all_sites())
 }
 
 /// Start the Pingora-based data plane proxy from the agent's cached rules.
@@ -588,4 +674,273 @@ fn init_tracing() {
         .with(filter)
         .with(fmt::layer().with_target(true))
         .init();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pingwaf_agent::cache::{
+        CachedRules, RouteConfig, SiteRules, UpstreamConfig, UpstreamPeer,
+    };
+
+    fn site_rules(site_id: &str, domain: &str) -> SiteRules {
+        SiteRules {
+            site_id: site_id.to_string(),
+            domain: domain.to_string(),
+            alternate_domains: vec![],
+            waf_config: None,
+            rate_limit_rules: vec![],
+            ip_access_rules: vec![],
+            geo_config: None,
+            cache_rules: vec![],
+            challenge_config: None,
+            rewrite_rules: vec![],
+            error_pages: vec![],
+            ssl_config: None,
+            upstreams: vec![],
+            routes: vec![],
+        }
+    }
+
+    fn pool(pool_id: &str, peers: Vec<UpstreamPeer>) -> UpstreamConfig {
+        UpstreamConfig {
+            name: pool_id.to_string(),
+            peers,
+            algorithm: String::new(),
+            health_check: None,
+            connection_timeout_ms: 0,
+            read_timeout_ms: 0,
+            write_timeout_ms: 0,
+            pool_id: pool_id.to_string(),
+            algo: String::new(),
+            sni: String::new(),
+            verify_cert: None,
+            is_default: false,
+        }
+    }
+
+    fn peer(address: &str) -> UpstreamPeer {
+        UpstreamPeer {
+            address: address.to_string(),
+            weight: 1,
+            tls: false,
+        }
+    }
+
+    fn route(
+        id: &str,
+        match_type: &str,
+        path: &str,
+        pool_id: &str,
+    ) -> RouteConfig {
+        RouteConfig {
+            id: id.to_string(),
+            name: id.to_string(),
+            match_type: match_type.to_string(),
+            path: path.to_string(),
+            priority: None,
+            enabled: true,
+            pool_id: pool_id.to_string(),
+        }
+    }
+
+    fn one_site_cache(site: SiteRules) -> CachedRules {
+        let mut cached = CachedRules::default();
+        cached.sites.insert(site.site_id.clone(), Arc::new(site));
+        cached
+    }
+
+    #[test]
+    fn single_pool_without_routes_matches_legacy_layout() {
+        let mut site = site_rules("site1", "a.example.com");
+        site.upstreams = vec![pool("", vec![peer("10.0.0.1:8080")])];
+        let config = cached_rules_to_pingap_config(&one_site_cache(site))
+            .expect("config should build");
+
+        let upstream = config
+            .upstreams
+            .get("site1_upstream")
+            .expect("legacy upstream key");
+        assert_eq!(upstream.addrs, vec!["10.0.0.1:8080"]);
+        assert_eq!(upstream.algo, None);
+
+        let loc = config
+            .locations
+            .get("site1_loc")
+            .expect("fallback location");
+        assert_eq!(loc.path.as_deref(), Some("/"));
+        assert_eq!(loc.upstream.as_deref(), Some("site1_upstream"));
+        assert_eq!(loc.host.as_deref(), Some("a.example.com"));
+        assert_eq!(loc.weight, None);
+    }
+
+    #[test]
+    fn legacy_multi_pool_cache_falls_back_to_first_pool() {
+        // Before pools existed each upstream entry overwrote the site's
+        // single location; now the first pool deterministically serves.
+        let mut site = site_rules("site1", "a.example.com");
+        site.upstreams = vec![
+            pool("", vec![peer("10.0.0.1:8080")]),
+            pool("", vec![peer("10.0.0.2:8080")]),
+        ];
+        let config = cached_rules_to_pingap_config(&one_site_cache(site))
+            .expect("config should build");
+
+        assert!(config.upstreams.contains_key("site1_upstream_0"));
+        assert!(config.upstreams.contains_key("site1_upstream_1"));
+        let loc = config.locations.get("site1_loc").expect("location");
+        assert_eq!(loc.upstream.as_deref(), Some("site1_upstream_0"));
+        assert_eq!(config.locations.len(), 1);
+    }
+
+    #[test]
+    fn pools_and_routes_build_separate_locations() {
+        let mut site = site_rules("site1", "a.example.com");
+        let mut default_pool = pool(
+            "pool-a",
+            vec![
+                peer("10.0.0.1:8080"),
+                UpstreamPeer {
+                    address: "10.0.0.2:8080".to_string(),
+                    weight: 3,
+                    tls: false,
+                },
+            ],
+        );
+        default_pool.is_default = true;
+        let second_pool = pool("pool-b", vec![peer("10.0.0.3:9090")]);
+        // Empty pools are skipped entirely.
+        site.upstreams =
+            vec![default_pool, second_pool, pool("pool-empty", vec![])];
+
+        let mut r1 = route("r1", "prefix", "/api", "pool-b");
+        r1.priority = Some(100);
+        let r2 = route("r2", "exact", "/healthz", "pool-a");
+        let r3 = route("r3", "regex", r"^/static/.*", "pool-b");
+        let mut disabled = route("r4", "prefix", "/gone", "pool-b");
+        disabled.enabled = false;
+        // Route referencing the skipped empty pool is dropped.
+        let orphan = route("r5", "prefix", "/orphan", "pool-empty");
+        site.routes = vec![r1, r2, r3, disabled, orphan];
+
+        let config = cached_rules_to_pingap_config(&one_site_cache(site))
+            .expect("config should build");
+
+        assert_eq!(config.upstreams.len(), 2);
+        let default_upstream =
+            config.upstreams.get("pool-a").expect("pool-a upstream");
+        assert!(
+            default_upstream
+                .addrs
+                .contains(&"10.0.0.2:8080 3".to_string())
+        );
+
+        let fallback = config
+            .locations
+            .get("site1_loc")
+            .expect("default pool fallback location");
+        assert_eq!(fallback.upstream.as_deref(), Some("pool-a"));
+        assert_eq!(fallback.path.as_deref(), Some("/"));
+        assert_eq!(fallback.weight, None);
+
+        let api = config
+            .locations
+            .get("site1_route_r1")
+            .expect("prefix route location");
+        assert_eq!(api.path.as_deref(), Some("/api"));
+        assert_eq!(api.upstream.as_deref(), Some("pool-b"));
+        assert_eq!(api.weight, Some(100));
+
+        let healthz = config
+            .locations
+            .get("site1_route_r2")
+            .expect("exact route location");
+        assert_eq!(healthz.path.as_deref(), Some("=/healthz"));
+        assert_eq!(healthz.upstream.as_deref(), Some("pool-a"));
+        assert_eq!(healthz.weight, None);
+
+        let static_route = config
+            .locations
+            .get("site1_route_r3")
+            .expect("regex route location");
+        assert_eq!(static_route.path.as_deref(), Some("~^/static/.*"));
+
+        assert!(!config.locations.contains_key("site1_route_r4"));
+        assert!(!config.locations.contains_key("site1_route_r5"));
+    }
+
+    #[test]
+    fn sni_verify_cert_and_algo_pass_through() {
+        let mut site = site_rules("site1", "a.example.com");
+        let mut tls_pool = pool("pool-a", vec![peer("https://10.0.0.1:8443")]);
+        tls_pool.is_default = true;
+        tls_pool.sni = "origin.example.com".to_string();
+        tls_pool.verify_cert = Some(false);
+        tls_pool.algo = "hash:cookie:session".to_string();
+        site.upstreams = vec![tls_pool];
+
+        let mut legacy_pool = pool("pool-b", vec![peer("10.0.0.2:8080")]);
+        legacy_pool.algo = "lbconsistenthash".to_string();
+        site.upstreams.push(legacy_pool);
+
+        let config = cached_rules_to_pingap_config(&one_site_cache(site))
+            .expect("config should build");
+
+        let tls = config.upstreams.get("pool-a").expect("tls pool");
+        assert_eq!(tls.sni.as_deref(), Some("origin.example.com"));
+        assert_eq!(tls.verify_cert, Some(false));
+        assert_eq!(
+            tls.algo.as_deref(),
+            Some("hash:cookie:session"),
+            "valid hash algo passes through"
+        );
+        assert_eq!(
+            tls.addrs,
+            vec!["10.0.0.1:8443"],
+            "scheme is stripped from peer addresses"
+        );
+
+        assert_eq!(
+            config.upstreams.get("pool-b").unwrap().algo,
+            None,
+            "legacy enum debug names collapse to the round_robin default"
+        );
+    }
+
+    #[test]
+    fn sanitize_algo_rejects_unknown_names() {
+        assert_eq!(sanitize_algo(""), None);
+        assert_eq!(sanitize_algo("round_robin"), None);
+        assert_eq!(sanitize_algo("least_connections"), None);
+        assert_eq!(sanitize_algo("random"), None);
+        assert_eq!(sanitize_algo("lbconsistenthash"), None);
+        assert_eq!(sanitize_algo("hash:"), None);
+        assert_eq!(sanitize_algo("hash:bogus"), None);
+        assert_eq!(sanitize_algo("hash:ip"), Some("hash:ip".to_string()));
+        assert_eq!(sanitize_algo("hash:url"), Some("hash:url".to_string()));
+        assert_eq!(sanitize_algo("hash:path"), Some("hash:path".to_string()));
+        assert_eq!(
+            sanitize_algo("hash:header:x-user"),
+            Some("hash:header:x-user".to_string())
+        );
+        assert_eq!(
+            sanitize_algo("hash:cookie:session_id"),
+            Some("hash:cookie:session_id".to_string())
+        );
+        assert_eq!(
+            sanitize_algo("hash:query:q"),
+            Some("hash:query:q".to_string())
+        );
+    }
+
+    #[test]
+    fn empty_cache_and_empty_sites_produce_no_config() {
+        assert!(
+            cached_rules_to_pingap_config(&CachedRules::default()).is_none()
+        );
+
+        let mut site = site_rules("site1", "");
+        site.upstreams = vec![pool("", vec![peer("10.0.0.1:8080")])];
+        assert!(cached_rules_to_pingap_config(&one_site_cache(site)).is_none());
+    }
 }
