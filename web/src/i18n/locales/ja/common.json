@@ -18,7 +18,12 @@
     "logs": "ログ",
     "agents": "エージェント",
     "settings": "設定",
-    "securityGeo": "地域"
+    "securityGeo": "地域",
+    "selectSiteFirst": "サイトを選択してください"
+  },
+  "sidebar": {
+    "collapse": "折りたたむ",
+    "expand": "展開"
   },
   "common": {
     "save": "保存",

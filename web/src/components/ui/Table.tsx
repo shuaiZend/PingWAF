@@ -1,5 +1,6 @@
 import { useMemo, useState, type ReactNode } from 'react'
 import { CaretUp, CaretDown, CaretLeft, CaretRight } from '@phosphor-icons/react'
+import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 import { Button } from './Button'
 
@@ -48,6 +49,7 @@ export function Table<T>({
   className,
   dense = false,
 }: TableProps<T>) {
+  const { t } = useTranslation()
   const [sort, setSort] = useState<{ key: string; dir: SortDir } | null>(null)
   const [page, setPage] = useState(0)
 
@@ -147,7 +149,7 @@ export function Table<T>({
                 <td colSpan={columns.length} className={cn(cellPad, 'text-center')}>
                   <div className="flex items-center justify-center gap-2 py-8 text-fg-subtle">
                     <span className="h-4 w-4 animate-spin-slow rounded-full border-2 border-current border-t-transparent" />
-                    <span className="text-sm">Loading…</span>
+                    <span className="text-sm">{t('common.loading')}</span>
                   </div>
                 </td>
               </tr>
@@ -155,7 +157,7 @@ export function Table<T>({
               <tr>
                 <td colSpan={columns.length} className={cellPad}>
                   {empty ?? (
-                    <div className="py-10 text-center text-sm text-fg-subtle">No data</div>
+                    <div className="py-10 text-center text-sm text-fg-subtle">{t('common.noData')}</div>
                   )}
                 </td>
               </tr>
@@ -196,14 +198,17 @@ export function Table<T>({
       {pageSize > 0 && sorted.length > 0 && (
         <div className="mt-3 flex items-center justify-between text-[13px] text-fg-subtle">
           <span>
-            {safePage * pageSize + 1}–{Math.min(sorted.length, (safePage + 1) * pageSize)} of{' '}
-            {sorted.length}
+            {t('pagination.showing', {
+              from: safePage * pageSize + 1,
+              to: Math.min(sorted.length, (safePage + 1) * pageSize),
+              total: sorted.length,
+            })}
           </span>
           <div className="flex items-center gap-1">
             <Button
               size="icon"
               variant="ghost"
-              aria-label="Previous page"
+              aria-label={t('pagination.previous')}
               disabled={safePage === 0}
               onClick={() => setPage((p) => Math.max(0, p - 1))}
               icon={<CaretLeft weight="bold" className="h-4 w-4" />}
@@ -214,7 +219,7 @@ export function Table<T>({
             <Button
               size="icon"
               variant="ghost"
-              aria-label="Next page"
+              aria-label={t('pagination.next')}
               disabled={safePage >= pageCount - 1}
               onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))}
               icon={<CaretRight weight="bold" className="h-4 w-4" />}
