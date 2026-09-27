@@ -18,7 +18,12 @@
     "logs": "Logs",
     "agents": "Agents",
     "settings": "Settings",
-    "securityGeo": "Geo"
+    "securityGeo": "Geo",
+    "selectSiteFirst": "Select a site first"
+  },
+  "sidebar": {
+    "collapse": "Collapse",
+    "expand": "Expand"
   },
   "common": {
     "save": "Save",

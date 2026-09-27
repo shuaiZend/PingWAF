@@ -18,7 +18,12 @@
     "logs": "日志",
     "agents": "节点",
     "settings": "设置",
-    "securityGeo": "地域"
+    "securityGeo": "地域",
+    "selectSiteFirst": "请先选择一个站点"
+  },
+  "sidebar": {
+    "collapse": "收起",
+    "expand": "展开"
   },
   "common": {
     "save": "保存",

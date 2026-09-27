@@ -25,12 +25,14 @@ interface NavLeaf {
   labelKey: string
   icon: Icon
   end?: boolean
+  requiresSite?: boolean
 }
 
 interface NavSub {
   to: string
   labelKey: string
   icon: Icon
+  requiresSite?: boolean
 }
 
 interface NavGroup {
@@ -54,6 +56,8 @@ export function Sidebar({ collapsed, onNavigate }: SidebarProps) {
   const siteMatch = useMatch('/sites/:siteId/*')
   const siteId = siteMatch?.params.siteId
   const site = (path: string) => (siteId ? `/sites/${siteId}/${path}` : '/sites')
+  // Per-site nav items should be disabled when no site is selected.
+  const hasSiteContext = Boolean(siteId)
 
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({
     security: true,
@@ -70,22 +74,24 @@ export function Sidebar({ collapsed, onNavigate }: SidebarProps) {
       labelKey: 'nav.security',
       icon: Shield,
       children: [
-        { to: site('security/waf'), labelKey: 'nav.securityWaf', icon: Shield },
+        { to: site('security/waf'), labelKey: 'nav.securityWaf', icon: Shield, requiresSite: true },
         {
           to: site('security/rate-limiting'),
           labelKey: 'nav.securityRateLimiting',
           icon: Gauge,
+          requiresSite: true,
         },
-        { to: site('security/bot'), labelKey: 'nav.securityBot', icon: Robot },
-        { to: site('security/cc'), labelKey: 'nav.securityCc', icon: Cloud },
+        { to: site('security/bot'), labelKey: 'nav.securityBot', icon: Robot, requiresSite: true },
+        { to: site('security/cc'), labelKey: 'nav.securityCc', icon: Cloud, requiresSite: true },
         {
           to: site('security/ip-rules'),
           labelKey: 'nav.securityIpRules',
           icon: IdentificationCard,
+          requiresSite: true,
         },
       ],
     },
-    { kind: 'leaf', to: site('caching'), labelKey: 'nav.caching', icon: Lightning },
+    { kind: 'leaf', to: site('caching'), labelKey: 'nav.caching', icon: Lightning, requiresSite: true },
     // SSL/TLS and traffic in the sidebar are the *global* surfaces; each site's
     // own certificates and traffic live in that site's tab bar.
     { kind: 'leaf', to: '/ssl', labelKey: 'nav.ssl', icon: Lock },
@@ -105,16 +111,32 @@ export function Sidebar({ collapsed, onNavigate }: SidebarProps) {
       {nav.map((entry) => {
         if (entry.kind === 'leaf') {
           const IconCmp = entry.icon
+          const disabled = entry.requiresSite && !hasSiteContext
           return (
             <NavLink
               key={entry.labelKey}
               to={entry.to}
               end={entry.end}
-              onClick={onNavigate}
-              title={collapsed ? t(entry.labelKey) : undefined}
+              onClick={(e) => {
+                if (disabled) {
+                  e.preventDefault()
+                  return
+                }
+                onNavigate?.()
+              }}
+              title={collapsed ? (disabled ? t('nav.selectSiteFirst') : t(entry.labelKey)) : undefined}
               className={({ isActive }) =>
-                cn(linkBase, isActive ? linkActive : linkIdle, collapsed && 'justify-center px-0')
+                cn(
+                  linkBase,
+                  disabled
+                    ? 'cursor-not-allowed opacity-50'
+                    : isActive
+                      ? linkActive
+                      : linkIdle,
+                  collapsed && 'justify-center px-0',
+                )
               }
+              aria-disabled={disabled}
             >
               <IconCmp weight="duotone" className="h-5 w-5 shrink-0" />
               {!collapsed && <span className="truncate">{t(entry.labelKey)}</span>}
@@ -126,24 +148,37 @@ export function Sidebar({ collapsed, onNavigate }: SidebarProps) {
         const IconCmp = entry.icon
         const groupKey = entry.labelKey
         const isOpen = openGroups[groupKey] ?? false
-        const childActive = entry.children.some((c) =>
+        // Only consider children active if they have a valid site context.
+        const childActive = hasSiteContext && entry.children.some((c) =>
           window.location.pathname.startsWith(c.to),
         )
 
         if (collapsed) {
+          const groupDisabled = !hasSiteContext && entry.children.some((c) => c.requiresSite)
           return (
             <NavLink
               key={groupKey}
               to={entry.children[0].to}
-              onClick={onNavigate}
-              title={t(groupKey)}
+              onClick={(e) => {
+                if (groupDisabled) {
+                  e.preventDefault()
+                  return
+                }
+                onNavigate?.()
+              }}
+              title={groupDisabled ? t('nav.selectSiteFirst') : t(groupKey)}
               className={({ isActive }) =>
                 cn(
                   linkBase,
                   'justify-center px-0',
-                  isActive || childActive ? linkActive : linkIdle,
+                  groupDisabled
+                    ? 'cursor-not-allowed opacity-50'
+                    : isActive || childActive
+                      ? linkActive
+                      : linkIdle,
                 )
               }
+              aria-disabled={groupDisabled}
             >
               <IconCmp weight="duotone" className="h-5 w-5 shrink-0" />
             </NavLink>
@@ -182,19 +217,30 @@ export function Sidebar({ collapsed, onNavigate }: SidebarProps) {
                 <div className="ml-4 mt-0.5 flex flex-col gap-0.5 border-l border-line pl-2">
                   {entry.children.map((child) => {
                     const ChildIcon = child.icon
+                    const childDisabled = child.requiresSite && !hasSiteContext
                     return (
                       <NavLink
                         key={child.to + child.labelKey}
                         to={child.to}
-                        onClick={onNavigate}
+                        onClick={(e) => {
+                          if (childDisabled) {
+                            e.preventDefault()
+                            return
+                          }
+                          onNavigate?.()
+                        }}
                         className={({ isActive }) =>
                           cn(
                             'flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-[13px] transition-colors duration-150',
-                            isActive
-                              ? 'bg-brand-soft font-medium text-brand'
-                              : 'text-fg-subtle hover:bg-recessed hover:text-fg',
+                            childDisabled
+                              ? 'cursor-not-allowed opacity-50'
+                              : isActive
+                                ? 'bg-brand-soft font-medium text-brand'
+                                : 'text-fg-subtle hover:bg-recessed hover:text-fg',
                           )
                         }
+                        aria-disabled={childDisabled}
+                        title={childDisabled ? t('nav.selectSiteFirst') : undefined}
                       >
                         <ChildIcon className="h-4 w-4 shrink-0" />
                         <span className="truncate">{t(child.labelKey)}</span>

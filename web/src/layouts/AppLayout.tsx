@@ -308,6 +308,7 @@ function SidebarFooter({
   collapsed: boolean
   onToggle: () => void
 }) {
+  const { t } = useTranslation()
   return (
     <div className="shrink-0 border-t border-line p-2">
       <button
@@ -316,7 +317,7 @@ function SidebarFooter({
           'flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm text-fg-subtle transition-colors hover:bg-recessed hover:text-fg',
           collapsed && 'justify-center px-0',
         )}
-        title={collapsed ? 'Expand' : 'Collapse'}
+        title={collapsed ? t('sidebar.expand') : t('sidebar.collapse')}
       >
         <CaretDown
           weight="bold"
@@ -325,7 +326,7 @@ function SidebarFooter({
             collapsed ? '-rotate-90' : 'rotate-90',
           )}
         />
-        {!collapsed && <span>Collapse</span>}
+        {!collapsed && <span>{t('sidebar.collapse')}</span>}
       </button>
     </div>
   )
