@@ -396,13 +396,17 @@ pub async fn start_data_plane(
 
     info!("data plane: proxy server is running on 0.0.0.0:80,0.0.0.0:443");
 
-    // Block until shutdown
-    let handle = std::thread::spawn(move || {
+    // Run Pingora in a dedicated OS thread. Do NOT join it here —
+    // joining would block the tokio worker thread permanently and starve
+    // the control-plane REST/gRPC servers (especially on small machines).
+    // The thread exits when the process shuts down.
+    std::thread::spawn(move || {
         my_server.run_forever();
     });
 
-    // Wait for the thread (it runs until process exit)
-    let _ = handle.join();
+    // Keep the async task alive until the tokio runtime shuts down.
+    // The caller (run()) aborts this task on shutdown signal.
+    std::future::pending::<()>().await;
     Ok(())
 }
 
