@@ -17,6 +17,7 @@ import {
   IdentificationCard,
   FunnelSimple,
   CaretDown,
+  Network,
   type Icon,
 } from '@phosphor-icons/react'
 import { cn } from '@/lib/utils'
@@ -92,6 +93,7 @@ export function Sidebar({ collapsed, onNavigate }: SidebarProps) {
         },
       ],
     },
+    { kind: 'leaf', to: site('origin'), labelKey: 'nav.origin', icon: Network, requiresSite: true },
     { kind: 'leaf', to: site('caching'), labelKey: 'nav.caching', icon: Lightning, requiresSite: true },
     { kind: 'leaf', to: '/ip-groups', labelKey: 'nav.ipGroups', icon: FunnelSimple },
     // SSL/TLS and traffic in the sidebar are the *global* surfaces; each site's

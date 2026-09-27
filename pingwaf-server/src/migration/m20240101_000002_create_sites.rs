@@ -272,6 +272,9 @@ pub enum SiteUpstreams {
     Table,
     Id,
     SiteId,
+    // Column added by m20240101_000011; listed here so later migrations can
+    // reference it through the shared identifier enum.
+    PoolId,
     Name,
     Address,
     Weight,

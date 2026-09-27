@@ -56,11 +56,81 @@ pub mod site_upstreams {
         #[sea_orm(primary_key, auto_increment = false)]
         pub id: Uuid,
         pub site_id: Uuid,
+        pub pool_id: Uuid,
         pub name: String,
         pub address: String,
         pub weight: i32,
         pub tls: bool,
         pub health_status: String,
+        pub created_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+/// `site_upstream_pools` — a group of origin nodes sharing one
+/// load-balancing algorithm and origin TLS setting.
+pub mod site_upstream_pools {
+    use super::*;
+
+    #[derive(
+        Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize,
+    )]
+    #[sea_orm(table_name = "site_upstream_pools")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub site_id: Uuid,
+        pub name: String,
+        /// pingap LB spec: `round_robin` or `hash:<type>[:<key>]`.
+        pub lb_algorithm: String,
+        /// Non-empty enables TLS to the origin and sets the SNI.
+        pub sni: Option<String>,
+        /// `None` keeps the proxy default (verification on).
+        pub verify_cert: Option<bool>,
+        pub is_default: bool,
+        pub created_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+/// Route match types accepted in `site_routes.match_type`.
+pub mod route_match_type {
+    pub const PREFIX: &str = "prefix";
+    pub const EXACT: &str = "exact";
+    pub const REGEX: &str = "regex";
+
+    pub fn is_valid(value: &str) -> bool {
+        matches!(value, PREFIX | EXACT | REGEX)
+    }
+}
+
+/// `site_routes` — maps request paths to an origin pool.
+pub mod site_routes {
+    use super::*;
+
+    #[derive(
+        Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize,
+    )]
+    #[sea_orm(table_name = "site_routes")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub site_id: Uuid,
+        pub name: String,
+        pub match_type: String,
+        pub path: String,
+        /// Manual location weight; `None` uses pingap's auto weight.
+        pub priority: Option<i32>,
+        pub enabled: bool,
+        pub pool_id: Uuid,
         pub created_at: DateTimeUtc,
     }
 

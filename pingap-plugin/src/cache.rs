@@ -1174,6 +1174,7 @@ purge_ip_list = ["192.168.1.1"]
             error_pages: vec![],
             ssl_config: None,
             upstreams: vec![],
+            routes: vec![],
         }
     }
 

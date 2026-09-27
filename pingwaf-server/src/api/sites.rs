@@ -23,8 +23,9 @@ use crate::api::state::AppState;
 use crate::auth::AuthUser;
 use crate::grpc::notify_config_changed;
 use crate::models::{
-    acme_challenge, cache_rules, rate_limit_rules, rule, rule_groups, site,
-    site_certificates, site_ssl, site_status, site_upstreams, tls_version,
+    acme_challenge, cache_rules, rate_limit_rules, route_match_type, rule,
+    rule_groups, site, site_certificates, site_routes, site_ssl, site_status,
+    site_upstream_pools, site_upstreams, tls_version,
 };
 
 /// Public representation of a site.
@@ -182,6 +183,9 @@ pub struct CreateUpstreamRequest {
     pub weight: i32,
     #[serde(default)]
     pub tls: bool,
+    /// Target pool; defaults to the site's default pool.
+    #[serde(default)]
+    pub pool_id: Option<Uuid>,
 }
 
 fn default_weight() -> i32 {
@@ -200,6 +204,68 @@ pub struct UpdateUpstreamRequest {
     pub tls: Option<bool>,
     #[serde(default)]
     pub health_status: Option<String>,
+    #[serde(default)]
+    pub pool_id: Option<Uuid>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreatePoolRequest {
+    pub name: String,
+    #[serde(default = "default_lb_algorithm")]
+    pub lb_algorithm: String,
+    /// Non-empty enables TLS to the origin; empty means plain HTTP.
+    #[serde(default)]
+    pub sni: Option<String>,
+    /// `None` keeps the proxy default (certificate verification on).
+    #[serde(default)]
+    pub verify_cert: Option<bool>,
+}
+
+fn default_lb_algorithm() -> String {
+    "round_robin".to_string()
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct UpdatePoolRequest {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub lb_algorithm: Option<String>,
+    /// `Some("")` clears the SNI (disables origin TLS); `None` leaves it.
+    #[serde(default)]
+    pub sni: Option<String>,
+    #[serde(default)]
+    pub verify_cert: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateRouteRequest {
+    pub name: String,
+    pub match_type: String,
+    pub path: String,
+    /// Manual location weight; `None` uses the auto weight.
+    #[serde(default)]
+    pub priority: Option<i32>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    pub pool_id: Uuid,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct UpdateRouteRequest {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub match_type: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    /// `Some(0)` clears the priority back to the auto weight.
+    #[serde(default)]
+    pub priority: Option<i32>,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub pool_id: Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -501,6 +567,22 @@ pub fn routes() -> Router<AppState> {
             put(update_upstream).delete(delete_upstream),
         )
         .route(
+            "/sites/{site_id}/upstream-pools",
+            get(list_pools).post(create_pool),
+        )
+        .route(
+            "/sites/{site_id}/upstream-pools/{pool_id}",
+            put(update_pool).delete(delete_pool),
+        )
+        .route(
+            "/sites/{site_id}/routes",
+            get(list_routes).post(create_route),
+        )
+        .route(
+            "/sites/{site_id}/routes/{route_id}",
+            put(update_route).delete(delete_route),
+        )
+        .route(
             "/sites/{site_id}/ssl",
             get(show_ssl).put(upsert_ssl).delete(delete_ssl),
         )
@@ -603,9 +685,28 @@ async fn create(
     .insert(&state.db)
     .await?;
 
+    // Every site starts with a default origin pool; the first origin node
+    // goes into it.
+    let pool = site_upstream_pools::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        site_id: Set(id),
+        name: Set("default".to_string()),
+        lb_algorithm: Set(default_lb_algorithm()),
+        sni: Set(payload
+            .upstream_tls
+            .filter(|tls| *tls)
+            .map(|_| origin_host(&upstream_address).to_string())),
+        verify_cert: Set(None),
+        is_default: Set(true),
+        created_at: Set(timestamp),
+    }
+    .insert(&state.db)
+    .await?;
+
     site_upstreams::ActiveModel {
         id: Set(Uuid::new_v4()),
         site_id: Set(id),
+        pool_id: Set(pool.id),
         name: Set(upstream_name),
         address: Set(upstream_address.clone()),
         weight: Set(default_weight()),
@@ -770,10 +871,12 @@ async fn create_upstream(
     let name = payload.name.trim().to_string();
     let address = payload.address.trim().to_string();
     validate_upstream(&name, &address, payload.weight)?;
+    let pool_id = resolve_pool(&state, id, payload.pool_id.as_ref()).await?;
 
     let model = site_upstreams::ActiveModel {
         id: Set(Uuid::new_v4()),
         site_id: Set(id),
+        pool_id: Set(pool_id),
         name: Set(name),
         address: Set(address),
         weight: Set(payload.weight),
@@ -784,7 +887,8 @@ async fn create_upstream(
     .insert(&state.db)
     .await?;
 
-    tracing::info!(site_id = %id, upstream = %model.id, "upstream added");
+    tracing::info!(site_id = %id, upstream = %model.id, pool = %pool_id, "upstream added");
+    touch_site(&state, id).await?;
     notify_config_changed(&state, id).await;
 
     Ok((StatusCode::CREATED, Json(model)).into_response())
@@ -822,6 +926,10 @@ async fn update_upstream(
     if let Some(tls) = payload.tls {
         active.tls = Set(tls);
     }
+    if let Some(pool_id) = payload.pool_id {
+        ensure_pool_belongs_to_site(&state, id, pool_id).await?;
+        active.pool_id = Set(pool_id);
+    }
     if let Some(health) = non_empty(&payload.health_status) {
         if health.len() > 20 {
             return Err(ApiError::BadRequest(
@@ -835,6 +943,7 @@ async fn update_upstream(
     validate_upstream(&updated.name, &updated.address, updated.weight)?;
 
     tracing::info!(site_id = %id, upstream = %target, "upstream updated");
+    touch_site(&state, id).await?;
     notify_config_changed(&state, id).await;
 
     Ok(Json(updated))
@@ -859,6 +968,304 @@ async fn delete_upstream(
     }
 
     tracing::info!(site_id = %id, upstream = %target, "upstream removed");
+    touch_site(&state, id).await?;
+    notify_config_changed(&state, id).await;
+
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// `GET /api/v1/sites/{site_id}/upstream-pools`
+async fn list_pools(
+    State(state): State<AppState>,
+    current: AuthUser,
+    Path(site_id): Path<String>,
+) -> Result<Json<Vec<site_upstream_pools::Model>>, ApiError> {
+    let id = parse_uuid(&site_id, "site id")?;
+    load_site_read(&state.db, id, &current).await?;
+
+    let mut rows = site_upstream_pools::Entity::find()
+        .filter(site_upstream_pools::Column::SiteId.eq(id))
+        .order_by_desc(site_upstream_pools::Column::IsDefault)
+        .order_by_asc(site_upstream_pools::Column::CreatedAt)
+        .all(&state.db)
+        .await?;
+    // `ORDER BY is_default DESC` puts the default first on PostgreSQL; the
+    // in-memory pass keeps that guarantee independent of SQL boolean order.
+    rows.sort_by_key(|row| !row.is_default);
+    Ok(Json(rows))
+}
+
+/// `POST /api/v1/sites/{site_id}/upstream-pools`
+async fn create_pool(
+    State(state): State<AppState>,
+    current: AuthUser,
+    Path(site_id): Path<String>,
+    Json(payload): Json<CreatePoolRequest>,
+) -> Result<Response, ApiError> {
+    let id = parse_uuid(&site_id, "site id")?;
+    load_site_write(&state.db, id, &current).await?;
+
+    let name = payload.name.trim().to_string();
+    let lb_algorithm = payload.lb_algorithm.trim().to_string();
+    let sni = non_empty(&payload.sni);
+    validate_pool(&name, &lb_algorithm, sni.as_deref())?;
+
+    let model = site_upstream_pools::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        site_id: Set(id),
+        name: Set(name),
+        lb_algorithm: Set(lb_algorithm),
+        sni: Set(sni),
+        verify_cert: Set(payload.verify_cert),
+        is_default: Set(false),
+        created_at: Set(Utc::now()),
+    }
+    .insert(&state.db)
+    .await?;
+
+    tracing::info!(site_id = %id, pool = %model.id, "origin pool added");
+    touch_site(&state, id).await?;
+    notify_config_changed(&state, id).await;
+
+    Ok((StatusCode::CREATED, Json(model)).into_response())
+}
+
+/// `PUT /api/v1/sites/{site_id}/upstream-pools/{pool_id}`
+async fn update_pool(
+    State(state): State<AppState>,
+    current: AuthUser,
+    Path((site_id, pool_id)): Path<(String, String)>,
+    Json(payload): Json<UpdatePoolRequest>,
+) -> Result<Json<site_upstream_pools::Model>, ApiError> {
+    let id = parse_uuid(&site_id, "site id")?;
+    let target = parse_uuid(&pool_id, "pool id")?;
+    load_site_write(&state.db, id, &current).await?;
+
+    let row = site_upstream_pools::Entity::find_by_id(target)
+        .filter(site_upstream_pools::Column::SiteId.eq(id))
+        .one(&state.db)
+        .await?
+        .ok_or_else(|| {
+            ApiError::NotFound(format!("pool {target} not found"))
+        })?;
+
+    let mut active: site_upstream_pools::ActiveModel = row.into();
+    if let Some(name) = non_empty(&payload.name) {
+        active.name = Set(name);
+    }
+    if let Some(lb_algorithm) = non_empty(&payload.lb_algorithm) {
+        active.lb_algorithm = Set(lb_algorithm.clone());
+    }
+    if let Some(sni) = payload.sni.as_deref() {
+        // `Some("")` clears the SNI and disables origin TLS.
+        active.sni = Set(non_empty(&Some(sni.to_string())));
+    }
+    if let Some(verify_cert) = payload.verify_cert {
+        active.verify_cert = Set(Some(verify_cert));
+    }
+
+    let updated = active.update(&state.db).await?;
+    validate_pool(
+        &updated.name,
+        &updated.lb_algorithm,
+        updated.sni.as_deref(),
+    )?;
+
+    tracing::info!(site_id = %id, pool = %target, "origin pool updated");
+    touch_site(&state, id).await?;
+    notify_config_changed(&state, id).await;
+
+    Ok(Json(updated))
+}
+
+/// `DELETE /api/v1/sites/{site_id}/upstream-pools/{pool_id}`
+async fn delete_pool(
+    State(state): State<AppState>,
+    current: AuthUser,
+    Path((site_id, pool_id)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    let id = parse_uuid(&site_id, "site id")?;
+    let target = parse_uuid(&pool_id, "pool id")?;
+    load_site_write(&state.db, id, &current).await?;
+
+    let row = site_upstream_pools::Entity::find_by_id(target)
+        .filter(site_upstream_pools::Column::SiteId.eq(id))
+        .one(&state.db)
+        .await?
+        .ok_or_else(|| {
+            ApiError::NotFound(format!("pool {target} not found"))
+        })?;
+    if row.is_default {
+        return Err(ApiError::BadRequest(
+            "the default pool cannot be deleted".to_string(),
+        ));
+    }
+
+    let referencing = site_routes::Entity::find()
+        .filter(site_routes::Column::PoolId.eq(target))
+        .count(&state.db)
+        .await?;
+    if referencing > 0 {
+        return Err(ApiError::Conflict(
+            "pool is still referenced by routes".to_string(),
+        ));
+    }
+
+    let nodes = site_upstreams::Entity::find()
+        .filter(site_upstreams::Column::PoolId.eq(target))
+        .count(&state.db)
+        .await?;
+    if nodes > 0 {
+        return Err(ApiError::Conflict(
+            "pool still has origin nodes; remove them first".to_string(),
+        ));
+    }
+
+    site_upstream_pools::Entity::delete_by_id(target)
+        .exec(&state.db)
+        .await?;
+
+    tracing::info!(site_id = %id, pool = %target, "origin pool removed");
+    touch_site(&state, id).await?;
+    notify_config_changed(&state, id).await;
+
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// `GET /api/v1/sites/{site_id}/routes`
+async fn list_routes(
+    State(state): State<AppState>,
+    current: AuthUser,
+    Path(site_id): Path<String>,
+) -> Result<Json<Vec<site_routes::Model>>, ApiError> {
+    let id = parse_uuid(&site_id, "site id")?;
+    load_site_read(&state.db, id, &current).await?;
+
+    let rows = site_routes::Entity::find()
+        .filter(site_routes::Column::SiteId.eq(id))
+        .order_by_desc(site_routes::Column::Priority)
+        .order_by_asc(site_routes::Column::CreatedAt)
+        .all(&state.db)
+        .await?;
+    Ok(Json(rows))
+}
+
+/// `POST /api/v1/sites/{site_id}/routes`
+async fn create_route(
+    State(state): State<AppState>,
+    current: AuthUser,
+    Path(site_id): Path<String>,
+    Json(payload): Json<CreateRouteRequest>,
+) -> Result<Response, ApiError> {
+    let id = parse_uuid(&site_id, "site id")?;
+    load_site_write(&state.db, id, &current).await?;
+
+    let name = payload.name.trim().to_string();
+    let match_type = payload.match_type.trim().to_string();
+    let path = payload.path.trim().to_string();
+    validate_route(&name, &match_type, &path, payload.priority)?;
+    ensure_pool_belongs_to_site(&state, id, payload.pool_id).await?;
+
+    let model = site_routes::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        site_id: Set(id),
+        name: Set(name),
+        match_type: Set(match_type),
+        path: Set(path),
+        priority: Set(payload.priority),
+        enabled: Set(payload.enabled),
+        pool_id: Set(payload.pool_id),
+        created_at: Set(Utc::now()),
+    }
+    .insert(&state.db)
+    .await?;
+
+    tracing::info!(site_id = %id, route = %model.id, "route added");
+    touch_site(&state, id).await?;
+    notify_config_changed(&state, id).await;
+
+    Ok((StatusCode::CREATED, Json(model)).into_response())
+}
+
+/// `PUT /api/v1/sites/{site_id}/routes/{route_id}`
+async fn update_route(
+    State(state): State<AppState>,
+    current: AuthUser,
+    Path((site_id, route_id)): Path<(String, String)>,
+    Json(payload): Json<UpdateRouteRequest>,
+) -> Result<Json<site_routes::Model>, ApiError> {
+    let id = parse_uuid(&site_id, "site id")?;
+    let target = parse_uuid(&route_id, "route id")?;
+    load_site_write(&state.db, id, &current).await?;
+
+    let row = site_routes::Entity::find_by_id(target)
+        .filter(site_routes::Column::SiteId.eq(id))
+        .one(&state.db)
+        .await?
+        .ok_or_else(|| {
+            ApiError::NotFound(format!("route {target} not found"))
+        })?;
+
+    if let Some(pool_id) = payload.pool_id {
+        ensure_pool_belongs_to_site(&state, id, pool_id).await?;
+    }
+
+    let mut active: site_routes::ActiveModel = row.into();
+    if let Some(name) = non_empty(&payload.name) {
+        active.name = Set(name);
+    }
+    if let Some(match_type) = non_empty(&payload.match_type) {
+        active.match_type = Set(match_type);
+    }
+    if let Some(path) = non_empty(&payload.path) {
+        active.path = Set(path);
+    }
+    if let Some(priority) = payload.priority {
+        // `0` is outside the valid range and means "back to auto weight".
+        active.priority = Set((priority > 0).then_some(priority));
+    }
+    if let Some(enabled) = payload.enabled {
+        active.enabled = Set(enabled);
+    }
+    if let Some(pool_id) = payload.pool_id {
+        active.pool_id = Set(pool_id);
+    }
+
+    let updated = active.update(&state.db).await?;
+    validate_route(
+        &updated.name,
+        &updated.match_type,
+        &updated.path,
+        updated.priority,
+    )?;
+
+    tracing::info!(site_id = %id, route = %target, "route updated");
+    touch_site(&state, id).await?;
+    notify_config_changed(&state, id).await;
+
+    Ok(Json(updated))
+}
+
+/// `DELETE /api/v1/sites/{site_id}/routes/{route_id}`
+async fn delete_route(
+    State(state): State<AppState>,
+    current: AuthUser,
+    Path((site_id, route_id)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    let id = parse_uuid(&site_id, "site id")?;
+    let target = parse_uuid(&route_id, "route id")?;
+    load_site_write(&state.db, id, &current).await?;
+
+    let deleted = site_routes::Entity::delete_by_id(target)
+        .filter(site_routes::Column::SiteId.eq(id))
+        .exec(&state.db)
+        .await?;
+    if deleted.rows_affected == 0 {
+        return Err(ApiError::NotFound(format!("route {target} not found")));
+    }
+
+    tracing::info!(site_id = %id, route = %target, "route removed");
+    touch_site(&state, id).await?;
     notify_config_changed(&state, id).await;
 
     Ok(StatusCode::NO_CONTENT.into_response())
@@ -1034,6 +1441,181 @@ fn validate_upstream(
         ));
     }
     Ok(())
+}
+
+/// Validates a pingap load-balancing spec: `round_robin` or
+/// `hash:<type>` for ip/url/path and `hash:<type>:<key>` for
+/// header/cookie/query.
+fn is_valid_lb_algorithm(value: &str) -> bool {
+    if value == "round_robin" {
+        return true;
+    }
+    let Some(rest) = value.strip_prefix("hash:") else {
+        return false;
+    };
+    let parts: Vec<&str> = rest.split(':').collect();
+    match parts.as_slice() {
+        [kind] => matches!(*kind, "ip" | "url" | "path"),
+        [kind, key] => {
+            matches!(*kind, "header" | "cookie" | "query")
+                && !key.is_empty()
+                && value.len() <= 64
+        },
+        _ => false,
+    }
+}
+
+/// Validates the fields shared by pool create/update.
+fn validate_pool(
+    name: &str,
+    lb_algorithm: &str,
+    sni: Option<&str>,
+) -> Result<(), ApiError> {
+    if name.is_empty() || name.len() > 100 {
+        return Err(ApiError::BadRequest(
+            "pool name must be 1-100 characters".to_string(),
+        ));
+    }
+    if lb_algorithm.len() > 64 || !is_valid_lb_algorithm(lb_algorithm) {
+        return Err(ApiError::BadRequest(format!(
+            "lb_algorithm '{lb_algorithm}' is invalid; expected round_robin \
+             or hash:<type>[:<key>] with type in ip/url/path/header/cookie/query"
+        )));
+    }
+    if let Some(sni) = sni.filter(|s| !s.is_empty()) {
+        if sni.len() > 255 {
+            return Err(ApiError::BadRequest(
+                "sni must be at most 255 characters".to_string(),
+            ));
+        }
+        if sni == "$host" {
+            return Err(ApiError::BadRequest(
+                "sni cannot be '$host'; static origin pools need a concrete \
+                 hostname"
+                    .to_string(),
+            ));
+        }
+        if sni.contains("://") || sni.contains(':') {
+            return Err(ApiError::BadRequest(
+                "sni must be a bare hostname without scheme or port"
+                    .to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Validates the fields shared by route create/update.
+fn validate_route(
+    name: &str,
+    match_type: &str,
+    path: &str,
+    priority: Option<i32>,
+) -> Result<(), ApiError> {
+    if name.is_empty() || name.len() > 100 {
+        return Err(ApiError::BadRequest(
+            "route name must be 1-100 characters".to_string(),
+        ));
+    }
+    if !route_match_type::is_valid(match_type) {
+        return Err(ApiError::BadRequest(format!(
+            "unknown route match type '{match_type}' (prefix, exact or regex)"
+        )));
+    }
+    if path.is_empty() || path.len() > 512 {
+        return Err(ApiError::BadRequest(
+            "route path must be 1-512 characters".to_string(),
+        ));
+    }
+    if match_type == route_match_type::REGEX {
+        regex::Regex::new(path).map(|_| ()).map_err(|err| {
+            ApiError::BadRequest(format!(
+                "route path is not a valid regex: {err}"
+            ))
+        })?;
+    } else {
+        if !path.starts_with('/') {
+            return Err(ApiError::BadRequest(
+                "route path must start with '/'".to_string(),
+            ));
+        }
+        if path.starts_with('=') || path.starts_with('~') {
+            return Err(ApiError::BadRequest(
+                "route path must not start with '=' or '~'".to_string(),
+            ));
+        }
+        if match_type == route_match_type::PREFIX && path == "/" {
+            return Err(ApiError::BadRequest(
+                "a prefix route on '/' conflicts with the default pool \
+                 fallback"
+                    .to_string(),
+            ));
+        }
+    }
+    if let Some(priority) = priority {
+        if !(1..=60_000).contains(&priority) {
+            return Err(ApiError::BadRequest(
+                "route priority must be between 1 and 60000".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Resolves the pool a new origin node belongs to: the given pool when
+/// specified, otherwise the site's default pool.
+async fn resolve_pool(
+    state: &AppState,
+    site_id: Uuid,
+    pool_id: Option<&Uuid>,
+) -> Result<Uuid, ApiError> {
+    match pool_id {
+        Some(pool_id) => {
+            ensure_pool_belongs_to_site(state, site_id, *pool_id).await?;
+            Ok(*pool_id)
+        },
+        None => {
+            let row = site_upstream_pools::Entity::find()
+                .filter(site_upstream_pools::Column::SiteId.eq(site_id))
+                .filter(site_upstream_pools::Column::IsDefault.eq(true))
+                .one(&state.db)
+                .await?
+                .ok_or_else(|| {
+                    ApiError::BadRequest(
+                        "site has no default origin pool".to_string(),
+                    )
+                })?;
+            Ok(row.id)
+        },
+    }
+}
+
+/// Fails unless the pool exists and belongs to the site.
+async fn ensure_pool_belongs_to_site(
+    state: &AppState,
+    site_id: Uuid,
+    pool_id: Uuid,
+) -> Result<(), ApiError> {
+    let owned = site_upstream_pools::Entity::find_by_id(pool_id)
+        .filter(site_upstream_pools::Column::SiteId.eq(site_id))
+        .one(&state.db)
+        .await?
+        .is_some();
+    if !owned {
+        return Err(ApiError::BadRequest(format!(
+            "pool {pool_id} does not belong to this site"
+        )));
+    }
+    Ok(())
+}
+
+/// Host part of a `host:port` origin address, used to pre-fill the pool SNI.
+fn origin_host(address: &str) -> &str {
+    let host = match address.rsplit_once(':') {
+        Some((host, port)) if port.chars().all(|c| c.is_ascii_digit()) => host,
+        _ => address,
+    };
+    host.trim_start_matches('[').trim_end_matches(']')
 }
 
 /// Updates `sites.updated_at` so agents see a fresh configuration fingerprint.

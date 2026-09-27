@@ -27,6 +27,7 @@ import { GlobalSslPage } from '@/pages/GlobalSslPage'
 import { GlobalTrafficPage } from '@/pages/GlobalTrafficPage'
 import { IpGroupsPage } from '@/pages/IpGroupsPage'
 import { RewritePage } from '@/pages/sites/RewritePage'
+import { OriginPage } from '@/pages/sites/OriginPage'
 import { ErrorPagesPage } from '@/pages/sites/ErrorPagesPage'
 import { SiteSettingsPage } from '@/pages/placeholders'
 import { EmptyState } from '@/components/ui/EmptyState'
@@ -76,7 +77,8 @@ export const router = createBrowserRouter([
         path: 'sites/:siteId',
         element: <SiteDetailPage />,
         children: [
-          { index: true, element: <Navigate to="security/waf" replace /> },
+          { index: true, element: <Navigate to="origin" replace /> },
+          { path: 'origin', element: <OriginPage /> },
           { path: 'security/waf', element: <WafPage /> },
           { path: 'security/rate-limiting', element: <RateLimitingPage /> },
           { path: 'security/bot', element: <BotProtectionPage /> },

@@ -5434,6 +5434,7 @@ dependencies = [
  "pingwaf-waf",
  "prost 0.14.4",
  "prost-types 0.14.4",
+ "regex",
  "reqwest 0.13.5",
  "rust-embed",
  "sea-orm",
