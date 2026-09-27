@@ -40,7 +40,7 @@ WORKDIR /app
 # 2b.【关键修复】预热前必须拷入：
 #     - build.rs（根 Cargo.toml 声明 build = "build.rs"，缺失会导致预热 cargo build 立即失败）
 #     - pingwaf-proto/proto/（pingwaf-proto/build.rs 需要 control_plane.proto 生成 gRPC stub）
-#     - 根 Cargo.toml/lock + 全部 24 个成员的 Cargo.toml
+#     - 根 Cargo.toml/lock + 全部 25 个成员的 Cargo.toml
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY pingwaf-proto/proto/ pingwaf-proto/proto/
 
@@ -65,6 +65,7 @@ COPY pingap-pyroscope/Cargo.toml pingap-pyroscope/
 COPY pingap-imageoptim/Cargo.toml pingap-imageoptim/
 COPY pingap-webhook/Cargo.toml pingap-webhook/
 COPY pingwaf-proto/Cargo.toml pingwaf-proto/
+COPY pingwaf-pprof/Cargo.toml pingwaf-pprof/
 COPY pingwaf-server/Cargo.toml pingwaf-server/
 COPY pingwaf-agent/Cargo.toml pingwaf-agent/
 COPY pingwaf-waf/Cargo.toml pingwaf-waf/
@@ -81,7 +82,8 @@ RUN mkdir -p src && echo "fn main() {}" > src/main.rs \
        pingap-certificate pingap-discovery pingap-health pingap-location \
        pingap-logger pingap-plugin pingap-proxy pingap-upstream pingap-acme \
        pingap-performance pingap-otel pingap-sentry pingap-pyroscope \
-       pingap-imageoptim pingap-webhook pingwaf-server pingwaf-agent \
+       pingap-imageoptim pingap-webhook pingwaf-pprof pingwaf-server \
+       pingwaf-agent \
        pingwaf-waf pingwaf-challenge; do \
        mkdir -p "$dir/src" && echo "" > "$dir/src/lib.rs"; \
     done \
@@ -124,6 +126,7 @@ COPY pingap-pyroscope/ pingap-pyroscope/
 COPY pingap-imageoptim/ pingap-imageoptim/
 COPY pingap-webhook/ pingap-webhook/
 COPY pingwaf-proto/ pingwaf-proto/
+COPY pingwaf-pprof/ pingwaf-pprof/
 COPY pingwaf-server/ pingwaf-server/
 COPY pingwaf-agent/ pingwaf-agent/
 COPY pingwaf-waf/ pingwaf-waf/
