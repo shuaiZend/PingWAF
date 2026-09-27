@@ -6,7 +6,6 @@ import {
   Trash,
   Pencil,
   ArrowClockwise,
-  FunnelSimple,
 } from '@phosphor-icons/react'
 import { PageHeader } from '@/components/PageHeader'
 import { Card, CardBody } from '@/components/ui/Card'
@@ -27,7 +26,6 @@ import { useCanWrite, useSitesList } from '@/hooks'
 import { formatDateTime, formatRelative } from '@/lib/format'
 import type {
   CreateIpGroupRequest,
-  IpGroup,
   IpGroupResponse,
   Site,
 } from '@/api/types'
@@ -92,20 +90,25 @@ export function IpGroupsPage() {
   const columns: Column<IpGroupResponse>[] = useMemo(
     () => [
       {
+        key: 'name',
         header: t('pages.ipGroups.colName'),
         accessor: (row) => row.group.name,
       },
       {
+        key: 'action',
         header: t('pages.ipGroups.colAction'),
-        accessor: (row) => (
+        accessor: (row) => row.group.action,
+        cell: (row) => (
           <Badge tone={ACTION_TONE[row.group.action] ?? 'neutral'}>
             {t(`pages.ipGroups.action_${row.group.action}`)}
           </Badge>
         ),
       },
       {
+        key: 'scope',
         header: t('pages.ipGroups.colScope'),
-        accessor: (row) =>
+        accessor: (row) => (row.group.is_global ? 'global' : 'site'),
+        cell: (row) =>
           row.group.is_global ? (
             <Badge tone="info">{t('pages.ipGroups.scopeGlobal')}</Badge>
           ) : (
@@ -115,12 +118,15 @@ export function IpGroupsPage() {
           ),
       },
       {
+        key: 'ipCount',
         header: t('pages.ipGroups.colIpCount'),
         accessor: (row) => row.group.ip_ranges.length,
       },
       {
+        key: 'source',
         header: t('pages.ipGroups.colSource'),
-        accessor: (row) =>
+        accessor: (row) => row.group.source_url ?? '',
+        cell: (row) =>
           row.group.source_url ? (
             <span className="truncate text-xs text-fg-subtle" title={row.group.source_url}>
               {row.group.source_url}
@@ -130,8 +136,10 @@ export function IpGroupsPage() {
           ),
       },
       {
+        key: 'lastSync',
         header: t('pages.ipGroups.colLastSync'),
-        accessor: (row) =>
+        accessor: (row) => row.group.last_synced_at ?? '',
+        cell: (row) =>
           row.group.last_synced_at ? (
             <span title={formatDateTime(row.group.last_synced_at)}>
               {formatRelative(row.group.last_synced_at)}
@@ -141,8 +149,10 @@ export function IpGroupsPage() {
           ),
       },
       {
+        key: 'actions',
         header: '',
-        accessor: (row) => (
+        width: '1%',
+        cell: (row) => (
           <div className="flex items-center justify-end gap-1">
             {row.group.source_url && (
               <Button
@@ -186,8 +196,7 @@ export function IpGroupsPage() {
       <PageHeader
         title={t('pages.ipGroups.title')}
         description={t('pages.ipGroups.description')}
-        icon={<FunnelSimple weight="duotone" className="h-6 w-6" />}
-        action={
+        actions={
           canWrite ? (
             <Button variant="primary" onClick={() => setCreateOpen(true)}>
               <Plus className="h-4 w-4" />
@@ -202,7 +211,7 @@ export function IpGroupsPage() {
           <div className="mb-4 flex flex-wrap items-center gap-3">
             <Select
               value={actionFilter}
-              onChange={setActionFilter}
+              onChange={(e) => setActionFilter(e.target.value)}
               options={[
                 { value: '', label: t('pages.ipGroups.filterAllActions') },
                 ...IP_GROUP_ACTIONS.map((a) => ({
@@ -213,7 +222,7 @@ export function IpGroupsPage() {
             />
             <Select
               value={scopeFilter}
-              onChange={setScopeFilter}
+              onChange={(e) => setScopeFilter(e.target.value)}
               options={[
                 { value: '', label: t('pages.ipGroups.filterAllScopes') },
                 { value: 'global', label: t('pages.ipGroups.scopeGlobal') },
@@ -226,11 +235,9 @@ export function IpGroupsPage() {
           </div>
 
           {listQuery.isLoading ? (
-            <Table columns={columns} data={[]}>
-              <SkeletonRows columns={7} rows={5} />
-            </Table>
+            <SkeletonRows columns={7} rows={5} />
           ) : listQuery.isError ? (
-            <ErrorState onRetry={invalidate} />
+            <ErrorState error={listQuery.error} onRetry={invalidate} />
           ) : groups.length === 0 ? (
             <EmptyState
               title={t('pages.ipGroups.empty')}
@@ -245,7 +252,7 @@ export function IpGroupsPage() {
               }
             />
           ) : (
-            <Table columns={columns} data={groups} />
+            <Table columns={columns} data={groups} rowKey={(row) => row.group.id} />
           )}
         </CardBody>
       </Card>
@@ -280,12 +287,12 @@ export function IpGroupsPage() {
           name: pendingDelete?.group.name,
         })}
         confirmLabel={t('common.delete')}
-        confirmTone="danger"
+        tone="danger"
         onConfirm={() => {
           if (pendingDelete) deleteMutation.mutate(pendingDelete.group.id)
           setPendingDelete(null)
         }}
-        onCancel={() => setPendingDelete(null)}
+        onClose={() => setPendingDelete(null)}
       />
     </>
   )
@@ -421,7 +428,7 @@ function GroupDialog({ initial, sites, onClose, onSaved }: GroupDialogProps) {
           <Select
             label={t('pages.ipGroups.fieldAction')}
             value={action}
-            onChange={setAction}
+            onChange={(e) => setAction(e.target.value)}
             options={IP_GROUP_ACTIONS.map((a) => ({
               value: a,
               label: t(`pages.ipGroups.action_${a}`),

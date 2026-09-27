@@ -83,7 +83,6 @@ export function DashboardPage() {
       interval: intervalFor(hours),
       ...(siteId ? { site_id: siteId } : {}),
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hours, siteId])
 
   const summary = useQuery({
