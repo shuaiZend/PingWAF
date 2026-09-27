@@ -11,7 +11,9 @@ pingap-cache = { workspace = true }
 tonic = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "signal", "fs"] }
 tokio-stream = { workspace = true, features = ["sync"] }
-serde = { workspace = true }
+# "rc" adds serde impls for Arc, so the rule cache can store sites as
+# `Arc<SiteRules>` and still persist the same JSON shape.
+serde = { workspace = true, features = ["rc"] }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }

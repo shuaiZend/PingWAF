@@ -1280,6 +1280,53 @@ static SQLI_INFO_SCHEMA: Lazy<Regex> = Lazy::new(|| {
 static SQLI_INTO_FILE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)\binto\s+(?:out|dump)file\b").unwrap());
 
+/// Needles for the SQLi prefilter. Every input that matches one of the
+/// strong regexes above contains at least one of these substrings
+/// (ASCII case-insensitively), so an automaton miss proves the input is
+/// clean and the expensive path can be skipped.
+static SQLI_PREFILTER_NEEDLES: &[&str] = &[
+    "or",
+    "and",
+    "||",
+    "&&",
+    "union",
+    "select",
+    "insert",
+    "update",
+    "delete",
+    "drop",
+    "alter",
+    "create",
+    "truncate",
+    "exec",
+    "grant",
+    "revoke",
+    "declare",
+    "begin",
+    "shutdown",
+    "sleep",
+    "benchmark",
+    "waitfor",
+    "load_file",
+    "extractvalue",
+    "updatexml",
+    "xp_cmdshell",
+    "sp_executesql",
+    "information_schema",
+    "sqlite_master",
+    "pg_catalog",
+    "sysobjects",
+    "syscolumns",
+    "into",
+];
+
+static SQLI_PREFILTER: Lazy<AhoCorasick> = Lazy::new(|| {
+    AhoCorasickBuilder::new()
+        .ascii_case_insensitive(true)
+        .build(SQLI_PREFILTER_NEEDLES)
+        .expect("aho-corasick build cannot fail with valid UTF-8 needles")
+});
+
 /// Detect SQL injection using token fingerprinting plus targeted regex checks.
 ///
 /// Returns `(is_sqli, fingerprint)`. The fingerprint encodes the
@@ -1288,8 +1335,17 @@ static SQLI_INTO_FILE: Lazy<Regex> =
 /// weak signals such as a trailing comment are recorded in the fingerprint
 /// but never block a request on their own, which keeps prose like
 /// `"C# programming"` or `"well--done"` from tripping the detector.
+///
+/// Inputs rejected by the keyword prefilter return an empty fingerprint;
+/// callers only inspect the fingerprint when `is_sqli` is true.
 pub fn detect_sqli(input: &str) -> (bool, String) {
     if input.len() < 3 {
+        return (false, String::new());
+    }
+    // `is_ascii` keeps the prefilter exact: the regexes use Unicode case
+    // folding, which matches code points the ASCII-folded automaton misses
+    // (e.g. the long-s `ſ`), so non-ASCII input always takes the full path.
+    if input.is_ascii() && !SQLI_PREFILTER.is_match(input) {
         return (false, String::new());
     }
     let lower = input.to_ascii_lowercase();
@@ -1376,10 +1432,39 @@ static XSS_HTML_COMMENT_BREAK: Lazy<Regex> = Lazy::new(|| {
         .unwrap()
 });
 
+/// Needles for the XSS prefilter, with the same guarantee as the SQLi set:
+/// every input matching one of the XSS regexes above contains at least one
+/// of these substrings.
+static XSS_PREFILTER_NEEDLES: &[&str] = &[
+    "<",
+    "on",
+    "javascript",
+    "vbscript",
+    "livescript",
+    "mocha",
+    "data",
+    "expression",
+    "url",
+];
+
+static XSS_PREFILTER: Lazy<AhoCorasick> = Lazy::new(|| {
+    AhoCorasickBuilder::new()
+        .ascii_case_insensitive(true)
+        .build(XSS_PREFILTER_NEEDLES)
+        .expect("aho-corasick build cannot fail with valid UTF-8 needles")
+});
+
 /// Detect XSS by looking for HTML tags / event handlers / dangerous URIs in
 /// contexts that should not contain them.
+///
+/// Inputs rejected by the keyword prefilter return an empty fingerprint;
+/// callers only inspect the fingerprint when `is_xss` is true.
 pub fn detect_xss(input: &str) -> (bool, String) {
     if input.len() < 3 {
+        return (false, String::new());
+    }
+    // See `detect_sqli` for why non-ASCII input bypasses the prefilter.
+    if input.is_ascii() && !XSS_PREFILTER.is_match(input) {
         return (false, String::new());
     }
     let lower = input.to_ascii_lowercase();
@@ -1525,5 +1610,22 @@ mod tests {
         let (hit, fp) = detect_xss("<svg onload=alert(1)>");
         assert!(hit);
         assert!(fp.contains("dangerous-tag"));
+    }
+
+    #[test]
+    fn detect_sqli_unicode_folding_takes_full_path() {
+        // `ſ` (long s) Unicode-folds to `s`, so the regex still fires even
+        // though the ASCII-folded prefilter would miss `ſelect`. Non-ASCII
+        // input must therefore bypass the prefilter entirely.
+        let (hit, fp) = detect_sqli("1 union ſelect password");
+        assert!(hit);
+        assert!(fp.contains("union-select"));
+    }
+
+    #[test]
+    fn detect_xss_mixed_case_passes_prefilter() {
+        let (hit, fp) = detect_xss("<IMG SRC=x ONERROR=alert(1)>");
+        assert!(hit);
+        assert!(fp.contains("event-handler"));
     }
 }

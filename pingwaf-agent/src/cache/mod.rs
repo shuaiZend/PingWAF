@@ -20,7 +20,12 @@ use pingwaf_proto::control_plane as proto;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CachedRules {
     /// Site rules keyed by site_id
-    pub sites: HashMap<String, SiteRules>,
+    ///
+    /// The values are shared via `Arc` so the hot-path lookups
+    /// (`get_site_rules`) return a pointer instead of deep-cloning every
+    /// rule the site carries. Updates build a new map but reuse the
+    /// `Arc`s of untouched sites.
+    pub sites: HashMap<String, Arc<SiteRules>>,
     /// Domain → site_id index for fast lookup
     pub domain_index: HashMap<String, String>,
     /// When the cache was last updated from the server
@@ -645,7 +650,7 @@ impl RuleCache {
         &self,
         bundle: &proto::RuleBundle,
     ) -> anyhow::Result<()> {
-        let site_rules = Self::convert_bundle(bundle);
+        let site_rules = Arc::new(Self::convert_bundle(bundle));
         let site_id = bundle.site_id.clone();
         let domain = site_rules.domain.clone();
         let alternate_domains = site_rules.alternate_domains.clone();
@@ -665,7 +670,9 @@ impl RuleCache {
             for alt in &alternate_domains {
                 updated.domain_index.insert(alt.clone(), site_id.clone());
             }
-            updated.sites.insert(site_id.clone(), site_rules.clone());
+            updated
+                .sites
+                .insert(site_id.clone(), Arc::clone(&site_rules));
             updated.config_hash = bundle.config_hash.clone();
             updated.updated_at = Utc::now();
             Arc::new(updated)
@@ -717,7 +724,7 @@ impl RuleCache {
                             .domain_index
                             .insert(alt.clone(), site.id.clone());
                     }
-                    updated.sites.insert(site.id.clone(), site_rules);
+                    updated.sites.insert(site.id.clone(), Arc::new(site_rules));
                 }
             }
 
@@ -739,10 +746,13 @@ impl RuleCache {
     }
 
     /// Look up site rules by domain name.
+    ///
+    /// Hot path: only the `Arc` is cloned, the rules themselves are shared
+    /// with the cache.
     pub fn get_site_rules(&self, domain: &str) -> Option<Arc<SiteRules>> {
         let rules = self.inner.load();
         let site_id = rules.domain_index.get(domain)?;
-        rules.sites.get(site_id).cloned().map(Arc::new)
+        rules.sites.get(site_id).cloned()
     }
 
     /// Look up site rules by site ID.
@@ -751,7 +761,7 @@ impl RuleCache {
         site_id: &str,
     ) -> Option<Arc<SiteRules>> {
         let rules = self.inner.load();
-        rules.sites.get(site_id).cloned().map(Arc::new)
+        rules.sites.get(site_id).cloned()
     }
 
     /// Get all cached site rules (snapshot).
