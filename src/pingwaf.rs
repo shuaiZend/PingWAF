@@ -401,6 +401,7 @@ pub async fn start_data_plane(
     // Start the upstream health check background task.
     // This also drives periodic DNS discovery updates — without it,
     // DNS-based backends are never resolved and requests get 503.
+    info!("data plane: creating upstream health check task");
     let upstream_health_check_task = new_upstream_health_check_task(
         new_upstream_provider(),
         Duration::from_secs(10),
@@ -409,10 +410,15 @@ pub async fn start_data_plane(
     let hc_name = upstream_health_check_task.name().to_string();
     info!(
         service_name = %hc_name,
-        "data plane: registering upstream health check background service"
+        "data plane: health check task created, wrapping as background service"
     );
-    my_server
-        .add_service(background_service(&hc_name, upstream_health_check_task));
+    let bg_service = background_service(&hc_name, upstream_health_check_task);
+    info!(
+        service_name = %bg_service.name(),
+        "data plane: adding health check background service to server"
+    );
+    my_server.add_service(bg_service);
+    info!("data plane: health check service added successfully");
 
     // Run Pingora in a dedicated OS thread. Do NOT join it here —
     // joining would block the tokio worker thread permanently and starve
