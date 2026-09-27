@@ -587,27 +587,30 @@ pub fn parse_expression(input: &str) -> Result<Expression> {
 
 /// Per-request context for [`evaluate`]. Built once by the engine after
 /// normalization and Stage 1 scoring.
-#[derive(Debug, Clone)]
-pub struct EvalContext {
-    pub method: String,
-    pub path: String,
-    pub full_uri: String,
-    pub host: String,
-    pub user_agent: String,
-    pub body: Option<String>,
+///
+/// Every string borrows the normalized request, so building the context
+/// allocates nothing on the hot path.
+#[derive(Debug, Clone, Copy)]
+pub struct EvalContext<'a> {
+    pub method: &'a str,
+    pub path: &'a str,
+    pub full_uri: &'a str,
+    pub host: &'a str,
+    pub user_agent: &'a str,
+    pub body: Option<&'a str>,
     /// Lower-cased header names paired with original-cased values.
-    pub headers: Vec<(String, String)>,
-    pub cookies: Vec<(String, String)>,
-    pub client_ip: String,
+    pub headers: &'a [(String, String)],
+    pub cookies: &'a [(String, String)],
+    pub client_ip: &'a str,
     pub parsed_ip: Option<IpAddr>,
-    pub country_code: Option<String>,
+    pub country_code: Option<&'a str>,
     pub ssl: bool,
     pub waf_score: u32,
     pub waf_score_sqli: u8,
     pub waf_score_xss: u8,
 }
 
-impl EvalContext {
+impl EvalContext<'_> {
     pub fn header(&self, name: &str) -> Option<&str> {
         let needle = name.to_ascii_lowercase();
         self.headers
@@ -636,17 +639,17 @@ enum FieldValue<'a> {
 
 fn resolve_field<'a>(field: &Field, ctx: &'a EvalContext) -> FieldValue<'a> {
     match &field.kind {
-        FieldKind::RequestPath => FieldValue::Str(&ctx.path),
-        FieldKind::RequestUriFull => FieldValue::Str(&ctx.full_uri),
-        FieldKind::RequestMethod => FieldValue::Str(&ctx.method),
-        FieldKind::RequestBody => match ctx.body.as_deref() {
+        FieldKind::RequestPath => FieldValue::Str(ctx.path),
+        FieldKind::RequestUriFull => FieldValue::Str(ctx.full_uri),
+        FieldKind::RequestMethod => FieldValue::Str(ctx.method),
+        FieldKind::RequestBody => match ctx.body {
             Some(b) => FieldValue::Str(b),
             None => FieldValue::Missing,
         },
-        FieldKind::Host => FieldValue::Str(&ctx.host),
-        FieldKind::UserAgent => FieldValue::Str(&ctx.user_agent),
+        FieldKind::Host => FieldValue::Str(ctx.host),
+        FieldKind::UserAgent => FieldValue::Str(ctx.user_agent),
         FieldKind::IpSrc => FieldValue::Ip(ctx.parsed_ip),
-        FieldKind::IpSrcCountry => match ctx.country_code.as_deref() {
+        FieldKind::IpSrcCountry => match ctx.country_code {
             Some(c) => FieldValue::Str(c),
             None => FieldValue::Missing,
         },
@@ -840,87 +843,92 @@ fn negate_if(op: Operator, positive: bool) -> bool {
 mod tests {
     use super::*;
 
-    fn ctx() -> EvalContext {
-        EvalContext {
-            method: "POST".into(),
-            path: "/admin/users".into(),
-            full_uri: "/admin/users?id=1".into(),
-            host: "example.com".into(),
-            user_agent: "curl/8.0".into(),
-            body: Some("name=test".into()),
-            headers: vec![
-                ("content-type".into(), "application/json".into()),
-                ("x-custom".into(), "hello".into()),
-            ],
-            cookies: vec![("session".into(), "abc123".into())],
-            client_ip: "10.0.0.5".into(),
-            parsed_ip: IpAddr::from_str("10.0.0.5").ok(),
-            country_code: Some("US".into()),
-            ssl: true,
-            waf_score: 25,
-            waf_score_sqli: 30,
-            waf_score_xss: 10,
+    /// Owns the data the borrowed [`EvalContext`] refers to.
+    struct TestCtx {
+        headers: Vec<(String, String)>,
+        cookies: Vec<(String, String)>,
+    }
+
+    impl TestCtx {
+        fn new() -> Self {
+            Self {
+                headers: vec![
+                    ("content-type".into(), "application/json".into()),
+                    ("x-custom".into(), "hello".into()),
+                ],
+                cookies: vec![("session".into(), "abc123".into())],
+            }
         }
+
+        fn ctx(&self) -> EvalContext<'_> {
+            EvalContext {
+                method: "POST",
+                path: "/admin/users",
+                full_uri: "/admin/users?id=1",
+                host: "example.com",
+                user_agent: "curl/8.0",
+                body: Some("name=test"),
+                headers: &self.headers,
+                cookies: &self.cookies,
+                client_ip: "10.0.0.5",
+                parsed_ip: IpAddr::from_str("10.0.0.5").ok(),
+                country_code: Some("US"),
+                ssl: true,
+                waf_score: 25,
+                waf_score_sqli: 30,
+                waf_score_xss: 10,
+            }
+        }
+    }
+
+    fn assert_eval(input: &str, expected: bool) {
+        let e = parse_expression(input).unwrap();
+        let c = TestCtx::new();
+        assert_eq!(evaluate(&e, &c.ctx()), expected, "expression: {input}");
     }
 
     #[test]
     fn parses_simple_comparison() {
-        let e = parse_expression(r#"http.request.method eq "POST""#).unwrap();
-        assert!(evaluate(&e, &ctx()));
+        assert_eval(r#"http.request.method eq "POST""#, true);
     }
 
     #[test]
     fn parses_and_or_not() {
-        let e = parse_expression(
+        assert_eval(
             r#"(http.request.uri.path contains "/admin" or http.request.uri.path contains "/api") and not ip.src.country in {"CN" "RU"}"#,
-        )
-        .unwrap();
-        assert!(evaluate(&e, &ctx()));
+            true,
+        );
     }
 
     #[test]
     fn parses_cidr_set() {
-        let e =
-            parse_expression("ip.src in {192.168.0.0/16 10.0.0.0/8}").unwrap();
-        assert!(evaluate(&e, &ctx()));
+        assert_eval("ip.src in {192.168.0.0/16 10.0.0.0/8}", true);
     }
 
     #[test]
     fn parses_header_lookup() {
-        let e =
-            parse_expression(r#"http.request.headers["x-custom"] eq "hello""#)
-                .unwrap();
-        assert!(evaluate(&e, &ctx()));
+        assert_eval(r#"http.request.headers["x-custom"] eq "hello""#, true);
     }
 
     #[test]
     fn parses_numeric_threshold() {
-        let e = parse_expression("cf.waf.score.sqli lt 20").unwrap();
-        assert!(!evaluate(&e, &ctx()));
-        let e = parse_expression("cf.waf.score.sqli gt 20").unwrap();
-        assert!(evaluate(&e, &ctx()));
+        assert_eval("cf.waf.score.sqli lt 20", false);
+        assert_eval("cf.waf.score.sqli gt 20", true);
     }
 
     #[test]
     fn parses_regex_match() {
-        let e =
-            parse_expression(r#"http.request.uri.path matches "^/admin/.*$""#)
-                .unwrap();
-        assert!(evaluate(&e, &ctx()));
+        assert_eval(r#"http.request.uri.path matches "^/admin/.*$""#, true);
     }
 
     #[test]
     fn parses_not_contains() {
-        let e =
-            parse_expression(r#"http.request.uri.path not contains "/secret""#)
-                .unwrap();
-        assert!(evaluate(&e, &ctx()));
+        assert_eval(r#"http.request.uri.path not contains "/secret""#, true);
     }
 
     #[test]
     fn parses_ssl_bool() {
-        let e = parse_expression("ssl eq true").unwrap();
-        assert!(evaluate(&e, &ctx()));
+        assert_eval("ssl eq true", true);
     }
 
     #[test]

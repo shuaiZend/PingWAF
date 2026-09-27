@@ -320,20 +320,18 @@ impl WafEngine {
         // ----- Build evaluation context (snapshot of Stage-1 scores) -----
         let parsed_ip = IpAddr::from_str(&request.client_ip).ok();
         let ssl = request.scheme.eq_ignore_ascii_case("https");
-        let host = normalized.host().to_string();
-        let user_agent = normalized.user_agent().to_string();
         let ctx = EvalContext {
-            method: normalized.method.clone(),
-            path: normalized.path.clone(),
-            full_uri: normalized.full_uri.clone(),
-            host,
-            user_agent,
-            body: normalized.body_str.clone(),
-            headers: normalized.headers.clone(),
-            cookies: normalized.cookies.clone(),
-            client_ip: request.client_ip.clone(),
+            method: &normalized.method,
+            path: &normalized.path,
+            full_uri: &normalized.full_uri,
+            host: normalized.host(),
+            user_agent: normalized.user_agent(),
+            body: normalized.body_str.as_deref(),
+            headers: &normalized.headers,
+            cookies: &normalized.cookies,
+            client_ip: &request.client_ip,
             parsed_ip,
-            country_code: request.country_code.clone(),
+            country_code: request.country_code.as_deref(),
             ssl,
             waf_score: breakdown.total,
             waf_score_sqli: breakdown.sqli_score,
