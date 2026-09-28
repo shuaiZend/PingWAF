@@ -580,6 +580,7 @@ message LogEntry {
   string waf_rule_id = 52;
   string waf_details = 53;
   repeated string waf_matched_tags = 54;
+  string waf_rule_name = 55;        // Display name of the rule that fired
 
   // Performance
   uint64 total_latency_ms = 60;
