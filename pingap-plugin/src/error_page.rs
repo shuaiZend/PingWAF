@@ -797,7 +797,10 @@ template = '{"error":"rate_limit_exceeded","request_id":"{{ request_id }}"}'
         )
         .unwrap();
 
-        let mut s = session("GET", "/secret", "example.com").await;
+        // Not a host agent-mode tests register: resolve() defers to the
+        // process-global agent when it has pages for the host, so
+        // "example.com" here races with agent tests running in parallel.
+        let mut s = session("GET", "/secret", "errorpage.test").await;
         let mut resp = ResponseHeader::build_no_case(403, None).unwrap();
         let result = plugin
             .handle_response(&mut s, &mut Ctx::default(), &mut resp)
@@ -822,7 +825,7 @@ template = '{"error":"rate_limit_exceeded","request_id":"{{ request_id }}"}'
         )
         .unwrap();
 
-        let mut s = session("GET", "/ok", "example.com").await;
+        let mut s = session("GET", "/ok", "errorpage.test").await;
         let mut resp = ResponseHeader::build_no_case(200, None).unwrap();
         let result = plugin
             .handle_response(&mut s, &mut Ctx::default(), &mut resp)

@@ -1826,7 +1826,10 @@ rules = '[{"id":"strip","direction":"request","condition":"http.request.uri.path
         )
         .unwrap();
 
-        let mut s = session("GET", "/api/users", "example.com").await;
+        // A host the agent-mode tests never register: active_rules() defers
+        // to the process-global agent when it has rules for the host, so
+        // "example.com" here races with agent tests running in parallel.
+        let mut s = session("GET", "/api/users", "rewrite.test").await;
         let result = plugin
             .handle_request(PluginStep::Request, &mut s, &mut Ctx::default())
             .await
@@ -1848,7 +1851,7 @@ rules = '[{"id":"h","direction":"response","operations":[{"type":"set_header","n
         )
         .unwrap();
 
-        let mut s = session("GET", "/", "example.com").await;
+        let mut s = session("GET", "/", "rewrite.test").await;
         let mut resp = ResponseHeader::build_no_case(200, None).unwrap();
         resp.insert_header("Server", "pingap").unwrap();
         let result = plugin
