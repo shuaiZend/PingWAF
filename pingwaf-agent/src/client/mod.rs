@@ -81,8 +81,6 @@ pub struct CommandHandlers {
 /// - Handle disconnection with exponential backoff reconnection
 pub struct ControlPlaneClient {
     config: AgentConfig,
-    /// Resolved agent ID (may be auto-generated)
-    agent_id: String,
     /// Agent authentication token received during registration
     agent_token: ArcSwapOption<String>,
     /// Whether we are currently connected to the server
@@ -116,7 +114,6 @@ impl ControlPlaneClient {
         rule_cache: Arc<RuleCache>,
         metrics: Arc<MetricsCollector>,
     ) -> Self {
-        let agent_id = config.resolved_agent_id();
         let (log_tx, log_rx) = mpsc::channel(4096);
         let retry_delay_ms = AtomicU64::new(config.reconnect_initial_delay_ms);
 
@@ -149,7 +146,6 @@ impl ControlPlaneClient {
 
         Self {
             config,
-            agent_id,
             agent_token: ArcSwapOption::empty(),
             connected: AtomicBool::new(false),
             shutdown_signal: Arc::new(AtomicBool::new(false)),
@@ -161,11 +157,6 @@ impl ControlPlaneClient {
             probe: Arc::new(ProbeBuffer::new()),
             retry_delay_ms,
         }
-    }
-
-    /// Get the resolved agent ID.
-    pub fn agent_id(&self) -> &str {
-        &self.agent_id
     }
 
     /// Check if the client is currently connected.
@@ -356,10 +347,15 @@ impl ControlPlaneClient {
         self.connected.store(true, Ordering::Relaxed);
         info!("Connected to control plane at {}", self.config.server_url);
 
+        // The server owns the agent identity: the token it minted carries its
+        // row ID as subject, and every stream is authenticated against that.
+        // Outbound messages must present exactly this ID, not a local one.
+        let agent_id = reg_response.agent_id.clone();
+
         // Run heartbeat and log shipping concurrently
         let heartbeat_fut = self.run_heartbeat(channel.clone(), &reg_response);
-        let log_shipper_fut = self.run_log_shipper(channel.clone());
-        let cert_shipper_fut = self.run_cert_event_shipper(channel);
+        let log_shipper_fut = self.run_log_shipper(channel.clone(), &agent_id);
+        let cert_shipper_fut = self.run_cert_event_shipper(channel, &agent_id);
 
         // Wait for either to complete (usually means disconnection)
         tokio::select! {
@@ -395,7 +391,7 @@ impl ControlPlaneClient {
     async fn run_heartbeat(
         &self,
         channel: Channel,
-        _reg_response: &proto::RegisterAgentResponse,
+        reg_response: &proto::RegisterAgentResponse,
     ) -> anyhow::Result<()> {
         let mut client = ProtoClient::new(channel);
 
@@ -411,7 +407,7 @@ impl ControlPlaneClient {
         // carries the auth token), so awaiting the call first would deadlock
         // both sides. The first interval tick fires immediately, sending the
         // opening message and unblocking the server.
-        let agent_id = self.agent_id.clone();
+        let agent_id = reg_response.agent_id.clone();
         let agent_token = self
             .agent_token
             .load_full()
@@ -625,7 +621,11 @@ impl ControlPlaneClient {
     ///
     /// Batches log entries and sends them to the server periodically or when
     /// the batch size threshold is reached.
-    async fn run_log_shipper(&self, channel: Channel) -> anyhow::Result<()> {
+    async fn run_log_shipper(
+        &self,
+        channel: Channel,
+        agent_id: &str,
+    ) -> anyhow::Result<()> {
         let mut client = ProtoClient::new(channel);
         let mut receiver = self.log_receiver.lock().await;
         let mut batch: Vec<proto::LogEntry> =
@@ -637,13 +637,11 @@ impl ControlPlaneClient {
         interval
             .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
-        let agent_id = self.agent_id.clone();
-
         loop {
             if self.shutdown_signal.load(Ordering::Relaxed) {
                 // Flush remaining logs before shutdown
                 if !batch.is_empty() {
-                    Self::flush_logs(&mut client, &agent_id, &mut batch).await;
+                    Self::flush_logs(&mut client, &mut batch).await;
                 }
                 break;
             }
@@ -652,12 +650,13 @@ impl ControlPlaneClient {
                 entry = receiver.recv() => {
                     match entry {
                         Some(log_entry) => {
-                            let proto_entry = Self::convert_log_entry(&agent_id, &log_entry);
+                            let proto_entry =
+                                Self::convert_log_entry(agent_id, &log_entry);
                             batch.push(proto_entry);
 
                             // Flush when batch is full
                             if batch.len() >= self.config.log_batch_size {
-                                Self::flush_logs(&mut client, &agent_id, &mut batch).await;
+                                Self::flush_logs(&mut client, &mut batch).await;
                             }
                         }
                         None => {
@@ -670,12 +669,12 @@ impl ControlPlaneClient {
                 _ = interval.tick() => {
                     // Periodic flush
                     if !batch.is_empty() {
-                        Self::flush_logs(&mut client, &agent_id, &mut batch).await;
+                        Self::flush_logs(&mut client, &mut batch).await;
                     }
                 }
                 _ = self.wait_for_shutdown() => {
                     if !batch.is_empty() {
-                        Self::flush_logs(&mut client, &agent_id, &mut batch).await;
+                        Self::flush_logs(&mut client, &mut batch).await;
                     }
                     break;
                 }
@@ -688,7 +687,6 @@ impl ControlPlaneClient {
     /// Flush a batch of log entries to the server.
     async fn flush_logs(
         client: &mut ProtoClient<Channel>,
-        agent_id: &str,
         batch: &mut Vec<proto::LogEntry>,
     ) {
         if batch.is_empty() {
@@ -720,8 +718,6 @@ impl ControlPlaneClient {
                 error!(error = %e, count, "Failed to ship logs");
             },
         }
-
-        let _ = agent_id; // Used in log context
     }
 
     /// Run the certificate-event shipping loop.
@@ -733,6 +729,7 @@ impl ControlPlaneClient {
     async fn run_cert_event_shipper(
         &self,
         channel: Channel,
+        agent_id: &str,
     ) -> anyhow::Result<()> {
         let mut client = ProtoClient::new(channel);
 
@@ -742,11 +739,9 @@ impl ControlPlaneClient {
         interval
             .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
-        let agent_id = self.agent_id.clone();
-
         loop {
             if self.shutdown_signal.load(Ordering::Relaxed) {
-                let entries = cert_event_buffer().drain(&agent_id);
+                let entries = cert_event_buffer().drain(agent_id);
                 if !entries.is_empty() {
                     Self::flush_cert_events(&mut client, entries).await;
                 }
@@ -755,13 +750,13 @@ impl ControlPlaneClient {
 
             tokio::select! {
                 _ = interval.tick() => {
-                    let entries = cert_event_buffer().drain(&agent_id);
+                    let entries = cert_event_buffer().drain(agent_id);
                     if !entries.is_empty() {
                         Self::flush_cert_events(&mut client, entries).await;
                     }
                 }
                 _ = self.wait_for_shutdown() => {
-                    let entries = cert_event_buffer().drain(&agent_id);
+                    let entries = cert_event_buffer().drain(agent_id);
                     if !entries.is_empty() {
                         Self::flush_cert_events(&mut client, entries).await;
                     }
