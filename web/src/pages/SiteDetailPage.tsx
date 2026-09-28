@@ -13,7 +13,6 @@ import {
   Robot,
   Cloud,
   IdentificationCard,
-  GlobeHemisphereWest,
   FileHtml,
   Network,
 } from '@phosphor-icons/react'
@@ -55,8 +54,11 @@ export function SiteDetailPage() {
     },
     { to: `${base}/security/bot`, label: t('nav.securityBot'), icon: Robot },
     { to: `${base}/security/cc`, label: t('nav.securityCc'), icon: Cloud },
-    { to: `${base}/security/ip-rules`, label: t('nav.securityIpRules'), icon: IdentificationCard },
-    { to: `${base}/security/geo`, label: t('nav.securityGeo'), icon: GlobeHemisphereWest },
+    {
+      to: `${base}/security/access`,
+      label: t('nav.securityAccess'),
+      icon: IdentificationCard,
+    },
     { to: `${base}/caching`, label: t('nav.caching'), icon: Lightning },
     { to: `${base}/ssl`, label: t('nav.ssl'), icon: Lock },
     { to: `${base}/traffic`, label: t('nav.traffic'), icon: ChartLine },

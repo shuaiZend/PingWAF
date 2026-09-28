@@ -12,14 +12,13 @@
     "securityRateLimiting": "Rate Limiting",
     "securityBot": "Bot Protection",
     "securityCc": "CC Protection",
-    "securityIpRules": "IP Rules",
+    "securityAccess": "Access control",
     "caching": "Caching",
     "ssl": "SSL/TLS",
     "traffic": "Traffic",
     "logs": "Logs",
     "agents": "Agents",
     "settings": "Settings",
-    "securityGeo": "Geo",
     "ipGroups": "IP Groups",
     "selectSiteFirst": "Select a site first"
   },
@@ -1200,7 +1199,14 @@
       "noAsns": "No blocked ASNs",
       "invalidAsn": "Enter a valid ASN number.",
       "duplicateAsn": "That ASN is already blocked.",
-      "byCountry": "Requests by country"
+      "byCountry": "Requests by country",
+      "enabled": "Enable geo restrictions",
+      "enabledHint": "While off, no request is denied by these rules.",
+      "asnHint": "ASN number, optionally prefixed with AS — e.g. AS13335",
+      "selectContinent": "Select all of {{continent}}",
+      "clearContinent": "Clear {{continent}}",
+      "selectContinentShort": "Select all",
+      "clearContinentShort": "Clear"
     },
     "sslGlobal": {
       "title": "SSL/TLS certificates",
@@ -1303,6 +1309,12 @@
       "syncFailed": "Sync failed",
       "confirmDeleteTitle": "Delete IP group?",
       "confirmDeleteDesc": "This will permanently remove the IP group \"{{name}}\"."
+    },
+    "accessControl": {
+      "title": "Access control",
+      "description": "Allow or deny traffic by IP address and geography. Credential-based restrictions (basic auth, OAuth) will be added here as further modules.",
+      "tabIpRules": "IP rules",
+      "tabGeo": "Geo restrictions"
     }
   },
   "challengeLevels": {
@@ -1312,8 +1324,8 @@
     "interactive": "Interactive"
   },
   "geoModes": {
-    "block": "Block specific countries",
-    "allow": "Allow only specific countries"
+    "block_list": "Block specific countries",
+    "allow_list": "Allow only specific countries"
   },
   "continents": {
     "Africa": "Africa",

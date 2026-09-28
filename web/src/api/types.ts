@@ -1266,25 +1266,22 @@ export interface BotStats {
 
 /* ── Geo restrictions ─────────────────────────────────────────────── */
 
-export type GeoMode = 'block' | 'allow'
+export type GeoMode = 'block_list' | 'allow_list'
 
-export const GEO_MODES: GeoMode[] = ['block', 'allow']
+export const GEO_MODES: GeoMode[] = ['block_list', 'allow_list']
 
 export type GeoAction = 'block' | 'challenge' | 'js_challenge'
 
 export const GEO_ACTIONS: GeoAction[] = ['block', 'challenge', 'js_challenge']
 
-export interface BlockedAsn {
-  asn: number
-  description: string
-}
-
 export interface GeoConfig {
   site_id: string
-  /** `block` = deny listed countries, `allow` = deny everything except listed. */
+  enabled: boolean
+  /** `block_list` = deny listed countries, `allow_list` = deny everything except listed. */
   mode: GeoMode | string
   countries: string[]
-  blocked_asns: BlockedAsn[]
+  /** ASN numbers, optionally prefixed with `AS` (e.g. `AS13335`). */
+  blocked_asns: string[]
   block_unknown: boolean
   action: GeoAction | string
 }

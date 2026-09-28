@@ -150,9 +150,12 @@ export function TrafficPanels({ siteId }: { siteId?: string }) {
     {
       key: 'rule_name',
       header: t('pages.traffic.rule'),
-      accessor: (r) => r.rule_name,
+      // Older events carry only the rule id — show it rather than a blank cell.
+      accessor: (r) => r.rule_name || r.rule_id,
       cell: (r) => (
-        <span className="text-[13px] font-medium text-fg-strong">{r.rule_name}</span>
+        <span className="text-[13px] font-medium text-fg-strong">
+          {r.rule_name || r.rule_id}
+        </span>
       ),
     },
     {

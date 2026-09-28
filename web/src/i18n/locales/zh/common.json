@@ -12,14 +12,13 @@
     "securityRateLimiting": "速率限制",
     "securityBot": "机器人防护",
     "securityCc": "CC 防护",
-    "securityIpRules": "IP 规则",
+    "securityAccess": "访问限制",
     "caching": "缓存",
     "ssl": "SSL/TLS",
     "traffic": "流量",
     "logs": "日志",
     "agents": "节点",
     "settings": "设置",
-    "securityGeo": "地域",
     "ipGroups": "IP 黑白名单",
     "selectSiteFirst": "请先选择一个站点"
   },
@@ -1200,7 +1199,14 @@
       "noAsns": "暂无阻止的 ASN",
       "invalidAsn": "请输入有效的 ASN 编号。",
       "duplicateAsn": "该 ASN 已被阻止。",
-      "byCountry": "按国家/地区统计请求"
+      "byCountry": "按国家/地区统计请求",
+      "enabled": "启用地域限制",
+      "enabledHint": "关闭时这些规则不会拦截任何请求。",
+      "asnHint": "ASN 编号，可带 AS 前缀，例如 AS13335",
+      "selectContinent": "全选{{continent}}",
+      "clearContinent": "取消全选{{continent}}",
+      "selectContinentShort": "全选",
+      "clearContinentShort": "取消全选"
     },
     "sslGlobal": {
       "title": "SSL/TLS 证书",
@@ -1303,6 +1309,12 @@
       "syncFailed": "同步失败",
       "confirmDeleteTitle": "删除 IP 组？",
       "confirmDeleteDesc": "将永久删除 IP 组「{{name}}」。"
+    },
+    "accessControl": {
+      "title": "访问限制",
+      "description": "按 IP 地址与地域允许或阻止访问；后续将在这里扩展账号口令、OAuth 等限制模块。",
+      "tabIpRules": "IP 规则",
+      "tabGeo": "地域限制"
     }
   },
   "challengeLevels": {
@@ -1312,8 +1324,8 @@
     "interactive": "交互式质询"
   },
   "geoModes": {
-    "block": "阻止指定国家",
-    "allow": "仅允许指定国家"
+    "block_list": "阻止指定国家/地区",
+    "allow_list": "仅允许指定国家/地区"
   },
   "continents": {
     "Africa": "非洲",

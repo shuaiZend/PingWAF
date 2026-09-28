@@ -18,8 +18,10 @@ import { AgentsPage } from '@/pages/AgentsPage'
 import { SettingsPage } from '@/pages/SettingsPage'
 import { BotPage as BotProtectionPage } from '@/pages/sites/BotPage'
 import { CcProtectionPage } from '@/pages/sites/CcProtectionPage'
-import { IpRulesPage } from '@/pages/sites/IpRulesPage'
-import { GeoPage } from '@/pages/sites/GeoPage'
+import {
+  AccessControlPage,
+  LegacySecurityRedirect,
+} from '@/pages/sites/AccessControlPage'
 import { CachingPage } from '@/pages/sites/CachingPage'
 import { SslPage } from '@/pages/sites/SslPage'
 import { TrafficPage } from '@/pages/sites/TrafficPage'
@@ -83,8 +85,17 @@ export const router = createBrowserRouter([
           { path: 'security/rate-limiting', element: <RateLimitingPage /> },
           { path: 'security/bot', element: <BotProtectionPage /> },
           { path: 'security/cc', element: <CcProtectionPage /> },
-          { path: 'security/ip-rules', element: <IpRulesPage /> },
-          { path: 'security/geo', element: <GeoPage /> },
+          { path: 'security/access', element: <AccessControlPage /> },
+          // IP rules and geo were separate tabs before they were merged; keep
+          // old links (including `?block=…` deep links) working.
+          {
+            path: 'security/ip-rules',
+            element: <LegacySecurityRedirect tab="ip" />,
+          },
+          {
+            path: 'security/geo',
+            element: <LegacySecurityRedirect tab="geo" />,
+          },
           { path: 'caching', element: <CachingPage /> },
           { path: 'ssl', element: <SslPage /> },
           { path: 'traffic', element: <TrafficPage /> },
