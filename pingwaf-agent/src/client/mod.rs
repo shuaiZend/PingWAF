@@ -406,11 +406,11 @@ impl ControlPlaneClient {
         let (hb_tx, hb_rx) = mpsc::channel::<proto::AgentHeartbeat>(4);
         let outbound = tokio_stream::wrappers::ReceiverStream::new(hb_rx);
 
-        // Start the bidirectional stream
-        let response = client.heartbeat(outbound).await?;
-        let mut inbound = response.into_inner();
-
-        // Spawn a task to send heartbeats periodically
+        // Spawn the sender BEFORE opening the stream: the server does not
+        // return response headers until it has read the first message (which
+        // carries the auth token), so awaiting the call first would deadlock
+        // both sides. The first interval tick fires immediately, sending the
+        // opening message and unblocking the server.
         let agent_id = self.agent_id.clone();
         let agent_token = self
             .agent_token
@@ -473,6 +473,17 @@ impl ControlPlaneClient {
                 }
             }
         });
+
+        // Start the bidirectional stream; on failure stop the sender so it
+        // does not buffer heartbeats no one will ever read.
+        let response = match client.heartbeat(outbound).await {
+            Ok(response) => response,
+            Err(e) => {
+                sender_task.abort();
+                return Err(e.into());
+            },
+        };
+        let mut inbound = response.into_inner();
 
         // Process incoming server commands
         let rule_cache = Arc::clone(&self.rule_cache);
