@@ -17,6 +17,10 @@ services:
     #   context: .
     #   dockerfile: Dockerfile
     container_name: pingwaf
+    # Stable across container recreation: the control plane re-registration
+    # matches agents by hostname + API key, so a changing container-ID
+    # hostname would register a fresh offline ghost on every redeploy.
+    hostname: pingwaf
     ports:
       - "80:80"       # HTTP traffic (proxied)
       - "443:443"     # HTTPS traffic (proxied)
