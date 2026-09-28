@@ -11,6 +11,9 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub id: Uuid,
     pub site_id: Uuid,
+    /// When set, the rule targets the referenced IP group instead of
+    /// enumerating `ip_ranges` itself.
+    pub group_id: Option<Uuid>,
     pub name: String,
     pub ip_ranges: Vec<String>,
     pub action: String,

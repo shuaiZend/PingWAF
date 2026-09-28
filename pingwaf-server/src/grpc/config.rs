@@ -26,8 +26,9 @@ use crate::api::ip_rules::ip_action;
 use crate::models::{
     acme_challenge, action, cache_rules, challenge_settings, characteristic,
     error_pages, geo_rules, ip_access_rules, ip_group_sites, ip_groups, mode,
-    rate_limit_rules, rewrite_rules, rule, rule_groups, site, site_routes,
-    site_ssl, site_status, site_upstream_pools, site_upstreams,
+    rate_limit_rules, rewrite_rules, rule, rule_groups, site,
+    site_certificates, site_routes, site_ssl, site_status, site_upstream_pools,
+    site_upstreams,
 };
 
 /// `pingwaf.WafMode` values from control_plane.proto.
@@ -214,6 +215,17 @@ async fn load_ssl(
         .await
 }
 
+async fn load_certificates(
+    db: &DatabaseConnection,
+    site_id: Uuid,
+) -> Result<Vec<site_certificates::Model>, sea_orm::DbErr> {
+    site_certificates::Entity::find()
+        .filter(site_certificates::Column::SiteId.eq(site_id))
+        .order_by_desc(site_certificates::Column::UpdatedAt)
+        .all(db)
+        .await
+}
+
 async fn load_ip_access_rules(
     db: &DatabaseConnection,
     site_id: Uuid,
@@ -248,6 +260,26 @@ async fn load_ip_groups(
         .order_by_asc(ip_groups::Column::Name)
         .all(db)
         .await
+}
+
+/// Loads the enabled IP groups referenced by the given access rules.
+///
+/// Group-backed rules expand against these rows at bundle time, so a group
+/// update reaches agents without touching the rules themselves.
+async fn load_referenced_groups(
+    db: &DatabaseConnection,
+    rules: &[ip_access_rules::Model],
+) -> Result<HashMap<Uuid, ip_groups::Model>, sea_orm::DbErr> {
+    let ids: Vec<Uuid> = rules.iter().filter_map(|r| r.group_id).collect();
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows = ip_groups::Entity::find()
+        .filter(ip_groups::Column::Enabled.eq(true))
+        .filter(ip_groups::Column::Id.is_in(ids))
+        .all(db)
+        .await?;
+    Ok(rows.into_iter().map(|g| (g.id, g)).collect())
 }
 
 async fn load_geo_rules(
@@ -354,18 +386,70 @@ fn cache_rule_to_proto(
     }
 }
 
-fn ssl_to_proto(row: &site_ssl::Model) -> SslConfig {
-    let acme_enabled = row.auto_renew && row.acme_email.is_some();
+fn ssl_to_proto(
+    row: &site_ssl::Model,
+    certs: &[site_certificates::Model],
+) -> SslConfig {
+    // The posture row selects a certificate but does not copy its material:
+    // the PEM of an uploaded certificate and every ACME setting (email,
+    // challenge type, DNS provider config) live on the `site_certificates`
+    // row only, so they are backfilled here for the agent.
+    let selected = row
+        .certificate_id
+        .and_then(|id| certs.iter().find(|cert| cert.id == id));
+    let uploaded_pem = row.cert_pem.as_deref().is_some_and(|p| !p.is_empty());
+    let cert_pem = if uploaded_pem {
+        row.cert_pem.clone().unwrap_or_default()
+    } else {
+        selected
+            .and_then(|cert| cert.cert_pem.clone())
+            .unwrap_or_default()
+    };
+    let uploaded_key = row.key_pem.as_deref().is_some_and(|p| !p.is_empty());
+    let key_pem = if uploaded_key {
+        row.key_pem.clone().unwrap_or_default()
+    } else {
+        selected
+            .and_then(|cert| cert.key_pem.clone())
+            .unwrap_or_default()
+    };
+    let acme_email = row
+        .acme_email
+        .clone()
+        .or_else(|| selected.and_then(|cert| cert.acme_email.clone()))
+        .unwrap_or_default();
+    let auto_renew =
+        row.auto_renew || selected.is_some_and(|cert| cert.auto_renew);
+    let acme_enabled = auto_renew && !acme_email.is_empty();
+    let acme_challenge_type = acme_challenge_proto(
+        row.acme_challenge_type.as_deref().or_else(|| {
+            selected
+                .as_ref()
+                .map(|cert| cert.acme_challenge_type.as_str())
+        }),
+    );
+    let acme_dns_provider = row
+        .acme_dns_provider
+        .clone()
+        .or_else(|| selected.and_then(|cert| cert.acme_dns_provider.clone()))
+        .unwrap_or_default();
+    let acme_dns_config =
+        json_to_string_map(&row.acme_dns_config.clone().or_else(|| {
+            selected.and_then(|cert| cert.acme_dns_config.clone())
+        }));
+    let certificate_id = row
+        .certificate_id
+        .or(selected.map(|cert| cert.id))
+        .map(|id| id.to_string())
+        .unwrap_or_default();
     SslConfig {
-        cert_pem: row.cert_pem.clone().unwrap_or_default(),
-        key_pem: row.key_pem.clone().unwrap_or_default(),
+        cert_pem,
+        key_pem,
         acme_enabled,
-        acme_email: row.acme_email.clone().unwrap_or_default(),
-        acme_challenge_type: acme_challenge_proto(
-            row.acme_challenge_type.as_deref(),
-        ),
-        acme_dns_provider: row.acme_dns_provider.clone().unwrap_or_default(),
-        acme_dns_config: json_to_string_map(&row.acme_dns_config),
+        acme_email,
+        acme_challenge_type,
+        acme_dns_provider,
+        acme_dns_config,
         min_tls_version: row.min_tls_version.clone(),
         hsts_enabled: row.hsts_enabled,
         hsts_max_age: row.hsts_max_age.max(0) as u32,
@@ -375,10 +459,7 @@ fn ssl_to_proto(row: &site_ssl::Model) -> SslConfig {
         self_signed: row.self_signed,
         mtls_enabled: row.mtls_enabled,
         mtls_client_ca: row.mtls_client_ca.clone().unwrap_or_default(),
-        certificate_id: row
-            .certificate_id
-            .map(|id| id.to_string())
-            .unwrap_or_default(),
+        certificate_id,
     }
 }
 
@@ -506,15 +587,28 @@ fn waf_config_to_proto(
 }
 
 /// Converts a stored IP access rule into its protocol representation.
-fn ip_access_rule_to_proto(row: &ip_access_rules::Model) -> IpAccessRule {
-    IpAccessRule {
+///
+/// Group-backed rules expand to the referenced group's live ranges while
+/// keeping the rule's own action and note; rules with neither a resolvable
+/// group nor their own ranges are skipped (they would match nothing).
+fn ip_access_rule_to_proto(
+    row: &ip_access_rules::Model,
+    groups: &HashMap<Uuid, ip_groups::Model>,
+) -> Option<IpAccessRule> {
+    let mut ip_ranges = row.ip_ranges.clone();
+    if let Some(group) = row.group_id.and_then(|gid| groups.get(&gid)) {
+        ip_ranges = group.ip_ranges.clone();
+    } else if ip_ranges.is_empty() {
+        return None;
+    }
+    Some(IpAccessRule {
         id: row.id.to_string(),
         name: row.name.clone(),
-        ip_ranges: row.ip_ranges.clone(),
+        ip_ranges,
         action: ip_action::to_proto(&row.action),
         note: row.note.clone().unwrap_or_default(),
         enabled: row.enabled,
-    }
+    })
 }
 
 /// Converts an IP group row into the same `IpAccessRule` proto message so that
@@ -671,10 +765,12 @@ pub async fn build_rule_bundle(
     let ssl = load_ssl(db, site_row.id).await?;
     let ip_rules = load_ip_access_rules(db, site_row.id).await?;
     let ip_groups = load_ip_groups(db, site_row.id).await?;
+    let referenced_groups = load_referenced_groups(db, &ip_rules).await?;
     let geo = load_geo_rules(db, site_row.id).await?;
     let challenge = load_challenge_settings(db, site_row.id).await?;
     let rewrites = load_rewrite_rules(db, site_row.id).await?;
     let err_pages = load_error_pages(db, site_row.id).await?;
+    let certificates = load_certificates(db, site_row.id).await?;
 
     let custom_rules: Vec<WafRule> =
         rules_rows.iter().map(rule_to_proto).collect();
@@ -688,7 +784,7 @@ pub async fn build_rule_bundle(
         rate_limit_rules: rate_limits.iter().map(rate_limit_to_proto).collect(),
         ip_access_rules: ip_rules
             .iter()
-            .map(ip_access_rule_to_proto)
+            .filter_map(|row| ip_access_rule_to_proto(row, &referenced_groups))
             .chain(ip_groups.iter().map(ip_group_to_proto))
             .collect(),
         geo: Some(geo_to_proto(geo.as_ref())),
@@ -699,7 +795,7 @@ pub async fn build_rule_bundle(
         challenge: Some(challenge_to_proto(challenge.as_ref())),
         rewrite_rules: rewrites.iter().map(rewrite_rule_to_proto).collect(),
         error_pages: err_pages.iter().map(error_page_to_proto).collect(),
-        ssl: ssl.as_ref().map(ssl_to_proto),
+        ssl: ssl.as_ref().map(|row| ssl_to_proto(row, &certificates)),
         upstreams: pools_to_proto(&pools, &upstreams),
         routes: routes_to_proto(&routes, &pools, &upstreams),
     };
@@ -963,5 +1059,71 @@ mod tests {
         // Losing the last node drops the route along with the pool.
         let protos = routes_to_proto(&routes, &[pool, empty], &[]);
         assert!(protos.is_empty());
+    }
+
+    fn ip_rule_model(
+        group_id: Option<Uuid>,
+        ip_ranges: Vec<String>,
+    ) -> ip_access_rules::Model {
+        ip_access_rules::Model {
+            id: Uuid::new_v4(),
+            site_id: Uuid::nil(),
+            name: "rule".into(),
+            ip_ranges,
+            action: "block".into(),
+            note: None,
+            enabled: true,
+            priority: 0,
+            group_id,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    fn ip_group_model(id: Uuid, ranges: &[&str]) -> ip_groups::Model {
+        ip_groups::Model {
+            id,
+            name: "group".into(),
+            description: None,
+            ip_ranges: ranges.iter().map(|r| r.to_string()).collect(),
+            action: "allow".into(),
+            is_global: false,
+            source_url: None,
+            sync_interval_minutes: None,
+            last_synced_at: None,
+            enabled: true,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn group_backed_rules_expand_to_live_group_ranges() {
+        let group_id = Uuid::new_v4();
+        let group =
+            ip_group_model(group_id, &["203.0.113.0/24", "198.51.100.7"]);
+
+        // The rule keeps its own action; the ranges come from the group.
+        let grouped = ip_rule_model(Some(group_id), Vec::new());
+        let mut groups = HashMap::new();
+        groups.insert(group_id, group.clone());
+        let proto =
+            ip_access_rule_to_proto(&grouped, &groups).expect("expands");
+        assert_eq!(proto.ip_ranges, group.ip_ranges);
+        assert_eq!(proto.action, ip_action::to_proto("block"));
+        assert_eq!(proto.name, "rule");
+
+        // A group-backed rule whose group is missing or disabled is skipped
+        // when it has no ranges of its own.
+        assert!(ip_access_rule_to_proto(&grouped, &HashMap::new()).is_none());
+
+        // A manual rule keeps its own ranges and ignores groups entirely.
+        let manual = ip_rule_model(None, vec!["10.0.0.0/8".to_string()]);
+        let proto = ip_access_rule_to_proto(&manual, &groups).expect("manual");
+        assert_eq!(proto.ip_ranges, vec!["10.0.0.0/8".to_string()]);
+
+        // A rule with neither group nor ranges matches nothing and is skipped.
+        let empty = ip_rule_model(None, Vec::new());
+        assert!(ip_access_rule_to_proto(&empty, &groups).is_none());
     }
 }

@@ -19,6 +19,9 @@ service ControlPlane {
   // Log shipping (agent streams logs to server)
   rpc ShipLogs(stream LogEntry) returns (LogAck);
 
+  // Certificate event shipping (raw ACME issuance logs from the agent)
+  rpc ShipCertEvents(stream CertEventEntry) returns (CertEventAck);
+
   // Metrics shipping
   rpc ShipMetrics(stream MetricBatch) returns (MetricAck);
 
@@ -597,6 +600,26 @@ message LogEntry {
 }
 
 message LogAck {
+  uint64 received_count = 1;
+  bool success = 2;
+  string error_message = 3;
+}
+
+// A raw certificate lifecycle log line captured on the agent (e.g. ACME
+// issuance progress from the data plane), so admins can follow issuance
+// attempts in the console.
+message CertEventEntry {
+  string agent_id = 1;
+  string site_id = 2;             // Empty when unknown at emit time
+  string certificate_id = 3;      // Empty when unknown at emit time
+  string event_type = 4;          // e.g. "acme_raw"
+  string level = 5;               // "INFO" / "WARN" / "ERROR"
+  string target = 6;              // tracing target, e.g. "pingap::acme"
+  string message = 7;             // Formatted log line
+  google.protobuf.Timestamp timestamp = 8;
+}
+
+message CertEventAck {
   uint64 received_count = 1;
   bool success = 2;
   string error_message = 3;

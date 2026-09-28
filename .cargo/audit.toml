@@ -27,4 +27,13 @@ ignore = [
     # It is required by Pingora 0.9's optional rustls backend; the current
     # upstream main branch still depends on it. Remove when Pingora replaces it.
     "RUSTSEC-2025-0134",
+
+    # quick-xml 0.26 (RUSTSEC-2026-0194/0195, uncontrolled recursion and
+    # potential XSS in untrusted documents). It reaches this tree through
+    # pprof 0.15 -> inferno 0.11, and pprof pins inferno ^0.11, so there is no
+    # semver-compatible upgrade. quick-xml is only used on the Linux pprof
+    # flamegraph rendering path, parsing locally collected sampling data — it
+    # never parses untrusted input. Remove once pprof allows inferno 0.12+.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
 ]

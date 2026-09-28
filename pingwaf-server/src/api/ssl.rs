@@ -828,7 +828,7 @@ async fn find_certificate_by_id(
 #[derive(Debug, Serialize)]
 pub struct CertificateEventResponse {
     pub id: Uuid,
-    pub certificate_id: Uuid,
+    pub certificate_id: Option<Uuid>,
     pub site_id: Option<Uuid>,
     pub event_type: String,
     pub message: String,
@@ -850,7 +850,7 @@ async fn write_cert_event(
 ) {
     let event = certificate_events::ActiveModel {
         id: Set(Uuid::new_v4()),
-        certificate_id: Set(certificate_id),
+        certificate_id: Set(Some(certificate_id)),
         site_id: Set(Some(site_id)),
         event_type: Set(event_type.to_string()),
         message: Set(message),
@@ -951,7 +951,7 @@ async fn list_all_events(
 
     let cert_ids: Vec<Uuid> = rows
         .iter()
-        .map(|e| e.certificate_id)
+        .filter_map(|e| e.certificate_id)
         .collect::<std::collections::HashSet<_>>()
         .into_iter()
         .collect();
@@ -971,7 +971,7 @@ async fn list_all_events(
     let items = rows
         .into_iter()
         .map(|e| {
-            let cert = certs.get(&e.certificate_id);
+            let cert = e.certificate_id.and_then(|cid| certs.get(&cid));
             let site_domain = e
                 .site_id
                 .and_then(|sid| sites.get(&sid))

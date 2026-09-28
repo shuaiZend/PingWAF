@@ -7,10 +7,10 @@ use axum::routing::get;
 use axum::Json;
 use axum::Router;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter,
-    QueryOrder, Set,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait,
+    PaginatorTrait, QueryFilter, QueryOrder, Set,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::api::common::{
@@ -21,7 +21,7 @@ use crate::api::sites::touch_site;
 use crate::api::state::AppState;
 use crate::auth::AuthUser;
 use crate::grpc::notify_config_changed;
-use crate::models::ip_access_rules;
+use crate::models::{ip_access_rules, ip_groups};
 
 /// Valid IP access actions.
 pub mod ip_action {
@@ -64,7 +64,14 @@ pub struct ListQuery {
 #[derive(Debug, Deserialize)]
 pub struct CreateRequest {
     pub name: String,
+    /// Explicit ranges. Required unless `group_id` references an IP group;
+    /// the two are mutually exclusive.
+    #[serde(default)]
     pub ip_ranges: Vec<String>,
+    /// When set, the rule matches the referenced IP group's ranges (kept in
+    /// sync with the group) instead of its own `ip_ranges`.
+    #[serde(default)]
+    pub group_id: Option<String>,
     #[serde(default = "default_action")]
     pub action: String,
     #[serde(default)]
@@ -79,8 +86,12 @@ pub struct CreateRequest {
 pub struct UpdateRequest {
     #[serde(default)]
     pub name: Option<String>,
+    /// Sending ranges switches the rule to manual mode (clearing any group
+    /// reference); sending `group_id` switches it to group mode.
     #[serde(default)]
     pub ip_ranges: Option<Vec<String>>,
+    #[serde(default)]
+    pub group_id: Option<String>,
     #[serde(default)]
     pub action: Option<String>,
     #[serde(default)]
@@ -89,6 +100,15 @@ pub struct UpdateRequest {
     pub enabled: Option<bool>,
     #[serde(default)]
     pub priority: Option<i32>,
+}
+
+/// Response body: the rule row plus the name of the referenced group (when
+/// the rule targets an IP group).
+#[derive(Debug, Serialize)]
+pub struct IpRuleResponse {
+    #[serde(flatten)]
+    pub rule: ip_access_rules::Model,
+    pub group_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -165,13 +185,95 @@ fn validate(name: &str, action: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// True when `ranges` carries at least one non-blank entry.
+fn has_ranges(ranges: &[String]) -> bool {
+    ranges.iter().any(|r| !r.trim().is_empty())
+}
+
+/// True when a request tries to target both an IP group and its own ranges:
+/// a rule matches exactly one of the two, never both.
+fn mode_conflict(group_id: &Option<String>, ip_ranges: &[String]) -> bool {
+    group_id
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|v| !v.is_empty())
+        && has_ranges(ip_ranges)
+}
+
+/// Resolves the create request's mode: a group reference or an explicit
+/// range list — exactly one of the two. Returns the validated pair.
+async fn resolve_create_mode(
+    state: &AppState,
+    group_id: &Option<String>,
+    ip_ranges: &[String],
+) -> Result<(Option<Uuid>, Vec<String>), ApiError> {
+    if mode_conflict(group_id, ip_ranges) {
+        return Err(ApiError::BadRequest(
+            "set either group_id or ip_ranges, not both".to_string(),
+        ));
+    }
+    let raw = group_id.as_deref().map(str::trim).filter(|v| !v.is_empty());
+    match raw {
+        Some(raw) => {
+            let gid = parse_uuid(raw, "IP group id")?;
+            ensure_group_exists(state, gid).await?;
+            Ok((Some(gid), Vec::new()))
+        },
+        None => {
+            let ranges = validate_ip_ranges(ip_ranges)?;
+            Ok((None, ranges))
+        },
+    }
+}
+
+async fn ensure_group_exists(
+    state: &AppState,
+    group_id: Uuid,
+) -> Result<(), ApiError> {
+    ip_groups::Entity::find_by_id(group_id)
+        .one(&state.db)
+        .await?
+        .map(|_| ())
+        .ok_or_else(|| {
+            ApiError::NotFound(format!("IP group {group_id} not found"))
+        })
+}
+
+/// Group names for the rules of one page, keyed by group id.
+async fn group_names(
+    db: &DatabaseConnection,
+    rules: &[ip_access_rules::Model],
+) -> Result<std::collections::HashMap<Uuid, String>, sea_orm::DbErr> {
+    let ids: Vec<Uuid> = rules.iter().filter_map(|r| r.group_id).collect();
+    if ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let rows = ip_groups::Entity::find()
+        .filter(ip_groups::Column::Id.is_in(ids))
+        .all(db)
+        .await?;
+    Ok(rows.into_iter().map(|g| (g.id, g.name)).collect())
+}
+
+fn to_response(
+    rule: ip_access_rules::Model,
+    names: &std::collections::HashMap<Uuid, String>,
+) -> IpRuleResponse {
+    let group_name = rule
+        .group_id
+        .as_ref()
+        .and_then(|gid| names.get(gid))
+        .cloned();
+    IpRuleResponse { rule, group_name }
+}
+
 /// `GET /api/v1/sites/{site_id}/ip-rules`
 async fn list(
     State(state): State<AppState>,
     current: AuthUser,
     Path(site_id): Path<String>,
     Query(query): Query<ListQuery>,
-) -> Result<Json<Page<ip_access_rules::Model>>, ApiError> {
+) -> Result<Json<Page<IpRuleResponse>>, ApiError> {
     let id = parse_uuid(&site_id, "site id")?;
     load_site_read(&state.db, id, &current).await?;
     let pagination = query.pagination.normalise();
@@ -190,7 +292,10 @@ async fn list(
 
     let total = paginator.num_items().await?;
     let rows = paginator.fetch_page(pagination.index()).await?;
-    Ok(Json(Page::new(rows, total, pagination)))
+    let names = group_names(&state.db, &rows).await?;
+    let items: Vec<IpRuleResponse> =
+        rows.into_iter().map(|r| to_response(r, &names)).collect();
+    Ok(Json(Page::new(items, total, pagination)))
 }
 
 /// `POST /api/v1/sites/{site_id}/ip-rules`
@@ -203,7 +308,9 @@ async fn create(
     let id = parse_uuid(&site_id, "site id")?;
     load_site_write(&state.db, id, &current).await?;
     validate(&payload.name, &payload.action)?;
-    let ip_ranges = validate_ip_ranges(&payload.ip_ranges)?;
+    let (group_id, ip_ranges) =
+        resolve_create_mode(&state, &payload.group_id, &payload.ip_ranges)
+            .await?;
 
     let timestamp = chrono::Utc::now();
     let model = ip_access_rules::ActiveModel {
@@ -215,6 +322,7 @@ async fn create(
         note: Set(non_empty(&payload.note)),
         enabled: Set(payload.enabled),
         priority: Set(payload.priority),
+        group_id: Set(group_id),
         created_at: Set(timestamp),
         updated_at: Set(timestamp),
     }
@@ -225,7 +333,8 @@ async fn create(
     touch_site(&state, id).await?;
     notify_config_changed(&state, id).await;
 
-    Ok((StatusCode::CREATED, Json(model)).into_response())
+    let names = group_names(&state.db, std::slice::from_ref(&model)).await?;
+    Ok((StatusCode::CREATED, Json(to_response(model, &names))).into_response())
 }
 
 /// `PUT /api/v1/sites/{site_id}/ip-rules/{rule_id}`
@@ -234,7 +343,7 @@ async fn update(
     current: AuthUser,
     Path((site_id, rule_id)): Path<(String, String)>,
     Json(payload): Json<UpdateRequest>,
-) -> Result<Json<ip_access_rules::Model>, ApiError> {
+) -> Result<Json<IpRuleResponse>, ApiError> {
     let id = parse_uuid(&site_id, "site id")?;
     let target = parse_uuid(&rule_id, "IP rule id")?;
     load_site_write(&state.db, id, &current).await?;
@@ -250,8 +359,30 @@ async fn update(
         }
         active.name = Set(name);
     }
-    if let Some(ranges) = payload.ip_ranges {
+    // A rule targets exactly one of a group or its own ranges: sending
+    // `group_id` switches to group mode, sending `ip_ranges` switches to
+    // manual mode (and clears the group reference).
+    if mode_conflict(
+        &payload.group_id,
+        payload.ip_ranges.as_deref().unwrap_or_default(),
+    ) {
+        return Err(ApiError::BadRequest(
+            "set either group_id or ip_ranges, not both".to_string(),
+        ));
+    }
+    if let Some(raw) = payload
+        .group_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        let gid = parse_uuid(raw, "IP group id")?;
+        ensure_group_exists(&state, gid).await?;
+        active.group_id = Set(Some(gid));
+        active.ip_ranges = Set(Vec::new());
+    } else if let Some(ranges) = payload.ip_ranges {
         active.ip_ranges = Set(validate_ip_ranges(&ranges)?);
+        active.group_id = Set(None);
     }
     if let Some(action) = non_empty(&payload.action) {
         if !ip_action::is_valid(&action) {
@@ -277,7 +408,8 @@ async fn update(
     touch_site(&state, id).await?;
     notify_config_changed(&state, id).await;
 
-    Ok(Json(updated))
+    let names = group_names(&state.db, std::slice::from_ref(&updated)).await?;
+    Ok(Json(to_response(updated, &names)))
 }
 
 /// `DELETE /api/v1/sites/{site_id}/ip-rules/{rule_id}`
@@ -330,6 +462,7 @@ async fn bulk_import(
         note: Set(non_empty(&payload.note)),
         enabled: Set(payload.enabled),
         priority: Set(0),
+        group_id: Set(None),
         created_at: Set(timestamp),
         updated_at: Set(timestamp),
     }
@@ -362,4 +495,43 @@ async fn find(
         .ok_or_else(|| {
             ApiError::NotFound(format!("IP access rule {rule_id} not found"))
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn group_and_ranges_are_mutually_exclusive() {
+        let ranges = vec!["10.0.0.1".to_string()];
+        assert!(mode_conflict(&Some("group".to_string()), &ranges));
+
+        // A blank group id means "no group" and never conflicts.
+        assert!(!mode_conflict(&Some("   ".to_string()), &ranges));
+        assert!(!mode_conflict(&None, &ranges));
+
+        // Blank ranges mean "no explicit ranges" and never conflict.
+        assert!(!mode_conflict(
+            &Some("group".to_string()),
+            &["   ".to_string()]
+        ));
+        assert!(!mode_conflict(&Some("group".to_string()), &[]));
+    }
+
+    #[test]
+    fn ranges_are_validated_trimmed_and_deduped() {
+        assert!(validate_ip_ranges(&[]).is_err());
+        assert!(validate_ip_ranges(&["not-an-ip".to_string()]).is_err());
+
+        let out = validate_ip_ranges(&[
+            "10.0.0.1".to_string(),
+            " 10.0.0.1 ".to_string(),
+            "10.0.0.0/24".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(
+            out,
+            vec!["10.0.0.1".to_string(), "10.0.0.0/24".to_string()]
+        );
+    }
 }

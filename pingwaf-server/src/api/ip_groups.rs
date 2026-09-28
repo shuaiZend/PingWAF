@@ -21,7 +21,7 @@ use crate::api::sites::touch_site;
 use crate::api::state::AppState;
 use crate::auth::AuthUser;
 use crate::grpc::notify_config_changed;
-use crate::models::{ip_group_sites, ip_groups, site};
+use crate::models::{ip_access_rules, ip_group_sites, ip_groups, site};
 
 /// Valid IP group actions.
 pub mod ip_group_action {
@@ -331,6 +331,7 @@ async fn update(
 
     let updated = active.update(&state.db).await?;
     tracing::info!(group_id = %target, "IP group updated");
+    propagate_group_change(&state, target).await;
 
     Ok(Json(updated))
 }
@@ -349,8 +350,69 @@ async fn remove(
         .await?;
 
     tracing::info!(group_id = %target, "IP group deleted");
+    propagate_group_change(&state, target).await;
 
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// Sites whose agent configuration embeds this group: explicitly associated
+/// sites plus any site whose access rules reference it. Used to push config
+/// updates after a group mutation.
+async fn affected_sites(
+    db: &sea_orm::DatabaseConnection,
+    group_id: Uuid,
+) -> Result<Vec<Uuid>, sea_orm::DbErr> {
+    let associated = ip_group_sites::Entity::find()
+        .filter(ip_group_sites::Column::IpGroupId.eq(group_id))
+        .select_only()
+        .column(ip_group_sites::Column::SiteId)
+        .into_query();
+    let referencing = ip_access_rules::Entity::find()
+        .filter(ip_access_rules::Column::GroupId.eq(group_id))
+        .select_only()
+        .column(ip_access_rules::Column::SiteId)
+        .into_query();
+
+    let mut ids: Vec<Uuid> = site::Entity::find()
+        .filter(
+            site::Column::Id
+                .in_subquery(associated)
+                .or(site::Column::Id.in_subquery(referencing)),
+        )
+        .select_only()
+        .column(site::Column::Id)
+        .into_tuple()
+        .all(db)
+        .await?;
+    ids.sort();
+    ids.dedup();
+    Ok(ids)
+}
+
+/// Touches and notifies every site affected by a group change. Best-effort:
+/// the mutation itself already succeeded, so failures only warn.
+async fn propagate_group_change(state: &AppState, group_id: Uuid) {
+    let site_ids = match affected_sites(&state.db, group_id).await {
+        Ok(ids) => ids,
+        Err(err) => {
+            tracing::warn!(
+                group_id = %group_id,
+                error = %err,
+                "failed to resolve sites affected by IP group change"
+            );
+            return;
+        },
+    };
+    for sid in site_ids {
+        if let Err(err) = touch_site(state, sid).await {
+            tracing::warn!(
+                site_id = %sid,
+                error = %err,
+                "failed to touch site after IP group change"
+            );
+        }
+        notify_config_changed(state, sid).await;
+    }
 }
 
 /// `GET /api/v1/ip-groups/{group_id}/sites`
@@ -407,6 +469,14 @@ async fn set_sites(
         load_site_read(&state.db, *sid, &_current).await?;
     }
 
+    let old_site_ids: Vec<Uuid> = ip_group_sites::Entity::find()
+        .filter(ip_group_sites::Column::IpGroupId.eq(target))
+        .select_only()
+        .column(ip_group_sites::Column::SiteId)
+        .into_tuple()
+        .all(&state.db)
+        .await?;
+
     ip_group_sites::Entity::delete_many()
         .filter(ip_group_sites::Column::IpGroupId.eq(target))
         .exec(&state.db)
@@ -428,9 +498,15 @@ async fn set_sites(
         "IP group sites updated"
     );
 
-    for sid in &site_ids {
-        touch_site(&state, *sid).await?;
-        notify_config_changed(&state, *sid).await;
+    // Sites losing the association need the same push as the ones gaining
+    // it: their bundles change in both directions.
+    let mut affected = old_site_ids;
+    affected.extend_from_slice(&site_ids);
+    affected.sort();
+    affected.dedup();
+    for sid in affected {
+        touch_site(&state, sid).await?;
+        notify_config_changed(&state, sid).await;
     }
 
     Ok(StatusCode::NO_CONTENT.into_response())
@@ -458,6 +534,7 @@ async fn sync_now(
     let updated = active.update(&state.db).await?;
 
     tracing::info!(group_id = %target, "IP group sync triggered");
+    propagate_group_change(&state, target).await;
 
     Ok(Json(serde_json::json!({
         "id": updated.id,

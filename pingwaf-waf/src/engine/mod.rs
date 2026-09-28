@@ -92,6 +92,8 @@ pub struct RequestData {
     pub country_code: Option<String>,
     /// `"http"` or `"https"`.
     pub scheme: String,
+    /// Wire protocol, e.g. `"HTTP/1.1"` or `"HTTP/2.0"`.
+    pub protocol: String,
 }
 
 impl RequestData {
@@ -105,6 +107,7 @@ impl RequestData {
             client_ip: String::new(),
             country_code: None,
             scheme: "http".into(),
+            protocol: "HTTP/1.1".into(),
         }
     }
 }
@@ -516,6 +519,7 @@ mod tests {
             client_ip: "203.0.113.10".into(),
             country_code: Some("US".into()),
             scheme: "https".into(),
+            protocol: "HTTP/1.1".into(),
         }
     }
 

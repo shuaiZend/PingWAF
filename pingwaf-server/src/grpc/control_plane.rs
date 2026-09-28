@@ -11,9 +11,10 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use pingwaf_proto::control_plane::{
     control_plane_server::ControlPlane as ControlPlaneTrait, AgentHeartbeat,
-    GetSiteConfigRequest, HostSample, LogAck, LogEntry, MetricAck, MetricBatch,
-    RegisterAgentRequest, RegisterAgentResponse, RuleBundle, ServerCommand,
-    SiteConfig, SyncRulesRequest,
+    CertEventAck, CertEventEntry, GetSiteConfigRequest, HostSample, LogAck,
+    LogEntry, MetricAck, MetricBatch, RegisterAgentRequest,
+    RegisterAgentResponse, RuleBundle, ServerCommand, SiteConfig,
+    SyncRulesRequest,
 };
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait,
@@ -36,8 +37,8 @@ use crate::grpc::config::{
 };
 use crate::grpc::registry::{AgentRegistry, COMMAND_CHANNEL_CAPACITY};
 use crate::models::{
-    access_log, action, agent, agent_status, api_key, host_sample,
-    security_event, site,
+    access_log, action, agent, agent_status, api_key, certificate_events,
+    host_sample, security_event, site,
 };
 
 /// Stream type returned by the server-streaming RPCs.
@@ -65,9 +66,17 @@ const MAX_UPSTREAM: usize = 255;
 /// writes roughly 17k rows a day, so expired rows are pruned while ingesting.
 const HOST_SAMPLE_RETENTION_HOURS: i64 = 24;
 
+/// Agent rows offline for longer than this are dropped from the inventory:
+/// decommissioned nodes and renamed hosts would otherwise survive as
+/// permanently-offline ghosts on the dashboard.
+const OFFLINE_AGENT_RETENTION_DAYS: i64 = 7;
+
 /// Epoch seconds of the last retention sweep, so that a busy fleet does not
 /// pay for a `DELETE` on every heartbeat.
 static LAST_SAMPLE_SWEEP: AtomicI64 = AtomicI64::new(0);
+
+/// Epoch seconds of the last offline-agent sweep, throttled the same way.
+static LAST_AGENT_SWEEP: AtomicI64 = AtomicI64::new(0);
 
 /// The gRPC control plane service.
 pub struct ControlPlaneService {
@@ -189,10 +198,13 @@ impl ControlPlaneTrait for ControlPlaneService {
         }
 
         // Re-registering the same host updates the existing row instead of
-        // creating a new one, so a restart does not inflate the inventory.
+        // creating a new one, so a restart does not inflate the inventory. The
+        // match ignores the reported IP on purpose: an agent whose address
+        // changed (DHCP, migration) must reclaim its row rather than orphan
+        // the old one as a permanently-offline ghost.
         let existing = agent::Entity::find()
             .filter(agent::Column::Hostname.eq(payload.hostname.clone()))
-            .filter(agent::Column::IpAddress.eq(payload.ip_address.clone()))
+            .filter(agent::Column::ApiKeyId.eq(Some(key.id)))
             .one(&self.db)
             .await
             .map_err(db_status)?;
@@ -216,6 +228,7 @@ impl ControlPlaneTrait for ControlPlaneService {
                     Set(positive_i64(payload.memory_bytes as i64));
                 active.status = Set(status);
                 active.api_key_id = Set(Some(key.id));
+                active.ip_address = Set(payload.ip_address.clone());
                 active.last_heartbeat = Set(Some(now));
                 active.public_ip = Set(optional(&payload.public_ip));
                 active.private_ip = Set(optional(&payload.private_ip));
@@ -495,6 +508,67 @@ impl ControlPlaneTrait for ControlPlaneService {
         }))
     }
 
+    async fn ship_cert_events(
+        &self,
+        request: Request<Streaming<CertEventEntry>>,
+    ) -> Result<Response<CertEventAck>, Status> {
+        let mut inbound = request.into_inner();
+        let batch_size = self.config.log_batch_size.max(1);
+        let mut received: u64 = 0;
+        let mut batch: Vec<certificate_events::ActiveModel> =
+            Vec::with_capacity(batch_size);
+
+        loop {
+            let message = match inbound.message().await {
+                Ok(Some(message)) => message,
+                Ok(None) => break,
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        received,
+                        "certificate event stream aborted"
+                    );
+                    return Ok(Response::new(CertEventAck {
+                        received_count: received,
+                        success: false,
+                        error_message: err.to_string(),
+                    }));
+                },
+            };
+            received += 1;
+            batch.push(certificate_events::ActiveModel {
+                id: Set(Uuid::new_v4()),
+                certificate_id: Set(parse_optional_uuid(
+                    &message.certificate_id,
+                )),
+                site_id: Set(parse_optional_uuid(&message.site_id)),
+                event_type: Set(if message.event_type.is_empty() {
+                    "acme_raw".to_string()
+                } else {
+                    message.event_type.chars().take(30).collect()
+                }),
+                message: Set(message.message),
+                details: Set(Some(serde_json::json!({
+                    "level": message.level,
+                    "target": message.target,
+                    "agent_id": message.agent_id,
+                }))),
+                created_at: Set(from_timestamp(message.timestamp.as_ref())),
+            });
+            if batch.len() >= batch_size {
+                flush_cert_events(&self.db, &mut batch).await?;
+            }
+        }
+
+        flush_cert_events(&self.db, &mut batch).await?;
+        tracing::debug!(received, "certificate events persisted");
+        Ok(Response::new(CertEventAck {
+            received_count: received,
+            success: true,
+            error_message: String::new(),
+        }))
+    }
+
     async fn ship_metrics(
         &self,
         request: Request<Streaming<MetricBatch>>,
@@ -508,14 +582,15 @@ impl ControlPlaneTrait for ControlPlaneService {
             metrics += batch.metrics.len() as u64;
 
             // Metrics double as liveness proof: touching the heartbeat keeps an
-            // agent that only ships metrics from being marked offline.
+            // agent that only ships metrics from being marked offline. Server
+            // time, not the agent-reported timestamp: liveness thresholds
+            // compare against Utc::now(), so trusting a skewed client clock
+            // would mark healthy agents offline.
             if let Some(agent_id) = parse_optional_uuid(&batch.agent_id) {
                 agent::Entity::update_many()
                     .col_expr(
                         agent::Column::LastHeartbeat,
-                        sea_orm::sea_query::Expr::value(from_timestamp(
-                            batch.timestamp.as_ref(),
-                        )),
+                        sea_orm::sea_query::Expr::value(Utc::now()),
                     )
                     .filter(agent::Column::Id.eq(agent_id))
                     .exec(&self.db)
@@ -586,7 +661,9 @@ async fn persist_heartbeat(
     agent_id: Uuid,
     message: &AgentHeartbeat,
 ) {
-    let reported = from_timestamp(message.timestamp.as_ref());
+    // Server time, not the agent's clock: liveness thresholds compare
+    // `last_heartbeat` against Utc::now(), so trusting the reported timestamp
+    // would let a skewed client clock mark healthy agents offline.
     let health = agent_status::from_proto_health(message.health);
 
     let mut active = agent::ActiveModel {
@@ -594,7 +671,7 @@ async fn persist_heartbeat(
         ..Default::default()
     };
     active.status = Set(health.to_string());
-    active.last_heartbeat = Set(Some(reported));
+    active.last_heartbeat = Set(Some(Utc::now()));
     if !message.config_hash.trim().is_empty() {
         active.config_hash = Set(Some(message.config_hash.clone()));
     }
@@ -605,6 +682,8 @@ async fn persist_heartbeat(
     if let Err(err) = active.update(db).await {
         tracing::warn!(%agent_id, error = %err, "could not persist heartbeat");
     }
+
+    sweep_offline_agents(db).await;
 }
 
 /// Persists the probe samples carried by one heartbeat and prunes expired rows.
@@ -688,6 +767,39 @@ async fn sweep_host_samples(db: &DatabaseConnection) {
     }
 }
 
+/// Deletes agent rows that have been offline beyond the retention window, at
+/// most once an hour. Child rows are safe: host samples cascade, log rows
+/// keep their agent_id only as a nullable reference.
+async fn sweep_offline_agents(db: &DatabaseConnection) {
+    let now = Utc::now();
+    let previous = LAST_AGENT_SWEEP.swap(now.timestamp(), Ordering::Relaxed);
+    let swept_recently = DateTime::from_timestamp(previous, 0)
+        .is_some_and(|at| at > now - chrono::Duration::hours(1));
+    if swept_recently {
+        return;
+    }
+
+    let cutoff = now - chrono::Duration::days(OFFLINE_AGENT_RETENTION_DAYS);
+    match agent::Entity::delete_many()
+        .filter(agent::Column::Status.eq(agent_status::OFFLINE.to_string()))
+        .filter(agent::Column::LastHeartbeat.lt(cutoff))
+        .exec(db)
+        .await
+    {
+        Ok(result) if result.rows_affected > 0 => {
+            tracing::info!(
+                deleted = result.rows_affected,
+                %cutoff,
+                "pruned long-offline agents"
+            );
+        },
+        Ok(_) => {},
+        Err(err) => {
+            tracing::warn!(error = %err, "could not prune offline agents");
+        },
+    }
+}
+
 /// Timestamps come from the agent's own clock. Anything outside the retention
 /// window — including a clock that runs ahead — is stored as `now`, so that the
 /// row still ages out instead of becoming unprunable.
@@ -751,6 +863,24 @@ async fn flush(
             tracing::error!(error = %err, "failed to persist security events");
             return Err(db_status(err));
         }
+    }
+    Ok(())
+}
+
+/// Persists one batch of certificate events. Failures are logged and dropped:
+/// a transient database hiccup must not tear down the agent's stream.
+async fn flush_cert_events(
+    db: &DatabaseConnection,
+    batch: &mut Vec<certificate_events::ActiveModel>,
+) -> Result<(), Status> {
+    if batch.is_empty() {
+        return Ok(());
+    }
+    let rows = std::mem::take(batch);
+    if let Err(err) =
+        certificate_events::Entity::insert_many(rows).exec(db).await
+    {
+        tracing::error!(error = %err, "failed to persist certificate events");
     }
     Ok(())
 }
