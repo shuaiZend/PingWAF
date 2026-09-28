@@ -8,6 +8,38 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.14.5] — 2026-09-28
+
+### ⛰️ Features
+
+- *(agent)* Run the WAF plugin on the data plane. The generated proxy config
+  now injects the `pingwaf:waf` plugin and references it from every location,
+  so detections execute and request/response logging reaches the control
+  plane — dashboard and site analytics show real traffic.
+- *(agent)* Hot-reload the data plane config when the rule cache hash changes
+  (upstreams, locations, certificates and plugins refresh without restarting
+  Pingora).
+- *(server)* ACME issuance works in PingWAF mode: HTTP-01 and DNS-01 with
+  per-provider default endpoints (aliyun, Cloudflare, DNSPod; Huawei needs a
+  region). Raw `pingap::acme` application events ship to the control plane
+  and appear in the SSL page's application log for debugging failed
+  applications.
+- *(server)* Site IP rules can reference global IP groups. Group ranges
+  expand live in the rule bundle, so updating a group takes effect on every
+  referencing site without touching its rules.
+
+### 🐛 Bug Fixes
+
+- *(web)* Fix the IP rules form dropping the CIDR list on manual-mode writes,
+  which made the backend reject the request.
+- *(server)* Reuse an agent's row when it reconnects from a new IP instead of
+  registering a duplicate that stays offline forever, use the server clock
+  for `last_heartbeat`/metrics so clock skew cannot mark healthy agents
+  offline, and reset the reconnect backoff as soon as registration succeeds.
+- *(server)* `certificate_events.certificate_id` is now nullable (raw ACME
+  events can arrive before the certificate row) and `ip_access_rules` gained
+  a nullable `group_id` (migration 000012).
+
 ## [PingWAF 0.14.4] — 2026-09-27
 
 ### 🐛 Bug Fixes
