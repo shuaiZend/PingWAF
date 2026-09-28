@@ -8,6 +8,36 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.14.8] — 2026-09-29
+
+### ⛰️ Features
+
+- *(waf)* Enforce the remaining protection features in the data plane. Caching,
+  bot protection, CC challenge, rate limiting, rewrites and custom error pages
+  were configurable in the control plane but never evaluated at the edge; they
+  now reach agents through the config stream and the WAF plugin applies them
+  per request. Bot protection classifies requests by user agent in v1 (verified
+  browsers, suspicious clients, blocked patterns) — TLS fingerprinting and
+  behavioral analysis are announced as upcoming. Rate limits count per key with
+  expiry, answer over-threshold requests from the edge, and emit security
+  events; CC protection challenges suspect bursts before they reach the origin.
+- *(logger)* Persist the full request behind every access log: request headers
+  plus up to 1 KiB of the body (truncated beyond that) are stored in a new
+  request-detail column, and the logs page can search by exact request ID and
+  inspect the stored detail.
+- *(dashboard)* Rebuild the dashboard around traffic. A new
+  `/analytics/sites-over-time` endpoint feeds a per-site multi-line traffic
+  chart, alongside new top-paths and status-code-distribution cards; the agent
+  fleet and top-sites cards were removed.
+- *(ip-groups)* Make IP group subscriptions real. Groups can pull ranges from
+  a source URL — Cloudflare's official IP list JSON, generic JSON feeds or
+  plain-text lists — a scheduler refreshes them at a chosen interval, and a
+  failed fetch records the error without wiping the previously known ranges. A
+  global "Cloudflare" subscription group is seeded on first boot, disabled by
+  default so enabling it is a deliberate act.
+- *(web)* Surface sync state in the IP groups page: a refresh-interval selector
+  (manual to weekly) for subscribed groups and the last sync error inline.
+
 ## [PingWAF 0.14.7] — 2026-09-28
 
 ### ⛰️ Features
