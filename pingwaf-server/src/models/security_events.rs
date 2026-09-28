@@ -76,6 +76,14 @@ pub mod access_logs {
         pub referer: Option<String>,
         pub country_code: Option<String>,
         pub tls_version: Option<String>,
+        /// Snapshot of the request headers (capped by the agent).
+        #[sea_orm(column_type = "JsonBinary")]
+        pub request_headers: Option<Json>,
+        /// Body prefix as sent by the agent (≤1 KiB, lossily decoded).
+        #[sea_orm(column_type = "Text")]
+        pub request_body: Option<String>,
+        pub request_body_size: Option<i64>,
+        pub request_body_truncated: Option<bool>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

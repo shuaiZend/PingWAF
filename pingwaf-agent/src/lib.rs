@@ -79,7 +79,9 @@ pub struct AccessLogEntry {
     pub referer: String,
     pub tls_version: String,
     pub country_code: String,
+    pub request_headers: Vec<(String, String)>,
     pub request_body: Option<Vec<u8>>,
+    pub request_body_size: u64,
     pub request_body_truncated: bool,
 }
 
@@ -238,6 +240,25 @@ impl PingWafAgent {
 
     /// Log an access entry (non-blocking, queued for batch shipping).
     pub fn log_access(&self, entry: AccessLogEntry) {
+        // The wire format is a header map, so repeated names are combined the
+        // way HTTP semantics prescribe instead of silently dropping values.
+        let mut request_headers: std::collections::HashMap<String, String> =
+            std::collections::HashMap::with_capacity(
+                entry.request_headers.len(),
+            );
+        for (name, value) in entry.request_headers {
+            match request_headers.entry(name) {
+                std::collections::hash_map::Entry::Occupied(mut existing) => {
+                    let combined = existing.get_mut();
+                    combined.reserve(value.len() + 2);
+                    combined.push_str(", ");
+                    combined.push_str(&value);
+                },
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(value);
+                },
+            }
+        }
         let log_entry = client::LogEntry {
             site_id: entry.site_id,
             request_id: entry.request_id,
@@ -248,9 +269,9 @@ impl PingWafAgent {
             path: entry.path,
             query_string: entry.query_string,
             protocol: entry.protocol,
-            request_headers: std::collections::HashMap::new(),
+            request_headers,
             request_body: entry.request_body,
-            request_body_size: entry.response_size,
+            request_body_size: entry.request_body_size,
             request_body_truncated: entry.request_body_truncated,
             response_status: entry.status_code,
             response_headers: std::collections::HashMap::new(),

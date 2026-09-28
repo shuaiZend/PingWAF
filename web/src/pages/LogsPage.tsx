@@ -71,6 +71,7 @@ interface Filters {
   siteId: string
   clientIp: string
   path: string
+  requestId: string
   action: string
   method: string
   statusClass: string
@@ -86,6 +87,7 @@ function defaultFilters(): Filters {
     siteId: '',
     clientIp: '',
     path: '',
+    requestId: '',
     action: '',
     method: '',
     statusClass: '',
@@ -108,6 +110,7 @@ export function LogsPage() {
 
   const debouncedIp = useDebouncedValue(filters.clientIp.trim(), 400)
   const debouncedPath = useDebouncedValue(filters.path.trim(), 400)
+  const debouncedRequestId = useDebouncedValue(filters.requestId.trim(), 400)
 
   const { data: sites } = useSitesList()
 
@@ -115,7 +118,7 @@ export function LogsPage() {
   // asks for page 5 of a completely different result set.
   useEffect(() => {
     setPage(1)
-  }, [tab, filters.preset, filters.siteId, filters.action, filters.method, filters.statusClass, debouncedIp, debouncedPath, pageSize])
+  }, [tab, filters.preset, filters.siteId, filters.action, filters.method, filters.statusClass, debouncedIp, debouncedPath, debouncedRequestId, pageSize])
 
   const params = useMemo<LogQueryParams>(() => {
     const base: LogQueryParams = {
@@ -127,6 +130,7 @@ export function LogsPage() {
     if (filters.siteId) base.site_id = filters.siteId
     if (debouncedIp) base.client_ip = debouncedIp
     if (debouncedPath) base.path = debouncedPath
+    if (debouncedRequestId) base.request_id = debouncedRequestId
     if (tab === 'security') {
       if (filters.action) base.action = filters.action
     } else {
@@ -134,7 +138,7 @@ export function LogsPage() {
       if (filters.statusClass) base.status_class = Number(filters.statusClass)
     }
     return base
-  }, [tab, page, pageSize, filters.from, filters.to, filters.siteId, filters.action, filters.method, filters.statusClass, debouncedIp, debouncedPath])
+  }, [tab, page, pageSize, filters.from, filters.to, filters.siteId, filters.action, filters.method, filters.statusClass, debouncedIp, debouncedPath, debouncedRequestId])
 
   const securityQuery = useQuery({
     queryKey: logKeys.security(params),
@@ -528,6 +532,14 @@ export function LogsPage() {
               placeholder="/api/v1/users"
               onChange={(e) => setFilter('path', e.target.value)}
             />
+            <Input
+              label={t('pages.logs.requestIdFilter')}
+              value={filters.requestId}
+              placeholder="01J9F3…"
+              hint={t('pages.logs.requestIdFilterHint')}
+              prefixIcon={<MagnifyingGlass weight="duotone" />}
+              onChange={(e) => setFilter('requestId', e.target.value)}
+            />
             {tab === 'security' ? (
               <Select
                 label={t('pages.logs.action')}
@@ -777,6 +789,43 @@ export function LogsPage() {
                 </p>
               </div>
             )}
+            {selectedLog.request_headers &&
+              Object.keys(selectedLog.request_headers).length > 0 && (
+                <div>
+                  <p className="mb-1.5 text-[13px] font-medium text-fg">
+                    {t('pages.logs.requestHeaders')}
+                  </p>
+                  <div className="max-h-56 overflow-auto rounded-md border border-line bg-recessed px-3 py-2">
+                    <dl className="flex flex-col gap-1">
+                      {Object.entries(selectedLog.request_headers).map(([name, value]) => (
+                        <div key={name} className="flex min-w-0 items-baseline gap-2">
+                          <dt className="pw-mono shrink-0 text-xs font-medium text-fg">
+                            {name}:
+                          </dt>
+                          <dd className="pw-mono min-w-0 break-all text-xs text-fg-subtle">
+                            {value}
+                          </dd>
+                        </div>
+                      ))}
+                    </dl>
+                  </div>
+                </div>
+              )}
+            <div>
+              <p className="mb-1.5 flex items-center gap-2 text-[13px] font-medium text-fg">
+                {t('pages.logs.requestBody')}
+                {selectedLog.request_body_truncated && (
+                  <Badge tone="warning">{t('pages.logs.bodyTruncated')}</Badge>
+                )}
+              </p>
+              {selectedLog.request_body ? (
+                <pre className="pw-mono max-h-56 overflow-auto whitespace-pre-wrap break-all rounded-md border border-line bg-recessed px-3 py-2 text-xs text-fg-subtle">
+                  {selectedLog.request_body}
+                </pre>
+              ) : (
+                <p className="text-xs text-fg-subtle">{t('pages.logs.noRequestBody')}</p>
+              )}
+            </div>
           </div>
         )}
       </Dialog>

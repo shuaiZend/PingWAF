@@ -25,12 +25,6 @@ export const errorPagesApi = {
 
   delete: (siteId: string, id: string) =>
     apiClient.delete<void>(`/sites/${siteId}/error-pages/${id}`),
-
-  /** Restores the built-in template for one status code. */
-  reset: (siteId: string, statusCode: number) =>
-    apiClient.post<ErrorPage>(`/sites/${siteId}/error-pages/reset`, {
-      status_code: statusCode,
-    }),
 }
 
 /** Variables the template engine substitutes. Rendered in the editor sidebar. */
@@ -110,10 +104,10 @@ Request {{request_id}} to {{request_path}} was rejected at {{timestamp}}.`
 /** The built-in template for a status code, used by "Reset to default". */
 export function defaultErrorPageTemplate(
   _statusCode: number,
-  contentType: ErrorPageContentType = 'html',
+  contentType: ErrorPageContentType = 'text/html',
 ): string {
-  if (contentType === 'json') return JSON_TEMPLATE
-  if (contentType === 'text') return TEXT_TEMPLATE
+  if (contentType === 'application/json') return JSON_TEMPLATE
+  if (contentType === 'text/plain') return TEXT_TEMPLATE
   return HTML_TEMPLATE
 }
 

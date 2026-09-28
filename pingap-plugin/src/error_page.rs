@@ -381,6 +381,9 @@ impl ErrorPagePlugin {
         c.insert("method", req.method.as_str());
         c.insert("path", req.uri.path());
         c.insert("host", host);
+        // Aliases the console documents for template authors.
+        c.insert("request_path", req.uri.path());
+        c.insert("request_host", host);
         c.insert(
             "user_agent",
             get_req_header_value(req, "user-agent").unwrap_or_default(),
@@ -826,5 +829,138 @@ template = '{"error":"rate_limit_exceeded","request_id":"{{ request_id }}"}'
             .await
             .unwrap();
         assert_eq!(ResponsePluginResult::Unchanged, result);
+    }
+
+    mod agent_mode {
+        use super::*;
+        use crate::waf::tests::install_test_agent;
+        use pingwaf_proto::control_plane as proto;
+        use pretty_assertions::assert_eq;
+
+        /// Agent-supplied pages replace responses for their host, take
+        /// precedence over the built-in defaults and expose the variables the
+        /// console documents (including the `request_path`/`request_host`
+        /// aliases).
+        #[tokio::test]
+        async fn agent_pages_replace_response() {
+            let (_guard, agent, _dir) = install_test_agent().await;
+            agent
+                .rule_cache
+                .update_from_site_config(&proto::SiteConfig {
+                    sites: vec![proto::Site {
+                        id: "site-1".to_string(),
+                        name: "example".to_string(),
+                        domain: "example.com".to_string(),
+                        alternate_domains: Vec::new(),
+                        status: 0,
+                        rules: Some(proto::RuleBundle {
+                            site_id: "site-1".to_string(),
+                            config_hash: "hash-1".to_string(),
+                            error_pages: vec![proto::CustomErrorPage {
+                                id: "ep-1".to_string(),
+                                status_code: 503,
+                                content_type: "text/html".to_string(),
+                                body_template: concat!(
+                                    "<html><body>{{ error_code }} on",
+                                    " {{ request_path }} at {{ request_host }}",
+                                    " for {{ request_id }}</body></html>"
+                                )
+                                .to_string(),
+                                name: "custom 503".to_string(),
+                                enabled: true,
+                            }],
+                            ..Default::default()
+                        }),
+                    }],
+                    config_hash: "hash-1".to_string(),
+                    updated_at: None,
+                })
+                .unwrap();
+
+            let plugin = ErrorPagePlugin::new(
+                &toml::from_str::<PluginConf>(r###"category = "error_page""###)
+                    .unwrap(),
+            )
+            .unwrap();
+
+            let mut s = session("GET", "/maintenance", "example.com").await;
+            let mut resp = ResponseHeader::build_no_case(503, None).unwrap();
+            let result = plugin
+                .handle_response(&mut s, &mut Ctx::default(), &mut resp)
+                .await
+                .unwrap();
+            assert_eq!(ResponsePluginResult::Modified, result);
+            // The compiled agent page renders with the documented variables
+            // filled in.
+            let (tera, pages) = plugin.resolve("example.com");
+            let page = pages.get(&503).expect("agent page compiled");
+            let mut c = Context::new();
+            c.insert("error_code", &503u16);
+            c.insert("request_id", "req-1");
+            c.insert("request_path", "/maintenance");
+            c.insert("request_host", "example.com");
+            let rendered = tera.render(&page.template_name, &c).unwrap();
+            assert!(rendered.contains("503 on /maintenance"));
+            assert!(rendered.contains("at example.com"));
+            assert!(rendered.contains("req-1"));
+        }
+
+        /// A status without an agent page is passed through untouched — agent
+        /// pages replace the built-in defaults for that host.
+        #[tokio::test]
+        async fn agent_pages_shadow_defaults_per_host() {
+            let (_guard, agent, _dir) = install_test_agent().await;
+            agent
+                .rule_cache
+                .update_from_site_config(&proto::SiteConfig {
+                    sites: vec![proto::Site {
+                        id: "site-1".to_string(),
+                        name: "example".to_string(),
+                        domain: "example.com".to_string(),
+                        alternate_domains: Vec::new(),
+                        status: 0,
+                        rules: Some(proto::RuleBundle {
+                            site_id: "site-1".to_string(),
+                            config_hash: "hash-1".to_string(),
+                            error_pages: vec![proto::CustomErrorPage {
+                                id: "ep-1".to_string(),
+                                status_code: 403,
+                                content_type: "text/html".to_string(),
+                                body_template: "custom".to_string(),
+                                name: "custom 403".to_string(),
+                                enabled: true,
+                            }],
+                            ..Default::default()
+                        }),
+                    }],
+                    config_hash: "hash-1".to_string(),
+                    updated_at: None,
+                })
+                .unwrap();
+
+            let plugin = ErrorPagePlugin::new(
+                &toml::from_str::<PluginConf>(r###"category = "error_page""###)
+                    .unwrap(),
+            )
+            .unwrap();
+
+            // 404 has no agent page: untouched despite the built-in default.
+            let mut s = session("GET", "/x", "example.com").await;
+            let mut resp = ResponseHeader::build_no_case(404, None).unwrap();
+            let result = plugin
+                .handle_response(&mut s, &mut Ctx::default(), &mut resp)
+                .await
+                .unwrap();
+            assert_eq!(ResponsePluginResult::Unchanged, result);
+
+            // Another host (no agent pages) still gets the built-in defaults.
+            let mut s = session("GET", "/x", "other.example.com").await;
+            let mut resp = ResponseHeader::build_no_case(403, None).unwrap();
+            let result = plugin
+                .handle_response(&mut s, &mut Ctx::default(), &mut resp)
+                .await
+                .unwrap();
+            assert_eq!(ResponsePluginResult::Modified, result);
+        }
     }
 }

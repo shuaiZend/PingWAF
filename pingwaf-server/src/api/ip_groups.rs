@@ -37,6 +37,12 @@ fn default_action() -> String {
     ip_group_action::BLOCK.to_string()
 }
 
+/// `<= 0` (or the UI's "manual" choice) clears the interval; positive values
+/// are kept as-is.
+fn normalise_interval(minutes: Option<i32>) -> Option<i32> {
+    minutes.filter(|minutes| *minutes > 0)
+}
+
 fn default_true() -> bool {
     true
 }
@@ -257,8 +263,11 @@ async fn create(
         action: Set(payload.action),
         is_global: Set(payload.is_global),
         source_url: Set(non_empty(&payload.source_url)),
-        sync_interval_minutes: Set(payload.sync_interval_minutes),
+        sync_interval_minutes: Set(normalise_interval(
+            payload.sync_interval_minutes,
+        )),
         last_synced_at: Set(None),
+        last_sync_error: Set(None),
         enabled: Set(payload.enabled),
         created_at: Set(timestamp),
         updated_at: Set(timestamp),
@@ -322,7 +331,7 @@ async fn update(
         active.source_url = Set(non_empty(&Some(url)));
     }
     if let Some(interval) = payload.sync_interval_minutes {
-        active.sync_interval_minutes = Set(Some(interval));
+        active.sync_interval_minutes = Set(normalise_interval(Some(interval)));
     }
     if let Some(enabled) = payload.enabled {
         active.enabled = Set(enabled);
@@ -513,7 +522,8 @@ async fn set_sites(
 }
 
 /// `POST /api/v1/ip-groups/{group_id}/sync` — trigger a manual sync from the
-/// subscription source. Currently a stub that just updates `last_synced_at`.
+/// subscription source. On failure the previous ranges are kept and the
+/// upstream error is recorded in `last_sync_error` (and returned here).
 async fn sync_now(
     State(state): State<AppState>,
     _current: AuthUser,
@@ -522,25 +532,144 @@ async fn sync_now(
     let target = parse_uuid(&group_id, "IP group id")?;
     let group = find_group(&state, target).await?;
 
-    if group.source_url.is_none() {
-        return Err(ApiError::BadRequest(
-            "IP group has no subscription source URL".to_string(),
-        ));
-    }
+    let updated =
+        sync_subscription(&state, group).await.map_err(|message| {
+            tracing::warn!(
+                group_id = %target,
+                error = %message,
+                "manual IP group subscription sync failed"
+            );
+            ApiError::BadGateway(message)
+        })?;
 
-    let mut active: ip_groups::ActiveModel = group.into();
-    active.last_synced_at = Set(Some(chrono::Utc::now()));
-    active.updated_at = Set(chrono::Utc::now());
-    let updated = active.update(&state.db).await?;
-
-    tracing::info!(group_id = %target, "IP group sync triggered");
-    propagate_group_change(&state, target).await;
-
+    tracing::info!(group_id = %target, "IP group sync completed");
     Ok(Json(serde_json::json!({
         "id": updated.id,
         "synced_at": updated.last_synced_at,
         "ip_count": updated.ip_ranges.len(),
     })))
+}
+
+/// Fetches the group's subscription source and persists the result.
+///
+/// A failed fetch never touches `ip_ranges`: the group keeps serving its
+/// previous ranges and only `last_sync_error` records the failure.
+async fn sync_subscription(
+    state: &AppState,
+    group: ip_groups::Model,
+) -> Result<ip_groups::Model, String> {
+    let source_url = match &group.source_url {
+        Some(url) => url.clone(),
+        None => {
+            return Err("IP group has no subscription source URL".to_string())
+        },
+    };
+
+    let client = crate::subscription::subscription_client();
+    let fetched =
+        crate::subscription::fetch_subscription_ranges(&client, &source_url)
+            .await;
+
+    let mut active: ip_groups::ActiveModel = group.clone().into();
+    match fetched {
+        Ok(ranges) => {
+            let changed = ranges != group.ip_ranges;
+            active.ip_ranges = Set(ranges);
+            active.last_synced_at = Set(Some(chrono::Utc::now()));
+            active.last_sync_error = Set(None);
+            active.updated_at = Set(chrono::Utc::now());
+            let updated = active
+                .update(&state.db)
+                .await
+                .map_err(|err| err.to_string())?;
+            if changed {
+                propagate_group_change(state, group.id).await;
+            }
+            tracing::info!(
+                group_id = %group.id,
+                ip_count = updated.ip_ranges.len(),
+                "IP group subscription synced"
+            );
+            Ok(updated)
+        },
+        Err(message) => {
+            active.last_sync_error = Set(Some(message.clone()));
+            active.updated_at = Set(chrono::Utc::now());
+            if let Err(err) = active.update(&state.db).await {
+                tracing::warn!(
+                    group_id = %group.id,
+                    error = %err,
+                    "failed to record the IP group sync error"
+                );
+            }
+            Err(message)
+        },
+    }
+}
+
+/// Launches the background scheduler that refreshes subscriptions.
+///
+/// Every 60 seconds it syncs every enabled group that has a source URL and a
+/// positive `sync_interval_minutes` (`NULL` means manual-only) whose
+/// `last_synced_at` is older than the interval — or that has never synced. The
+/// first tick fires immediately, so a freshly seeded subscription populates
+/// right after boot without blocking startup.
+pub fn start_subscription_sync_scheduler(
+    state: AppState,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut ticker =
+            tokio::time::interval(std::time::Duration::from_secs(60));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            if let Err(err) = sync_due_groups(&state).await {
+                tracing::warn!(
+                    error = %err,
+                    "IP group subscription sweep failed"
+                );
+            }
+        }
+    })
+}
+
+/// Syncs every subscription whose refresh interval has elapsed.
+async fn sync_due_groups(state: &AppState) -> Result<(), sea_orm::DbErr> {
+    let candidates = ip_groups::Entity::find()
+        .filter(ip_groups::Column::Enabled.eq(true))
+        .filter(ip_groups::Column::SourceUrl.is_not_null())
+        .filter(ip_groups::Column::SyncIntervalMinutes.is_not_null())
+        .all(&state.db)
+        .await?;
+
+    for group in candidates {
+        let interval = group.sync_interval_minutes.unwrap_or(0);
+        if interval <= 0 {
+            continue;
+        }
+        let due = match group.last_synced_at {
+            None => true,
+            Some(last) => {
+                chrono::Utc::now()
+                    >= last + chrono::Duration::minutes(i64::from(interval))
+            },
+        };
+        if !due {
+            continue;
+        }
+        tracing::info!(
+            group_id = %group.id,
+            name = %group.name,
+            "syncing IP group subscription"
+        );
+        if let Err(message) = sync_subscription(state, group).await {
+            tracing::warn!(
+                error = %message,
+                "scheduled IP group subscription sync failed"
+            );
+        }
+    }
+    Ok(())
 }
 
 async fn find_group(

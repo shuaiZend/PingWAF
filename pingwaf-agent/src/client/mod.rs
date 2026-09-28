@@ -115,7 +115,9 @@ impl ControlPlaneClient {
         rule_cache: Arc<RuleCache>,
         metrics: Arc<MetricsCollector>,
     ) -> Self {
-        let (log_tx, log_rx) = mpsc::channel(4096);
+        // Bigger buffer: every request now ships a full log entry (headers
+        // and a body prefix), so bursts need more headroom before drops.
+        let (log_tx, log_rx) = mpsc::channel(16384);
         let retry_delay_ms = AtomicU64::new(config.reconnect_initial_delay_ms);
 
         // A purge is actionable without the host application: the edge cache

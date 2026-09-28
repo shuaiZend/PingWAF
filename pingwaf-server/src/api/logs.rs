@@ -42,6 +42,8 @@ pub struct SecurityQuery {
     pub host: Option<String>,
     pub path: Option<String>,
     pub country_code: Option<String>,
+    /// Exact request id, e.g. when correlating with an `X-Request-ID` header.
+    pub request_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -60,6 +62,8 @@ pub struct AccessQuery {
     pub cache_status: Option<String>,
     pub country_code: Option<String>,
     pub min_latency_ms: Option<i64>,
+    /// Exact request id, e.g. when correlating with an `X-Request-ID` header.
+    pub request_id: Option<String>,
 }
 
 /// Retention endpoint payload.
@@ -201,6 +205,10 @@ async fn list_security(
             security_event::Column::CountryCode.eq(country.to_uppercase()),
         );
     }
+    if let Some(request_id) = non_empty(&query.request_id) {
+        condition =
+            condition.add(security_event::Column::RequestId.eq(request_id));
+    }
 
     let paginator = security_event::Entity::find()
         .filter(condition)
@@ -270,6 +278,9 @@ async fn list_access(
     if let Some(min_latency) = query.min_latency_ms {
         condition =
             condition.add(access_log::Column::TotalLatencyMs.gte(min_latency));
+    }
+    if let Some(request_id) = non_empty(&query.request_id) {
+        condition = condition.add(access_log::Column::RequestId.eq(request_id));
     }
 
     let paginator = access_log::Entity::find()

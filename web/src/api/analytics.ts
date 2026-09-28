@@ -3,6 +3,7 @@ import type {
   AnalyticsSummary,
   RangeQuery,
   SiteOverview,
+  SiteTrafficBucket,
   StatusCodeCount,
   TimeBucket,
   TopIp,
@@ -22,6 +23,9 @@ export const analyticsApi = {
 
   requestsOverTime: (params: RangeQuery = {}) =>
     apiClient.get<TimeBucket[]>('/analytics/requests-over-time', { query: params }),
+
+  sitesOverTime: (params: RangeQuery = {}) =>
+    apiClient.get<SiteTrafficBucket[]>('/analytics/sites-over-time', { query: params }),
 
   topRules: (params: RangeQuery = {}) =>
     apiClient.get<TopRule[]>('/analytics/top-rules', { query: { limit: 10, ...params } }),
@@ -84,6 +88,7 @@ export const analyticsKeys = {
   all: ['analytics'] as const,
   summary: (params: RangeQuery) => [...analyticsKeys.all, 'summary', params] as const,
   traffic: (params: RangeQuery) => [...analyticsKeys.all, 'traffic', params] as const,
+  sitesOverTime: (params: RangeQuery) => [...analyticsKeys.all, 'sites-over-time', params] as const,
   topRules: (params: RangeQuery) => [...analyticsKeys.all, 'top-rules', params] as const,
   topIps: (params: RangeQuery) => [...analyticsKeys.all, 'top-ips', params] as const,
   topPaths: (params: RangeQuery) => [...analyticsKeys.all, 'top-paths', params] as const,

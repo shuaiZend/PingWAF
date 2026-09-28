@@ -54,15 +54,15 @@ use pingora::http::ResponseHeader;
 use pingora::proxy::Session;
 use pingwaf_agent::PingWafAgent;
 use pingwaf_agent::cache::{
-    HeaderOpType, RewriteDirection as CacheRewriteDirection,
-    RewriteRule as CacheRewriteRule,
+    RewriteDirection as CacheRewriteDirection,
+    RewriteOperation as CacheRewriteOperation, RewriteRule as CacheRewriteRule,
 };
 use regex::Regex;
 use serde::Deserialize;
 use std::borrow::Cow;
 use std::str::FromStr;
 use std::sync::Arc;
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// Key under which the response-body modifier is stashed in [`Ctx`].
 const PLUGIN_ID: &str = "_rewrite_";
@@ -200,6 +200,7 @@ enum CondField {
     Method,
     Host,
     ClientIp,
+    Country,
     Status,
     Header(String),
 }
@@ -397,13 +398,23 @@ fn parse_field(path: &str) -> CondField {
         "http.request.uri.full" | "http.request.uri" | "request.uri" => {
             CondField::FullUri
         },
-        "http.request.uri.query" | "request.query" => CondField::Query,
+        "http.request.uri.query"
+        | "request.query"
+        | "http.request.uri.args" => CondField::Query,
         "http.request.method" | "request.method" => CondField::Method,
         "http.host" | "host" => CondField::Host,
         "ip.src" | "client.ip" => CondField::ClientIp,
+        "ip.src.country" | "geo.country" => CondField::Country,
         "http.response.status" | "response.status" | "status" => {
             CondField::Status
         },
+        // The console's expression builder exposes these friendly names; they
+        // denote the corresponding request header.
+        "http.user_agent" | "user_agent" | "http.useragent" => {
+            CondField::Header("user-agent".to_string())
+        },
+        "http.referer" => CondField::Header("referer".to_string()),
+        "http.cookie" => CondField::Header("cookie".to_string()),
         _ => CondField::Header(path.to_string()),
     }
 }
@@ -551,6 +562,7 @@ impl CondParser {
             "eq" | "=" | "==" => CondOp::Eq,
             "ne" | "neq" | "!=" => CondOp::Ne,
             "contains" => CondOp::Contains,
+            "not_contains" => CondOp::NotContains,
             "starts_with" | "startswith" => CondOp::StartsWith,
             "ends_with" | "endswith" => CondOp::EndsWith,
             "matches" => CondOp::Matches,
@@ -659,6 +671,8 @@ struct CondCtx<'a> {
     query: &'a str,
     host: &'a str,
     client_ip: &'a str,
+    /// GeoIP country code of `client_ip`; empty when not resolved.
+    country: &'a str,
     status: u16,
     headers: &'a HeaderMap,
 }
@@ -677,12 +691,36 @@ fn resolve_field<'a>(field: &CondField, ctx: &'a CondCtx<'a>) -> FieldVal<'a> {
         CondField::Method => FieldVal::Str(ctx.method),
         CondField::Host => FieldVal::Str(ctx.host),
         CondField::ClientIp => FieldVal::Str(ctx.client_ip),
+        CondField::Country => {
+            if ctx.country.is_empty() {
+                FieldVal::Missing
+            } else {
+                FieldVal::Str(ctx.country)
+            }
+        },
         CondField::Status => FieldVal::Num(ctx.status as i64),
         CondField::Header(name) => match ctx.header(name) {
             Some(v) => FieldVal::Str(v),
             None => FieldVal::Missing,
         },
     }
+}
+
+/// Whether any rule condition reads `ip.src.country`, so the GeoIP lookup is
+/// only paid for when a rule actually needs it.
+fn conditions_use_country(rules: &[CompiledRewriteRule]) -> bool {
+    fn walk(expr: &CondExpr) -> bool {
+        match expr {
+            CondExpr::Field { field, .. } => {
+                matches!(field, CondField::Country)
+            },
+            CondExpr::And(a, b) | CondExpr::Or(a, b) => walk(a) || walk(b),
+            CondExpr::Not(inner) => walk(inner),
+        }
+    }
+    rules
+        .iter()
+        .any(|r| r.condition.as_ref().map(walk).unwrap_or(false))
 }
 
 fn evaluate(expr: &CondExpr, ctx: &CondCtx<'_>) -> bool {
@@ -1133,41 +1171,8 @@ fn convert_agent_rules(rules: &[CacheRewriteRule]) -> Vec<RewriteRule> {
                 CacheRewriteDirection::Request => RewriteDirection::Request,
                 CacheRewriteDirection::Response => RewriteDirection::Response,
             };
-            let mut operations = Vec::new();
-            for h in &r.header_operations {
-                let op = match h.op_type {
-                    HeaderOpType::Set => RewriteOperation::SetHeader {
-                        name: h.name.clone(),
-                        value: h.value.clone(),
-                    },
-                    HeaderOpType::Add => RewriteOperation::AddHeader {
-                        name: h.name.clone(),
-                        value: h.value.clone(),
-                    },
-                    HeaderOpType::Remove => RewriteOperation::RemoveHeader {
-                        name: h.name.clone(),
-                    },
-                };
-                operations.push(op);
-            }
-            if !r.path_rewrite.is_empty() {
-                operations.push(RewriteOperation::RegexReplacePath {
-                    pattern: r.path_rewrite.clone(),
-                    replacement: r.path_rewrite_to.clone(),
-                });
-            }
-            if !r.body_search.is_empty() {
-                operations.push(RewriteOperation::ReplaceBody {
-                    search: r.body_search.clone(),
-                    replacement: r.body_replace.clone(),
-                });
-            }
-            if let Some((name, value)) = r.query_rewrite.split_once('=') {
-                operations.push(RewriteOperation::SetQueryParam {
-                    name: name.trim().to_string(),
-                    value: value.trim().to_string(),
-                });
-            }
+            let operations =
+                r.operations.iter().filter_map(convert_operation).collect();
             RewriteRule {
                 id: r.id.clone(),
                 name: r.name.clone(),
@@ -1183,6 +1188,48 @@ fn convert_agent_rules(rules: &[CacheRewriteRule]) -> Vec<RewriteRule> {
             }
         })
         .collect()
+}
+
+/// Maps one agent operation (the console's `{type, name, value}` shape) to the
+/// plugin's data model. Returns `None` for unknown types so a future console
+/// version cannot break rule compilation for the whole site.
+fn convert_operation(op: &CacheRewriteOperation) -> Option<RewriteOperation> {
+    let converted = match op.op_type.as_str() {
+        "set_header" => RewriteOperation::SetHeader {
+            name: op.name.clone(),
+            value: op.value.clone(),
+        },
+        "add_header" => RewriteOperation::AddHeader {
+            name: op.name.clone(),
+            value: op.value.clone(),
+        },
+        "remove_header" => RewriteOperation::RemoveHeader {
+            name: op.name.clone(),
+        },
+        "set_path" => RewriteOperation::SetPath {
+            value: op.value.clone(),
+        },
+        "regex_replace_path" => RewriteOperation::RegexReplacePath {
+            pattern: op.name.clone(),
+            replacement: op.value.clone(),
+        },
+        "set_query_param" => RewriteOperation::SetQueryParam {
+            name: op.name.clone(),
+            value: op.value.clone(),
+        },
+        "remove_query_param" => RewriteOperation::RemoveQueryParam {
+            name: op.name.clone(),
+        },
+        "replace_body" => RewriteOperation::ReplaceBody {
+            search: op.name.clone(),
+            replacement: op.value.clone(),
+        },
+        other => {
+            debug!(op_type = other, "unsupported rewrite operation type");
+            return None;
+        },
+    };
+    Some(converted)
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1228,25 +1275,33 @@ impl RewritePlugin {
                 return cached.rules.clone();
             }
             let converted = convert_agent_rules(&site.rewrite_rules);
-            match compile_rules(converted) {
-                Ok(compiled) => {
-                    let rules = Arc::new(compiled);
-                    self.site_rules.insert(
-                        host.to_string(),
-                        CachedSiteRules {
-                            fingerprint,
-                            rules: Arc::clone(&rules),
-                        },
-                    );
-                    return rules;
-                },
-                Err(e) => {
-                    debug!(
-                        error = e.to_string(),
-                        "compile agent rewrite rules failed"
-                    );
-                },
+            // Compile per rule: one invalid rule must not disable the
+            // whole site's rewrite set, so bad rules are dropped with a
+            // warning instead of failing everything.
+            let mut compiled: Vec<CompiledRewriteRule> = Vec::new();
+            for rule in converted {
+                match compile_rule(&rule) {
+                    Ok(c) => compiled.push(c),
+                    Err(e) => {
+                        warn!(
+                            rule = %rule.id,
+                            name = %rule.name,
+                            error = e.to_string(),
+                            "drop invalid rewrite rule"
+                        );
+                    },
+                }
             }
+            compiled.sort_by_key(|r| r.priority);
+            let rules = Arc::new(compiled);
+            self.site_rules.insert(
+                host.to_string(),
+                CachedSiteRules {
+                    fingerprint,
+                    rules: Arc::clone(&rules),
+                },
+            );
+            return rules;
         }
         self.rules.load_full()
     }
@@ -1460,6 +1515,11 @@ impl Plugin for RewritePlugin {
         }
 
         let client_ip = ensure_client_ip(session, ctx).to_string();
+        let country = if conditions_use_country(&rules) {
+            crate::waf::lookup_country(&client_ip).unwrap_or_default()
+        } else {
+            String::new()
+        };
         let vars = Self::interp_vars(session, ctx);
         let mut modified = false;
 
@@ -1482,6 +1542,7 @@ impl Plugin for RewritePlugin {
                         query: req.uri.query().unwrap_or_default(),
                         host: &host,
                         client_ip: &client_ip,
+                        country: &country,
                         status: 0,
                         headers: &req.headers,
                     };
@@ -1521,6 +1582,11 @@ impl Plugin for RewritePlugin {
         }
 
         let client_ip = ensure_client_ip(session, ctx).to_string();
+        let country = if conditions_use_country(&rules) {
+            crate::waf::lookup_country(&client_ip).unwrap_or_default()
+        } else {
+            String::new()
+        };
         let vars = Self::interp_vars(session, ctx);
         let status = upstream_response.status.as_u16();
         let mut modified = false;
@@ -1545,6 +1611,7 @@ impl Plugin for RewritePlugin {
                         query: req.uri.query().unwrap_or_default(),
                         host: &host,
                         client_ip: &client_ip,
+                        country: &country,
                         status,
                         headers: &req.headers,
                     };
@@ -1665,6 +1732,7 @@ mod tests {
             query: "",
             host: "example.com",
             client_ip: "1.1.1.1",
+            country: "",
             status: 0,
             headers: &headers,
         };
@@ -1678,6 +1746,7 @@ mod tests {
             query: "",
             host: "",
             client_ip: "",
+            country: "",
             status: 404,
             headers: &headers,
         };
@@ -1695,6 +1764,7 @@ mod tests {
             query: "",
             host: "",
             client_ip: "",
+            country: "",
             status: 0,
             headers: &headers,
         };
@@ -1789,5 +1859,142 @@ rules = '[{"id":"h","direction":"response","operations":[{"type":"set_header","n
         assert_eq!("1", resp.headers.get("x-test").unwrap().to_str().unwrap());
         assert!(resp.headers.get("server").is_none());
         assert_eq!(201, resp.status.as_u16());
+    }
+
+    mod agent_mode {
+        use super::*;
+        use crate::waf::tests::install_test_agent;
+        use pingwaf_proto::control_plane as proto;
+        use pretty_assertions::assert_eq;
+
+        fn site_config(
+            rewrite_rules: Vec<proto::RewriteRule>,
+        ) -> proto::SiteConfig {
+            proto::SiteConfig {
+                sites: vec![proto::Site {
+                    id: "site-1".to_string(),
+                    name: "example".to_string(),
+                    domain: "example.com".to_string(),
+                    alternate_domains: Vec::new(),
+                    status: 0,
+                    rules: Some(proto::RuleBundle {
+                        site_id: "site-1".to_string(),
+                        config_hash: "hash-1".to_string(),
+                        rewrite_rules,
+                        ..Default::default()
+                    }),
+                }],
+                config_hash: "hash-1".to_string(),
+                updated_at: None,
+            }
+        }
+
+        fn rule(
+            operations: Vec<proto::RewriteOperation>,
+        ) -> proto::RewriteRule {
+            proto::RewriteRule {
+                id: "strip".to_string(),
+                name: "strip api prefix".to_string(),
+                match_expression: String::new(),
+                direction: 0,
+                operations,
+                enabled: true,
+                priority: 1,
+            }
+        }
+
+        /// Agent-supplied rules drive the rewrite even though the plugin's
+        /// local config has none; other hosts stay untouched.
+        #[tokio::test]
+        async fn agent_rules_rewrite_request_path() {
+            let (_guard, agent, _dir) = install_test_agent().await;
+            agent
+                .rule_cache
+                .update_from_site_config(&site_config(vec![rule(vec![
+                    proto::RewriteOperation {
+                        r#type: "regex_replace_path".to_string(),
+                        name: "^/api/(.*)".to_string(),
+                        value: "/$1".to_string(),
+                    },
+                ])]))
+                .unwrap();
+
+            let plugin = RewritePlugin::new(
+                &toml::from_str::<PluginConf>(r###"category = "rewrite""###)
+                    .unwrap(),
+            )
+            .unwrap();
+
+            let mut s = session("GET", "/api/users", "other.example.com").await;
+            plugin
+                .handle_request(
+                    PluginStep::Request,
+                    &mut s,
+                    &mut Ctx::default(),
+                )
+                .await
+                .unwrap();
+            assert_eq!("/api/users", s.req_header().uri.path());
+
+            let mut s = session("GET", "/api/users", "example.com").await;
+            let result = plugin
+                .handle_request(
+                    PluginStep::Request,
+                    &mut s,
+                    &mut Ctx::default(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(true, result == RequestPluginResult::Continue);
+            assert_eq!("/users", s.req_header().uri.path());
+        }
+
+        /// The console dialect (`not_contains`, `http.user_agent`) compiles and
+        /// evaluates; a rule whose condition parses keeps working.
+        #[tokio::test]
+        async fn agent_rules_understand_console_dialect() {
+            let (_guard, agent, _dir) = install_test_agent().await;
+            let mut config =
+                site_config(vec![rule(vec![proto::RewriteOperation {
+                    r#type: "set_header".to_string(),
+                    name: "x-rewritten".to_string(),
+                    value: "1".to_string(),
+                }])]);
+            config.sites[0].rules.as_mut().unwrap().rewrite_rules[0]
+                .match_expression =
+                r#"http.user_agent contains "curl" and http.host not_contains "nope""#
+                    .to_string();
+            agent.rule_cache.update_from_site_config(&config).unwrap();
+
+            let plugin = RewritePlugin::new(
+                &toml::from_str::<PluginConf>(r###"category = "rewrite""###)
+                    .unwrap(),
+            )
+            .unwrap();
+
+            let mut s = session("GET", "/", "example.com").await;
+            s.req_header_mut()
+                .insert_header("User-Agent", "curl/8.4.0")
+                .unwrap();
+            let result = plugin
+                .handle_request(
+                    PluginStep::Request,
+                    &mut s,
+                    &mut Ctx::default(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(RequestPluginResult::Continue, result);
+            // The condition matched, so the request header op ran.
+            assert_eq!(
+                "1",
+                s.req_header()
+                    .headers
+                    .get("x-rewritten")
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+            );
+        }
     }
 }

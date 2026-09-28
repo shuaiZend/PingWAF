@@ -34,6 +34,7 @@ import {
 import { useCanWrite } from '@/hooks'
 import { cn } from '@/lib/utils'
 import {
+  ERROR_PAGE_CONTENT_TYPE_LABELS,
   ERROR_PAGE_CONTENT_TYPES,
   ERROR_PAGE_STATUS_CODES,
   type ErrorPage,
@@ -44,7 +45,7 @@ interface EditorState {
   status_code: number
   name: string
   content_type: ErrorPageContentType
-  template: string
+  body_template: string
   enabled: boolean
   existingId: string | null
 }
@@ -84,14 +85,14 @@ export function ErrorPagesPage() {
             status_code: state.status_code,
             name: state.name,
             content_type: state.content_type,
-            template: state.template,
+            body_template: state.body_template,
             enabled: state.enabled,
           })
         : errorPagesApi.upsert(siteId, {
             status_code: state.status_code,
             name: state.name,
             content_type: state.content_type,
-            template: state.template,
+            body_template: state.body_template,
             enabled: state.enabled,
           }),
     onSuccess: () => {
@@ -122,16 +123,16 @@ export function ErrorPagesPage() {
     setEditor({
       status_code: statusCode,
       name: existing?.name ?? ERROR_PAGE_MESSAGES[statusCode] ?? String(statusCode),
-      content_type: (existing?.content_type as ErrorPageContentType) ?? 'html',
-      template:
-        existing?.template ??
-        defaultErrorPageTemplate(statusCode, (existing?.content_type as ErrorPageContentType) ?? 'html'),
+      content_type: (existing?.content_type as ErrorPageContentType) ?? 'text/html',
+      body_template:
+        existing?.body_template ??
+        defaultErrorPageTemplate(statusCode, (existing?.content_type as ErrorPageContentType) ?? 'text/html'),
       enabled: existing?.enabled ?? true,
       existingId: existing?.id ?? null,
     })
   }
 
-  const previewHtml = editor ? renderErrorPageTemplate(editor.template) : ''
+  const previewHtml = editor ? renderErrorPageTemplate(editor.body_template) : ''
 
   const cards = [...ERROR_PAGE_STATUS_CODES]
 
@@ -194,7 +195,7 @@ export function ErrorPagesPage() {
                         {page?.name || ERROR_PAGE_MESSAGES[code]}
                       </p>
                       <p className="mt-0.5 text-xs uppercase tracking-wide text-fg-subtle">
-                        {page?.content_type ?? 'html'}
+                        {page?.content_type ?? 'text/html'}
                       </p>
                     </div>
                   </div>
@@ -290,7 +291,7 @@ export function ErrorPagesPage() {
                 value={editor.content_type}
                 options={ERROR_PAGE_CONTENT_TYPES.map((c) => ({
                   value: c,
-                  label: c.toUpperCase(),
+                  label: ERROR_PAGE_CONTENT_TYPE_LABELS[c] ?? c.toUpperCase(),
                 }))}
                 onChange={(e) => {
                   const content_type = e.target.value as ErrorPageContentType
@@ -316,8 +317,8 @@ export function ErrorPagesPage() {
                 <Textarea
                   mono
                   rows={18}
-                  value={editor.template}
-                  onChange={(e) => setEditor({ ...editor, template: e.target.value })}
+                  value={editor.body_template}
+                  onChange={(e) => setEditor({ ...editor, body_template: e.target.value })}
                 />
               </div>
 
@@ -328,7 +329,7 @@ export function ErrorPagesPage() {
                   {t('pages.errorPages.preview')}
                 </span>
                 <div className="h-[388px] overflow-hidden rounded-md border border-line bg-white">
-                  {editor.content_type === 'html' ? (
+                  {editor.content_type === 'text/html' ? (
                     <iframe
                       title={t('pages.errorPages.preview')}
                       className="h-full w-full"
@@ -357,7 +358,7 @@ export function ErrorPagesPage() {
                       title={v.description}
                       onClick={() =>
                         setEditor((e) =>
-                          e ? { ...e, template: `${e.template}{{${v.name}}}` } : e,
+                          e ? { ...e, body_template: `${e.body_template}{{${v.name}}}` } : e,
                         )
                       }
                       className="group flex flex-col items-start rounded px-1.5 py-1 text-left transition-colors hover:bg-elevated"
@@ -384,7 +385,7 @@ export function ErrorPagesPage() {
           setEditor({
             ...pendingReset,
             content_type: pendingReset.content_type,
-            template: defaultErrorPageTemplate(
+            body_template: defaultErrorPageTemplate(
               pendingReset.status_code,
               pendingReset.content_type,
             ),

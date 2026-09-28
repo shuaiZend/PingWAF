@@ -999,8 +999,23 @@ fn access_log_row(
         referer: Set(optional(&entry.referer)),
         country_code: Set(truncate(&entry.country_code, MAX_COUNTRY)),
         tls_version: Set(truncate(&entry.tls_version, MAX_TLS_VERSION)),
+        request_headers: Set(headers_json(&entry.request_headers)),
+        request_body: Set(request_body_text(&entry.request_body)),
+        request_body_size: Set(positive_i64(entry.request_body_size as i64)),
+        request_body_truncated: Set(Some(entry.request_body_truncated)),
         ..Default::default()
     }
+}
+
+/// Lossily decodes the request body kept for the PostgreSQL row. The agent
+/// already caps the payload at 1 KiB; this is a defensive second cap.
+fn request_body_text(body: &[u8]) -> Option<String> {
+    const MAX_STORED_BODY: usize = 4096;
+    if body.is_empty() {
+        return None;
+    }
+    let capped = &body[..body.len().min(MAX_STORED_BODY)];
+    Some(String::from_utf8_lossy(capped).into_owned())
 }
 
 /// Maps a shipped log entry onto a `security_events` row, or `None` when the

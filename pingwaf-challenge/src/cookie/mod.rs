@@ -7,6 +7,10 @@ use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;
 
+/// Cookie holding a solved challenge's clearance. Consumers outside this
+/// crate (e.g. the WAF plugin's rate limiter) validate it by name.
+pub const CLEARANCE_COOKIE_NAME: &str = "__pingwaf_clearance";
+
 /// Challenge clearance levels (higher level bypasses lower)
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
@@ -78,7 +82,7 @@ impl CookieManager {
         Self {
             secret: secret.to_vec(),
             default_duration_secs: duration_secs,
-            cookie_name: "__pingwaf_clearance".to_string(),
+            cookie_name: CLEARANCE_COOKIE_NAME.to_string(),
         }
     }
 

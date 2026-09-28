@@ -17,13 +17,67 @@ use sea_orm::{
 };
 use uuid::Uuid;
 
-use crate::models::{cache_rules, mode, rule, rule_groups};
+use crate::models::{cache_rules, ip_groups, mode, rule, rule_groups};
 
 /// Name of the group that holds the built-in WAF rules.
 pub const WAF_DEFAULT_GROUP_NAME: &str = "PingWAF 内置防护";
 /// Description shown next to the group in the dashboard.
 pub const WAF_DEFAULT_GROUP_DESCRIPTION: &str =
     "开箱即用的基础防护规则，按需调整";
+
+/// Official Cloudflare IP list — the default subscription every install gets.
+pub const CLOUDFLARE_IPS_URL: &str = "https://api.cloudflare.com/client/v4/ips";
+/// Name of the seeded Cloudflare subscription group.
+pub const CLOUDFLARE_GROUP_NAME: &str = "Cloudflare";
+
+/// Seeds the built-in Cloudflare subscription group.
+///
+/// The group exists from the first boot with a daily refresh interval so the
+/// operator only has to flip `enabled` (and the action) to use it. It starts
+/// *disabled*: its ranges block legitimate visitors when a site is proxied
+/// through Cloudflare, so enforcing it is always an operator decision. The
+/// background scheduler populates the ranges on its first tick.
+pub async fn seed_ip_group_defaults(
+    db: &DatabaseConnection,
+) -> Result<(), sea_orm::DbErr> {
+    let existing = ip_groups::Entity::find()
+        .filter(ip_groups::Column::SourceUrl.eq(CLOUDFLARE_IPS_URL))
+        .one(db)
+        .await?;
+    if existing.is_some() {
+        return Ok(());
+    }
+
+    let timestamp = Utc::now();
+    ip_groups::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        name: Set(CLOUDFLARE_GROUP_NAME.to_string()),
+        description: Set(Some(
+            "Official Cloudflare IP ranges, refreshed daily from \
+             api.cloudflare.com. Disabled by default: enable it once you \
+             know how it fits your traffic."
+                .to_string(),
+        )),
+        ip_ranges: Set(Vec::new()),
+        action: Set("block".to_string()),
+        is_global: Set(true),
+        source_url: Set(Some(CLOUDFLARE_IPS_URL.to_string())),
+        sync_interval_minutes: Set(Some(1440)),
+        last_synced_at: Set(None),
+        last_sync_error: Set(None),
+        enabled: Set(false),
+        created_at: Set(timestamp),
+        updated_at: Set(timestamp),
+    }
+    .insert(db)
+    .await?;
+
+    tracing::info!(
+        url = CLOUDFLARE_IPS_URL,
+        "seeded the built-in Cloudflare IP subscription group"
+    );
+    Ok(())
+}
 
 /// Disk budget, in MiB, every new site starts with.
 pub const DEFAULT_CACHE_QUOTA_MB: i32 = 1024;

@@ -21,6 +21,10 @@ pub struct Model {
     pub source_url: Option<String>,
     pub sync_interval_minutes: Option<i32>,
     pub last_synced_at: Option<DateTimeUtc>,
+    /// Why the most recent subscription sync failed; `None` when the last sync
+    /// succeeded (or none has run yet).
+    #[sea_orm(column_type = "Text")]
+    pub last_sync_error: Option<String>,
     pub enabled: bool,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,

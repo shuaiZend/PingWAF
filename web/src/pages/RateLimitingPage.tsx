@@ -31,6 +31,7 @@ import { useCanWrite } from '@/hooks'
 import { formatNumber } from '@/lib/format'
 import {
   RATE_LIMIT_CHARACTERISTICS,
+  RATE_LIMIT_CHARACTERISTICS_PENDING,
   RULE_ACTIONS,
   type CreateRateLimitRequest,
   type RateLimitRule,
@@ -477,10 +478,16 @@ export function RateLimitingPage() {
             min={1}
             value={form.characteristics}
             onChange={(characteristics) => setForm((f) => ({ ...f, characteristics }))}
-            options={RATE_LIMIT_CHARACTERISTICS.map((c) => ({
-              value: c,
-              label: t(`characteristics.${c}`, c),
-            }))}
+            options={RATE_LIMIT_CHARACTERISTICS.map((c) => {
+              const pending = RATE_LIMIT_CHARACTERISTICS_PENDING.includes(c)
+              return {
+                value: c,
+                label: pending
+                  ? `${t(`characteristics.${c}`, c)} (${t('common.comingSoon')})`
+                  : t(`characteristics.${c}`, c),
+                disabled: pending,
+              }
+            })}
           />
 
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">

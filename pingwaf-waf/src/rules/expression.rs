@@ -52,6 +52,7 @@ pub struct Field {
 pub enum FieldKind {
     RequestPath,
     RequestUriFull,
+    RequestQuery,
     RequestMethod,
     RequestHeader,
     RequestCookie,
@@ -78,6 +79,9 @@ impl FieldKind {
             "http.request.uri.full" | "http.request.uri" | "request.uri" => {
                 FieldKind::RequestUriFull
             },
+            "http.request.uri.query"
+            | "request.query"
+            | "http.request.uri.args" => FieldKind::RequestQuery,
             "http.request.method" | "request.method" => {
                 FieldKind::RequestMethod
             },
@@ -399,8 +403,22 @@ impl Parser {
 
     fn parse_comparison(&mut self) -> Result<Expression> {
         let path = self.expect_ident()?;
-        let kind = FieldKind::from_path(&path);
+        let mut kind = FieldKind::from_path(&path);
         let mut index = None;
+        // Console field aliases that denote a specific request header.
+        if let FieldKind::Unknown(name) = &kind {
+            match name.as_str() {
+                "http.referer" => {
+                    kind = FieldKind::RequestHeader;
+                    index = Some("referer".to_string());
+                },
+                "http.cookie" => {
+                    kind = FieldKind::RequestHeader;
+                    index = Some("cookie".to_string());
+                },
+                _ => {},
+            }
+        }
         if self.peek() == &Token::LBracket {
             self.next();
             match self.next() {
@@ -436,6 +454,7 @@ impl Parser {
             "eq" | "=" | "==" => Operator::Eq,
             "ne" | "neq" | "!=" => Operator::Ne,
             "contains" => Operator::Contains,
+            "not_contains" => Operator::NotContains,
             "matches" => Operator::Matches,
             "in" => Operator::In,
             "starts_with" | "startswith" => Operator::StartsWith,
@@ -641,6 +660,10 @@ fn resolve_field<'a>(field: &Field, ctx: &'a EvalContext) -> FieldValue<'a> {
     match &field.kind {
         FieldKind::RequestPath => FieldValue::Str(ctx.path),
         FieldKind::RequestUriFull => FieldValue::Str(ctx.full_uri),
+        FieldKind::RequestQuery => match ctx.full_uri.split_once('?') {
+            Some((_, q)) => FieldValue::Str(q),
+            None => FieldValue::Missing,
+        },
         FieldKind::RequestMethod => FieldValue::Str(ctx.method),
         FieldKind::RequestBody => match ctx.body {
             Some(b) => FieldValue::Str(b),

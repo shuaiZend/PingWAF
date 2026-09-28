@@ -5,6 +5,7 @@ pub mod js_challenge;
 // Re-export main types for convenient access
 pub use cookie::{
     ClearanceLevel, ClearancePayload, CookieError, CookieManager,
+    CLEARANCE_COOKIE_NAME,
 };
 pub use fingerprint::BrowserFingerprint;
 pub use js_challenge::verify::{check_browser_integrity, IntegrityResult};

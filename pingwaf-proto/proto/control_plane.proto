@@ -236,6 +236,9 @@ message RuleBundle {
 
   // Origin pools and routes
   repeated RouteConfig routes = 20;
+
+  // Bot protection (UA classification)
+  BotProtectionConfig bot_protection = 21;
 }
 
 message WafConfig {
@@ -383,19 +386,25 @@ enum ChallengeLevel {
   CHALLENGE_INTERACTIVE = 3;      // Full CAPTCHA
 }
 
+// User-agent based bot classification. Verified bots on the whitelist pass,
+// real browsers pass, everything else receives the configured action.
+message BotProtectionConfig {
+  bool enabled = 1;
+  WafAction action = 2;                      // Applied to non-browser user agents
+  repeated string known_bots_whitelist = 3;  // Case-insensitive UA substrings of verified bots
+}
+
 message RewriteRule {
   string id = 1;
   string name = 2;
   string match_expression = 3;
   RewriteDirection direction = 4;
-  repeated HeaderOperation header_operations = 5;
-  string path_rewrite = 6;           // Regex replace pattern
-  string path_rewrite_to = 7;
-  string query_rewrite = 8;
-  string body_search = 9;            // For sub_filter style
-  string body_replace = 10;
+  reserved 5, 6, 7, 8, 9, 10;
+  reserved "header_operations", "path_rewrite", "path_rewrite_to",
+            "query_rewrite", "body_search", "body_replace";
   bool enabled = 11;
   uint32 priority = 12;
+  repeated RewriteOperation operations = 13;
 }
 
 enum RewriteDirection {
@@ -403,16 +412,15 @@ enum RewriteDirection {
   REWRITE_RESPONSE = 1;
 }
 
-message HeaderOperation {
-  HeaderOpType type = 1;
+// One declarative rewrite operation, mirroring the console's operations JSON:
+// type is one of set_header | add_header | remove_header | set_path |
+// regex_replace_path | set_query_param | remove_query_param | replace_body.
+// name/value semantics depend on the type (pattern/replacement for
+// regex_replace_path and replace_body, header name/value for header ops).
+message RewriteOperation {
+  string type = 1;
   string name = 2;
   string value = 3;
-}
-
-enum HeaderOpType {
-  HEADER_SET = 0;
-  HEADER_ADD = 1;
-  HEADER_REMOVE = 2;
 }
 
 message CustomErrorPage {
