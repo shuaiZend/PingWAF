@@ -269,21 +269,26 @@ pub async fn bootstrap_and_seed_api_key(
     seed_bootstrap_api_key(&db).await
 }
 
+const BOOTSTRAP_KEY_NAME: &str = "_all-in-one-bootstrap";
+const BOOTSTRAP_KEY_FILE: &str = "/var/lib/pingwaf/bootstrap_api_key";
+
 /// Seeds a bootstrap API key for all-in-one mode.
 ///
-/// Creates a fresh API key each startup so the embedded agent can
-/// authenticate with the local gRPC server. Any previous bootstrap key is
-/// replaced. Returns the plaintext key value.
+/// The plaintext is persisted in the data dir and reused across restarts:
+/// agent rows are re-identified by (hostname, api_key_id), so rotating the
+/// key on every startup would strand the previous agent row as an offline
+/// ghost. Rotation only happens when the key file and the database row
+/// disagree (first boot, row deleted from the UI, restored database).
+/// Returns the plaintext key value.
 pub async fn seed_bootstrap_api_key(
     db: &sea_orm::DatabaseConnection,
 ) -> anyhow::Result<String> {
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
     use crate::api::keys::generate_key;
-    use crate::auth::password::hash_password_with_cost;
+    use crate::auth::password::{hash_password_with_cost, verify_password};
     use crate::models::{api_key, user};
 
-    const BOOTSTRAP_KEY_NAME: &str = "_all-in-one-bootstrap";
     const KEY_HASH_COST: u32 = 10;
 
     let admin = user::Entity::find()
@@ -294,11 +299,27 @@ pub async fn seed_bootstrap_api_key(
             anyhow::anyhow!("no admin user found for bootstrap key")
         })?;
 
-    if let Some(existing) = api_key::Entity::find()
+    let existing = api_key::Entity::find()
         .filter(api_key::Column::Name.eq(BOOTSTRAP_KEY_NAME))
         .one(db)
-        .await?
-    {
+        .await?;
+
+    if let Some(row) = &existing {
+        if let Ok(saved) = std::fs::read_to_string(BOOTSTRAP_KEY_FILE) {
+            let saved = saved.trim();
+            if !saved.is_empty()
+                && verify_password(saved, &row.key_hash).unwrap_or(false)
+            {
+                tracing::debug!(
+                    key_id = %row.id,
+                    "reusing persisted bootstrap API key"
+                );
+                return Ok(saved.to_string());
+            }
+        }
+    }
+
+    if let Some(existing) = existing {
         api_key::Entity::delete_by_id(existing.id).exec(db).await?;
         tracing::debug!(old_key_id = %existing.id, "rotated bootstrap API key");
     }
@@ -322,8 +343,45 @@ pub async fn seed_bootstrap_api_key(
     use sea_orm::ActiveModelTrait;
     model.insert(db).await?;
 
+    if let Err(e) = persist_bootstrap_key(plaintext.as_str()) {
+        tracing::warn!(
+            error = %e,
+            path = BOOTSTRAP_KEY_FILE,
+            "failed to persist bootstrap API key; the embedded agent will get a fresh key and agent identity on every restart"
+        );
+    }
+
     tracing::info!("bootstrap API key created for all-in-one agent");
     Ok(plaintext)
+}
+
+/// Writes the bootstrap key plaintext to a root-owned file (0600) inside the
+/// persistent data dir.
+fn persist_bootstrap_key(plaintext: &str) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let path = std::path::Path::new(BOOTSTRAP_KEY_FILE);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    #[cfg(unix)]
+    let mut file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?
+    };
+    #[cfg(not(unix))]
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)?;
+    file.write_all(plaintext.as_bytes())?;
+    Ok(())
 }
 
 /// Returns a future that resolves when the process receives SIGINT or SIGTERM.
