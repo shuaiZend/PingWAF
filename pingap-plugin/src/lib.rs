@@ -279,6 +279,27 @@ mod plugin;
 pub use plugin::get_plugin_factory;
 
 #[cfg(test)]
+pub(crate) mod test_support {
+    //! Fixtures shared by plugin test modules.
+    use pingora::proxy::Session;
+    use tokio_test::io::Builder;
+
+    /// Builds an H1 session preloaded with a single request.
+    pub(crate) async fn h1_session(
+        method: &str,
+        target: &str,
+        host: &str,
+    ) -> Session {
+        let input =
+            format!("{method} {target} HTTP/1.1\r\nHost: {host}\r\n\r\n");
+        let mock_io = Builder::new().read(input.as_bytes()).build();
+        let mut s = Session::new_h1(Box::new(mock_io));
+        s.read_request().await.expect("read_request");
+        s
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::accepts_encoding;
     use pretty_assertions::assert_eq;
