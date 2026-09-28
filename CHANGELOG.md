@@ -8,6 +8,41 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.14.7] — 2026-09-28
+
+### ⛰️ Features
+
+- *(waf)* Enforce IP access rules and geo restrictions in the data plane. Both
+  policies are evaluated inside the WAF plugin from the cached rule bundle, so
+  control-plane edits take effect without a proxy reload: IP rules run
+  first-match-wins in priority order — an explicit allow short-circuits
+  catch-all blocks, making "whitelist group + block everyone else" work — and
+  they apply even when the WAF engine is disabled. Geo rules deny listed
+  countries/ASNs, non-whitelisted traffic, or unresolvable countries, and every
+  denial is logged with the resolved country code.
+- *(ssl)* Report per-site certificate state through agent heartbeats. ACME
+  issuance happens entirely on the edge, so the control plane kept showing
+  issued certificates as "pending" with no expiry; the hosting process now
+  exposes a snapshot (valid / expiring soon / expired, with `not_after`) that
+  heartbeats carry back and the server writes onto the site's certificate row.
+- *(web)* Merge IP rules and geo restrictions into one "Access control" tab,
+  ready to host credential-based restrictions later. The geo panel gains an
+  enable switch, per-continent select-all in the country picker, and ASN
+  entries stored as strings to match the API; legacy `/security/ip-rules` and
+  `/security/geo` links redirect with their query (and `?block=` deep link)
+  intact.
+
+### 🐛 Bug Fixes
+
+- *(analytics)* Plumb rule display names and country codes through `LogEntry`
+  so security events, access logs and the traffic page stop showing blank rule
+  columns, and IP flags can render the client's country.
+- *(server)* Serve `GET /sites/{id}/geo/stats` so the geo page's country chart
+  has a backing endpoint.
+- *(web)* The `?block=` deep link opened an empty dialog: a competing
+  form-reset effect wiped the prefilled values. The query parameter is now
+  consumed when the dialog closes instead of on open.
+
 ## [PingWAF 0.14.6] — 2026-09-28
 
 ### 🐛 Bug Fixes
