@@ -596,6 +596,10 @@ impl RuleCache {
         // show "0 of 512 MB" rather than "unconfigured" for a site whose quota
         // simply has not started filling yet.
         let ledger = pingap_cache::global_disk_quota();
+        // Certificate state comes from the hosting process, which owns the
+        // provider the ACME task writes into; without one every site reports
+        // an empty status and the control plane leaves its rows alone.
+        let ssl = crate::cert_status::snapshot();
         let mut out = Vec::with_capacity(rules.sites.len());
         for (site_id, site) in rules.sites.iter() {
             // A site answers on its primary domain and every alias, and the
@@ -618,6 +622,7 @@ impl RuleCache {
                 quota_mb = quota_mb
                     .max(quota::configured_quota_mb(domain).unwrap_or(0));
             }
+            let status = ssl.get(site_id);
             out.push(proto::SiteStatus {
                 site_id: site_id.clone(),
                 domain: site.domain.clone(),
@@ -625,8 +630,13 @@ impl RuleCache {
                 requests_blocked: 0,
                 cache_hits: 0,
                 cache_misses: 0,
-                ssl_status: String::new(),
-                ssl_expires_at: None,
+                ssl_status: status
+                    .map(|status| status.status.to_string())
+                    .unwrap_or_default(),
+                ssl_expires_at: status.map(|status| prost_types::Timestamp {
+                    seconds: status.expires_at,
+                    nanos: 0,
+                }),
                 cache_disk_bytes: disk_bytes,
                 cache_items: items,
                 cache_evictions: evictions,

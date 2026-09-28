@@ -20,7 +20,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::certificates::{new_certificate_provider, try_update_certificates};
 use crate::cli::{
@@ -709,6 +709,54 @@ pub async fn start_data_plane(
         if !errors.is_empty() {
             error!(error = errors, "data plane: certificate parse errors");
         }
+    }
+
+    // Let the agent report certificate state: the ACME task writes issued PEMs
+    // into the provider below, and without this the control plane keeps showing
+    // the certificate as pending forever. Certificates generated from site
+    // config are named `{site_id}_cert`, which is how a status is attributed
+    // back to its site.
+    {
+        let provider = cert_provider.clone();
+        pingwaf_agent::cert_status::set_snapshot(Some(Arc::new(move || {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_secs() as i64)
+                .unwrap_or_default();
+            let mut statuses = HashMap::new();
+            for cert in provider.list().values() {
+                let Some(site_id) = cert
+                    .name
+                    .as_deref()
+                    .and_then(|name| name.strip_suffix("_cert"))
+                else {
+                    continue;
+                };
+                let Some(info) = cert.info.as_ref() else {
+                    continue;
+                };
+                if info.not_after == 0 {
+                    continue;
+                }
+                let remaining = info.not_after - now;
+                let status = if remaining <= 0 {
+                    "expired"
+                } else if remaining <= 2 * 24 * 3600 {
+                    "expiring_soon"
+                } else {
+                    "valid"
+                };
+                // One certificate is listed under every domain it serves; the
+                // entries agree, so the first one wins.
+                statuses.entry(site_id.to_string()).or_insert(
+                    pingwaf_agent::cert_status::CertStatus {
+                        status,
+                        expires_at: info.not_after,
+                    },
+                );
+            }
+            statuses
+        })));
     }
 
     // Create the Pingora server

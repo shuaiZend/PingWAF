@@ -13,11 +13,12 @@ use pingwaf_proto::control_plane::{
     control_plane_server::ControlPlane as ControlPlaneTrait, AgentHeartbeat,
     CertEventAck, CertEventEntry, GetSiteConfigRequest, HostSample, LogAck,
     LogEntry, MetricAck, MetricBatch, RegisterAgentRequest,
-    RegisterAgentResponse, RuleBundle, ServerCommand, SiteConfig,
+    RegisterAgentResponse, RuleBundle, ServerCommand, SiteConfig, SiteStatus,
     SyncRulesRequest,
 };
+use sea_orm::sea_query::Expr;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait,
+    ActiveModelTrait, ColumnTrait, Condition, DatabaseConnection, EntityTrait,
     QueryFilter, Set,
 };
 use tokio::sync::mpsc;
@@ -26,6 +27,7 @@ use tonic::{Request, Response, Status, Streaming};
 use uuid::Uuid;
 
 use crate::api::keys::{authenticate_api_key, key_allows_agent};
+use crate::api::ssl::cert_status;
 use crate::auth::jwt::{create_agent_token, verify_agent_token};
 use crate::config::ServerConfig;
 use crate::es::{
@@ -38,7 +40,7 @@ use crate::grpc::config::{
 use crate::grpc::registry::{AgentRegistry, COMMAND_CHANNEL_CAPACITY};
 use crate::models::{
     access_log, action, agent, agent_status, api_key, certificate_events,
-    host_sample, security_event, site,
+    host_sample, security_event, site, site_certificates,
 };
 
 /// Stream type returned by the server-streaming RPCs.
@@ -56,6 +58,7 @@ const MAX_CLIENT_IP: usize = 45;
 const MAX_METHOD: usize = 10;
 const MAX_HOST: usize = 255;
 const MAX_RULE_ID: usize = 100;
+const MAX_RULE_NAME: usize = 200;
 const MAX_ACTION: usize = 30;
 const MAX_COUNTRY: usize = 2;
 const MAX_CACHE_STATUS: usize = 20;
@@ -683,7 +686,82 @@ async fn persist_heartbeat(
         tracing::warn!(%agent_id, error = %err, "could not persist heartbeat");
     }
 
+    persist_site_certificates(db, &message.site_statuses).await;
+
     sweep_offline_agents(db).await;
+}
+
+/// Writes the per-site certificate state reported by the edge back onto its
+/// certificate rows.
+///
+/// Only rows without a PEM are touched: those are the ACME-managed ones, whose
+/// issuance happens entirely on the edge — the control plane never sees the
+/// certificate, so without this write-back the row would read "pending" with no
+/// expiry forever, even after the certificate went live.
+async fn persist_site_certificates(
+    db: &DatabaseConnection,
+    statuses: &[SiteStatus],
+) {
+    let now = Utc::now();
+    for status in statuses {
+        let row_status = match status.ssl_status.as_str() {
+            "valid" | "expiring_soon" => cert_status::ACTIVE,
+            "expired" => cert_status::EXPIRED,
+            // "none" or empty: nothing has been issued yet, and an unreadable
+            // site id cannot be attributed to a row.
+            _ => continue,
+        };
+        let Ok(site_id) = Uuid::parse_str(&status.site_id) else {
+            continue;
+        };
+        let Some(expires_at) = status
+            .ssl_expires_at
+            .and_then(|ts| DateTime::from_timestamp(ts.seconds, 0))
+        else {
+            continue;
+        };
+
+        // The guard keeps a steady fleet from writing the same values every
+        // heartbeat: only rows whose status or expiry actually change match.
+        let result = site_certificates::Entity::update_many()
+            .col_expr(
+                site_certificates::Column::Status,
+                Expr::value(row_status),
+            )
+            .col_expr(
+                site_certificates::Column::ExpiresAt,
+                Expr::value(expires_at),
+            )
+            .col_expr(site_certificates::Column::UpdatedAt, Expr::value(now))
+            .filter(site_certificates::Column::SiteId.eq(site_id))
+            .filter(site_certificates::Column::CertPem.is_null())
+            .filter(
+                Condition::any()
+                    .add(site_certificates::Column::Status.ne(row_status))
+                    .add(site_certificates::Column::ExpiresAt.is_null())
+                    .add(site_certificates::Column::ExpiresAt.ne(expires_at)),
+            )
+            .exec(db)
+            .await;
+        match result {
+            Ok(result) if result.rows_affected > 0 => {
+                tracing::info!(
+                    %site_id,
+                    status = row_status,
+                    %expires_at,
+                    "recorded edge certificate state"
+                );
+            },
+            Ok(_) => {},
+            Err(err) => {
+                tracing::warn!(
+                    %site_id,
+                    error = %err,
+                    "could not persist certificate state"
+                );
+            },
+        }
+    }
 }
 
 /// Persists the probe samples carried by one heartbeat and prunes expired rows.
@@ -953,7 +1031,7 @@ fn security_event_row(
         host: Set(truncate(&entry.host, MAX_HOST)),
         path: Set(optional(&entry.path)),
         rule_id: Set(truncate(&entry.waf_rule_id, MAX_RULE_ID)),
-        rule_name: Set(None),
+        rule_name: Set(truncate(&entry.waf_rule_name, MAX_RULE_NAME)),
         action: Set(truncate(waf_action, MAX_ACTION)
             .unwrap_or_else(|| action::LOG.to_string())),
         score: Set(if entry.waf_score == 0 {
@@ -1072,7 +1150,7 @@ fn security_event_document(
         query_string: optional(&entry.query_string),
 
         rule_id: entry.waf_rule_id.clone(),
-        rule_name: None,
+        rule_name: optional(&entry.waf_rule_name),
         action: if waf_action.is_empty() {
             action::LOG.to_string()
         } else {

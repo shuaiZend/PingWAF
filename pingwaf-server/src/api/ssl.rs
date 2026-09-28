@@ -33,7 +33,7 @@ use crate::models::{
 };
 
 /// Certificate status values.
-mod cert_status {
+pub(crate) mod cert_status {
     pub const ACTIVE: &str = "active";
     pub const PENDING: &str = "pending";
     pub const EXPIRED: &str = "expired";
