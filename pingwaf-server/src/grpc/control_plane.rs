@@ -473,9 +473,17 @@ impl ControlPlaneTrait for ControlPlaneService {
             let site_id = parse_optional_uuid(&message.site_id);
             let agent_id = parse_optional_uuid(&message.agent_id);
             let timestamp = from_timestamp(message.timestamp.as_ref());
+            let waf_event = is_waf_event(&message);
 
-            access_batch
-                .push(access_log_row(&message, site_id, agent_id, timestamp));
+            // WAF-decision entries are routed to `security_events` only: the
+            // agent always emits a second, access-shaped entry for the same
+            // request (at deny time or response time), so writing both would
+            // duplicate every blocked or monitored request in `access_logs`.
+            if !waf_event {
+                access_batch.push(access_log_row(
+                    &message, site_id, agent_id, timestamp,
+                ));
+            }
             if let Some(event) =
                 security_event_row(&message, site_id, agent_id, timestamp)
             {
@@ -486,9 +494,11 @@ impl ControlPlaneTrait for ControlPlaneService {
             // retention. Both calls are non-blocking `try_send`s, so a slow or
             // down ES cluster can never apply back-pressure to the agent stream.
             if let Some(es) = &self.es {
-                es.index_access_log(access_log_document(
-                    es, &message, timestamp,
-                ));
+                if !waf_event {
+                    es.index_access_log(access_log_document(
+                        es, &message, timestamp,
+                    ));
+                }
                 if let Some(event) =
                     security_event_document(es, &message, timestamp)
                 {
@@ -1018,6 +1028,15 @@ fn request_body_text(body: &[u8]) -> Option<String> {
     Some(String::from_utf8_lossy(capped).into_owned())
 }
 
+/// True when the entry carries a WAF decision and belongs in
+/// `security_events`. The same condition gates every consumer (PostgreSQL and
+/// Elasticsearch) so the two stores never disagree on routing.
+fn is_waf_event(entry: &LogEntry) -> bool {
+    !entry.waf_action.trim().is_empty()
+        || entry.waf_score != 0
+        || !entry.waf_rule_id.trim().is_empty()
+}
+
 /// Maps a shipped log entry onto a `security_events` row, or `None` when the
 /// request was clean and produced no WAF decision.
 fn security_event_row(
@@ -1026,13 +1045,10 @@ fn security_event_row(
     agent_id: Option<Uuid>,
     timestamp: DateTime<Utc>,
 ) -> Option<security_event::ActiveModel> {
-    let waf_action = entry.waf_action.trim();
-    if waf_action.is_empty()
-        && entry.waf_score == 0
-        && entry.waf_rule_id.trim().is_empty()
-    {
+    if !is_waf_event(entry) {
         return None;
     }
+    let waf_action = entry.waf_action.trim();
 
     Some(security_event::ActiveModel {
         site_id: Set(site_id),
@@ -1139,13 +1155,10 @@ fn security_event_document(
     entry: &LogEntry,
     timestamp: DateTime<Utc>,
 ) -> Option<SecurityEventDocument> {
-    let waf_action = entry.waf_action.trim();
-    if waf_action.is_empty()
-        && entry.waf_score == 0
-        && entry.waf_rule_id.trim().is_empty()
-    {
+    if !is_waf_event(entry) {
         return None;
     }
+    let waf_action = entry.waf_action.trim();
 
     let (request_body, mut request_body_truncated) =
         es.truncate_body_to_string(&entry.request_body);
@@ -1369,6 +1382,33 @@ mod tests {
             .expect("event");
         assert!(event.action.is_set());
         assert_eq!(event.score.unwrap(), Some(42));
+    }
+
+    #[test]
+    fn waf_decisions_are_not_routed_to_access_logs() {
+        // A blocked request arrives as two entries: the WAF decision (which
+        // carries no request detail) and the access entry with detail and the
+        // real status. Storing the decision in `access_logs` too would
+        // duplicate every blocked or monitored request.
+        let decision = LogEntry {
+            waf_action: action::BLOCK.into(),
+            waf_rule_id: "sqli-942100".into(),
+            ..Default::default()
+        };
+        assert!(is_waf_event(&decision));
+
+        let access = LogEntry {
+            request_id: "abc".into(),
+            ..Default::default()
+        };
+        assert!(!is_waf_event(&access));
+
+        // Monitored requests carry no action, only a score or rule id.
+        let monitored = LogEntry {
+            waf_score: 7,
+            ..Default::default()
+        };
+        assert!(is_waf_event(&monitored));
     }
 
     #[test]

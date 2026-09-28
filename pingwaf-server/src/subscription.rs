@@ -12,14 +12,45 @@
 
 use serde_json::Value;
 
-/// Builds the HTTP client used for subscription fetches.
+/// Builds the HTTP client used for subscription fetches. Redirects may only
+/// stay on http/https so a source cannot bounce the fetcher onto another
+/// scheme (e.g. an internal service) mid-chain.
 pub fn subscription_client() -> reqwest::Client {
     reqwest::Client::builder()
         .user_agent(concat!("PingWAF/", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(30))
         .connect_timeout(std::time::Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 5 {
+                return attempt.error("too many redirects");
+            }
+            match attempt.url().scheme() {
+                "http" | "https" => attempt.follow(),
+                _ => attempt.error("redirect left the http/https schemes"),
+            }
+        }))
         .build()
         .unwrap_or_default()
+}
+
+/// Rejects source URLs the fetcher must never follow: only `http`/`https` to
+/// a named host. This blocks `file:`, `data:` and other schemes whose fetch
+/// could touch local resources or internal services.
+pub fn validate_source_url(url: &str) -> Result<(), String> {
+    let parsed = reqwest::Url::parse(url)
+        .map_err(|err| format!("invalid source URL: {err}"))?;
+    match parsed.scheme() {
+        "http" | "https" => {},
+        other => {
+            return Err(format!(
+                "unsupported source URL scheme '{other}:', use http or https"
+            ))
+        },
+    }
+    if parsed.host_str().unwrap_or_default().is_empty() {
+        return Err("source URL must include a host".to_string());
+    }
+    Ok(())
 }
 
 /// Downloads a subscription source and returns its validated IP ranges.
@@ -27,6 +58,8 @@ pub async fn fetch_subscription_ranges(
     client: &reqwest::Client,
     url: &str,
 ) -> Result<Vec<String>, String> {
+    // Re-checked here so every caller is covered, not just the API paths.
+    validate_source_url(url)?;
     let response = client
         .get(url)
         .send()
@@ -176,5 +209,21 @@ mod tests {
         assert!(parse_subscription("# only comments\n").is_err());
         assert!(parse_subscription("{not json").is_err());
         assert!(parse_subscription(r#"{"result": {}}"#).is_err());
+    }
+
+    #[test]
+    fn source_urls_must_be_http_or_https() {
+        assert!(
+            validate_source_url("https://www.cloudflare.com/ips-v4").is_ok()
+        );
+        assert!(validate_source_url("http://internal.example/list").is_ok());
+
+        // Schemes that could touch local resources or opaque payloads.
+        assert!(validate_source_url("file:///etc/passwd").is_err());
+        assert!(validate_source_url("data:text/plain,1.2.3.4").is_err());
+        assert!(validate_source_url("ftp://mirror.example/list").is_err());
+        // No scheme and no host are both rejected.
+        assert!(validate_source_url("www.cloudflare.com/ips-v4").is_err());
+        assert!(validate_source_url("http://").is_err());
     }
 }

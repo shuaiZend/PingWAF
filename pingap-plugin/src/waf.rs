@@ -902,18 +902,36 @@ const MAX_LOG_BODY: usize = 1024;
 const MAX_LOG_HEADERS: usize = 64;
 const MAX_LOG_HEADERS_BYTES: usize = 8 * 1024;
 
+/// Headers whose values never reach the log store: they carry credentials
+/// (session cookies, bearer tokens, basic auth) and logging them would turn
+/// every access-log row into a secret. Compared case-insensitively.
+const REDACTED_HEADERS: &[&str] =
+    &["authorization", "proxy-authorization", "cookie"];
+
+/// Value stored in place of a redacted header's contents.
+const REDACTED_VALUE: &str = "[redacted]";
+
 /// Caps the header snapshot kept for logging so a pathological request cannot
 /// bloat the log store: at most [`MAX_LOG_HEADERS`] entries totalling at most
-/// [`MAX_LOG_HEADERS_BYTES`] bytes.
+/// [`MAX_LOG_HEADERS_BYTES`] bytes, with credential headers ([`REDACTED_HEADERS`])
+/// replaced by [`REDACTED_VALUE`].
 fn cap_request_headers(headers: &[(String, String)]) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let mut total = 0usize;
     for (name, value) in headers.iter().take(MAX_LOG_HEADERS) {
-        total += name.len() + value.len();
+        let sensitive = REDACTED_HEADERS
+            .iter()
+            .any(|h| name.eq_ignore_ascii_case(h));
+        let stored = if sensitive {
+            REDACTED_VALUE
+        } else {
+            value.as_str()
+        };
+        total += name.len() + stored.len();
         if total > MAX_LOG_HEADERS_BYTES {
             break;
         }
-        out.push((name.clone(), value.clone()));
+        out.push((name.clone(), stored.to_string()));
     }
     out
 }
@@ -2281,6 +2299,43 @@ ml_threshold = 0.75
         big.push(("x-big".to_string(), "b".repeat(MAX_LOG_HEADERS_BYTES)));
         let capped = cap_request_headers(&big);
         assert_eq!(1, capped.len());
+    }
+
+    #[test]
+    fn cap_request_headers_redacts_credentials() {
+        // Name case must not matter: HTTP headers are case-insensitive.
+        let headers = vec![
+            ("Authorization".to_string(), "Bearer tok".to_string()),
+            ("cookie".to_string(), "sid=secret".to_string()),
+            ("Proxy-Authorization".to_string(), "Basic xyz".to_string()),
+            ("X-Custom".to_string(), "kept".to_string()),
+        ];
+        let capped = cap_request_headers(&headers);
+        let value = |name: &str| {
+            capped
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, v)| v.as_str())
+                .unwrap()
+        };
+        assert_eq!(REDACTED_VALUE, value("Authorization"));
+        assert_eq!(REDACTED_VALUE, value("cookie"));
+        assert_eq!(REDACTED_VALUE, value("Proxy-Authorization"));
+        assert_eq!("kept", value("X-Custom"));
+
+        // The redacted snapshot's budget is charged with the short marker,
+        // so a header bag that is all credentials still fits.
+        let creds: Vec<(String, String)> = (0..MAX_LOG_HEADERS)
+            .map(|i| {
+                let name = if i % 2 == 0 {
+                    "authorization"
+                } else {
+                    "cookie"
+                };
+                (name.to_string(), "s".repeat(500))
+            })
+            .collect();
+        assert_eq!(MAX_LOG_HEADERS, cap_request_headers(&creds).len());
     }
 
     #[test]
