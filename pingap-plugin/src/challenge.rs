@@ -634,6 +634,6 @@ cookie_secret = "test-secret"
             )
             .await
             .unwrap();
-        assert_eq!(true, result == RequestPluginResult::Continue);
+        assert!(result == RequestPluginResult::Continue);
     }
 }

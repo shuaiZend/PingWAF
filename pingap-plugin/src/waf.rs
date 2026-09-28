@@ -37,21 +37,26 @@ use pingap_core::{
     Ctx, HTTP_HEADER_NAME_X_REQUEST_ID, Plugin, PluginStep,
     RequestPluginResult, ResponsePluginResult, ensure_client_ip, get_host,
 };
+use pingap_util::IpRules;
 use pingora::http::ResponseHeader;
 use pingora::proxy::Session;
 use pingwaf_agent::cache::{
-    WafAction as CacheWafAction, WafConfig as CacheWafConfig,
-    WafMode as CacheWafMode,
+    GeoConfig as CacheGeoConfig, IpAccessAction as CacheIpAccessAction,
+    SiteRules as CacheSiteRules, WafAction as CacheWafAction,
+    WafConfig as CacheWafConfig, WafMode as CacheWafMode,
 };
 use pingwaf_agent::{AccessLogEntry, PingWafAgent, SecurityEvent};
 use pingwaf_challenge::generate_request_id;
 use pingwaf_waf::{
-    CompiledRule, RequestData, RuleAction, WafAction, WafEngine,
-    WafEngineConfig, WafMode, WafVerdict,
+    CompiledRule, RequestData, RuleAction, ScoreBreakdown, WafAction,
+    WafEngine, WafEngineConfig, WafMode, WafVerdict,
 };
 use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
 use std::sync::{Arc, LazyLock, RwLock};
 use std::time::{Duration, Instant};
+use tor_geoip::GeoipDb;
 use tracing::debug;
 
 type Result<T, E = Error> = std::result::Result<T, E>;
@@ -66,10 +71,263 @@ enum EngineChoice {
     Disabled,
 }
 
-/// A cached per-domain engine plus the fingerprint it was built from.
-struct CachedEngine {
+/// Site data resolved from the agent cache, compiled once per config
+/// fingerprint: the WAF engine, the access restrictions and the custom rule
+/// names used to label security events.
+struct SiteContext {
+    engine: Option<Arc<WafEngine>>,
+    policy: AccessPolicy,
+    /// Custom rule id → name.
+    rule_names: HashMap<String, String>,
+}
+
+impl SiteContext {
+    fn build(site_rules: &CacheSiteRules) -> Self {
+        let waf_cfg = site_rules.waf_config.as_ref();
+        Self {
+            engine: waf_cfg
+                .filter(|cfg| cfg.enabled)
+                .map(|cfg| Arc::new(build_site_engine(cfg))),
+            policy: AccessPolicy::build(site_rules),
+            rule_names: waf_cfg
+                .map(|cfg| {
+                    cfg.custom_rules
+                        .iter()
+                        .map(|r| (r.id.clone(), r.name.clone()))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Resolves the engine choice for the rules this context was built from.
+    fn choice(&self, site_rules: &CacheSiteRules) -> EngineChoice {
+        match site_rules.waf_config.as_ref() {
+            Some(cfg) if cfg.enabled => {
+                self.engine.as_ref().map_or(EngineChoice::Base, |engine| {
+                    EngineChoice::Site(Arc::clone(engine))
+                })
+            },
+            Some(_) => EngineChoice::Disabled,
+            None => EngineChoice::Base,
+        }
+    }
+}
+
+/// A cached per-domain context plus the fingerprint it was built from.
+struct CachedSite {
     fingerprint: String,
-    engine: Arc<WafEngine>,
+    context: Arc<SiteContext>,
+}
+
+/// Everything resolved for one request target.
+struct ResolvedSite {
+    choice: EngineChoice,
+    site_id: String,
+    context: Option<Arc<SiteContext>>,
+}
+
+// ─────────────────────────────────────────────────────────────
+// Access restrictions (IP rules and geo)
+// ─────────────────────────────────────────────────────────────
+
+/// Embedded GeoIP database backing country/ASN facts: it feeds geo
+/// restrictions, the `ip.src.country` rule variable and the country reported
+/// with access logs.
+static GEO_DB: LazyLock<Arc<GeoipDb>> = LazyLock::new(GeoipDb::new_embedded);
+
+/// Country code (ISO 3166-1 alpha-2) of `ip`, when the database knows it.
+fn lookup_country(ip: &str) -> Option<String> {
+    let addr: IpAddr = ip.parse().ok()?;
+    GEO_DB
+        .lookup_country_code(addr)
+        .map(|code| code.as_ref().to_string())
+}
+
+/// Autonomous system number of `ip`, when the database knows it.
+fn lookup_asn(ip: &str) -> Option<u32> {
+    let addr: IpAddr = ip.parse().ok()?;
+    GEO_DB.lookup_asn(addr)
+}
+
+/// Parses a configured ASN, which operators write either bare or with an `AS`
+/// prefix (`13335`, `AS13335`).
+fn parse_asn(value: &str) -> Option<u32> {
+    let trimmed = value.trim();
+    let digits = trimmed
+        .strip_prefix("AS")
+        .or_else(|| trimmed.strip_prefix("as"))
+        .unwrap_or(trimmed);
+    digits.parse::<u32>().ok()
+}
+
+/// What an IP access rule does when the client IP matches it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IpRuleAction {
+    Allow,
+    Challenge,
+    Block,
+}
+
+/// One IP access rule with its ranges parsed once.
+struct IpRule {
+    id: String,
+    name: String,
+    action: IpRuleAction,
+    ranges: IpRules,
+}
+
+/// Geo restrictions with the country and ASN lists normalised once.
+struct GeoRule {
+    enabled: bool,
+    blocked_countries: HashSet<String>,
+    allowed_countries: HashSet<String>,
+    blocked_asns: HashSet<u32>,
+    block_unknown: bool,
+    challenge: bool,
+}
+
+/// Why a request was denied, and by which rule.
+struct Denial {
+    rule_id: String,
+    rule_name: String,
+    detail: String,
+    challenge: bool,
+}
+
+/// Access restrictions of one site: IP rules plus the geo policy.
+///
+/// IP rules are evaluated first-match-wins in the order the control plane sent
+/// them (priority ascending), so an `Allow` rule placed above a catch-all
+/// `Block` yields a whitelist and sits below a blacklist. An explicit `Allow`
+/// match short-circuits every rule below it; when nothing matches, the request
+/// continues.
+#[derive(Default)]
+struct AccessPolicy {
+    ip_rules: Vec<IpRule>,
+    geo: Option<GeoRule>,
+}
+
+impl AccessPolicy {
+    fn build(site_rules: &CacheSiteRules) -> Self {
+        let ip_rules = site_rules
+            .ip_access_rules
+            .iter()
+            .filter(|rule| rule.enabled && !rule.ip_ranges.is_empty())
+            .map(|rule| IpRule {
+                id: rule.id.clone(),
+                name: rule.name.clone(),
+                action: match rule.action {
+                    CacheIpAccessAction::Allow => IpRuleAction::Allow,
+                    CacheIpAccessAction::Challenge
+                    | CacheIpAccessAction::JsChallenge => {
+                        IpRuleAction::Challenge
+                    },
+                    CacheIpAccessAction::Block => IpRuleAction::Block,
+                },
+                ranges: IpRules::new(&rule.ip_ranges),
+            })
+            .collect();
+        Self {
+            ip_rules,
+            geo: site_rules.geo_config.as_ref().map(GeoRule::build),
+        }
+    }
+
+    /// Decides whether `ip` — and the country it resolves to — may proceed.
+    ///
+    /// `None` means the request continues; `Some(denial)` carries the rule
+    /// that stopped it.
+    fn evaluate(&self, ip: &str, country: Option<&str>) -> Option<Denial> {
+        if let Ok(addr) = ip.parse::<IpAddr>() {
+            for rule in &self.ip_rules {
+                if !rule.ranges.is_match_addr(&addr) {
+                    continue;
+                }
+                return match rule.action {
+                    IpRuleAction::Allow => None,
+                    IpRuleAction::Block => Some(Denial {
+                        rule_id: rule.id.clone(),
+                        rule_name: rule.name.clone(),
+                        detail: format!(
+                            "client ip {ip} matched block rule {}",
+                            rule.id
+                        ),
+                        challenge: false,
+                    }),
+                    IpRuleAction::Challenge => Some(Denial {
+                        rule_id: rule.id.clone(),
+                        rule_name: rule.name.clone(),
+                        detail: format!(
+                            "client ip {ip} matched challenge rule {}",
+                            rule.id
+                        ),
+                        challenge: true,
+                    }),
+                };
+            }
+        }
+
+        let geo = self.geo.as_ref().filter(|geo| geo.enabled)?;
+        let asn_denied = !geo.blocked_asns.is_empty()
+            && lookup_asn(ip)
+                .is_some_and(|asn| geo.blocked_asns.contains(&asn));
+        let country_denied = match country {
+            Some(code) => {
+                geo.blocked_countries.contains(code)
+                    || (!geo.allowed_countries.is_empty()
+                        && !geo.allowed_countries.contains(code))
+            },
+            None => geo.block_unknown,
+        };
+        if !asn_denied && !country_denied {
+            return None;
+        }
+        Some(Denial {
+            rule_id: "geo_restriction".to_string(),
+            rule_name: "Geo restriction".to_string(),
+            detail: match (country, asn_denied) {
+                (Some(code), true) => {
+                    format!("country {code} and its network are restricted")
+                },
+                (Some(code), false) => {
+                    format!("country {code} is restricted for this site")
+                },
+                (None, true) => "the client network is restricted".to_string(),
+                (None, false) => {
+                    "the country of the client could not be determined"
+                        .to_string()
+                },
+            },
+            challenge: geo.challenge,
+        })
+    }
+}
+
+impl GeoRule {
+    fn build(cfg: &CacheGeoConfig) -> Self {
+        let country_set = |list: &[String]| -> HashSet<String> {
+            list.iter()
+                .map(|code| code.trim().to_uppercase())
+                .filter(|code| !code.is_empty())
+                .collect()
+        };
+        Self {
+            enabled: cfg.enabled,
+            blocked_countries: country_set(&cfg.blocked_countries),
+            allowed_countries: country_set(&cfg.allowed_countries),
+            blocked_asns: cfg
+                .blocked_asns
+                .iter()
+                .filter_map(|asn| parse_asn(asn))
+                .collect(),
+            block_unknown: cfg.block_unknown,
+            challenge: matches!(
+                cfg.action,
+                CacheWafAction::Challenge | CacheWafAction::JsChallenge
+            ),
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -90,6 +348,7 @@ struct PendingAccess {
     user_agent: String,
     referer: String,
     tls_version: String,
+    country_code: String,
     start: Instant,
 }
 
@@ -140,7 +399,7 @@ fn emit_access(
         user_agent: pending.user_agent,
         referer: pending.referer,
         tls_version: pending.tls_version,
-        country_code: String::new(),
+        country_code: pending.country_code,
         request_body: None,
         request_body_truncated: false,
     });
@@ -172,7 +431,7 @@ pub struct WafPlugin {
     pow_difficulty: u32,
     hash_value: String,
     /// Per-domain engines built from agent rules, keyed by host.
-    site_engines: DashMap<String, CachedEngine>,
+    site_contexts: DashMap<String, CachedSite>,
 }
 
 fn parse_mode(value: &str) -> WafMode {
@@ -244,45 +503,59 @@ impl WafPlugin {
     /// Create a new plugin from configuration.
     pub fn new(params: &PluginConf) -> Result<Self> {
         debug!(params = params.to_string(), "new waf plugin");
+        // Load the embedded GeoIP database here rather than on the first
+        // request: the lookup is on the request path and its parse is not.
+        LazyLock::force(&GEO_DB);
         Self::try_from(params)
     }
 
-    /// Resolve which engine to use for `host`, consulting the agent rule cache
-    /// when available and caching per-domain engines.
-    fn resolve_engine(&self, host: &str) -> (EngineChoice, String) {
+    /// Resolve the site data for `host`, consulting the agent rule cache when
+    /// available and caching compiled contexts per domain.
+    fn resolve_site(&self, host: &str) -> ResolvedSite {
+        let fallback = |site_id: String| ResolvedSite {
+            choice: EngineChoice::Base,
+            site_id,
+            context: None,
+        };
         let Some(agent) = PingWafAgent::instance() else {
-            return (EngineChoice::Base, host.to_string());
+            return fallback(host.to_string());
         };
         if host.is_empty() {
-            return (EngineChoice::Base, String::new());
+            return fallback(String::new());
         }
         let Some(site_rules) = agent.get_rules_for_domain(host) else {
-            return (EngineChoice::Base, host.to_string());
+            return fallback(host.to_string());
         };
-        let site_id = site_rules.site_id.clone();
-        let Some(waf_cfg) = site_rules.waf_config.as_ref() else {
-            return (EngineChoice::Base, site_id);
-        };
-        if !waf_cfg.enabled {
-            return (EngineChoice::Disabled, site_id);
-        }
 
         let fingerprint = agent.config_hash();
-        if let Some(cached) = self.site_engines.get(host)
-            && cached.fingerprint == fingerprint
-        {
-            return (EngineChoice::Site(cached.engine.clone()), site_id);
-        }
-
-        let engine = Arc::new(build_site_engine(waf_cfg));
-        self.site_engines.insert(
-            host.to_string(),
-            CachedEngine {
-                fingerprint,
-                engine: Arc::clone(&engine),
+        let cached = self.site_contexts.get(host).map(|cached| {
+            (cached.fingerprint.clone(), Arc::clone(&cached.context))
+        });
+        let context = match cached {
+            Some((cached_fingerprint, context))
+                if cached_fingerprint == fingerprint =>
+            {
+                context
             },
-        );
-        (EngineChoice::Site(engine), site_id)
+            _ => {
+                let context = Arc::new(SiteContext::build(&site_rules));
+                self.site_contexts.insert(
+                    host.to_string(),
+                    CachedSite {
+                        fingerprint,
+                        context: Arc::clone(&context),
+                    },
+                );
+                context
+            },
+        };
+
+        let choice = context.choice(&site_rules);
+        ResolvedSite {
+            choice,
+            site_id: site_rules.site_id.clone(),
+            context: Some(context),
+        }
     }
 
     /// Ship a security event to the control plane (best effort, non-blocking).
@@ -292,6 +565,7 @@ impl WafPlugin {
         host: &str,
         request_data: &RequestData,
         verdict: &WafVerdict,
+        rule_name: &str,
     ) {
         let Some(agent) = PingWafAgent::instance() else {
             return;
@@ -321,7 +595,7 @@ impl WafPlugin {
             path: request_data.path.clone(),
             query_string: request_data.query.clone(),
             rule_id: verdict.matched_rules.first().cloned().unwrap_or_default(),
-            rule_name: String::new(),
+            rule_name: rule_name.to_string(),
             action: action_str(&verdict.action).to_string(),
             score: verdict.score as u32,
             details: verdict.details.clone(),
@@ -330,6 +604,60 @@ impl WafPlugin {
             country_code: request_data.country_code.clone().unwrap_or_default(),
             matched_tags: verdict.matched_rules.clone(),
         });
+    }
+
+    /// Answers a request stopped by an access restriction: security event,
+    /// access log with the real status, then the block page or the challenge.
+    #[allow(clippy::too_many_arguments)]
+    fn deny_request(
+        agent: Option<&Arc<PingWafAgent>>,
+        site_id: &str,
+        request_id: &str,
+        host: &str,
+        request_data: &RequestData,
+        denial: &Denial,
+        original_url: &str,
+        pow_difficulty: u32,
+    ) -> RequestPluginResult {
+        let verdict = WafVerdict {
+            action: if denial.challenge {
+                WafAction::Challenge
+            } else {
+                WafAction::Block
+            },
+            score: 0,
+            matched_rules: vec![denial.rule_id.clone()],
+            details: denial.detail.clone(),
+            breakdown: ScoreBreakdown::clean(),
+        };
+        Self::log_event(
+            site_id,
+            request_id,
+            host,
+            request_data,
+            &verdict,
+            &denial.rule_name,
+        );
+        if let Some(agent) = agent
+            && let Some((_, pending)) = PENDING_ACCESS.remove(request_id)
+        {
+            let status = if denial.challenge { 503 } else { 403 };
+            emit_access(agent, request_id, pending, status, String::new(), 0);
+        }
+        if denial.challenge {
+            RequestPluginResult::Respond(build_challenge_response(
+                request_id,
+                original_url,
+                site_id,
+                pow_difficulty,
+                ChallengeKind::Js,
+            ))
+        } else {
+            RequestPluginResult::Respond(block_page(
+                request_id,
+                &verdict.details,
+            ))
+        }
     }
 }
 
@@ -396,7 +724,7 @@ impl TryFrom<&PluginConf> for WafPlugin {
             max_body_size,
             pow_difficulty,
             hash_value,
-            site_engines: DashMap::new(),
+            site_contexts: DashMap::new(),
         })
     }
 }
@@ -460,12 +788,24 @@ impl Plugin for WafPlugin {
             },
         };
 
-        // ── Resolve the engine for this domain ──
-        let (choice, site_id) = self.resolve_engine(&host);
+        // ── Resolve the engine and access restrictions for this domain ──
+        let resolved = self.resolve_site(&host);
+        let site_id = resolved.site_id.clone();
+        let context = resolved.context.clone();
+        let choice = resolved.choice;
+
+        // Country of the client: it feeds geo restrictions, the
+        // `ip.src.country` rule variable and the flag shown with the access
+        // log, so it is only resolved when an agent consumes those facts.
+        let agent = PingWafAgent::instance();
+        let country = if agent.is_some() {
+            lookup_country(&client_ip)
+        } else {
+            None
+        };
 
         // Track the request for access logging until the response phase —
         // including WAF-disabled sites, so traffic data stays complete.
-        let agent = PingWafAgent::instance();
         if agent.is_some() {
             register_pending_access(
                 &request_id,
@@ -486,9 +826,47 @@ impl Plugin for WafPlugin {
                         .clone()
                         .unwrap_or_default()
                         .to_string(),
+                    country_code: country.clone().unwrap_or_default(),
                     start: Instant::now(),
                 },
             );
+        }
+
+        let mut request_data = RequestData {
+            method,
+            path: path.clone(),
+            query: query.clone(),
+            headers,
+            body: None,
+            client_ip,
+            country_code: country,
+            scheme,
+            protocol,
+        };
+
+        // ── Access restrictions: IP rules and geo stop a request before the
+        // WAF engine runs, and apply whether or not it is enabled ──
+        if let Some(site) = &context
+            && let Some(denial) = site.policy.evaluate(
+                &request_data.client_ip,
+                request_data.country_code.as_deref(),
+            )
+        {
+            let original_url = if query.is_empty() {
+                path
+            } else {
+                format!("{path}?{query}")
+            };
+            return Ok(Self::deny_request(
+                agent.as_ref(),
+                &site_id,
+                &request_id,
+                &host,
+                &request_data,
+                &denial,
+                &original_url,
+                self.pow_difficulty,
+            ));
         }
 
         if matches!(choice, EngineChoice::Disabled) {
@@ -505,7 +883,7 @@ impl Plugin for WafPlugin {
         }
 
         // ── Optional request-body inspection ──
-        let body = if self.inspect_body {
+        request_data.body = if self.inspect_body {
             let mut buf = BytesMut::with_capacity(4096);
             while let Some(chunk) = session.read_request_body().await? {
                 buf.put(chunk.as_ref());
@@ -522,18 +900,6 @@ impl Plugin for WafPlugin {
             None
         };
 
-        let request_data = RequestData {
-            method,
-            path: path.clone(),
-            query: query.clone(),
-            headers,
-            body,
-            client_ip,
-            country_code: None,
-            scheme,
-            protocol,
-        };
-
         // ── Inspect ──
         let verdict = match &choice {
             EngineChoice::Site(engine) => engine.inspect(&request_data),
@@ -545,6 +911,19 @@ impl Plugin for WafPlugin {
             EngineChoice::Disabled => unreachable!("handled above"),
         };
 
+        // Custom rule ids carry no name of their own; the site context maps
+        // the one that fired back to its configured name.
+        let rule_name_of = |verdict: &WafVerdict| -> String {
+            let Some(id) = verdict.matched_rules.first() else {
+                return String::new();
+            };
+            context
+                .as_ref()
+                .and_then(|context| context.rule_names.get(id))
+                .cloned()
+                .unwrap_or_default()
+        };
+
         if verdict.action == WafAction::Pass {
             if let Some(agent) = &agent {
                 agent.record_request(false);
@@ -554,12 +933,14 @@ impl Plugin for WafPlugin {
 
         // Monitor: log the event but let the request through.
         if verdict.action == WafAction::Monitor {
+            let rule_name = rule_name_of(&verdict);
             Self::log_event(
                 &site_id,
                 &request_id,
                 &host,
                 &request_data,
                 &verdict,
+                &rule_name,
             );
             return Ok(RequestPluginResult::Continue);
         }
@@ -567,7 +948,15 @@ impl Plugin for WafPlugin {
         // Block / Challenge: log the security event, then emit the access
         // entry with the real status — a Respond result never reaches
         // handle_response, so this is the only chance to log it.
-        Self::log_event(&site_id, &request_id, &host, &request_data, &verdict);
+        let rule_name = rule_name_of(&verdict);
+        Self::log_event(
+            &site_id,
+            &request_id,
+            &host,
+            &request_data,
+            &verdict,
+            &rule_name,
+        );
         if let Some(agent) = &agent
             && let Some((_, pending)) = PENDING_ACCESS.remove(&request_id)
         {
@@ -642,6 +1031,7 @@ mod tests {
     use pingwaf_agent::client::ControlPlaneClient;
     use pingwaf_agent::config::AgentConfig;
     use pingwaf_agent::heartbeat::MetricsCollector;
+    use pingwaf_proto::control_plane as proto;
     use tokio_test::io::Builder;
 
     #[test]
@@ -721,7 +1111,7 @@ ml_threshold = 0.75
             )
             .await
             .unwrap();
-        assert_eq!(true, result == RequestPluginResult::Continue);
+        assert!(result == RequestPluginResult::Continue);
     }
 
     #[tokio::test]
@@ -746,7 +1136,7 @@ ml_threshold = 0.75
             )
             .await
             .unwrap();
-        assert_eq!(true, result == RequestPluginResult::Continue);
+        assert!(result == RequestPluginResult::Continue);
     }
 
     #[tokio::test]
@@ -771,7 +1161,7 @@ ml_threshold = 0.75
             )
             .await
             .unwrap();
-        assert_eq!(true, result == RequestPluginResult::Skipped);
+        assert!(result == RequestPluginResult::Skipped);
     }
 
     /// The agent instance is a process-wide global, and cargo runs a
@@ -816,6 +1206,202 @@ ml_threshold = 0.75
         });
         PingWafAgent::set_agent_instance(Some(Arc::clone(&agent)));
         (lock, agent, dir)
+    }
+
+    /// Pushes site rules to the test agent: a whitelist allow rule above a
+    /// catch-all block rule for `example.com`.
+    async fn install_whitelist_agent() -> (
+        tokio::sync::MutexGuard<'static, ()>,
+        Arc<PingWafAgent>,
+        tempfile::TempDir,
+    ) {
+        let installed = install_test_agent().await;
+        installed
+            .1
+            .rule_cache
+            .update_from_site_config(&proto::SiteConfig {
+                sites: vec![proto::Site {
+                    id: "site-1".to_string(),
+                    name: "example".to_string(),
+                    domain: "example.com".to_string(),
+                    alternate_domains: Vec::new(),
+                    status: 0,
+                    rules: Some(proto::RuleBundle {
+                        site_id: "site-1".to_string(),
+                        config_hash: "hash-1".to_string(),
+                        ip_access_rules: vec![
+                            proto::IpAccessRule {
+                                id: "allow-office".to_string(),
+                                name: "office egress".to_string(),
+                                ip_ranges: vec!["10.1.1.1".to_string()],
+                                action: proto::IpAccessAction::IpAccessAllow
+                                    as i32,
+                                note: String::new(),
+                                enabled: true,
+                            },
+                            proto::IpAccessRule {
+                                id: "block-all".to_string(),
+                                name: "block everything else".to_string(),
+                                ip_ranges: vec!["0.0.0.0/0".to_string()],
+                                action: proto::IpAccessAction::IpAccessBlock
+                                    as i32,
+                                note: String::new(),
+                                enabled: true,
+                            },
+                        ],
+                        ..Default::default()
+                    }),
+                }],
+                config_hash: "hash-1".to_string(),
+                updated_at: None,
+            })
+            .unwrap();
+        installed
+    }
+
+    /// Builds one request against the plugin from `client_ip`.
+    async fn run_request(
+        plugin: &WafPlugin,
+        client_ip: &str,
+    ) -> RequestPluginResult {
+        let input_header = "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let mock_io = Builder::new().read(input_header.as_bytes()).build();
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+        let mut ctx = Ctx::default();
+        ctx.conn.client_ip = Some(client_ip.to_string());
+        plugin
+            .handle_request(PluginStep::EarlyRequest, &mut session, &mut ctx)
+            .await
+            .unwrap()
+    }
+
+    /// An allow rule above a catch-all block rule yields a whitelist: the
+    /// listed IP passes, everything else is answered with 403.
+    #[tokio::test]
+    async fn test_ip_access_rules_whitelist() {
+        let (_guard, _agent, _dir) = install_whitelist_agent().await;
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        assert!(
+            run_request(&plugin, "10.1.1.1").await
+                == RequestPluginResult::Continue
+        );
+
+        let RequestPluginResult::Respond(resp) =
+            run_request(&plugin, "203.0.113.7").await
+        else {
+            panic!("expected the catch-all rule to answer");
+        };
+        assert_eq!(http::StatusCode::FORBIDDEN, resp.status);
+    }
+
+    /// A matching block rule is enforced even when the site has no WAF engine
+    /// of its own: access restrictions are not gated on the managed rules.
+    #[tokio::test]
+    async fn test_ip_access_rule_applies_with_waf_disabled() {
+        let (_guard, agent, _dir) = install_test_agent().await;
+        agent
+            .rule_cache
+            .update_from_site_config(&proto::SiteConfig {
+                sites: vec![proto::Site {
+                    id: "site-1".to_string(),
+                    name: "example".to_string(),
+                    domain: "example.com".to_string(),
+                    alternate_domains: Vec::new(),
+                    status: 0,
+                    rules: Some(proto::RuleBundle {
+                        site_id: "site-1".to_string(),
+                        config_hash: "hash-1".to_string(),
+                        waf: Some(proto::WafConfig {
+                            enabled: false,
+                            ..Default::default()
+                        }),
+                        ip_access_rules: vec![proto::IpAccessRule {
+                            id: "block-crawlers".to_string(),
+                            name: "block crawlers".to_string(),
+                            ip_ranges: vec!["192.0.2.0/24".to_string()],
+                            action: proto::IpAccessAction::IpAccessChallenge
+                                as i32,
+                            note: String::new(),
+                            enabled: true,
+                        }],
+                        ..Default::default()
+                    }),
+                }],
+                config_hash: "hash-1".to_string(),
+                updated_at: None,
+            })
+            .unwrap();
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        let RequestPluginResult::Respond(resp) =
+            run_request(&plugin, "192.0.2.9").await
+        else {
+            panic!("expected the challenge rule to answer");
+        };
+        assert_eq!(http::StatusCode::SERVICE_UNAVAILABLE, resp.status);
+
+        assert!(
+            run_request(&plugin, "198.51.100.4").await
+                == RequestPluginResult::Continue
+        );
+    }
+
+    /// A geo policy denies a client whose country is on the blocked list, and
+    /// the denial carries the country on the emitted security event.
+    #[tokio::test]
+    async fn test_geo_rule_blocks_listed_country() {
+        LazyLock::force(&GEO_DB);
+        let ip = "8.8.8.8";
+        let country = lookup_country(ip).expect("embedded db resolves 8.8.8.8");
+
+        let (_guard, agent, _dir) = install_test_agent().await;
+        agent
+            .rule_cache
+            .update_from_site_config(&proto::SiteConfig {
+                sites: vec![proto::Site {
+                    id: "site-1".to_string(),
+                    name: "example".to_string(),
+                    domain: "example.com".to_string(),
+                    alternate_domains: Vec::new(),
+                    status: 0,
+                    rules: Some(proto::RuleBundle {
+                        site_id: "site-1".to_string(),
+                        config_hash: "hash-1".to_string(),
+                        geo: Some(proto::GeoConfig {
+                            enabled: true,
+                            blocked_countries: vec![country.clone()],
+                            action: proto::WafAction::Block as i32,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
+                }],
+                config_hash: "hash-1".to_string(),
+                updated_at: None,
+            })
+            .unwrap();
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        let RequestPluginResult::Respond(resp) = run_request(&plugin, ip).await
+        else {
+            panic!("expected the geo rule to answer");
+        };
+        assert_eq!(http::StatusCode::FORBIDDEN, resp.status);
+
+        let event = agent.client.pop_log().await.unwrap();
+        assert_eq!(country, event.country_code);
+        assert_eq!("geo_restriction", event.waf_rule_id);
     }
 
     #[tokio::test]
@@ -882,7 +1468,7 @@ ml_threshold = 0.75
             .handle_request(PluginStep::EarlyRequest, &mut session, &mut ctx)
             .await
             .unwrap();
-        assert_eq!(true, result == RequestPluginResult::Continue);
+        assert!(result == RequestPluginResult::Continue);
         assert_eq!(2, agent.metrics.requests_total());
         assert_eq!(1, agent.metrics.blocked_requests_total());
 
