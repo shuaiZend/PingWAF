@@ -696,19 +696,9 @@ register_plugin!("error_page", ErrorPagePlugin);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::h1_session as session;
     use pingora::http::ResponseHeader;
-    use pingora::proxy::Session;
     use pretty_assertions::assert_eq;
-    use tokio_test::io::Builder;
-
-    async fn session(method: &str, target: &str, host: &str) -> Session {
-        let input =
-            format!("{method} {target} HTTP/1.1\r\nHost: {host}\r\n\r\n");
-        let mock_io = Builder::new().read(input.as_bytes()).build();
-        let mut s = Session::new_h1(Box::new(mock_io));
-        s.read_request().await.expect("read_request");
-        s
-    }
 
     #[test]
     fn test_defaults_registered() {
