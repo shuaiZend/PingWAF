@@ -383,16 +383,43 @@ fn cached_rules_to_pingap_config(cached: &CachedRules) -> Option<PingapConfig> {
         return None;
     }
 
-    // Single server listening on 80 and 443
+    // TLS is a per-server switch in pingap: `global_certificates` turns it on
+    // for every address that server listens on, so 80 and 443 cannot share
+    // one server — a merged listener ran plaintext HTTP through TLS
+    // handshakes, which also broke ACME HTTP-01 validation on port 80.
     let has_certs = !certificates.is_empty();
     let mut servers: HashMap<String, PingapServerConf> = HashMap::new();
-    let server_conf = PingapServerConf {
-        addr: "0.0.0.0:80,0.0.0.0:443".to_string(),
-        locations: Some(location_names),
-        global_certificates: Some(has_certs),
-        ..Default::default()
-    };
-    servers.insert("pingwaf".to_string(), server_conf);
+    if has_certs {
+        servers.insert(
+            "pingwaf".to_string(),
+            PingapServerConf {
+                addr: "0.0.0.0:80".to_string(),
+                locations: Some(location_names.clone()),
+                global_certificates: Some(false),
+                ..Default::default()
+            },
+        );
+        servers.insert(
+            "pingwaf_tls".to_string(),
+            PingapServerConf {
+                addr: "0.0.0.0:443".to_string(),
+                locations: Some(location_names),
+                global_certificates: Some(true),
+                ..Default::default()
+            },
+        );
+    } else {
+        // Nothing to serve over TLS yet; both ports stay plaintext until the
+        // first certificate lands and the next reload splits the listeners.
+        servers.insert(
+            "pingwaf".to_string(),
+            PingapServerConf {
+                addr: "0.0.0.0:80,0.0.0.0:443".to_string(),
+                locations: Some(location_names),
+                ..Default::default()
+            },
+        );
+    }
 
     Some(PingapConfig {
         basic: BasicConf::default(),
@@ -736,8 +763,9 @@ pub async fn start_data_plane(
             logger: None,
         };
         let mut ps = ProxyServer::new(&server_conf, ctx)?;
-        // The HTTP-01 challenge is served on port 80; the single data plane
-        // server listens on a combined "0.0.0.0:80,0.0.0.0:443" address.
+        // The HTTP-01 challenge must be reachable on port 80, so every
+        // data-plane server whose address list includes :80 intercepts
+        // /.well-known/acme-challenge before proxying.
         if acme_enabled
             && server_conf
                 .addr
@@ -1343,6 +1371,43 @@ mod tests {
                 "location {name} must reference the waf plugin"
             );
         }
+    }
+
+    #[test]
+    fn certified_sites_split_plaintext_and_tls_servers() {
+        let mut site = site_rules("site1", "a.example.com");
+        let mut default_pool = pool("pool1", vec![peer("10.0.0.1:8080")]);
+        default_pool.is_default = true;
+        site.upstreams = vec![default_pool];
+        site.ssl_config = Some(acme_ssl());
+        let config = cached_rules_to_pingap_config(&one_site_cache(site))
+            .expect("config should build");
+
+        assert_eq!(config.servers.len(), 2);
+        let http = config.servers.get("pingwaf").expect("http server");
+        assert_eq!(http.addr, "0.0.0.0:80");
+        assert_eq!(http.global_certificates, Some(false));
+        let tls = config.servers.get("pingwaf_tls").expect("tls server");
+        assert_eq!(tls.addr, "0.0.0.0:443");
+        assert_eq!(tls.global_certificates, Some(true));
+        let names = tls.locations.as_deref().expect("tls locations");
+        assert_eq!(names, http.locations.as_deref().expect("http locations"));
+        assert!(names.contains(&"site1_loc".to_string()));
+    }
+
+    #[test]
+    fn sites_without_certificates_keep_one_combined_server() {
+        let mut site = site_rules("site1", "a.example.com");
+        let mut default_pool = pool("pool1", vec![peer("10.0.0.1:8080")]);
+        default_pool.is_default = true;
+        site.upstreams = vec![default_pool];
+        let config = cached_rules_to_pingap_config(&one_site_cache(site))
+            .expect("config should build");
+
+        assert_eq!(config.servers.len(), 1);
+        let server = config.servers.get("pingwaf").expect("server");
+        assert_eq!(server.addr, "0.0.0.0:80,0.0.0.0:443");
+        assert_eq!(server.global_certificates, None);
     }
 
     fn acme_ssl() -> SslConfig {
