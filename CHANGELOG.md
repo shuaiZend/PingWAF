@@ -8,6 +8,33 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.14.6] — 2026-09-28
+
+### 🐛 Bug Fixes
+
+- *(agent)* Open the heartbeat stream before the sender task so neither side
+  deadlocks. The control plane holds response headers until it reads the first
+  message, which the agent only sent after awaiting those headers — heartbeats
+  never flowed, every agent drifted offline and server commands (rule updates,
+  IP bans, cache purge) never reached the data plane. Also run the runtime
+  images with a writable working directory (`/var/lib/pingwaf`) so agent cache
+  persistence and ACME state survive restarts.
+- *(agent)* Adopt the server-issued agent id on every gRPC stream. The client
+  presented a locally generated UUID, so the control plane rejected each
+  heartbeat with "agent_id does not match the presented token".
+- *(compose)* Pin the container hostname so a recreated all-in-one agent
+  re-registers under the same identity instead of minting a new agent row on
+  every deploy.
+- *(agent)* Split plaintext and TLS listeners: `global_certificates` enables
+  TLS per server, so the combined "0.0.0.0:80, 0.0.0.0:443" listener wrapped
+  plaintext HTTP in TLS handshakes — browsers to port 80 died with
+  `tls_validate_record_header` errors and ACME HTTP-01 challenges never
+  arrived. Port 80 now serves plaintext HTTP while 443 keeps TLS.
+- *(server)* Persist the bootstrap API key to `/var/lib/pingwaf/bootstrap_api_key`
+  (0600) and verify it against the database hash on startup, so the all-in-one
+  agent keeps its key — and its agent row — across control plane restarts
+  instead of minting a ghost row on every boot.
+
 ## [PingWAF 0.14.5] — 2026-09-28
 
 ### ⛰️ Features
