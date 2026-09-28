@@ -36,6 +36,17 @@ const ACTION_TONE: Record<string, 'danger' | 'success'> = {
   allow: 'success',
 }
 
+/** Refresh intervals offered for subscriptions, in minutes (0 = manual). */
+const SYNC_INTERVAL_OPTIONS = [
+  { value: '0', labelKey: 'syncManual' },
+  { value: '60', labelKey: 'syncHourly' },
+  { value: '360', labelKey: 'sync6h' },
+  { value: '1440', labelKey: 'syncDaily' },
+  { value: '10080', labelKey: 'syncWeekly' },
+] as const
+
+const SYNC_INTERVAL_DEFAULT = '1440'
+
 export function IpGroupsPage() {
   const { t } = useTranslation()
   const toast = useToast()
@@ -84,7 +95,8 @@ export function IpGroupsPage() {
       toast.success(t('pages.ipGroups.synced'))
       invalidate()
     },
-    onError: () => toast.error(t('pages.ipGroups.syncFailed')),
+    onError: (error) =>
+      toast.error(error.message || t('pages.ipGroups.syncFailed')),
   })
 
   const columns: Column<IpGroupResponse>[] = useMemo(
@@ -139,14 +151,25 @@ export function IpGroupsPage() {
         key: 'lastSync',
         header: t('pages.ipGroups.colLastSync'),
         accessor: (row) => row.last_synced_at ?? '',
-        cell: (row) =>
-          row.last_synced_at ? (
-            <span title={formatDateTime(row.last_synced_at)}>
-              {formatRelative(row.last_synced_at)}
-            </span>
-          ) : (
-            <span className="text-fg-subtle">—</span>
-          ),
+        cell: (row) => (
+          <div className="min-w-0">
+            {row.last_synced_at ? (
+              <span title={formatDateTime(row.last_synced_at)}>
+                {formatRelative(row.last_synced_at)}
+              </span>
+            ) : (
+              <span className="text-fg-subtle">—</span>
+            )}
+            {row.last_sync_error && (
+              <p
+                className="max-w-48 truncate text-xs text-danger"
+                title={row.last_sync_error}
+              >
+                {row.last_sync_error}
+              </p>
+            )}
+          </div>
+        ),
       },
       {
         key: 'actions',
@@ -318,6 +341,9 @@ function GroupDialog({ initial, sites, onClose, onSaved }: GroupDialogProps) {
   const [action, setAction] = useState(initial?.action ?? 'block')
   const [isGlobal, setIsGlobal] = useState(initial?.is_global ?? true)
   const [sourceUrl, setSourceUrl] = useState(initial?.source_url ?? '')
+  const [syncInterval, setSyncInterval] = useState(
+    String(initial?.sync_interval_minutes ?? SYNC_INTERVAL_DEFAULT),
+  )
   const [enabled, setEnabled] = useState(initial?.enabled ?? true)
   const [ipText, setIpText] = useState(initial?.ip_ranges.join('\n') ?? '')
   const [selectedSites, setSelectedSites] = useState<Set<string>>(
@@ -349,6 +375,10 @@ function GroupDialog({ initial, sites, onClose, onSaved }: GroupDialogProps) {
         action,
         is_global: isGlobal,
         source_url: sourceUrl.trim() || null,
+        // 0 = manual; the server maps it to a null interval.
+        sync_interval_minutes: sourceUrl.trim()
+          ? Number(syncInterval)
+          : 0,
         enabled,
       }
 
@@ -395,7 +425,7 @@ function GroupDialog({ initial, sites, onClose, onSaved }: GroupDialogProps) {
 
   const canSave =
     name.trim().length > 0 &&
-    ipValidation.total > 0 &&
+    (ipValidation.total > 0 || sourceUrl.trim().length > 0) &&
     ipValidation.invalid.length === 0
 
   const toggleSite = (id: string) =>
@@ -518,6 +548,18 @@ function GroupDialog({ initial, sites, onClose, onSaved }: GroupDialogProps) {
           onChange={(e) => setSourceUrl(e.target.value)}
           placeholder={t('pages.ipGroups.fieldSourceUrlPh')}
         />
+
+        {sourceUrl.trim() && (
+          <Select
+            label={t('pages.ipGroups.fieldSyncInterval')}
+            value={syncInterval}
+            onChange={(e) => setSyncInterval(e.target.value)}
+            options={SYNC_INTERVAL_OPTIONS.map((option) => ({
+              value: option.value,
+              label: t(`pages.ipGroups.${option.labelKey}`),
+            }))}
+          />
+        )}
 
         <div className="flex justify-end gap-2 pt-2">
           <Button variant="ghost" onClick={onClose}>

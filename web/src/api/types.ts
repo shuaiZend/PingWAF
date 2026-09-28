@@ -407,6 +407,15 @@ export const RATE_LIMIT_CHARACTERISTICS: RateLimitCharacteristic[] = [
   'ja3',
 ]
 
+/** Characteristics the edge cannot key counters on yet: rules that use them
+ * are stored but not enforced. */
+export const RATE_LIMIT_CHARACTERISTICS_PENDING: RateLimitCharacteristic[] = [
+  'header',
+  'cookie',
+  'query',
+  'ja3',
+]
+
 /** `models::rules::rate_limit_rules::Model` */
 export interface RateLimitRule {
   id: string
@@ -510,6 +519,10 @@ export interface AccessLog {
   referer: string | null
   country_code: string | null
   tls_version: string | null
+  request_headers: Record<string, string> | null
+  request_body: string | null
+  request_body_size: number | null
+  request_body_truncated: boolean | null
 }
 
 /** `api::logs::SecurityQuery` */
@@ -523,6 +536,7 @@ export interface SecurityLogQuery extends PaginationQuery {
   host?: string
   path?: string
   country_code?: string
+  request_id?: string
 }
 
 /** `api::logs::AccessQuery` */
@@ -539,6 +553,7 @@ export interface AccessLogQuery extends PaginationQuery {
   cache_status?: string
   country_code?: string
   min_latency_ms?: number
+  request_id?: string
 }
 
 /** Convenience alias used by the logs page. */
@@ -634,6 +649,15 @@ export interface SiteOverview {
   plan: string
   requests: number
   blocked: number
+}
+
+/** `api::analytics::SiteTrafficBucket` — one point of one site's series. */
+export interface SiteTrafficBucket {
+  bucket: string
+  site_id: string
+  site_domain: string
+  site_name: string
+  requests: number
 }
 
 /* ── Agents ───────────────────────────────────────────────────────── */
@@ -1064,36 +1088,33 @@ export interface PurgeCacheResult {
 /* ── CC protection / challenge ────────────────────────────────────── */
 
 /** Default challenge posture applied when CC protection trips. */
-export type ChallengeLevel = 'none' | 'js_challenge' | 'managed' | 'interactive'
+export type ChallengeLevel =
+  | 'none'
+  | 'non_interactive'
+  | 'managed'
+  | 'interactive'
 
 export const CHALLENGE_LEVELS: ChallengeLevel[] = [
   'none',
-  'js_challenge',
+  'non_interactive',
   'managed',
   'interactive',
 ]
 
 export interface ChallengeConfig {
-  site_id: string
   enabled: boolean
-  under_attack: boolean
-  challenge_level: ChallengeLevel | string
-  /** Minutes a solved challenge stays valid for a client. */
-  clearance_duration: number
-  /** Requests/minute per IP before a challenge is issued. */
+  under_attack_mode: boolean
+  default_level: ChallengeLevel | string
+  /** Seconds a solved challenge stays valid for a client (60..86400). */
+  clearance_duration_secs: number
+  /** Requests/minute per IP before a challenge is issued (1..10000000). */
   rate_threshold: number
   exempt_paths: string[]
   browser_integrity_check: boolean
   tls_fingerprint_check: boolean
 }
 
-export type UpdateChallengeRequest = Partial<Omit<ChallengeConfig, 'site_id'>>
-
-export interface ChallengeStats {
-  challenges_served: number
-  pass_rate: number
-  block_rate: number
-}
+export type UpdateChallengeRequest = ChallengeConfig
 
 /* ── IP access rules ──────────────────────────────────────────────── */
 
@@ -1185,7 +1206,7 @@ export interface RewriteRule {
   name: string
   direction: RewriteDirection | string
   /** Wirefilter-flavoured match expression; empty means "always". */
-  condition: string
+  condition_expr: string
   operations: RewriteOperation[]
   priority: number
   enabled: boolean
@@ -1195,7 +1216,7 @@ export interface RewriteRule {
 export interface CreateRewriteRuleRequest {
   name: string
   direction?: RewriteDirection | string
-  condition?: string
+  condition_expr?: string
   operations?: RewriteOperation[]
   priority?: number
   enabled?: boolean
@@ -1205,9 +1226,20 @@ export type UpdateRewriteRuleRequest = Partial<CreateRewriteRuleRequest>
 
 /* ── Custom error pages ───────────────────────────────────────────── */
 
-export type ErrorPageContentType = 'html' | 'json' | 'text'
+export type ErrorPageContentType = 'text/html' | 'application/json' | 'text/plain'
 
-export const ERROR_PAGE_CONTENT_TYPES: ErrorPageContentType[] = ['html', 'json', 'text']
+export const ERROR_PAGE_CONTENT_TYPES: ErrorPageContentType[] = [
+  'text/html',
+  'application/json',
+  'text/plain',
+]
+
+/** Short labels for the content-type picker. */
+export const ERROR_PAGE_CONTENT_TYPE_LABELS: Record<string, string> = {
+  'text/html': 'HTML',
+  'application/json': 'JSON',
+  'text/plain': 'Text',
+}
 
 /** Status codes the console offers a custom page for out of the box. */
 export const ERROR_PAGE_STATUS_CODES = [403, 429, 502, 503, 504] as const
@@ -1218,7 +1250,7 @@ export interface ErrorPage {
   status_code: number
   name: string
   content_type: ErrorPageContentType | string
-  template: string
+  body_template: string
   enabled: boolean
   created_at: string
 }
@@ -1227,42 +1259,38 @@ export interface UpsertErrorPageRequest {
   status_code: number
   name?: string
   content_type?: ErrorPageContentType | string
-  template?: string
+  body_template?: string
   enabled?: boolean
 }
 
 /* ── Bot protection ───────────────────────────────────────────────── */
 
-export type BotAction = 'allow' | 'challenge' | 'block'
+export type BotAction = 'block' | 'challenge' | 'js_challenge' | 'log' | 'allow'
 
-export const BOT_ACTIONS: BotAction[] = ['allow', 'challenge', 'block']
-
-export interface KnownBot {
-  id: string
-  name: string
-  /** Substring or regex matched against the User-Agent header. */
-  ua_pattern: string
-  action: BotAction | string
-}
+/** Actions the v1 data plane enforces; `js_challenge`/`allow` are accepted by
+ * the API for compatibility but behave like `challenge`/`log`. */
+export const BOT_ACTIONS: BotAction[] = ['block', 'challenge', 'log']
 
 export interface BotConfig {
+  id: string
   site_id: string
   enabled: boolean
-  user_agent_analysis: boolean
+  ua_analysis: boolean
   js_detection: boolean
-  tls_fingerprinting: boolean
+  tls_fingerprint: boolean
   behavioral_analysis: boolean
   action: BotAction | string
-  known_bots: KnownBot[]
+  /** Case-insensitive User-Agent substrings of verified good bots. */
+  known_bots_whitelist: string[]
+  updated_at: string
 }
 
-export type UpdateBotRequest = Partial<Omit<BotConfig, 'site_id' | 'known_bots'>>
-
-export interface BotStats {
-  bot_request_pct: number
-  verified_bots: number
-  likely_bots: number
-}
+export type UpdateBotRequest = Partial<
+  Pick<
+    BotConfig,
+    'enabled' | 'ua_analysis' | 'action' | 'known_bots_whitelist'
+  >
+>
 
 /* ── Geo restrictions ─────────────────────────────────────────────── */
 
@@ -1326,6 +1354,8 @@ export interface IpGroup {
   source_url: string | null
   sync_interval_minutes: number | null
   last_synced_at: string | null
+  /** Why the most recent subscription sync failed; null when it succeeded. */
+  last_sync_error: string | null
   enabled: boolean
   created_at: string
   updated_at: string

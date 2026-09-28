@@ -39,6 +39,9 @@ pub enum ApiError {
     /// The endpoint exists but cannot run on this deployment, e.g. CPU
     /// profiling on non-Linux platforms.
     NotImplemented(String),
+    /// An upstream dependency (e.g. a subscription source) failed; the
+    /// upstream's own error text is safe to show to the operator.
+    BadGateway(String),
     /// Unexpected failure; the message is logged in full and a generic text is
     /// returned to the client.
     Internal(String),
@@ -55,6 +58,7 @@ impl ApiError {
             ApiError::Conflict(_) => "conflict",
             ApiError::Unprocessable(_) => "unprocessable_entity",
             ApiError::NotImplemented(_) => "not_implemented",
+            ApiError::BadGateway(_) => "bad_gateway",
             ApiError::Internal(_) => "internal_error",
         }
     }
@@ -69,6 +73,7 @@ impl ApiError {
             ApiError::Conflict(_) => StatusCode::CONFLICT,
             ApiError::Unprocessable(_) => StatusCode::UNPROCESSABLE_ENTITY,
             ApiError::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
+            ApiError::BadGateway(_) => StatusCode::BAD_GATEWAY,
             ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -96,6 +101,7 @@ impl std::fmt::Display for ApiError {
             | ApiError::Conflict(msg)
             | ApiError::Unprocessable(msg)
             | ApiError::NotImplemented(msg)
+            | ApiError::BadGateway(msg)
             | ApiError::Internal(msg) => f.write_str(msg),
         }
     }

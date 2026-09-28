@@ -18,6 +18,7 @@ pub mod grpc;
 pub mod migration;
 pub mod models;
 pub mod monitoring;
+pub mod subscription;
 
 pub use config::ServerConfig;
 
@@ -80,6 +81,13 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
 
     // ── 4. Seed default admin ────────────────────────────────────────────────
     seed_admin(&db, &config).await?;
+    // Best-effort like every seed: boot must not fail over the default group.
+    if let Err(err) = defaults::seed_ip_group_defaults(&db).await {
+        tracing::warn!(
+            error = %err,
+            "could not seed the built-in Cloudflare IP group"
+        );
+    }
 
     // ── 5. Parse addresses early (before config moves into Arc) ─────────────
     let http_addr: SocketAddr = config.http_addr.parse().map_err(|e| {
@@ -138,7 +146,7 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
     let http_listener = TcpListener::bind(http_addr).await.map_err(|err| {
         anyhow::anyhow!("failed to bind HTTP address {http_addr}: {err}")
     })?;
-    let router = api::build_router(state);
+    let router = api::build_router(state.clone());
     tracing::info!(%http_addr, "REST API listening");
 
     // ── 8. gRPC (tonic) ──────────────────────────────────────────────────────
@@ -165,6 +173,10 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
         monitor_config,
         agents.clone(),
     );
+
+    // ── 9b. Start the IP group subscription scheduler ───────────────────────
+    let _sync_handle =
+        api::ip_groups::start_subscription_sync_scheduler(state.clone());
 
     // ── 10. Spawn and wait for shutdown ─────────────────────────────────────
     tokio::select! {

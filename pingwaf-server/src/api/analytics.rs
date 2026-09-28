@@ -35,6 +35,9 @@ const MAX_BUCKETS: i64 = 8 * 1024;
 /// `date_trunc` fields the API accepts.
 const INTERVALS: [&str; 4] = ["minute", "hour", "day", "week"];
 
+/// Sites tracked by the per-site traffic chart.
+const TOP_SITES_LIMIT: i64 = 8;
+
 #[derive(Debug, Deserialize)]
 pub struct RangeQuery {
     pub site_id: Option<String>,
@@ -160,11 +163,21 @@ pub struct SiteOverview {
     pub blocked: i64,
 }
 
+#[derive(Debug, Serialize)]
+pub struct SiteTrafficBucket {
+    pub bucket: DateTime<Utc>,
+    pub site_id: Uuid,
+    pub site_domain: String,
+    pub site_name: String,
+    pub requests: i64,
+}
+
 /// Routes contributed to `/api/v1`.
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/analytics/summary", get(summary))
         .route("/analytics/requests-over-time", get(requests_over_time))
+        .route("/analytics/sites-over-time", get(sites_over_time))
         .route("/analytics/top-rules", get(top_rules))
         .route("/analytics/top-ips", get(top_ips))
         .route("/analytics/top-paths", get(top_paths))
@@ -208,7 +221,16 @@ async fn resolve(
             }
         },
     };
+    resolve_range(query, site_id)
+}
 
+/// Validates from/to/interval/limit. Site visibility is decided by the caller
+/// so endpoints that aggregate across sites (rather than requiring one) can
+/// reuse the same window checks.
+fn resolve_range(
+    query: &RangeQuery,
+    site_id: Option<Uuid>,
+) -> Result<Resolved, ApiError> {
     let to = match parse_optional_datetime(&query.to, "to")? {
         Some(instant) => instant,
         None => Utc::now(),
@@ -245,6 +267,16 @@ async fn resolve(
         interval,
         limit,
     })
+}
+
+/// Seconds covered by one `date_trunc` bucket.
+fn bucket_seconds(interval: &str) -> i64 {
+    match interval {
+        "minute" => 60,
+        "hour" => 3_600,
+        "day" => 86_400,
+        _ => 604_800, // week
+    }
 }
 
 /// `GET /api/v1/analytics/summary`
@@ -321,14 +353,8 @@ async fn requests_over_time(
 
     // Reject ranges that would produce an absurd number of buckets before
     // touching the database.
-    let bucket_seconds = match resolved.interval.as_str() {
-        "minute" => 60,
-        "hour" => 3_600,
-        "day" => 86_400,
-        _ => 604_800, // week
-    };
     let span = (resolved.to - resolved.from).num_seconds().max(1);
-    if span / bucket_seconds > MAX_BUCKETS {
+    if span / bucket_seconds(&resolved.interval) > MAX_BUCKETS {
         return Err(ApiError::BadRequest(format!(
             "the requested range would produce too many {0} buckets; widen the interval",
             resolved.interval
@@ -390,6 +416,110 @@ async fn requests_over_time(
     }
 
     Ok(Json(buckets))
+}
+
+/// `GET /api/v1/analytics/sites-over-time` — request volume over time for the
+/// busiest sites, one series per site, for the dashboard's multi-line chart.
+///
+/// Unlike the aggregate endpoints this one stays meaningful without a site
+/// filter even for accounts owning several sites: no filter scopes to every
+/// site the caller may see, restricted to the top [`TOP_SITES_LIMIT`] sites by
+/// in-window traffic so the chart stays readable.
+async fn sites_over_time(
+    State(state): State<AppState>,
+    current: AuthUser,
+    Query(query): Query<RangeQuery>,
+) -> Result<Json<Vec<SiteTrafficBucket>>, ApiError> {
+    let site_id = match non_empty(&query.site_id) {
+        Some(raw) => {
+            let id = parse_uuid(&raw, "site id")?;
+            load_site_read(&state.db, id, &current).await?;
+            Some(id)
+        },
+        None => None,
+    };
+    let resolved = resolve_range(&query, site_id)?;
+
+    let span = (resolved.to - resolved.from).num_seconds().max(1);
+    if span / bucket_seconds(&resolved.interval) > MAX_BUCKETS {
+        return Err(ApiError::BadRequest(format!(
+            "the requested range would produce too many {0} buckets; widen the interval",
+            resolved.interval
+        )));
+    }
+
+    let (mut where_sql, mut where_values) = resolved.filter("a");
+    if resolved.site_id.is_none() && !current.is_admin() {
+        // Non-admins only see their own sites.
+        let user_placeholder = where_values.len() + 1;
+        where_sql.push_str(&format!(" AND s.user_id = ${user_placeholder}"));
+        where_values.push(current.id.into());
+    }
+
+    // Pass 1: the top sites by total in-window traffic.
+    let limit_placeholder = where_values.len() + 1;
+    let mut values = where_values.clone();
+    values.push(TOP_SITES_LIMIT.into());
+    let top_sql = format!(
+        "SELECT a.site_id, s.domain AS site_domain, s.name AS site_name \
+         FROM access_logs a JOIN sites s ON s.id = a.site_id \
+         WHERE {where_sql} \
+         GROUP BY a.site_id, s.domain, s.name \
+         ORDER BY COUNT(*) DESC, s.domain ASC \
+         LIMIT ${limit_placeholder}"
+    );
+    let top_rows = query_all(&state.db, &top_sql, values).await?;
+    let top: Vec<(Uuid, String, String)> = top_rows
+        .iter()
+        .map(|row| {
+            (
+                get_value::<Uuid>(row, "site_id"),
+                get_value::<String>(row, "site_domain"),
+                get_value::<String>(row, "site_name"),
+            )
+        })
+        .collect();
+    if top.is_empty() {
+        return Ok(Json(Vec::new()));
+    }
+
+    // Pass 2: the bucketed series for those sites only.
+    let interval = resolved.interval.clone();
+    let where_count = where_values.len();
+    let mut in_clause = String::new();
+    for index in 0..top.len() {
+        if index > 0 {
+            in_clause.push_str(", ");
+        }
+        in_clause.push_str(&format!("${}", where_count + index + 1));
+    }
+    let sql = format!(
+        "SELECT date_trunc('{interval}', a.timestamp) AS bucket, \
+                a.site_id, s.domain AS site_domain, s.name AS site_name, \
+                COUNT(*) AS requests \
+         FROM access_logs a JOIN sites s ON s.id = a.site_id \
+         WHERE {where_sql} AND a.site_id IN ({in_clause}) \
+         GROUP BY bucket, a.site_id, s.domain, s.name \
+         ORDER BY bucket ASC"
+    );
+    let mut values = where_values;
+    for (id, _, _) in &top {
+        values.push((*id).into());
+    }
+
+    let rows = query_all(&state.db, &sql, values).await?;
+    Ok(Json(
+        rows.iter()
+            .map(|row| SiteTrafficBucket {
+                bucket: try_get::<DateTime<Utc>>(row, "bucket")
+                    .unwrap_or_else(Utc::now),
+                site_id: get_value::<Uuid>(row, "site_id"),
+                site_domain: get_value::<String>(row, "site_domain"),
+                site_name: get_value::<String>(row, "site_name"),
+                requests: get_value::<i64>(row, "requests"),
+            })
+            .collect(),
+    ))
 }
 
 /// `GET /api/v1/analytics/top-rules`
@@ -638,5 +768,14 @@ mod tests {
         assert!(!INTERVALS.contains(&"1 hour; DROP TABLE users"));
         assert_eq!(default_interval(), "hour");
         assert_eq!(default_limit(), 10);
+    }
+
+    #[test]
+    fn bucket_seconds_covers_every_interval() {
+        for interval in INTERVALS {
+            assert!(bucket_seconds(interval) > 0);
+        }
+        assert_eq!(bucket_seconds("minute"), 60);
+        assert_eq!(bucket_seconds("week"), 604_800);
     }
 }

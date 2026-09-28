@@ -18,7 +18,7 @@
 //! Agent (data plane only), and AllInOne (both in a single process).
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -180,6 +180,29 @@ fn sanitize_algo(algo: &str) -> Option<String> {
 /// every generated location.
 const WAF_PLUGIN_NAME: &str = "pingwaf:waf";
 
+/// Name under which the edge cache plugin is registered. One process-wide
+/// instance serves every site: the plugin resolves each host's cache rules
+/// from the agent's rule cache, so wiring it into the locations is all the
+/// data plane needs to actually cache.
+const CACHE_PLUGIN_NAME: &str = "pingwaf:cache";
+
+/// Name under which the CC/challenge plugin is registered. Like the WAF and
+/// cache plugins it resolves per-site settings from the agent's rule cache;
+/// it also serves the challenge verify endpoint, which every site needs
+/// whenever a WAF, IP or geo rule answers with a challenge.
+const CHALLENGE_PLUGIN_NAME: &str = "pingwaf:challenge";
+
+/// Name under which the rewrite plugin is registered. It rewrites request
+/// and response headers/paths/bodies per the site's rewrite rules, resolved
+/// from the agent's rule cache at request time.
+const REWRITE_PLUGIN_NAME: &str = "pingwaf:rewrite";
+
+/// Name under which the custom error page plugin is registered. It replaces
+/// upstream error responses with the site's configured pages (falling back to
+/// the built-in PingWAF pages); plugin-generated responses such as WAF blocks
+/// answer early and never reach its response phase.
+const ERROR_PAGE_PLUGIN_NAME: &str = "pingwaf:error_page";
+
 /// Build a `PingapConfig` from the agent's cached site rules.
 ///
 /// Each origin pool becomes one upstream keyed by its pool id (or the
@@ -189,10 +212,22 @@ const WAF_PLUGIN_NAME: &str = "pingwaf:waf";
 /// additional location carrying the pingap path marker for its match
 /// type. All sites share a single server listening on ports 80 and 443
 /// with TLS enabled via the global certificate store.
-fn cached_rules_to_pingap_config(cached: &CachedRules) -> Option<PingapConfig> {
+fn cached_rules_to_pingap_config(
+    cached: &CachedRules,
+    cache_dir: &Path,
+) -> Option<PingapConfig> {
     if cached.sites.is_empty() {
         return None;
     }
+
+    // The cache plugin carries no per-site settings of its own — rules,
+    // namespaces and quotas all flow from the agent's rule cache at request
+    // time. It only earns a slot in the config when some site actually has
+    // cache rules; for the rest it would be dead weight.
+    let has_cache_rules = cached
+        .sites
+        .values()
+        .any(|site| site.cache_rules.iter().any(|rule| rule.enabled));
 
     let mut upstreams: HashMap<String, UpstreamConf> = HashMap::new();
     let mut locations: HashMap<String, LocationConf> = HashMap::new();
@@ -206,6 +241,42 @@ fn cached_rules_to_pingap_config(cached: &CachedRules) -> Option<PingapConfig> {
         toml::from_str::<PluginConf>(r###"category = "waf""###)
             .unwrap_or_default(),
     );
+    plugins.insert(
+        CHALLENGE_PLUGIN_NAME.to_string(),
+        toml::from_str::<PluginConf>(r###"category = "challenge""###)
+            .unwrap_or_default(),
+    );
+    plugins.insert(
+        REWRITE_PLUGIN_NAME.to_string(),
+        toml::from_str::<PluginConf>(r###"category = "rewrite""###)
+            .unwrap_or_default(),
+    );
+    plugins.insert(
+        ERROR_PAGE_PLUGIN_NAME.to_string(),
+        toml::from_str::<PluginConf>(r###"category = "error_page""###)
+            .unwrap_or_default(),
+    );
+    if has_cache_rules {
+        let mut cache_conf = PluginConf::new();
+        cache_conf.insert(
+            "category".to_string(),
+            toml::Value::String("cache".to_string()),
+        );
+        cache_conf.insert(
+            "directory".to_string(),
+            toml::Value::String(cache_dir.to_string_lossy().to_string()),
+        );
+        plugins.insert(CACHE_PLUGIN_NAME.to_string(), cache_conf);
+    }
+    let mut location_plugins: Vec<String> = vec![
+        WAF_PLUGIN_NAME.to_string(),
+        CHALLENGE_PLUGIN_NAME.to_string(),
+        REWRITE_PLUGIN_NAME.to_string(),
+        ERROR_PAGE_PLUGIN_NAME.to_string(),
+    ];
+    if has_cache_rules {
+        location_plugins.push(CACHE_PLUGIN_NAME.to_string());
+    }
 
     for (site_id, site) in &cached.sites {
         if site.domain.is_empty() {
@@ -312,7 +383,7 @@ fn cached_rules_to_pingap_config(cached: &CachedRules) -> Option<PingapConfig> {
                     upstream: Some(key),
                     host: Some(host.clone()),
                     path: Some("/".to_string()),
-                    plugins: Some(vec![WAF_PLUGIN_NAME.to_string()]),
+                    plugins: Some(location_plugins.clone()),
                     ..Default::default()
                 },
             );
@@ -340,7 +411,7 @@ fn cached_rules_to_pingap_config(cached: &CachedRules) -> Option<PingapConfig> {
                     weight: route
                         .priority
                         .map(|p| p.clamp(1, u16::MAX as i32) as u16),
-                    plugins: Some(vec![WAF_PLUGIN_NAME.to_string()]),
+                    plugins: Some(location_plugins.clone()),
                     ..Default::default()
                 },
             );
@@ -434,7 +505,10 @@ fn cached_rules_to_pingap_config(cached: &CachedRules) -> Option<PingapConfig> {
 
 /// Build a `PingapConfig` from the agent's cached rules.
 fn build_pingap_config(rule_cache: &RuleCache) -> Option<PingapConfig> {
-    cached_rules_to_pingap_config(&rule_cache.all_sites())
+    cached_rules_to_pingap_config(
+        &rule_cache.all_sites(),
+        rule_cache.cache_dir(),
+    )
 }
 
 /// Build the certificate entry a lets-encrypt issuance is driven by.
@@ -1148,6 +1222,7 @@ mod tests {
             ssl_config: None,
             upstreams: vec![],
             routes: vec![],
+            bot_protection: None,
         }
     }
 
@@ -1203,8 +1278,11 @@ mod tests {
     fn single_pool_without_routes_matches_legacy_layout() {
         let mut site = site_rules("site1", "a.example.com");
         site.upstreams = vec![pool("", vec![peer("10.0.0.1:8080")])];
-        let config = cached_rules_to_pingap_config(&one_site_cache(site))
-            .expect("config should build");
+        let config = cached_rules_to_pingap_config(
+            &one_site_cache(site),
+            Path::new("/tmp/pingwaf-test-cache"),
+        )
+        .expect("config should build");
 
         let upstream = config
             .upstreams
@@ -1232,8 +1310,11 @@ mod tests {
             pool("", vec![peer("10.0.0.1:8080")]),
             pool("", vec![peer("10.0.0.2:8080")]),
         ];
-        let config = cached_rules_to_pingap_config(&one_site_cache(site))
-            .expect("config should build");
+        let config = cached_rules_to_pingap_config(
+            &one_site_cache(site),
+            Path::new("/tmp/pingwaf-test-cache"),
+        )
+        .expect("config should build");
 
         assert!(config.upstreams.contains_key("site1_upstream_0"));
         assert!(config.upstreams.contains_key("site1_upstream_1"));
@@ -1272,8 +1353,11 @@ mod tests {
         let orphan = route("r5", "prefix", "/orphan", "pool-empty");
         site.routes = vec![r1, r2, r3, disabled, orphan];
 
-        let config = cached_rules_to_pingap_config(&one_site_cache(site))
-            .expect("config should build");
+        let config = cached_rules_to_pingap_config(
+            &one_site_cache(site),
+            Path::new("/tmp/pingwaf-test-cache"),
+        )
+        .expect("config should build");
 
         assert_eq!(config.upstreams.len(), 2);
         let default_upstream =
@@ -1332,8 +1416,11 @@ mod tests {
         legacy_pool.algo = "lbconsistenthash".to_string();
         site.upstreams.push(legacy_pool);
 
-        let config = cached_rules_to_pingap_config(&one_site_cache(site))
-            .expect("config should build");
+        let config = cached_rules_to_pingap_config(
+            &one_site_cache(site),
+            Path::new("/tmp/pingwaf-test-cache"),
+        )
+        .expect("config should build");
 
         let tls = config.upstreams.get("pool-a").expect("tls pool");
         assert_eq!(tls.sni.as_deref(), Some("origin.example.com"));
@@ -1385,12 +1472,22 @@ mod tests {
     #[test]
     fn empty_cache_and_empty_sites_produce_no_config() {
         assert!(
-            cached_rules_to_pingap_config(&CachedRules::default()).is_none()
+            cached_rules_to_pingap_config(
+                &CachedRules::default(),
+                Path::new("/tmp/pingwaf-test-cache")
+            )
+            .is_none()
         );
 
         let mut site = site_rules("site1", "");
         site.upstreams = vec![pool("", vec![peer("10.0.0.1:8080")])];
-        assert!(cached_rules_to_pingap_config(&one_site_cache(site)).is_none());
+        assert!(
+            cached_rules_to_pingap_config(
+                &one_site_cache(site),
+                Path::new("/tmp/pingwaf-test-cache")
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -1400,8 +1497,11 @@ mod tests {
         default_pool.is_default = true;
         site.upstreams = vec![default_pool];
         site.routes = vec![route("r1", "prefix", "/api", "pool1")];
-        let config = cached_rules_to_pingap_config(&one_site_cache(site))
-            .expect("config should build");
+        let config = cached_rules_to_pingap_config(
+            &one_site_cache(site),
+            Path::new("/tmp/pingwaf-test-cache"),
+        )
+        .expect("config should build");
 
         let category = config
             .plugins
@@ -1415,8 +1515,107 @@ mod tests {
         for (name, loc) in &config.locations {
             assert_eq!(
                 loc.plugins.as_deref(),
-                Some(["pingwaf:waf".to_string()].as_slice()),
-                "location {name} must reference the waf plugin"
+                Some(
+                    [
+                        "pingwaf:waf".to_string(),
+                        "pingwaf:challenge".to_string(),
+                        "pingwaf:rewrite".to_string(),
+                        "pingwaf:error_page".to_string(),
+                    ]
+                    .as_slice()
+                ),
+                "location {name} must reference the waf and challenge plugins"
+            );
+        }
+    }
+
+    fn cache_rule(enabled: bool) -> pingwaf_agent::cache::CacheRule {
+        pingwaf_agent::cache::CacheRule {
+            id: "cr1".to_string(),
+            name: "static assets".to_string(),
+            match_expression: r#"path starts_with "/assets/""#.to_string(),
+            edge_ttl_seconds: 300,
+            browser_ttl_seconds: 60,
+            disk_quota_mb: 0,
+            cache_eligible: true,
+            cache_key_headers: vec![],
+            respect_origin_headers: true,
+            stale_while_revalidate_seconds: 0,
+            enabled,
+        }
+    }
+
+    #[test]
+    fn cache_plugin_is_wired_when_a_site_has_cache_rules() {
+        let mut site = site_rules("site1", "a.example.com");
+        let mut default_pool = pool("pool1", vec![peer("10.0.0.1:8080")]);
+        default_pool.is_default = true;
+        site.upstreams = vec![default_pool];
+        site.cache_rules = vec![cache_rule(true)];
+        let config = cached_rules_to_pingap_config(
+            &one_site_cache(site),
+            Path::new("/var/lib/pingwaf/cache"),
+        )
+        .expect("config should build");
+
+        let conf = config
+            .plugins
+            .get("pingwaf:cache")
+            .expect("cache plugin must be present");
+        assert_eq!(
+            conf.get("category").and_then(|v| v.as_str()),
+            Some("cache")
+        );
+        assert_eq!(
+            conf.get("directory").and_then(|v| v.as_str()),
+            Some("/var/lib/pingwaf/cache")
+        );
+        for (name, loc) in &config.locations {
+            assert_eq!(
+                loc.plugins.as_deref(),
+                Some(
+                    [
+                        "pingwaf:waf".to_string(),
+                        "pingwaf:challenge".to_string(),
+                        "pingwaf:rewrite".to_string(),
+                        "pingwaf:error_page".to_string(),
+                        "pingwaf:cache".to_string(),
+                    ]
+                    .as_slice()
+                ),
+                "location {name} must reference the cache plugin"
+            );
+        }
+    }
+
+    #[test]
+    fn cache_plugin_is_absent_without_enabled_cache_rules() {
+        let mut site = site_rules("site1", "a.example.com");
+        let mut default_pool = pool("pool1", vec![peer("10.0.0.1:8080")]);
+        default_pool.is_default = true;
+        site.upstreams = vec![default_pool];
+        // Disabled rules must not pull the plugin in.
+        site.cache_rules = vec![cache_rule(false)];
+        let config = cached_rules_to_pingap_config(
+            &one_site_cache(site),
+            Path::new("/var/lib/pingwaf/cache"),
+        )
+        .expect("config should build");
+
+        assert!(!config.plugins.contains_key("pingwaf:cache"));
+        for (name, loc) in &config.locations {
+            assert_eq!(
+                loc.plugins.as_deref(),
+                Some(
+                    [
+                        "pingwaf:waf".to_string(),
+                        "pingwaf:challenge".to_string(),
+                        "pingwaf:rewrite".to_string(),
+                        "pingwaf:error_page".to_string(),
+                    ]
+                    .as_slice()
+                ),
+                "location {name} must not reference the cache plugin"
             );
         }
     }
@@ -1428,8 +1627,11 @@ mod tests {
         default_pool.is_default = true;
         site.upstreams = vec![default_pool];
         site.ssl_config = Some(acme_ssl());
-        let config = cached_rules_to_pingap_config(&one_site_cache(site))
-            .expect("config should build");
+        let config = cached_rules_to_pingap_config(
+            &one_site_cache(site),
+            Path::new("/tmp/pingwaf-test-cache"),
+        )
+        .expect("config should build");
 
         assert_eq!(config.servers.len(), 2);
         let http = config.servers.get("pingwaf").expect("http server");
@@ -1449,8 +1651,11 @@ mod tests {
         let mut default_pool = pool("pool1", vec![peer("10.0.0.1:8080")]);
         default_pool.is_default = true;
         site.upstreams = vec![default_pool];
-        let config = cached_rules_to_pingap_config(&one_site_cache(site))
-            .expect("config should build");
+        let config = cached_rules_to_pingap_config(
+            &one_site_cache(site),
+            Path::new("/tmp/pingwaf-test-cache"),
+        )
+        .expect("config should build");
 
         assert_eq!(config.servers.len(), 1);
         let server = config.servers.get("pingwaf").expect("server");

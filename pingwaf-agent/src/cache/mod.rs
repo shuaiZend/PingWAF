@@ -65,6 +65,8 @@ pub struct SiteRules {
     /// existed.
     #[serde(default)]
     pub routes: Vec<RouteConfig>,
+    #[serde(default)]
+    pub bot_protection: Option<BotProtectionConfig>,
 }
 
 impl SiteRules {
@@ -269,6 +271,15 @@ impl From<i32> for ChallengeLevel {
     }
 }
 
+// ─── Bot Protection ─────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BotProtectionConfig {
+    pub enabled: bool,
+    pub action: WafAction,
+    pub known_bots_whitelist: Vec<String>,
+}
+
 // ─── Rewrite ────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -277,12 +288,8 @@ pub struct RewriteRule {
     pub name: String,
     pub match_expression: String,
     pub direction: RewriteDirection,
-    pub header_operations: Vec<HeaderOperation>,
-    pub path_rewrite: String,
-    pub path_rewrite_to: String,
-    pub query_rewrite: String,
-    pub body_search: String,
-    pub body_replace: String,
+    #[serde(default)]
+    pub operations: Vec<RewriteOperation>,
     pub enabled: bool,
     pub priority: u32,
 }
@@ -303,29 +310,18 @@ impl From<i32> for RewriteDirection {
     }
 }
 
+/// One declarative rewrite operation mirroring the console's operations JSON:
+/// `op_type` is one of set_header | add_header | remove_header | set_path |
+/// regex_replace_path | set_query_param | remove_query_param | replace_body;
+/// `name`/`value` semantics depend on the type.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HeaderOperation {
-    pub op_type: HeaderOpType,
+pub struct RewriteOperation {
+    #[serde(rename = "type")]
+    pub op_type: String,
+    #[serde(default)]
     pub name: String,
+    #[serde(default)]
     pub value: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HeaderOpType {
-    Set,
-    Add,
-    Remove,
-}
-
-impl From<i32> for HeaderOpType {
-    fn from(v: i32) -> Self {
-        match v {
-            1 => Self::Add,
-            2 => Self::Remove,
-            _ => Self::Set,
-        }
-    }
 }
 
 // ─── Error Pages ────────────────────────────────────────────
@@ -1043,6 +1039,10 @@ impl RuleCache {
                 .iter()
                 .map(Self::convert_route_config)
                 .collect(),
+            bot_protection: bundle
+                .bot_protection
+                .as_ref()
+                .map(Self::convert_bot_protection),
         }
     }
 
@@ -1168,26 +1168,31 @@ impl RuleCache {
         }
     }
 
+    fn convert_bot_protection(
+        b: &proto::BotProtectionConfig,
+    ) -> BotProtectionConfig {
+        BotProtectionConfig {
+            enabled: b.enabled,
+            action: WafAction::from(b.action),
+            known_bots_whitelist: b.known_bots_whitelist.clone(),
+        }
+    }
+
     fn convert_rewrite_rule(r: &proto::RewriteRule) -> RewriteRule {
         RewriteRule {
             id: r.id.clone(),
             name: r.name.clone(),
             match_expression: r.match_expression.clone(),
             direction: RewriteDirection::from(r.direction),
-            header_operations: r
-                .header_operations
+            operations: r
+                .operations
                 .iter()
-                .map(|h| HeaderOperation {
-                    op_type: HeaderOpType::from(h.r#type),
-                    name: h.name.clone(),
-                    value: h.value.clone(),
+                .map(|o| RewriteOperation {
+                    op_type: o.r#type.clone(),
+                    name: o.name.clone(),
+                    value: o.value.clone(),
                 })
                 .collect(),
-            path_rewrite: r.path_rewrite.clone(),
-            path_rewrite_to: r.path_rewrite_to.clone(),
-            query_rewrite: r.query_rewrite.clone(),
-            body_search: r.body_search.clone(),
-            body_replace: r.body_replace.clone(),
             enabled: r.enabled,
             priority: r.priority,
         }
@@ -1375,6 +1380,7 @@ mod tests {
                         enabled: true,
                         pool_id: "pool-1".to_string(),
                     }],
+                    bot_protection: None,
                 }),
             )]
             .into_iter()

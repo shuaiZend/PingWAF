@@ -39,6 +39,11 @@ use pingap_core::{
     get_req_header_value,
 };
 use pingora::proxy::Session;
+use pingwaf_agent::PingWafAgent;
+use pingwaf_agent::cache::{
+    ChallengeConfig as CacheChallengeConfig,
+    ChallengeLevel as CacheChallengeLevel,
+};
 use pingwaf_challenge::js_challenge::page::{
     ChallengePageParams, generate_interactive_challenge_html,
     generate_js_challenge_html, generate_managed_challenge_html,
@@ -48,7 +53,8 @@ use pingwaf_challenge::{
     ChallengeSubmission, ClearanceLevel, VerifyResult, generate_request_id,
 };
 use std::borrow::Cow;
-use std::sync::{Arc, LazyLock, RwLock};
+use std::path::Path;
+use std::sync::{Arc, LazyLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, warn};
 
@@ -188,6 +194,36 @@ pub(crate) fn block_page(request_id: &str, reason: &str) -> HttpResponse {
         .finish()
 }
 
+/// A 429 HTML page for requests stopped by a rate limit rule, telling the
+/// client when it may retry.
+pub(crate) fn rate_limit_page(
+    request_id: &str,
+    reason: &str,
+    retry_after_secs: u64,
+) -> HttpResponse {
+    let retry_hint = if retry_after_secs > 0 {
+        format!("<p>Please try again in about {retry_after_secs} seconds.</p>")
+    } else {
+        String::new()
+    };
+    let body = format!(
+        "<html><body><h1>429 Too Many Requests</h1><p>Rate limit exceeded.</p>\
+<p>Reason: {reason}</p>{retry_hint}<p>Event ID: {request_id}</p></body></html>"
+    );
+    let mut response = HttpResponse::builder(StatusCode::TOO_MANY_REQUESTS)
+        .body(body)
+        .header(HTTP_HEADER_CONTENT_HTML.clone())
+        .no_store();
+    if retry_after_secs > 0 {
+        response = response.header((
+            header::RETRY_AFTER,
+            HeaderValue::from_str(&retry_after_secs.to_string())
+                .unwrap_or(HeaderValue::from_static("60")),
+        ));
+    }
+    response.finish()
+}
+
 // ─────────────────────────────────────────────────────────────
 // Per-IP fixed-window rate counter
 // ─────────────────────────────────────────────────────────────
@@ -198,19 +234,113 @@ struct RateWindow {
 }
 
 // ─────────────────────────────────────────────────────────────
+// Per-site decision engines (control-plane mode)
+// ─────────────────────────────────────────────────────────────
+
+/// A cached per-site decision engine plus the agent config fingerprint it was
+/// built from.
+struct CachedChallengeEngine {
+    fingerprint: String,
+    engine: Option<Arc<ChallengeEngine>>,
+}
+
+/// Builds the decision engine for one site's challenge configuration. Every
+/// engine shares the plugin's clearance-cookie secret so a cookie earned on
+/// one site validates everywhere the plugin runs.
+fn build_site_engine(
+    cfg: &CacheChallengeConfig,
+    cookie_secret: &str,
+    cookie_name: &str,
+    pow_difficulty: u32,
+) -> ChallengeEngine {
+    let default_level = match cfg.default_level {
+        CacheChallengeLevel::None => ClearanceLevel::None,
+        CacheChallengeLevel::NonInteractive => ClearanceLevel::NonInteractive,
+        CacheChallengeLevel::Managed => ClearanceLevel::Managed,
+        CacheChallengeLevel::Interactive => ClearanceLevel::Interactive,
+    };
+    let clearance_duration_secs = if cfg.clearance_duration_seconds == 0 {
+        1800
+    } else {
+        i64::from(cfg.clearance_duration_seconds)
+    };
+    ChallengeEngine::new(ChallengeConfig {
+        enabled: true,
+        under_attack_mode: cfg.under_attack_mode,
+        default_level,
+        clearance_duration_secs,
+        exempt_paths: cfg.exempt_paths.clone(),
+        exempt_user_agents: Vec::new(),
+        // A zero threshold from the control plane means rate-based
+        // challenging is disabled; the engine would otherwise challenge
+        // everything above zero requests.
+        rate_threshold: if cfg.request_threshold == 0 {
+            u32::MAX
+        } else {
+            cfg.request_threshold
+        },
+        browser_integrity_check: cfg.browser_integrity_check,
+        tls_fingerprint_check: cfg.tls_fingerprint_check,
+        cookie_secret: cookie_secret.to_string(),
+        cookie_name: cookie_name.to_string(),
+        pow_difficulty,
+        submission_max_age_secs: 300,
+    })
+}
+
+/// Resolves the clearance-cookie signing secret.
+///
+/// Standalone deployments take it from the plugin config. Under the PingWaf
+/// agent the generated config carries no secret: one is generated on first
+/// boot and persisted in the agent cache dir so clearance cookies survive
+/// config reloads and process restarts.
+pub(crate) fn resolve_cookie_secret(configured: &str) -> String {
+    if !configured.is_empty() && configured != "change-me" {
+        return configured.to_string();
+    }
+    let Some(agent) = PingWafAgent::instance() else {
+        return configured.to_string();
+    };
+    let dir = Path::new(&agent.config.cache_dir);
+    let path = dir.join("challenge_cookie_secret");
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        let trimmed = existing.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    let secret = uuid::Uuid::new_v4().simple().to_string();
+    if std::fs::create_dir_all(dir).is_ok()
+        && std::fs::write(&path, secret.as_bytes()).is_ok()
+    {
+        secret
+    } else {
+        // Keep the clearance system working even on a read-only cache dir;
+        // cookies merely do not survive a restart.
+        uuid::Uuid::new_v4().simple().to_string()
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
 // ChallengePlugin
 // ─────────────────────────────────────────────────────────────
 
 /// CC protection / browser challenge plugin.
 pub struct ChallengePlugin {
     plugin_step: PluginStep,
-    /// Hot-reloadable challenge engine.
-    engine: Arc<RwLock<ChallengeEngine>>,
+    /// Statically configured engine: the decision engine in standalone mode
+    /// and the clearance-cookie signer everywhere (per-site engines share its
+    /// secret, and only the nonce — which never depends on the engine — is
+    /// needed to verify a submission).
+    engine: Arc<ChallengeEngine>,
     hash_value: String,
     enabled: bool,
     cookie_name: String,
+    cookie_secret: String,
     pow_difficulty: u32,
-    /// Per-IP request counter used to feed `request_rate` to the engine.
+    /// Per-site decision engines built from agent rules, keyed by host.
+    site_engines: DashMap<String, CachedChallengeEngine>,
+    /// Per host+IP request counter used to feed `request_rate` to the engine.
     rates: DashMap<String, RateWindow>,
 }
 
@@ -244,6 +374,45 @@ impl ChallengePlugin {
             });
         }
         count
+    }
+
+    /// Resolves the decision engine for `host`: the per-site engine built
+    /// from agent rules in control-plane mode, the statically configured
+    /// engine in standalone mode. `None` means pass everything through.
+    fn decision_engine(&self, host: &str) -> Option<Arc<ChallengeEngine>> {
+        if PingWafAgent::instance().is_none() {
+            return Some(Arc::clone(&self.engine));
+        }
+        if host.is_empty() {
+            return None;
+        }
+        let agent = PingWafAgent::instance()?;
+        let site_rules = agent.get_rules_for_domain(host)?;
+        let cfg = site_rules
+            .challenge_config
+            .as_ref()
+            .filter(|cfg| cfg.enabled)?;
+
+        let fingerprint = agent.config_hash();
+        if let Some(cached) = self.site_engines.get(host)
+            && cached.fingerprint == fingerprint
+        {
+            return cached.engine.clone();
+        }
+        let engine = Arc::new(build_site_engine(
+            cfg,
+            &self.cookie_secret,
+            &self.cookie_name,
+            self.pow_difficulty,
+        ));
+        self.site_engines.insert(
+            host.to_string(),
+            CachedChallengeEngine {
+                fingerprint,
+                engine: Some(Arc::clone(&engine)),
+            },
+        );
+        Some(engine)
     }
 
     /// Handle a POST to the verify endpoint: validate the proof-of-work and,
@@ -307,10 +476,7 @@ impl ChallengePlugin {
             site_id: pending.site_id,
         };
 
-        let result = {
-            let engine = self.engine.read().unwrap_or_else(|e| e.into_inner());
-            engine.verify_solution(&submission)
-        };
+        let result = self.engine.verify_solution(&submission);
 
         match result {
             VerifyResult::Success {
@@ -369,7 +535,8 @@ impl TryFrom<&PluginConf> for ChallengePlugin {
         let pow_difficulty =
             get_int_conf_or_default(value, "pow_difficulty", 20) as u32;
 
-        let mut cookie_secret = get_str_conf(value, "cookie_secret");
+        let mut cookie_secret =
+            resolve_cookie_secret(&get_str_conf(value, "cookie_secret"));
         if cookie_secret.is_empty() {
             cookie_secret = "change-me".to_string();
         }
@@ -409,7 +576,7 @@ impl TryFrom<&PluginConf> for ChallengePlugin {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true),
             tls_fingerprint_check: false,
-            cookie_secret,
+            cookie_secret: cookie_secret.clone(),
             cookie_name: cookie_name.clone(),
             pow_difficulty,
             submission_max_age_secs: get_int_conf_or_default(
@@ -421,11 +588,13 @@ impl TryFrom<&PluginConf> for ChallengePlugin {
 
         Ok(Self {
             plugin_step,
-            engine: Arc::new(RwLock::new(ChallengeEngine::new(config))),
+            engine: Arc::new(ChallengeEngine::new(config)),
             hash_value,
             enabled,
             cookie_name,
+            cookie_secret,
             pow_difficulty,
+            site_engines: DashMap::new(),
             rates: DashMap::new(),
         })
     }
@@ -466,17 +635,30 @@ impl Plugin for ChallengePlugin {
                 .unwrap_or_default()
                 .to_string();
 
-        // A valid clearance cookie short-circuits everything.
+        // A valid clearance cookie short-circuits everything. Per-site engines
+        // share this engine's secret, so it can validate any site's cookie.
         if let Some(cookie) =
             get_cookie_value(session.req_header(), &self.cookie_name)
+            && self.engine.validate_clearance(cookie).is_some()
         {
-            let engine = self.engine.read().unwrap_or_else(|e| e.into_inner());
-            if engine.validate_clearance(cookie).is_some() {
-                return Ok(RequestPluginResult::Continue);
-            }
+            return Ok(RequestPluginResult::Continue);
         }
 
-        let request_rate = self.record_rate(&client_ip);
+        let host = get_host(session.req_header())
+            .unwrap_or_default()
+            .to_string();
+        let Some(engine) = self.decision_engine(&host) else {
+            return Ok(RequestPluginResult::Continue);
+        };
+
+        // Rate windows are per site so one domain's burst never charges
+        // another's budget.
+        let rate_key = if host.is_empty() {
+            client_ip.clone()
+        } else {
+            format!("{host}:{client_ip}")
+        };
+        let request_rate = self.record_rate(&rate_key);
         let challenge_request = ChallengeRequest {
             path,
             method,
@@ -487,10 +669,7 @@ impl Plugin for ChallengePlugin {
             request_rate,
         };
 
-        let decision = {
-            let engine = self.engine.read().unwrap_or_else(|e| e.into_inner());
-            engine.should_challenge(&challenge_request)
-        };
+        let decision = engine.should_challenge(&challenge_request);
 
         if decision == ChallengeDecision::Pass {
             return Ok(RequestPluginResult::Continue);
@@ -575,6 +754,10 @@ exempt_paths = ["/health"]
 
     #[tokio::test]
     async fn test_under_attack_challenges() {
+        // Standalone behaviour requires the agent paths to stay off, and a
+        // sibling test may otherwise hold an installed agent.
+        let _agent_lock = lock_agent().await;
+        PingWafAgent::set_agent_instance(None);
         let plugin = ChallengePlugin::new(
             &toml::from_str::<PluginConf>(
                 r###"
@@ -609,6 +792,8 @@ cookie_secret = "test-secret"
 
     #[tokio::test]
     async fn test_exempt_path_passes() {
+        let _agent_lock = lock_agent().await;
+        PingWafAgent::set_agent_instance(None);
         let plugin = ChallengePlugin::new(
             &toml::from_str::<PluginConf>(
                 r###"
@@ -635,5 +820,189 @@ cookie_secret = "test-secret"
             .await
             .unwrap();
         assert!(result == RequestPluginResult::Continue);
+    }
+
+    // ── Control-plane mode (PingWafAgent installed) ──────────────
+
+    use pingap_core::PluginStep as TestPluginStep;
+    use pingora::proxy::Session as TestSession;
+
+    use crate::waf::tests::lock_agent;
+    use pingwaf_agent::cache::RuleCache;
+    use pingwaf_agent::client::ControlPlaneClient;
+    use pingwaf_agent::config::AgentConfig;
+    use pingwaf_agent::heartbeat::MetricsCollector;
+    use pingwaf_proto::control_plane as proto;
+
+    /// Installs an agent whose site carries the given challenge config, plus
+    /// a second site with none, to exercise per-site resolution.
+    async fn install_challenge_agent(
+        challenge: Option<proto::ChallengeConfig>,
+    ) -> (
+        tokio::sync::MutexGuard<'static, ()>,
+        Arc<PingWafAgent>,
+        tempfile::TempDir,
+    ) {
+        let lock = lock_agent().await;
+        let dir = tempfile::tempdir().unwrap();
+        let config = AgentConfig {
+            cache_dir: dir.path().to_string_lossy().to_string(),
+            ..Default::default()
+        };
+        let rule_cache =
+            RuleCache::new(dir.path().to_path_buf(), "test-agent".to_string())
+                .unwrap();
+        let metrics = Arc::new(MetricsCollector::new());
+        let client = Arc::new(ControlPlaneClient::new(
+            config.clone(),
+            Arc::clone(&rule_cache),
+            Arc::clone(&metrics),
+        ));
+        let agent = Arc::new(PingWafAgent {
+            config,
+            client,
+            rule_cache,
+            metrics,
+        });
+        PingWafAgent::set_agent_instance(Some(Arc::clone(&agent)));
+
+        agent
+            .rule_cache
+            .update_from_site_config(&proto::SiteConfig {
+                sites: vec![
+                    proto::Site {
+                        id: "site-1".to_string(),
+                        name: "example".to_string(),
+                        domain: "example.com".to_string(),
+                        alternate_domains: Vec::new(),
+                        status: 0,
+                        rules: Some(proto::RuleBundle {
+                            site_id: "site-1".to_string(),
+                            config_hash: "hash-1".to_string(),
+                            challenge: challenge.clone(),
+                            ..Default::default()
+                        }),
+                    },
+                    proto::Site {
+                        id: "site-2".to_string(),
+                        name: "bare".to_string(),
+                        domain: "bare.example.com".to_string(),
+                        alternate_domains: Vec::new(),
+                        status: 0,
+                        rules: Some(proto::RuleBundle {
+                            site_id: "site-2".to_string(),
+                            config_hash: "hash-1".to_string(),
+                            ..Default::default()
+                        }),
+                    },
+                ],
+                config_hash: "hash-1".to_string(),
+                updated_at: None,
+            })
+            .unwrap();
+        (lock, agent, dir)
+    }
+
+    async fn run_challenge_request(
+        plugin: &ChallengePlugin,
+        host: &str,
+        path: &str,
+    ) -> RequestPluginResult {
+        let input_header =
+            format!("GET {path} HTTP/1.1\r\nHost: {host}\r\n\r\n");
+        let mock_io = Builder::new().read(input_header.as_bytes()).build();
+        let mut session = TestSession::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+        plugin
+            .handle_request(
+                TestPluginStep::EarlyRequest,
+                &mut session,
+                &mut Ctx::default(),
+            )
+            .await
+            .unwrap()
+    }
+
+    /// Under attack mode is enforced per site: the configured site gets the
+    /// JS challenge, exempt paths pass, and a site without challenge config
+    /// is never challenged.
+    #[tokio::test]
+    async fn test_agent_under_attack_mode_applies_per_site() {
+        let (_guard, _agent, _dir) =
+            install_challenge_agent(Some(proto::ChallengeConfig {
+                enabled: true,
+                under_attack_mode: true,
+                default_level: proto::ChallengeLevel::ChallengeNonInteractive
+                    as i32,
+                clearance_duration_seconds: 1800,
+                exempt_paths: vec!["/health".to_string()],
+                request_threshold: 0,
+                browser_integrity_check: true,
+                tls_fingerprint_check: false,
+            }))
+            .await;
+        let plugin = ChallengePlugin::new(
+            &toml::from_str::<PluginConf>(
+                r###"cookie_secret = "test-secret""###,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let RequestPluginResult::Respond(resp) =
+            run_challenge_request(&plugin, "example.com", "/dashboard").await
+        else {
+            panic!("expected under-attack mode to challenge");
+        };
+        assert_eq!(StatusCode::SERVICE_UNAVAILABLE, resp.status);
+
+        assert!(
+            run_challenge_request(&plugin, "example.com", "/health").await
+                == RequestPluginResult::Continue
+        );
+        assert!(
+            run_challenge_request(&plugin, "bare.example.com", "/dashboard")
+                .await
+                == RequestPluginResult::Continue
+        );
+    }
+
+    /// A site without challenge config is never challenged, and the verify
+    /// endpoint stays reachable for challenges issued by other rules.
+    #[tokio::test]
+    async fn test_agent_verify_endpoint_is_served() {
+        let (_guard, _agent, _dir) = install_challenge_agent(None).await;
+        let plugin = ChallengePlugin::new(
+            &toml::from_str::<PluginConf>(
+                r###"cookie_secret = "test-secret""###,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        // Requests pass everywhere: no site has challenge config.
+        assert!(
+            run_challenge_request(&plugin, "example.com", "/").await
+                == RequestPluginResult::Continue
+        );
+
+        // The verify endpoint answers (403 for a malformed body) instead of
+        // falling through to the upstream.
+        let input_header = "POST /_pingwaf/challenge/verify HTTP/1.1\r\nHost: example.com\r\nContent-Length: 4\r\n\r\nbody";
+        let mock_io = Builder::new().read(input_header.as_bytes()).build();
+        let mut session = TestSession::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+        let result = plugin
+            .handle_request(
+                TestPluginStep::EarlyRequest,
+                &mut session,
+                &mut Ctx::default(),
+            )
+            .await
+            .unwrap();
+        let RequestPluginResult::Respond(resp) = result else {
+            panic!("expected the verify endpoint to answer");
+        };
+        assert_eq!(StatusCode::FORBIDDEN, resp.status);
     }
 }

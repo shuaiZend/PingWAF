@@ -9,9 +9,10 @@ use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, TimeZone, Utc};
 use pingwaf_proto::control_plane::{
-    CacheRule, ChallengeConfig, CustomErrorPage, GeoConfig, HeaderOperation,
-    IpAccessRule, RateLimitRule, RewriteRule, RouteConfig, RuleBundle, Site,
-    SiteConfig, SslConfig, UpstreamConfig, UpstreamPeer, WafConfig, WafRule,
+    BotProtectionConfig, CacheRule, ChallengeConfig, CustomErrorPage,
+    GeoConfig, IpAccessRule, RateLimitRule, RewriteOperation, RewriteRule,
+    RouteConfig, RuleBundle, Site, SiteConfig, SslConfig, UpstreamConfig,
+    UpstreamPeer, WafConfig, WafRule,
 };
 use prost::Message;
 use prost_types::Timestamp;
@@ -24,9 +25,9 @@ use uuid::Uuid;
 use crate::api::challenge::challenge_level;
 use crate::api::ip_rules::ip_action;
 use crate::models::{
-    acme_challenge, action, cache_rules, challenge_settings, characteristic,
-    error_pages, geo_rules, ip_access_rules, ip_group_sites, ip_groups, mode,
-    rate_limit_rules, rewrite_rules, rule, rule_groups, site,
+    acme_challenge, action, bot_protection, cache_rules, challenge_settings,
+    characteristic, error_pages, geo_rules, ip_access_rules, ip_group_sites,
+    ip_groups, mode, rate_limit_rules, rewrite_rules, rule, rule_groups, site,
     site_certificates, site_routes, site_ssl, site_status, site_upstream_pools,
     site_upstreams,
 };
@@ -682,60 +683,97 @@ fn challenge_to_proto(
     }
 }
 
+async fn load_bot_protection(
+    db: &DatabaseConnection,
+    site_id: Uuid,
+) -> Result<Option<bot_protection::Model>, sea_orm::DbErr> {
+    bot_protection::Entity::find()
+        .filter(bot_protection::Column::SiteId.eq(site_id))
+        .one(db)
+        .await
+}
+
+/// Converts stored bot protection settings into the protocol representation.
+///
+/// The whitelist is stored as a JSON array of strings; malformed entries are
+/// skipped so a bad edit in the control plane can never break agent config.
+fn bot_protection_to_proto(
+    row: Option<&bot_protection::Model>,
+) -> BotProtectionConfig {
+    let Some(row) = row else {
+        return BotProtectionConfig {
+            enabled: false,
+            action: 0,
+            known_bots_whitelist: Vec::new(),
+        };
+    };
+
+    let known_bots_whitelist = row
+        .known_bots_whitelist
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_string))
+                .collect::<Vec<String>>()
+        })
+        .unwrap_or_default();
+
+    BotProtectionConfig {
+        enabled: row.enabled && row.ua_analysis,
+        action: action::to_proto(&row.action),
+        known_bots_whitelist,
+    }
+}
+
 /// Converts a stored rewrite rule into its protocol representation.
 fn rewrite_rule_to_proto(row: &rewrite_rules::Model) -> RewriteRule {
-    // Parse the JSON operations array into HeaderOperation protos
-    let header_operations = parse_header_operations(&row.operations);
-
     RewriteRule {
         id: row.id.to_string(),
         name: row.name.clone(),
         match_expression: row.condition_expr.clone().unwrap_or_default(),
         direction: if row.direction == "response" { 1 } else { 0 },
-        header_operations,
-        path_rewrite: String::new(),
-        path_rewrite_to: String::new(),
-        query_rewrite: String::new(),
-        body_search: String::new(),
-        body_replace: String::new(),
+        operations: parse_operations(&row.operations),
         enabled: row.enabled,
         priority: row.priority.max(0) as u32,
     }
 }
 
-/// Parses JSON operations into proto HeaderOperation messages.
-fn parse_header_operations(ops: &serde_json::Value) -> Vec<HeaderOperation> {
-    let mut result = Vec::new();
-    if let Some(array) = ops.as_array() {
-        for item in array {
-            if let Some(obj) = item.as_object() {
-                let op_type = obj
-                    .get("type")
-                    .and_then(|v| v.as_str())
-                    .map(|t| match t {
-                        "set" => 0,
-                        "add" => 1,
-                        "remove" => 2,
-                        _ => 0,
-                    })
-                    .unwrap_or(0);
-                result.push(HeaderOperation {
-                    r#type: op_type,
-                    name: obj
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
-                    value: obj
-                        .get("value")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
-                });
+/// Parses the stored operations JSON array into proto operations. The console
+/// stores `{type, name, value}` objects whose semantics depend on the type
+/// (pattern/replacement for `regex_replace_path` and `replace_body`); they
+/// pass through verbatim so the data plane sees exactly what was configured.
+fn parse_operations(ops: &serde_json::Value) -> Vec<RewriteOperation> {
+    let Some(items) = ops.as_array() else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            let obj = item.as_object()?;
+            let r#type = obj
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            if r#type.is_empty() {
+                return None;
             }
-        }
-    }
-    result
+            Some(RewriteOperation {
+                r#type,
+                name: obj
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                value: obj
+                    .get("value")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+            })
+        })
+        .collect()
 }
 
 /// Converts a stored error page into its protocol representation.
@@ -771,6 +809,7 @@ pub async fn build_rule_bundle(
     let rewrites = load_rewrite_rules(db, site_row.id).await?;
     let err_pages = load_error_pages(db, site_row.id).await?;
     let certificates = load_certificates(db, site_row.id).await?;
+    let bot = load_bot_protection(db, site_row.id).await?;
 
     let custom_rules: Vec<WafRule> =
         rules_rows.iter().map(rule_to_proto).collect();
@@ -798,6 +837,7 @@ pub async fn build_rule_bundle(
         ssl: ssl.as_ref().map(|row| ssl_to_proto(row, &certificates)),
         upstreams: pools_to_proto(&pools, &upstreams),
         routes: routes_to_proto(&routes, &pools, &upstreams),
+        bot_protection: Some(bot_protection_to_proto(bot.as_ref())),
     };
 
     bundle.config_hash = fingerprint(&bundle);
@@ -898,6 +938,46 @@ mod tests {
         assert_eq!(map.get("token").map(String::as_str), Some("abc"));
         assert_eq!(map.get("retries").map(String::as_str), Some("3"));
         assert!(json_to_string_map(&None).is_empty());
+    }
+
+    fn bot_row(enabled: bool, ua_analysis: bool) -> bot_protection::Model {
+        bot_protection::Model {
+            id: Uuid::new_v4(),
+            site_id: Uuid::nil(),
+            enabled,
+            ua_analysis,
+            js_detection: true,
+            tls_fingerprint: false,
+            behavioral_analysis: false,
+            action: "challenge".to_string(),
+            known_bots_whitelist: serde_json::json!([
+                "Googlebot",
+                1,
+                "bingbot"
+            ]),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn bot_protection_proto_skips_malformed_whitelist_entries() {
+        let row = bot_row(true, true);
+        let proto = bot_protection_to_proto(Some(&row));
+        assert!(proto.enabled);
+        assert_eq!(proto.action, action::to_proto("challenge"));
+        assert_eq!(
+            proto.known_bots_whitelist,
+            vec!["Googlebot".to_string(), "bingbot".to_string()]
+        );
+
+        // UA analysis disabled means the data plane has nothing to enforce.
+        let row = bot_row(true, false);
+        assert!(!bot_protection_to_proto(Some(&row)).enabled);
+
+        // No row yet: disabled defaults.
+        let proto = bot_protection_to_proto(None);
+        assert!(!proto.enabled);
+        assert!(proto.known_bots_whitelist.is_empty());
     }
 
     #[test]
@@ -1091,6 +1171,7 @@ mod tests {
             source_url: None,
             sync_interval_minutes: None,
             last_synced_at: None,
+            last_sync_error: None,
             enabled: true,
             created_at: Utc::now(),
             updated_at: Utc::now(),

@@ -78,14 +78,14 @@ const emptyForm = (): FormState => ({
 })
 
 function formFromRule(rule: RewriteRule): FormState {
-  const parsed = parseExpression(rule.condition)
+  const parsed = parseExpression(rule.condition_expr)
   return {
     name: rule.name,
     direction: rule.direction,
-    conditionMode: parsed ? 'builder' : rule.condition ? 'expression' : 'builder',
+    conditionMode: parsed ? 'builder' : rule.condition_expr ? 'expression' : 'builder',
     combinator: parsed?.combinator ?? 'and',
     conditions: parsed?.conditions?.length ? parsed.conditions : [emptyCondition()],
-    expression: rule.condition,
+    expression: rule.condition_expr,
     operations: rule.operations.length ? rule.operations : [{ type: 'set_header', name: '', value: '' }],
     priority: rule.priority,
     enabled: rule.enabled,
@@ -223,7 +223,7 @@ export function RewritePage() {
     save.mutate({
       name,
       direction: form.direction,
-      condition,
+      condition_expr: condition,
       operations: operations.map((o) => ({
         type: o.type,
         name: o.name?.trim() || undefined,
@@ -265,7 +265,7 @@ export function RewritePage() {
         <div className="min-w-0">
           <p className="truncate text-[13px] font-medium text-fg-strong">{r.name}</p>
           <p className="pw-mono truncate text-xs text-fg-subtle">
-            {r.condition || t('pages.rewrite.always')}
+            {r.condition_expr || t('pages.rewrite.always')}
           </p>
         </div>
       ),

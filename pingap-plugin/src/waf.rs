@@ -28,7 +28,10 @@ use super::{
     Error, get_bool_conf, get_hash_key, get_int_conf_or_default, get_str_conf,
     get_str_slice_conf,
 };
-use crate::challenge::{ChallengeKind, block_page, build_challenge_response};
+use crate::challenge::{
+    ChallengeKind, VERIFY_ENDPOINT, block_page, build_challenge_response,
+    rate_limit_page, resolve_cookie_secret,
+};
 use async_trait::async_trait;
 use bytes::{BufMut, BytesMut};
 use dashmap::DashMap;
@@ -41,12 +44,18 @@ use pingap_util::IpRules;
 use pingora::http::ResponseHeader;
 use pingora::proxy::Session;
 use pingwaf_agent::cache::{
-    GeoConfig as CacheGeoConfig, IpAccessAction as CacheIpAccessAction,
+    BotProtectionConfig as CacheBotProtection, GeoConfig as CacheGeoConfig,
+    IpAccessAction as CacheIpAccessAction, RateLimitRule as CacheRateLimitRule,
     SiteRules as CacheSiteRules, WafAction as CacheWafAction,
     WafConfig as CacheWafConfig, WafMode as CacheWafMode,
 };
 use pingwaf_agent::{AccessLogEntry, PingWafAgent, SecurityEvent};
-use pingwaf_challenge::generate_request_id;
+use pingwaf_challenge::{
+    CLEARANCE_COOKIE_NAME, CookieManager, generate_request_id,
+};
+use pingwaf_waf::rules::{
+    EvalContext, Expression, evaluate as evaluate_expression, parse_expression,
+};
 use pingwaf_waf::{
     CompiledRule, RequestData, RuleAction, ScoreBreakdown, WafAction,
     WafEngine, WafEngineConfig, WafMode, WafVerdict,
@@ -54,8 +63,9 @@ use pingwaf_waf::{
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, RwLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tor_geoip::GeoipDb;
 use tracing::debug;
 
@@ -77,6 +87,10 @@ enum EngineChoice {
 struct SiteContext {
     engine: Option<Arc<WafEngine>>,
     policy: AccessPolicy,
+    /// Bot protection (UA classification); `None` when disabled.
+    bot: Option<BotPolicy>,
+    /// Rate limit rules; `None` when the site has none that are enforceable.
+    rate_limits: Option<RateLimitPolicy>,
     /// Custom rule id → name.
     rule_names: HashMap<String, String>,
 }
@@ -84,11 +98,18 @@ struct SiteContext {
 impl SiteContext {
     fn build(site_rules: &CacheSiteRules) -> Self {
         let waf_cfg = site_rules.waf_config.as_ref();
+        let rate_limits = RateLimitPolicy::build(site_rules);
         Self {
             engine: waf_cfg
                 .filter(|cfg| cfg.enabled)
                 .map(|cfg| Arc::new(build_site_engine(cfg))),
             policy: AccessPolicy::build(site_rules),
+            bot: site_rules
+                .bot_protection
+                .as_ref()
+                .filter(|cfg| cfg.enabled)
+                .map(BotPolicy::build),
+            rate_limits: (!rate_limits.rules.is_empty()).then_some(rate_limits),
             rule_names: waf_cfg
                 .map(|cfg| {
                     cfg.custom_rules
@@ -137,7 +158,7 @@ struct ResolvedSite {
 static GEO_DB: LazyLock<Arc<GeoipDb>> = LazyLock::new(GeoipDb::new_embedded);
 
 /// Country code (ISO 3166-1 alpha-2) of `ip`, when the database knows it.
-fn lookup_country(ip: &str) -> Option<String> {
+pub(crate) fn lookup_country(ip: &str) -> Option<String> {
     let addr: IpAddr = ip.parse().ok()?;
     GEO_DB
         .lookup_country_code(addr)
@@ -331,6 +352,524 @@ impl GeoRule {
 }
 
 // ─────────────────────────────────────────────────────────────
+// Bot protection (user-agent classification)
+// ─────────────────────────────────────────────────────────────
+
+/// What bot protection does with a non-browser user agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BotAction {
+    Log,
+    Challenge,
+    Block,
+}
+
+/// Bot protection compiled from the site bundle: verified-bot user agent
+/// substrings normalised for case-insensitive matching plus the action for
+/// everything that does not look like a browser.
+struct BotPolicy {
+    whitelist: Vec<String>,
+    action: BotAction,
+}
+
+/// Outcome of classifying one request's user agent.
+enum BotDecision {
+    /// Verified bot or real browser: continue.
+    Pass,
+    /// Stop the request with the challenge or block page.
+    Deny(Denial),
+    /// Record a security event but let the request through.
+    LogOnly(Denial),
+}
+
+impl BotPolicy {
+    fn build(cfg: &CacheBotProtection) -> Self {
+        let action = match cfg.action {
+            CacheWafAction::Log => BotAction::Log,
+            CacheWafAction::Challenge | CacheWafAction::JsChallenge => {
+                BotAction::Challenge
+            },
+            _ => BotAction::Block,
+        };
+        Self {
+            whitelist: cfg
+                .known_bots_whitelist
+                .iter()
+                .map(|ua| ua.trim().to_lowercase())
+                .filter(|ua| !ua.is_empty())
+                .collect(),
+            action,
+        }
+    }
+
+    /// Classifies one request. Whitelisted verified bots pass first, then real
+    /// browsers; everything else receives the configured action.
+    fn evaluate(&self, user_agent: &str) -> BotDecision {
+        let ua = user_agent.to_lowercase();
+        if self.whitelist.iter().any(|bot| ua.contains(bot)) {
+            return BotDecision::Pass;
+        }
+        if is_browser_ua(&ua) {
+            return BotDecision::Pass;
+        }
+        let denial = Denial {
+            rule_id: "bot_protection".to_string(),
+            rule_name: "Bot protection".to_string(),
+            detail: if user_agent.is_empty() {
+                "the request carries no user agent".to_string()
+            } else {
+                format!(
+                    "user agent '{user_agent}' is neither a verified bot nor a browser"
+                )
+            },
+            challenge: self.action == BotAction::Challenge,
+        };
+        match self.action {
+            BotAction::Log => BotDecision::LogOnly(denial),
+            _ => BotDecision::Deny(denial),
+        }
+    }
+}
+
+/// Loose fingerprint of a real browser user agent: browsers declare
+/// `Mozilla/5.0` plus a concrete engine token, while scripting clients,
+/// scanners and empty agents do not.
+fn is_browser_ua(ua_lower: &str) -> bool {
+    ua_lower.contains("mozilla/5.0")
+        && (ua_lower.contains("chrome/")
+            || ua_lower.contains("safari/")
+            || ua_lower.contains("firefox/")
+            || ua_lower.contains("trident/")
+            || ua_lower.contains("edg/")
+            || ua_lower.contains("opr/")
+            || ua_lower.contains("samsungbrowser/"))
+}
+
+// ─────────────────────────────────────────────────────────────
+// Rate limiting (per-site rules over fixed-window counters)
+// ─────────────────────────────────────────────────────────────
+
+/// Counter key dimension of a rate limit rule. Characteristics that cannot be
+/// keyed at the edge (header/cookie/query/ja3) cause the rule to be ignored at
+/// build time rather than enforced with a degraded key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RateChar {
+    Ip,
+    Host,
+    Path,
+    Asn,
+    Country,
+}
+
+/// What an exhausted rate limit rule does to matching requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RateAction {
+    /// Record a security event only.
+    Log,
+    /// Serve the browser challenge; clients holding a valid clearance are
+    /// exempt (they already proved a human is behind the traffic).
+    Challenge,
+    /// Reject with 429 for the mitigation window.
+    Block,
+}
+
+/// One enabled rate limit rule compiled for evaluation. Rules keep the order
+/// the control plane sent them in (priority ascending) and the first
+/// enforcing rule to trip stops the request.
+struct CompiledRateRule {
+    id: String,
+    name: String,
+    /// Optional match condition; `None` applies to every request.
+    expression: Option<Expression>,
+    chars: Vec<RateChar>,
+    period_secs: u64,
+    threshold: u32,
+    mitigation_secs: u64,
+    action: RateAction,
+}
+
+impl CompiledRateRule {
+    /// Compiles one control-plane rule; `None` when disabled, unenforceable
+    /// (zero threshold or period, unsupported characteristic, allow action)
+    /// or carrying an expression that fails to parse.
+    fn build(rule: &CacheRateLimitRule) -> Option<Self> {
+        if !rule.enabled || rule.threshold == 0 || rule.period_seconds == 0 {
+            return None;
+        }
+        let mut chars = Vec::with_capacity(rule.characteristics.len());
+        for raw in &rule.characteristics {
+            let lower = raw.trim().to_lowercase();
+            let kind = match lower
+                .strip_prefix("ratelimitchar")
+                .unwrap_or(&lower)
+            {
+                "ip" | "ipnat" | "ip_nat" => RateChar::Ip,
+                "host" => RateChar::Host,
+                "path" => RateChar::Path,
+                "asn" => RateChar::Asn,
+                "country" => RateChar::Country,
+                _ => {
+                    debug!(
+                        rule = %rule.id,
+                        characteristic = %raw,
+                        "rate limit characteristic unsupported at the edge; rule ignored"
+                    );
+                    return None;
+                },
+            };
+            chars.push(kind);
+        }
+        let expression = if rule.expression.trim().is_empty() {
+            None
+        } else {
+            match parse_expression(&rule.expression) {
+                Ok(expr) => Some(expr),
+                Err(e) => {
+                    debug!(
+                        rule = %rule.id,
+                        error = %e,
+                        "rate limit expression failed to parse; rule ignored"
+                    );
+                    return None;
+                },
+            }
+        };
+        let action = match rule.action {
+            CacheWafAction::Log => RateAction::Log,
+            CacheWafAction::Challenge | CacheWafAction::JsChallenge => {
+                RateAction::Challenge
+            },
+            CacheWafAction::Block => RateAction::Block,
+            // Counting without consequence would only burn CPU.
+            CacheWafAction::Allow => return None,
+        };
+        Some(Self {
+            id: rule.id.clone(),
+            name: rule.name.clone(),
+            expression,
+            chars,
+            period_secs: u64::from(rule.period_seconds),
+            threshold: rule.threshold,
+            mitigation_secs: u64::from(rule.mitigation_timeout_seconds),
+            action,
+        })
+    }
+
+    /// Counter key for this rule and request: the rule id (a UUID, unique
+    /// across sites) plus the value of every tracked characteristic.
+    fn counter_key(
+        &self,
+        request_data: &RequestData,
+        host: &str,
+        asn: Option<u32>,
+    ) -> String {
+        let mut key = String::with_capacity(64);
+        key.push_str(&self.id);
+        for c in &self.chars {
+            key.push('\u{1f}');
+            match c {
+                RateChar::Ip => key.push_str(&request_data.client_ip),
+                RateChar::Host => key.push_str(host),
+                RateChar::Path => key.push_str(&request_data.path),
+                RateChar::Country => key.push_str(
+                    request_data.country_code.as_deref().unwrap_or("-"),
+                ),
+                RateChar::Asn => match asn {
+                    Some(n) => key.push_str(&n.to_string()),
+                    None => key.push('-'),
+                },
+            }
+        }
+        key
+    }
+}
+
+fn rate_tripped(rule: &CompiledRateRule, retry_after: u64) -> RateTripped {
+    RateTripped {
+        rule_id: rule.id.clone(),
+        rule_name: rule.name.clone(),
+        detail: format!(
+            "rate limit rule '{}' exceeded {} requests per {}s",
+            rule.name, rule.threshold, rule.period_secs
+        ),
+        challenge: rule.action == RateAction::Challenge,
+        retry_after,
+    }
+}
+
+/// A tripped rate limit rule.
+struct RateTripped {
+    rule_id: String,
+    rule_name: String,
+    detail: String,
+    challenge: bool,
+    /// Suggested Retry-After in seconds: the mitigation timeout, or the rest
+    /// of the current window when no mitigation is configured.
+    retry_after: u64,
+}
+
+/// What rate limiting decided for one request.
+struct RateOutcome {
+    /// First enforcing rule that tripped: the request must be stopped.
+    deny: Option<RateTripped>,
+    /// Log-only rules that tripped: recorded as events only.
+    logged: Vec<RateTripped>,
+}
+
+/// Fixed-window counter state for one rate limit key.
+#[derive(Debug)]
+struct RateCounter {
+    /// Current window index (`unix seconds / period`).
+    window: u64,
+    count: u32,
+    /// Unix seconds until which the key stays blocked (0 = clear); only set
+    /// while a mitigation timeout is running.
+    blocked_until: u64,
+    /// Unix seconds after which the entry becomes collectable.
+    expires_at: u64,
+}
+
+/// Only pay for garbage collection above this many live counters.
+const RATE_COUNTERS_GC_THRESHOLD: usize = 65_536;
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// All rate limit rules of one site in evaluation order.
+#[derive(Default)]
+struct RateLimitPolicy {
+    rules: Vec<CompiledRateRule>,
+}
+
+impl RateLimitPolicy {
+    fn build(site_rules: &CacheSiteRules) -> Self {
+        Self {
+            rules: site_rules
+                .rate_limit_rules
+                .iter()
+                .filter_map(CompiledRateRule::build)
+                .collect(),
+        }
+    }
+
+    /// Counts the request against every matching rule. Enforcement rules stop
+    /// at the first one that trips; log-only rules accumulate events and let
+    /// the request continue.
+    fn evaluate(
+        &self,
+        counters: &DashMap<String, RateCounter>,
+        request_data: &RequestData,
+        host: &str,
+        cleared: bool,
+    ) -> RateOutcome {
+        let mut logged = Vec::new();
+        if self.rules.is_empty() {
+            return RateOutcome { deny: None, logged };
+        }
+        let now = unix_now();
+        let asn = self
+            .rules
+            .iter()
+            .any(|r| r.chars.contains(&RateChar::Asn))
+            .then(|| lookup_asn(&request_data.client_ip))
+            .flatten();
+        let expression_state = self
+            .rules
+            .iter()
+            .any(|r| r.expression.is_some())
+            .then(|| ExpressionState::build(request_data));
+        for rule in &self.rules {
+            if let (Some(state), Some(expr)) =
+                (expression_state.as_ref(), rule.expression.as_ref())
+                && !evaluate_expression(expr, &state.eval(request_data, host))
+            {
+                continue;
+            }
+            // A client holding a valid clearance already solved a challenge;
+            // challenge rules neither count nor stop it.
+            if rule.action == RateAction::Challenge && cleared {
+                continue;
+            }
+            let key = rule.counter_key(request_data, host, asn);
+            if counters.len() > RATE_COUNTERS_GC_THRESHOLD {
+                counters.retain(|_, entry| now < entry.expires_at);
+            }
+            let window = now / rule.period_secs;
+            let mut entry = counters.entry(key).or_insert(RateCounter {
+                window,
+                count: 0,
+                blocked_until: 0,
+                expires_at: 0,
+            });
+            if entry.window != window {
+                entry.window = window;
+                entry.count = 0;
+                entry.blocked_until = 0;
+            }
+            let retry_after = if rule.mitigation_secs > 0 {
+                rule.mitigation_secs
+            } else {
+                (window + 1) * rule.period_secs - now
+            };
+            if now < entry.blocked_until {
+                drop(entry);
+                let tripped = rate_tripped(rule, retry_after);
+                match rule.action {
+                    RateAction::Log => logged.push(tripped),
+                    _ => {
+                        return RateOutcome {
+                            deny: Some(tripped),
+                            logged,
+                        };
+                    },
+                }
+                continue;
+            }
+            entry.count = entry.count.saturating_add(1);
+            entry.expires_at =
+                (window + 1) * rule.period_secs + rule.mitigation_secs;
+            if entry.count > rule.threshold {
+                if rule.mitigation_secs > 0 {
+                    entry.blocked_until = now + rule.mitigation_secs;
+                }
+                drop(entry);
+                let tripped = rate_tripped(rule, retry_after);
+                match rule.action {
+                    RateAction::Log => logged.push(tripped),
+                    _ => {
+                        return RateOutcome {
+                            deny: Some(tripped),
+                            logged,
+                        };
+                    },
+                }
+            }
+        }
+        RateOutcome { deny: None, logged }
+    }
+}
+
+/// Owned per-request data rule expressions evaluate against: the
+/// [`EvalContext`] borrows from this state plus the request data.
+struct ExpressionState {
+    full_uri: String,
+    cookies: Vec<(String, String)>,
+}
+
+impl ExpressionState {
+    fn build(request_data: &RequestData) -> Self {
+        let full_uri = if request_data.query.is_empty() {
+            request_data.path.clone()
+        } else {
+            format!("{}?{}", request_data.path, request_data.query)
+        };
+        Self {
+            full_uri,
+            cookies: parse_cookies(&request_data.headers),
+        }
+    }
+
+    fn eval<'a>(
+        &'a self,
+        request_data: &'a RequestData,
+        host: &'a str,
+    ) -> EvalContext<'a> {
+        let user_agent = request_data
+            .headers
+            .iter()
+            .find(|(k, _)| k == "user-agent")
+            .map(|(_, v)| v.as_str())
+            .unwrap_or("");
+        EvalContext {
+            method: &request_data.method,
+            path: &request_data.path,
+            full_uri: &self.full_uri,
+            host,
+            user_agent,
+            body: None,
+            headers: &request_data.headers,
+            cookies: &self.cookies,
+            client_ip: &request_data.client_ip,
+            parsed_ip: request_data.client_ip.parse().ok(),
+            country_code: request_data.country_code.as_deref(),
+            ssl: request_data.scheme.eq_ignore_ascii_case("https"),
+            waf_score: 0,
+            waf_score_sqli: 0,
+            waf_score_xss: 0,
+        }
+    }
+}
+
+/// Parses the `Cookie` header into name/value pairs.
+fn parse_cookies(headers: &[(String, String)]) -> Vec<(String, String)> {
+    let Some(raw) = headers
+        .iter()
+        .find(|(k, _)| k == "cookie")
+        .map(|(_, v)| v.as_str())
+    else {
+        return Vec::new();
+    };
+    raw.split(';')
+        .filter_map(|pair| {
+            let (name, value) = pair.trim().split_once('=')?;
+            Some((name.trim().to_string(), value.trim().to_string()))
+        })
+        .collect()
+}
+
+/// Extracts the clearance cookie value, if the client carries one.
+fn clearance_cookie(headers: &[(String, String)]) -> Option<String> {
+    headers
+        .iter()
+        .find(|(k, _)| k == "cookie")
+        .and_then(|(_, v)| {
+            v.split(';').find_map(|pair| {
+                let (name, value) = pair.trim().split_once('=')?;
+                name.trim()
+                    .eq_ignore_ascii_case(CLEARANCE_COOKIE_NAME)
+                    .then(|| value.trim().to_string())
+            })
+        })
+}
+
+/// Clearance cookies of the challenge system, cached against the agent cache
+/// dir they were resolved from so a rebuilt or replaced agent re-resolves its
+/// secret instead of reusing a stale one.
+static CLEARANCE_SECRET: RwLock<Option<(PathBuf, String)>> = RwLock::new(None);
+
+/// Whether `value` (when present) is a valid clearance cookie. A client that
+/// solved a challenge once is exempt from challenge-type rate limit rules.
+fn clearance_valid(value: Option<String>) -> bool {
+    let Some(value) = value else {
+        return false;
+    };
+    let Some(agent) = PingWafAgent::instance() else {
+        return false;
+    };
+    let secret_path =
+        Path::new(&agent.config.cache_dir).join("challenge_cookie_secret");
+    if let Some((path, secret)) = CLEARANCE_SECRET
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        && *path == secret_path
+    {
+        return CookieManager::new(secret.as_bytes(), 3600)
+            .validate_clearance(&value)
+            .is_ok();
+    }
+    let secret = resolve_cookie_secret("");
+    *CLEARANCE_SECRET.write().unwrap_or_else(|e| e.into_inner()) =
+        Some((secret_path, secret.clone()));
+    CookieManager::new(secret.as_bytes(), 3600)
+        .validate_clearance(&value)
+        .is_ok()
+}
+
+// ─────────────────────────────────────────────────────────────
 // Pending access log store
 // ─────────────────────────────────────────────────────────────
 
@@ -349,7 +888,73 @@ struct PendingAccess {
     referer: String,
     tls_version: String,
     country_code: String,
+    request_headers: Vec<(String, String)>,
+    request_body: Option<Vec<u8>>,
+    request_body_truncated: bool,
     start: Instant,
+}
+
+/// Body bytes kept per access log entry. The full request is not stored —
+/// logs are for forensics, not for mirroring uploads.
+const MAX_LOG_BODY: usize = 1024;
+
+/// Upper bounds for the header snapshot kept per access log entry.
+const MAX_LOG_HEADERS: usize = 64;
+const MAX_LOG_HEADERS_BYTES: usize = 8 * 1024;
+
+/// Caps the header snapshot kept for logging so a pathological request cannot
+/// bloat the log store: at most [`MAX_LOG_HEADERS`] entries totalling at most
+/// [`MAX_LOG_HEADERS_BYTES`] bytes.
+fn cap_request_headers(headers: &[(String, String)]) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut total = 0usize;
+    for (name, value) in headers.iter().take(MAX_LOG_HEADERS) {
+        total += name.len() + value.len();
+        if total > MAX_LOG_HEADERS_BYTES {
+            break;
+        }
+        out.push((name.clone(), value.clone()));
+    }
+    out
+}
+
+/// Accumulates the request-body prefix kept for logging: at most
+/// [`MAX_LOG_BODY`] bytes plus a flag telling whether the kept prefix is
+/// shorter than the full body.
+#[derive(Default)]
+struct LogBodyPrefix {
+    body: Option<Vec<u8>>,
+    truncated: bool,
+}
+
+impl LogBodyPrefix {
+    fn absorb(&mut self, chunk: &[u8]) {
+        let buf = self.body.get_or_insert_with(|| {
+            Vec::with_capacity(chunk.len().min(MAX_LOG_BODY))
+        });
+        // Overshoot is allowed here so a body of exactly MAX_LOG_BODY bytes
+        // stays untruncated; `finish` trims and flags afterwards.
+        if buf.len() <= MAX_LOG_BODY {
+            buf.extend_from_slice(chunk);
+        }
+    }
+
+    /// Marks the capture as interrupted (the read loop stopped before the body
+    /// signalled completion), so the kept prefix may be shorter than the real
+    /// body even though it fits within [`MAX_LOG_BODY`].
+    fn interrupted(&mut self) {
+        self.truncated = true;
+    }
+
+    fn finish(mut self) -> (Option<Vec<u8>>, bool) {
+        if let Some(buf) = self.body.as_mut()
+            && buf.len() > MAX_LOG_BODY
+        {
+            buf.truncate(MAX_LOG_BODY);
+            self.truncated = true;
+        }
+        (self.body, self.truncated)
+    }
 }
 
 /// Orphaned entries (e.g. upstream connect failures that bypass
@@ -380,6 +985,8 @@ fn emit_access(
     upstream_latency_ms: u64,
 ) {
     let total_latency_ms = pending.start.elapsed().as_millis() as u64;
+    let request_body_size =
+        pending.request_body.as_ref().map_or(0, |b| b.len() as u64);
     agent.log_access(AccessLogEntry {
         site_id: pending.site_id,
         request_id: request_id.to_string(),
@@ -400,8 +1007,10 @@ fn emit_access(
         referer: pending.referer,
         tls_version: pending.tls_version,
         country_code: pending.country_code,
-        request_body: None,
-        request_body_truncated: false,
+        request_headers: pending.request_headers,
+        request_body: pending.request_body,
+        request_body_size,
+        request_body_truncated: pending.request_body_truncated,
     });
 }
 
@@ -423,8 +1032,9 @@ pub struct WafPlugin {
     ml_enabled: bool,
     #[allow(dead_code)]
     ml_threshold: f64,
-    /// Opt-in request-body inspection (kept off by default: reading the body
-    /// on every request is expensive and interferes with streaming uploads).
+    /// Inspect the full request body with the WAF engine. Off by default:
+    /// scanning arbitrary bodies is expensive. Independent of this flag the
+    /// first KiB of every body is captured for the access log.
     inspect_body: bool,
     max_body_size: usize,
     /// Proof-of-work difficulty used when delegating a `Challenge` verdict.
@@ -432,6 +1042,9 @@ pub struct WafPlugin {
     hash_value: String,
     /// Per-domain engines built from agent rules, keyed by host.
     site_contexts: DashMap<String, CachedSite>,
+    /// Rate limit counters, keyed by rule id and characteristic values. Kept
+    /// on the plugin so they survive per-site context rebuilds.
+    rate_counters: DashMap<String, RateCounter>,
 }
 
 fn parse_mode(value: &str) -> WafMode {
@@ -725,6 +1338,7 @@ impl TryFrom<&PluginConf> for WafPlugin {
             pow_difficulty,
             hash_value,
             site_contexts: DashMap::new(),
+            rate_counters: DashMap::new(),
         })
     }
 }
@@ -804,6 +1418,43 @@ impl Plugin for WafPlugin {
             None
         };
 
+        // ── Full-request log capture: snapshot headers and keep at most 1 KiB
+        // of body. Pingora's retry buffer replays bytes consumed here to the
+        // upstream, so reading does not interfere with forwarding. Skipped for
+        // the challenge verify endpoint, whose handler consumes the body
+        // itself. WAF body inspection reuses the same read pass. ──
+        let log_headers = cap_request_headers(&headers);
+        let mut log_body_prefix = LogBodyPrefix::default();
+        let mut inspect_buf = BytesMut::new();
+        if agent.is_some() && !(method == "POST" && path == VERIFY_ENDPOINT) {
+            let mut interrupted = false;
+            loop {
+                let Some(chunk) = session.read_request_body().await? else {
+                    break;
+                };
+                let chunk = chunk.as_ref();
+                log_body_prefix.absorb(chunk);
+                if self.inspect_body {
+                    inspect_buf.put(chunk);
+                    if inspect_buf.len() >= self.max_body_size {
+                        interrupted = true;
+                        break;
+                    }
+                } else if log_body_prefix
+                    .body
+                    .as_ref()
+                    .is_some_and(|buf| buf.len() > MAX_LOG_BODY)
+                {
+                    interrupted = true;
+                    break;
+                }
+            }
+            if interrupted {
+                log_body_prefix.interrupted();
+            }
+        }
+        let (log_body, log_body_truncated) = log_body_prefix.finish();
+
         // Track the request for access logging until the response phase —
         // including WAF-disabled sites, so traffic data stays complete.
         if agent.is_some() {
@@ -818,7 +1469,7 @@ impl Plugin for WafPlugin {
                     host: host.clone(),
                     path: path.clone(),
                     query: query.clone(),
-                    user_agent,
+                    user_agent: user_agent.clone(),
                     referer,
                     tls_version: ctx
                         .conn
@@ -827,6 +1478,9 @@ impl Plugin for WafPlugin {
                         .unwrap_or_default()
                         .to_string(),
                     country_code: country.clone().unwrap_or_default(),
+                    request_headers: log_headers,
+                    request_body: log_body,
+                    request_body_truncated: log_body_truncated,
                     start: Instant::now(),
                 },
             );
@@ -869,6 +1523,137 @@ impl Plugin for WafPlugin {
             ));
         }
 
+        // ── Bot protection: UA classification runs after IP/geo and before
+        // the engine, applying whether or not the WAF engine is enabled ──
+        if let Some(bot) = context.as_ref().and_then(|ctx| ctx.bot.as_ref()) {
+            let original_url = if query.is_empty() {
+                path.clone()
+            } else {
+                format!("{path}?{query}")
+            };
+            match bot.evaluate(&user_agent) {
+                BotDecision::Pass => {},
+                BotDecision::Deny(denial) => {
+                    return Ok(Self::deny_request(
+                        agent.as_ref(),
+                        &site_id,
+                        &request_id,
+                        &host,
+                        &request_data,
+                        &denial,
+                        &original_url,
+                        self.pow_difficulty,
+                    ));
+                },
+                BotDecision::LogOnly(denial) => {
+                    let verdict = WafVerdict {
+                        action: WafAction::Monitor,
+                        score: 0,
+                        matched_rules: vec![denial.rule_id.clone()],
+                        details: denial.detail.clone(),
+                        breakdown: ScoreBreakdown::clean(),
+                    };
+                    Self::log_event(
+                        &site_id,
+                        &request_id,
+                        &host,
+                        &request_data,
+                        &verdict,
+                        &denial.rule_name,
+                    );
+                },
+            }
+        }
+
+        // ── Rate limiting: fixed-window counters run after IP/geo/bot and
+        // before the engine, applying whether or not the WAF engine is
+        // enabled ──
+        if let Some(rate) =
+            context.as_ref().and_then(|c| c.rate_limits.as_ref())
+        {
+            let cleared =
+                rate.rules.iter().any(|r| r.action == RateAction::Challenge)
+                    && clearance_valid(clearance_cookie(&request_data.headers));
+            let outcome = rate.evaluate(
+                &self.rate_counters,
+                &request_data,
+                &host,
+                cleared,
+            );
+            for tripped in &outcome.logged {
+                let verdict = WafVerdict {
+                    action: WafAction::Monitor,
+                    score: 0,
+                    matched_rules: vec![tripped.rule_id.clone()],
+                    details: tripped.detail.clone(),
+                    breakdown: ScoreBreakdown::clean(),
+                };
+                Self::log_event(
+                    &site_id,
+                    &request_id,
+                    &host,
+                    &request_data,
+                    &verdict,
+                    &tripped.rule_name,
+                );
+            }
+            if let Some(tripped) = outcome.deny {
+                let original_url = if query.is_empty() {
+                    path.clone()
+                } else {
+                    format!("{path}?{query}")
+                };
+                let verdict = WafVerdict {
+                    action: if tripped.challenge {
+                        WafAction::Challenge
+                    } else {
+                        WafAction::Block
+                    },
+                    score: 0,
+                    matched_rules: vec![tripped.rule_id.clone()],
+                    details: tripped.detail.clone(),
+                    breakdown: ScoreBreakdown::clean(),
+                };
+                Self::log_event(
+                    &site_id,
+                    &request_id,
+                    &host,
+                    &request_data,
+                    &verdict,
+                    &tripped.rule_name,
+                );
+                if let Some(agent) = &agent
+                    && let Some((_, pending)) =
+                        PENDING_ACCESS.remove(&request_id)
+                {
+                    let status = if tripped.challenge { 503 } else { 429 };
+                    emit_access(
+                        agent,
+                        &request_id,
+                        pending,
+                        status,
+                        String::new(),
+                        0,
+                    );
+                }
+                return Ok(if tripped.challenge {
+                    RequestPluginResult::Respond(build_challenge_response(
+                        &request_id,
+                        &original_url,
+                        &site_id,
+                        self.pow_difficulty,
+                        ChallengeKind::Js,
+                    ))
+                } else {
+                    RequestPluginResult::Respond(rate_limit_page(
+                        &request_id,
+                        &tripped.detail,
+                        tripped.retry_after,
+                    ))
+                });
+            }
+        }
+
         if matches!(choice, EngineChoice::Disabled) {
             if let Some(agent) = &agent {
                 agent.record_request(false);
@@ -882,25 +1667,14 @@ impl Plugin for WafPlugin {
             return Ok(RequestPluginResult::Skipped);
         }
 
-        // ── Optional request-body inspection ──
-        request_data.body = if self.inspect_body {
-            let mut buf = BytesMut::with_capacity(4096);
-            while let Some(chunk) = session.read_request_body().await? {
-                buf.put(chunk.as_ref());
-                if buf.len() >= self.max_body_size {
-                    break;
-                }
-            }
-            if buf.is_empty() {
-                None
-            } else {
-                Some(buf.to_vec())
-            }
+        // ── Inspect ──
+        // The body (if any) was already read during log capture; when body
+        // inspection is enabled the engine sees the same prefix.
+        request_data.body = if self.inspect_body && !inspect_buf.is_empty() {
+            Some(inspect_buf.to_vec())
         } else {
             None
         };
-
-        // ── Inspect ──
         let verdict = match &choice {
             EngineChoice::Site(engine) => engine.inspect(&request_data),
             EngineChoice::Base => {
@@ -1023,7 +1797,7 @@ impl Plugin for WafPlugin {
 register_plugin!("waf", WafPlugin);
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use pingap_core::PluginStep;
     use pingora::proxy::Session;
@@ -1031,6 +1805,7 @@ mod tests {
     use pingwaf_agent::client::ControlPlaneClient;
     use pingwaf_agent::config::AgentConfig;
     use pingwaf_agent::heartbeat::MetricsCollector;
+    use pingwaf_challenge::ClearanceLevel;
     use pingwaf_proto::control_plane as proto;
     use tokio_test::io::Builder;
 
@@ -1172,13 +1947,13 @@ ml_threshold = 0.75
     static AGENT_LOCK: tokio::sync::Mutex<()> =
         tokio::sync::Mutex::const_new(());
 
-    async fn lock_agent() -> tokio::sync::MutexGuard<'static, ()> {
+    pub(crate) async fn lock_agent() -> tokio::sync::MutexGuard<'static, ()> {
         AGENT_LOCK.lock().await
     }
 
     /// Install a never-connecting agent for the duration of one test,
     /// holding the agent lock so sibling tests stay off the global.
-    async fn install_test_agent() -> (
+    pub(crate) async fn install_test_agent() -> (
         tokio::sync::MutexGuard<'static, ()>,
         Arc<PingWafAgent>,
         tempfile::TempDir,
@@ -1487,5 +2262,685 @@ ml_threshold = 0.75
         assert_eq!("page=1", entry.query_string);
         // Consumed exactly once.
         assert!(agent.client.pop_log().await.is_none());
+    }
+
+    #[test]
+    fn cap_request_headers_limits_size_and_count() {
+        let headers: Vec<(String, String)> = (0..100)
+            .map(|i| (format!("x-header-{i:03}"), format!("value-{i}")))
+            .collect();
+        let capped = cap_request_headers(&headers);
+        assert_eq!(MAX_LOG_HEADERS, capped.len());
+
+        let huge: Vec<(String, String)> =
+            vec![("x-big".to_string(), "a".repeat(MAX_LOG_HEADERS_BYTES))];
+        let capped = cap_request_headers(&huge);
+        assert!(capped.is_empty());
+
+        let mut big = vec![("x-ok".to_string(), "v".to_string())];
+        big.push(("x-big".to_string(), "b".repeat(MAX_LOG_HEADERS_BYTES)));
+        let capped = cap_request_headers(&big);
+        assert_eq!(1, capped.len());
+    }
+
+    #[test]
+    fn log_body_prefix_keeps_1kib_prefix() {
+        // A body of exactly the cap arrives complete.
+        let mut prefix = LogBodyPrefix::default();
+        prefix.absorb(&[b'a'; MAX_LOG_BODY]);
+        let (body, truncated) = prefix.finish();
+        assert_eq!(MAX_LOG_BODY, body.unwrap().len());
+        assert!(!truncated);
+
+        // Anything longer is cut to the cap and flagged.
+        let mut prefix = LogBodyPrefix::default();
+        prefix.absorb(&[b'a'; MAX_LOG_BODY]);
+        prefix.absorb(b"overflow");
+        let (body, truncated) = prefix.finish();
+        assert_eq!(MAX_LOG_BODY, body.unwrap().len());
+        assert!(truncated);
+
+        // An interrupted read marks even a small prefix as partial.
+        let mut prefix = LogBodyPrefix::default();
+        prefix.absorb(b"partial");
+        prefix.interrupted();
+        let (body, truncated) = prefix.finish();
+        assert_eq!(b"partial".to_vec(), body.unwrap());
+        assert!(truncated);
+
+        // No body at all.
+        let (body, truncated) = LogBodyPrefix::default().finish();
+        assert!(body.is_none());
+        assert!(!truncated);
+    }
+
+    #[tokio::test]
+    async fn test_access_log_captures_request_detail() {
+        let (_guard, agent, _dir) = install_test_agent().await;
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        let body = "username=admin&password=secret";
+        let input = format!(
+            "POST /login HTTP/1.1\r\nHost: example.com\r\n\
+             Content-Type: application/x-www-form-urlencoded\r\n\
+             Content-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let mock_io = Builder::new().read(input.as_bytes()).build();
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+        let mut ctx = Ctx::default();
+        let result = plugin
+            .handle_request(PluginStep::EarlyRequest, &mut session, &mut ctx)
+            .await
+            .unwrap();
+        assert!(result == RequestPluginResult::Continue);
+
+        // The access entry only ships once the response arrives.
+        assert!(agent.client.pop_log().await.is_none());
+        let mut resp = ResponseHeader::build(200, None).unwrap();
+        plugin
+            .handle_response(&mut session, &mut ctx, &mut resp)
+            .await
+            .unwrap();
+        let entry = agent.client.pop_log().await.unwrap();
+
+        assert_eq!(
+            body.as_bytes(),
+            entry.request_body.as_deref().unwrap_or(&[])
+        );
+        assert!(!entry.request_body_truncated);
+        assert_eq!(body.len() as u64, entry.request_body_size);
+        assert_eq!(
+            Some("example.com"),
+            entry.request_headers.get("host").map(String::as_str)
+        );
+        assert_eq!(
+            Some("application/x-www-form-urlencoded"),
+            entry
+                .request_headers
+                .get("content-type")
+                .map(String::as_str)
+        );
+    }
+
+    /// Builds one request with an explicit user agent header.
+    async fn run_request_with_ua(
+        plugin: &WafPlugin,
+        client_ip: &str,
+        user_agent: &str,
+    ) -> RequestPluginResult {
+        let input_header = format!(
+            "GET / HTTP/1.1\r\nHost: example.com\r\nUser-Agent: {user_agent}\r\n\r\n"
+        );
+        let mock_io = Builder::new().read(input_header.as_bytes()).build();
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+        let mut ctx = Ctx::default();
+        ctx.conn.client_ip = Some(client_ip.to_string());
+        plugin
+            .handle_request(PluginStep::EarlyRequest, &mut session, &mut ctx)
+            .await
+            .unwrap()
+    }
+
+    /// Installs an agent whose site has bot protection enabled with the given
+    /// action and a `Googlebot` whitelist entry, and no WAF engine.
+    async fn install_bot_agent(
+        action: proto::WafAction,
+    ) -> (
+        tokio::sync::MutexGuard<'static, ()>,
+        Arc<PingWafAgent>,
+        tempfile::TempDir,
+    ) {
+        let installed = install_test_agent().await;
+        installed
+            .1
+            .rule_cache
+            .update_from_site_config(&proto::SiteConfig {
+                sites: vec![proto::Site {
+                    id: "site-1".to_string(),
+                    name: "example".to_string(),
+                    domain: "example.com".to_string(),
+                    alternate_domains: Vec::new(),
+                    status: 0,
+                    rules: Some(proto::RuleBundle {
+                        site_id: "site-1".to_string(),
+                        config_hash: "hash-1".to_string(),
+                        waf: Some(proto::WafConfig {
+                            enabled: false,
+                            ..Default::default()
+                        }),
+                        bot_protection: Some(proto::BotProtectionConfig {
+                            enabled: true,
+                            action: action as i32,
+                            known_bots_whitelist: vec!["Googlebot".to_string()],
+                        }),
+                        ..Default::default()
+                    }),
+                }],
+                config_hash: "hash-1".to_string(),
+                updated_at: None,
+            })
+            .unwrap();
+        installed
+    }
+
+    #[test]
+    fn bot_ua_classification() {
+        let policy = BotPolicy::build(&CacheBotProtection {
+            enabled: true,
+            action: CacheWafAction::Block,
+            known_bots_whitelist: vec!["Googlebot".to_string()],
+        });
+
+        assert!(matches!(
+            policy.evaluate(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+            ),
+            BotDecision::Pass
+        ));
+        assert!(matches!(
+            policy.evaluate("Mozilla/5.0 (compatible; Googlebot/2.1)"),
+            BotDecision::Pass
+        ));
+        assert!(matches!(
+            policy.evaluate("curl/8.4.0"),
+            BotDecision::Deny(_)
+        ));
+        assert!(matches!(policy.evaluate(""), BotDecision::Deny(_)));
+        assert!(matches!(
+            policy.evaluate("python-requests/2.31.0"),
+            BotDecision::Deny(_)
+        ));
+    }
+
+    /// A block action answers non-browser agents with 403 even with the WAF
+    /// engine disabled; whitelisted bots and browsers pass.
+    #[tokio::test]
+    async fn test_bot_protection_blocks_non_browser() {
+        let (_guard, _agent, _dir) =
+            install_bot_agent(proto::WafAction::Block).await;
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        let RequestPluginResult::Respond(resp) =
+            run_request_with_ua(&plugin, "203.0.113.7", "curl/8.4.0").await
+        else {
+            panic!("expected bot protection to answer");
+        };
+        assert_eq!(http::StatusCode::FORBIDDEN, resp.status);
+
+        assert!(
+            run_request_with_ua(
+                &plugin,
+                "203.0.113.7",
+                "Mozilla/5.0 (compatible; Googlebot/2.1)"
+            )
+            .await
+                == RequestPluginResult::Continue
+        );
+        assert!(
+            run_request_with_ua(
+                &plugin,
+                "203.0.113.7",
+                "Mozilla/5.0 (X11; Linux x86_64) Firefox/127.0"
+            )
+            .await
+                == RequestPluginResult::Continue
+        );
+    }
+
+    /// The challenge action answers with the JS challenge (503).
+    #[tokio::test]
+    async fn test_bot_protection_challenge_action() {
+        let (_guard, _agent, _dir) =
+            install_bot_agent(proto::WafAction::Challenge).await;
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        let RequestPluginResult::Respond(resp) =
+            run_request_with_ua(&plugin, "203.0.113.7", "wget/1.21").await
+        else {
+            panic!("expected bot protection to answer");
+        };
+        assert_eq!(http::StatusCode::SERVICE_UNAVAILABLE, resp.status);
+    }
+
+    /// The log action records a security event but lets the request through.
+    #[tokio::test]
+    async fn test_bot_protection_log_action() {
+        let (_guard, agent, _dir) =
+            install_bot_agent(proto::WafAction::Log).await;
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        assert!(
+            run_request_with_ua(&plugin, "203.0.113.7", "python/3.12").await
+                == RequestPluginResult::Continue
+        );
+        let event = agent.client.pop_log().await.unwrap();
+        assert_eq!("bot_protection", event.waf_rule_id);
+        assert_eq!("monitor", event.waf_action);
+    }
+
+    /// Builds one rate limit rule for the tests.
+    fn rate_rule(
+        id: &str,
+        chars: Vec<proto::RateLimitCharacteristics>,
+        expression: &str,
+        threshold: u32,
+        action: proto::WafAction,
+        mitigation: u32,
+    ) -> proto::RateLimitRule {
+        proto::RateLimitRule {
+            id: id.to_string(),
+            name: format!("rule-{id}"),
+            expression: expression.to_string(),
+            characteristics: chars.into_iter().map(|c| c as i32).collect(),
+            period_seconds: 60,
+            threshold,
+            action: action as i32,
+            mitigation_timeout_seconds: mitigation,
+            enabled: true,
+            priority: 0,
+        }
+    }
+
+    /// Installs an agent whose site carries the given rate limit rules and no
+    /// WAF engine.
+    async fn install_rate_agent(
+        rules: Vec<proto::RateLimitRule>,
+    ) -> (
+        tokio::sync::MutexGuard<'static, ()>,
+        Arc<PingWafAgent>,
+        tempfile::TempDir,
+    ) {
+        let installed = install_test_agent().await;
+        installed
+            .1
+            .rule_cache
+            .update_from_site_config(&proto::SiteConfig {
+                sites: vec![proto::Site {
+                    id: "site-1".to_string(),
+                    name: "example".to_string(),
+                    domain: "example.com".to_string(),
+                    alternate_domains: Vec::new(),
+                    status: 0,
+                    rules: Some(proto::RuleBundle {
+                        site_id: "site-1".to_string(),
+                        config_hash: "hash-1".to_string(),
+                        waf: Some(proto::WafConfig {
+                            enabled: false,
+                            ..Default::default()
+                        }),
+                        rate_limit_rules: rules,
+                        ..Default::default()
+                    }),
+                }],
+                config_hash: "hash-1".to_string(),
+                updated_at: None,
+            })
+            .unwrap();
+        installed
+    }
+
+    /// Builds one GET request with an explicit path and optional cookie.
+    async fn run_rate_request(
+        plugin: &WafPlugin,
+        client_ip: &str,
+        path: &str,
+        cookie: Option<&str>,
+    ) -> RequestPluginResult {
+        let cookie_line = cookie
+            .map(|value| format!("Cookie: {value}\r\n"))
+            .unwrap_or_default();
+        let input_header = format!(
+            "GET {path} HTTP/1.1\r\nHost: example.com\r\n{cookie_line}\r\n"
+        );
+        let mock_io = Builder::new().read(input_header.as_bytes()).build();
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+        let mut ctx = Ctx::default();
+        ctx.conn.client_ip = Some(client_ip.to_string());
+        plugin
+            .handle_request(PluginStep::EarlyRequest, &mut session, &mut ctx)
+            .await
+            .unwrap()
+    }
+
+    #[test]
+    fn rate_rule_build_filters_unenforceable_rules() {
+        let build = |rule: proto::RateLimitRule| {
+            CompiledRateRule::build(&CacheRateLimitRule {
+                id: rule.id,
+                name: rule.name,
+                expression: rule.expression,
+                characteristics: rule
+                    .characteristics
+                    .iter()
+                    .map(|c| {
+                        format!(
+                            "{:?}",
+                            proto::RateLimitCharacteristics::try_from(*c)
+                                .unwrap_or(
+                                    proto::RateLimitCharacteristics::RateLimitCharIp
+                                )
+                        )
+                    })
+                    .collect(),
+                period_seconds: rule.period_seconds,
+                threshold: rule.threshold,
+                action: CacheWafAction::from(rule.action),
+                mitigation_timeout_seconds: rule.mitigation_timeout_seconds,
+                enabled: rule.enabled,
+                priority: rule.priority,
+            })
+        };
+
+        // Zero threshold or period would never trip (or trip everything).
+        assert!(
+            build(rate_rule(
+                "a",
+                vec![proto::RateLimitCharacteristics::RateLimitCharIp],
+                "",
+                0,
+                proto::WafAction::Block,
+                60
+            ))
+            .is_none()
+        );
+        // Disabled rules are skipped.
+        let mut disabled = rate_rule(
+            "b",
+            vec![proto::RateLimitCharacteristics::RateLimitCharIp],
+            "",
+            10,
+            proto::WafAction::Block,
+            0,
+        );
+        disabled.enabled = false;
+        assert!(build(disabled).is_none());
+        // Characteristics the edge cannot key on invalidate the whole rule.
+        assert!(
+            build(rate_rule(
+                "c",
+                vec![
+                    proto::RateLimitCharacteristics::RateLimitCharIp,
+                    proto::RateLimitCharacteristics::RateLimitCharJa3,
+                ],
+                "",
+                10,
+                proto::WafAction::Block,
+                0
+            ))
+            .is_none()
+        );
+        // Allow actions do nothing meaningful on a counter.
+        assert!(
+            build(rate_rule(
+                "d",
+                vec![proto::RateLimitCharacteristics::RateLimitCharIp],
+                "",
+                10,
+                proto::WafAction::Allow,
+                0
+            ))
+            .is_none()
+        );
+        // A parse failure leaves the rule out rather than matching nothing.
+        assert!(
+            build(rate_rule(
+                "e",
+                vec![proto::RateLimitCharacteristics::RateLimitCharIp],
+                "http.request.uri.path ~~~",
+                10,
+                proto::WafAction::Block,
+                0
+            ))
+            .is_none()
+        );
+        // The prost debug name of ip_nat normalises to the plain IP key.
+        let nat = build(rate_rule(
+            "f",
+            vec![proto::RateLimitCharacteristics::RateLimitCharIpNat],
+            "",
+            10,
+            proto::WafAction::Block,
+            0,
+        ))
+        .unwrap();
+        assert_eq!(vec![RateChar::Ip], nat.chars);
+    }
+
+    #[test]
+    fn rate_policy_counts_per_key_and_expires() {
+        let policy = RateLimitPolicy {
+            rules: vec![CompiledRateRule {
+                id: "rl".to_string(),
+                name: "per-ip".to_string(),
+                expression: None,
+                chars: vec![RateChar::Ip],
+                period_secs: 60,
+                threshold: 1,
+                mitigation_secs: 0,
+                action: RateAction::Block,
+            }],
+        };
+        let counters: DashMap<String, RateCounter> = DashMap::new();
+        let request = |ip: &str, path: &str| RequestData {
+            method: "GET".to_string(),
+            path: path.to_string(),
+            query: String::new(),
+            headers: Vec::new(),
+            body: None,
+            client_ip: ip.to_string(),
+            country_code: None,
+            scheme: "http".to_string(),
+            protocol: "HTTP/1.1".to_string(),
+        };
+
+        assert!(
+            policy
+                .evaluate(&counters, &request("1.1.1.1", "/"), "s.test", false)
+                .deny
+                .is_none()
+        );
+        let outcome = policy.evaluate(
+            &counters,
+            &request("1.1.1.1", "/"),
+            "s.test",
+            false,
+        );
+        let deny = outcome.deny.expect("second request must trip");
+        assert!(!deny.challenge);
+        assert!(deny.retry_after > 0 && deny.retry_after <= 60);
+
+        // A different key (IP or path dimension) keeps its own counter.
+        assert!(
+            policy
+                .evaluate(&counters, &request("2.2.2.2", "/"), "s.test", false)
+                .deny
+                .is_none()
+        );
+    }
+
+    /// A block action answers the third request over the threshold with 429
+    /// while other IPs keep their own counters.
+    #[tokio::test]
+    async fn test_rate_limit_blocks_over_threshold() {
+        let (_guard, _agent, _dir) = install_rate_agent(vec![rate_rule(
+            "rl-block",
+            vec![proto::RateLimitCharacteristics::RateLimitCharIp],
+            "",
+            2,
+            proto::WafAction::Block,
+            60,
+        )])
+        .await;
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        assert!(
+            run_rate_request(&plugin, "203.0.113.9", "/", None).await
+                == RequestPluginResult::Continue
+        );
+        assert!(
+            run_rate_request(&plugin, "203.0.113.9", "/", None).await
+                == RequestPluginResult::Continue
+        );
+        let RequestPluginResult::Respond(resp) =
+            run_rate_request(&plugin, "203.0.113.9", "/", None).await
+        else {
+            panic!("expected the rate limit to answer");
+        };
+        assert_eq!(http::StatusCode::TOO_MANY_REQUESTS, resp.status);
+
+        // Another client IP is unaffected.
+        assert!(
+            run_rate_request(&plugin, "203.0.113.10", "/", None).await
+                == RequestPluginResult::Continue
+        );
+    }
+
+    /// The path characteristic splits counters and the expression restricts
+    /// which requests a rule counts at all.
+    #[tokio::test]
+    async fn test_rate_limit_path_and_expression() {
+        let (_guard, _agent, _dir) = install_rate_agent(vec![rate_rule(
+            "rl-api",
+            vec![
+                proto::RateLimitCharacteristics::RateLimitCharIp,
+                proto::RateLimitCharacteristics::RateLimitCharPath,
+            ],
+            r#"http.request.uri.path starts_with "/api/""#,
+            1,
+            proto::WafAction::Block,
+            0,
+        )])
+        .await;
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        // First hit counts, second trips, a different path keeps its own
+        // counter and requests outside /api/ are never counted.
+        assert!(
+            run_rate_request(&plugin, "203.0.113.11", "/api/list", None).await
+                == RequestPluginResult::Continue
+        );
+        let RequestPluginResult::Respond(resp) =
+            run_rate_request(&plugin, "203.0.113.11", "/api/list", None).await
+        else {
+            panic!("expected the rate limit to answer");
+        };
+        assert_eq!(http::StatusCode::TOO_MANY_REQUESTS, resp.status);
+
+        assert!(
+            run_rate_request(&plugin, "203.0.113.11", "/api/detail", None)
+                .await
+                == RequestPluginResult::Continue
+        );
+        assert!(
+            run_rate_request(&plugin, "203.0.113.11", "/other", None).await
+                == RequestPluginResult::Continue
+        );
+        assert!(
+            run_rate_request(&plugin, "203.0.113.11", "/other", None).await
+                == RequestPluginResult::Continue
+        );
+    }
+
+    /// The log action ships a security event but lets the request continue.
+    #[tokio::test]
+    async fn test_rate_limit_log_action_records_event() {
+        let (_guard, agent, _dir) = install_rate_agent(vec![rate_rule(
+            "rl-log",
+            vec![proto::RateLimitCharacteristics::RateLimitCharIp],
+            "",
+            1,
+            proto::WafAction::Log,
+            0,
+        )])
+        .await;
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        assert!(
+            run_rate_request(&plugin, "203.0.113.12", "/", None).await
+                == RequestPluginResult::Continue
+        );
+        assert!(
+            run_rate_request(&plugin, "203.0.113.12", "/", None).await
+                == RequestPluginResult::Continue
+        );
+        let event = agent.client.pop_log().await.unwrap();
+        assert_eq!("rl-log", event.waf_rule_id);
+        assert_eq!("monitor", event.waf_action);
+    }
+
+    /// The challenge action serves the JS challenge; a client holding a valid
+    /// clearance cookie is exempt and keeps passing.
+    #[tokio::test]
+    async fn test_rate_limit_challenge_and_clearance() {
+        let (_guard, _agent, _dir) = install_rate_agent(vec![rate_rule(
+            "rl-challenge",
+            vec![proto::RateLimitCharacteristics::RateLimitCharIp],
+            "",
+            1,
+            proto::WafAction::Challenge,
+            60,
+        )])
+        .await;
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        // The second request trips and receives the challenge page.
+        assert!(
+            run_rate_request(&plugin, "203.0.113.13", "/", None).await
+                == RequestPluginResult::Continue
+        );
+        let RequestPluginResult::Respond(resp) =
+            run_rate_request(&plugin, "203.0.113.13", "/", None).await
+        else {
+            panic!("expected the challenge to answer");
+        };
+        assert_eq!(http::StatusCode::SERVICE_UNAVAILABLE, resp.status);
+
+        // A solved clearance exempts the client: the rule neither counts nor
+        // stops it, even though the counter is already over the threshold.
+        let secret = resolve_cookie_secret("");
+        let manager = CookieManager::new(secret.as_bytes(), 3600);
+        let cookie = manager.issue_clearance(
+            ClearanceLevel::NonInteractive,
+            "site-1",
+            "fingerprint",
+        );
+        assert!(
+            run_rate_request(
+                &plugin,
+                "203.0.113.13",
+                "/",
+                Some(&format!("{CLEARANCE_COOKIE_NAME}={cookie}"))
+            )
+            .await
+                == RequestPluginResult::Continue
+        );
     }
 }

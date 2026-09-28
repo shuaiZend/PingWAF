@@ -5,6 +5,8 @@ import { Link } from 'react-router-dom'
 import {
   AreaChart,
   Area,
+  LineChart,
+  Line,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -31,7 +33,7 @@ import { Select } from '@/components/ui/Select'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { Table, type Column } from '@/components/ui/Table'
 import { ErrorState } from '@/components/ErrorState'
-import { Skeleton, SkeletonRows, SkeletonStat } from '@/components/ui/Skeleton'
+import { Skeleton, SkeletonRows } from '@/components/ui/Skeleton'
 import { analyticsApi, analyticsKeys } from '@/api/analytics'
 import { agentsApi, agentKeys } from '@/api/agents'
 import { useSitesList } from '@/hooks'
@@ -42,9 +44,8 @@ import {
   formatLatency,
   formatNumber,
   formatPercent,
-  formatRelative,
 } from '@/lib/format'
-import type { RangeQuery, TopIp, TopRule } from '@/api/types'
+import type { RangeQuery, TopIp, TopPath, TopRule } from '@/api/types'
 
 /** Preset windows, in hours. The API caps a single range at 31 days. */
 const RANGE_OPTIONS = [
@@ -58,6 +59,33 @@ const RANGE_OPTIONS = [
 
 /** 30s polling cadence, matching the dashboard's "live" promise. */
 const REFRESH_MS = 30_000
+
+/** Stroke palette for the per-site traffic lines (capped at 8 sites server-side). */
+const SITE_LINE_COLORS = [
+  '#f6821f',
+  '#18794e',
+  '#2f6fed',
+  '#e54d2a',
+  '#8b5cf6',
+  '#0891b2',
+  '#ca8a04',
+  '#db2777',
+]
+
+/** Badge tone matching the HTTP class of a status code. */
+function statusCodeTone(code: number): 'success' | 'info' | 'warning' | 'danger' {
+  if (code < 300) return 'success'
+  if (code < 400) return 'info'
+  if (code < 500) return 'warning'
+  return 'danger'
+}
+
+function statusCodeBar(code: number): string {
+  if (code < 300) return 'bg-success'
+  if (code < 400) return 'bg-focus'
+  if (code < 500) return 'bg-warning'
+  return 'bg-danger'
+}
 
 function intervalFor(hours: number): 'minute' | 'hour' | 'day' {
   if (hours <= 2) return 'minute'
@@ -109,11 +137,25 @@ export function DashboardPage() {
     refetchInterval: REFRESH_MS,
   })
 
-  const topSites = useQuery({
-    queryKey: analyticsKeys.sites(range),
-    queryFn: () => analyticsApi.sitesOverview(range),
+  // Per-site series only make sense across sites, so the chart is hidden
+  // while a single site is selected.
+  const siteTraffic = useQuery({
+    queryKey: analyticsKeys.sitesOverTime(range),
+    queryFn: () => analyticsApi.sitesOverTime(range),
     refetchInterval: REFRESH_MS,
     enabled: !siteId,
+  })
+
+  const topPaths = useQuery({
+    queryKey: analyticsKeys.topPaths(range),
+    queryFn: () => analyticsApi.topPaths({ ...range, limit: 8 }),
+    refetchInterval: REFRESH_MS,
+  })
+
+  const statusCodes = useQuery({
+    queryKey: analyticsKeys.statusCodes(range),
+    queryFn: () => analyticsApi.statusCodes(range),
+    refetchInterval: REFRESH_MS,
   })
 
   const agents = useQuery({
@@ -143,6 +185,33 @@ export function DashboardPage() {
       })),
     [traffic.data, spanMs],
   )
+
+  // The API returns one row per (bucket, site); pivot into one object per
+  // bucket with a column per site so recharts can draw one line per site.
+  const siteTrafficData = useMemo(() => {
+    const domains: string[] = []
+    const names = new Map<string, string>()
+    const buckets = new Map<string, Record<string, string | number>>()
+    for (const point of siteTraffic.data ?? []) {
+      if (!names.has(point.site_domain)) {
+        names.set(point.site_domain, point.site_name || point.site_domain)
+        domains.push(point.site_domain)
+      }
+      let bucket = buckets.get(point.bucket)
+      if (!bucket) {
+        bucket = { bucket: point.bucket }
+        buckets.set(point.bucket, bucket)
+      }
+      bucket[point.site_domain] = point.requests
+    }
+    const data = [...buckets.values()]
+      .sort((a, b) => String(a.bucket).localeCompare(String(b.bucket)))
+      .map((bucket) => ({ ...bucket, label: formatBucket(bucket.bucket, spanMs) }))
+    return { data, domains, names }
+  }, [siteTraffic.data, spanMs])
+
+  const statusRows = statusCodes.data ?? []
+  const statusTotal = statusRows.reduce((sum, row) => sum + row.requests, 0)
 
   const s = summary.data
   const onlineAgents = (agents.data ?? []).filter((a) => a.status === 'online').length
@@ -286,6 +355,37 @@ export function DashboardPage() {
     },
   ]
 
+  const pathColumns: Column<TopPath>[] = [
+    {
+      key: 'path',
+      header: t('pages.dashboard.path'),
+      accessor: (r) => r.path,
+      cell: (r) => <span className="pw-mono block truncate text-[13px] text-fg">{r.path}</span>,
+    },
+    {
+      key: 'requests',
+      header: t('pages.dashboard.hits'),
+      accessor: (r) => r.requests,
+      align: 'right',
+      sortable: true,
+      cell: (r) => <span className="tabular-nums">{formatNumber(r.requests)}</span>,
+    },
+    {
+      key: 'cache_hits',
+      header: t('pages.dashboard.cacheHits'),
+      accessor: (r) => r.cache_hits,
+      align: 'right',
+      cell: (r) => <span className="tabular-nums text-fg-subtle">{formatNumber(r.cache_hits)}</span>,
+    },
+    {
+      key: 'avg_latency_ms',
+      header: t('pages.dashboard.avgLatency'),
+      accessor: (r) => r.avg_latency_ms,
+      align: 'right',
+      cell: (r) => <span className="tabular-nums">{formatLatency(r.avg_latency_ms)}</span>,
+    },
+  ]
+
   return (
     <div className="animate-slide-up">
       <PageHeader
@@ -320,6 +420,9 @@ export function DashboardPage() {
                 void traffic.refetch()
                 void topIps.refetch()
                 void topRules.refetch()
+                void topPaths.refetch()
+                void statusCodes.refetch()
+                if (!siteId) void siteTraffic.refetch()
               }}
             >
               {t('common.refresh')}
@@ -472,6 +575,87 @@ export function DashboardPage() {
         </CardBody>
       </Card>
 
+      {/* Per-site traffic */}
+      {!siteId && (
+        <Card className="mt-4">
+          <CardHeader
+            title={t('pages.dashboard.sitesTraffic')}
+            description={t('pages.dashboard.sitesTrafficDescription')}
+            action={
+              siteTraffic.data ? (
+                <span className="text-xs text-fg-subtle tabular-nums">
+                  {t('pages.dashboard.sitesTracked', { count: siteTrafficData.domains.length })}
+                </span>
+              ) : undefined
+            }
+          />
+          <CardBody>
+            {siteTraffic.isPending ? (
+              <Skeleton className="h-72 w-full" />
+            ) : siteTraffic.isError ? (
+              <ErrorState
+                variant="inline"
+                error={siteTraffic.error}
+                onRetry={() => siteTraffic.refetch()}
+                retrying={siteTraffic.isFetching}
+              />
+            ) : siteTrafficData.data.length === 0 ? (
+              <EmptyState
+                icon={<Globe weight="duotone" className="h-8 w-8" />}
+                title={t('pages.dashboard.noSiteTraffic')}
+                description={t('pages.dashboard.noSiteTrafficDescription')}
+                className="py-10"
+              />
+            ) : (
+              <div className="h-72 w-full">
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={siteTrafficData.data} margin={{ top: 8, right: 8, left: -16, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border-line)" vertical={false} />
+                    <XAxis
+                      dataKey="label"
+                      tick={{ fontSize: 11, fill: 'var(--color-text-subtle)' }}
+                      tickLine={false}
+                      axisLine={{ stroke: 'var(--color-border-line)' }}
+                      minTickGap={24}
+                    />
+                    <YAxis
+                      tick={{ fontSize: 11, fill: 'var(--color-text-subtle)' }}
+                      tickLine={false}
+                      axisLine={false}
+                      tickFormatter={(v: number) => formatCompactNumber(v)}
+                    />
+                    <Tooltip
+                      contentStyle={{
+                        background: 'var(--color-bg-elevated)',
+                        border: '1px solid var(--color-border-line)',
+                        borderRadius: 8,
+                        fontSize: 12,
+                        color: 'var(--color-text-default)',
+                      }}
+                      formatter={(value) => formatNumber(Number(value ?? 0))}
+                    />
+                    <Legend wrapperStyle={{ fontSize: 12 }} iconType="circle" />
+                    {siteTrafficData.domains.map((domain, index) => (
+                      <Line
+                        key={domain}
+                        type="monotone"
+                        dataKey={domain}
+                        name={siteTrafficData.names.get(domain)}
+                        stroke={SITE_LINE_COLORS[index % SITE_LINE_COLORS.length]}
+                        strokeWidth={2}
+                        dot={false}
+                        activeDot={{ r: 3 }}
+                        connectNulls
+                      />
+                    ))}
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+          </CardBody>
+        </Card>
+      )}
+
       <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-2">
         {/* Top threat IPs */}
         <Card>
@@ -533,154 +717,82 @@ export function DashboardPage() {
         </Card>
       </div>
 
-      {/* Agent fleet */}
-      <Card className="mt-4">
-        <CardHeader
-          title={t('pages.dashboard.agentFleet')}
-          description={t('pages.dashboard.agentFleetDescription')}
-          action={
-            <Link to="/agents">
-              <Button variant="ghost" size="sm" icon={<ArrowRight weight="bold" className="h-3.5 w-3.5" />}>
-                {t('common.viewAll')}
-              </Button>
-            </Link>
-          }
-        />
-        <CardBody>
-          {agents.isPending ? (
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
-              {Array.from({ length: 4 }).map((_, i) => (
-                <SkeletonStat key={i} />
-              ))}
-            </div>
-          ) : agents.isError ? (
-            <ErrorState variant="inline" error={agents.error} onRetry={() => agents.refetch()} />
-          ) : (agents.data ?? []).length === 0 ? (
-            <EmptyState
-              className="py-8"
-              icon={<Desktop weight="duotone" className="h-7 w-7" />}
-              title={t('pages.agents.empty')}
-              description={t('pages.dashboard.noAgentsDescription')}
-            />
-          ) : (
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
-              {(agents.data ?? []).slice(0, 8).map((agent) => (
-                <Link
-                  key={agent.id}
-                  to="/agents"
-                  className="group rounded-lg border border-line bg-recessed/40 p-3.5 transition-all duration-150 hover:border-fill hover:bg-recessed"
-                >
-                  <div className="flex items-start justify-between gap-2">
-                    <span className="flex min-w-0 items-center gap-2">
-                      <span
-                        className={cn(
-                          'h-2 w-2 shrink-0 rounded-full',
-                          agent.status === 'online'
-                            ? 'bg-success'
-                            : agent.status === 'degraded'
-                              ? 'bg-warning'
-                              : 'bg-fg-subtle/50',
-                        )}
-                      />
-                      <span className="truncate text-[13px] font-medium text-fg-strong">
-                        {agent.hostname}
-                      </span>
-                    </span>
-                    <Badge
-                      size="sm"
-                      tone={
-                        agent.status === 'online'
-                          ? 'success'
-                          : agent.status === 'degraded'
-                            ? 'warning'
-                            : 'neutral'
-                      }
-                    >
-                      {t(`status.${agent.status}`, agent.status)}
-                    </Badge>
-                  </div>
-                  <p className="pw-mono mt-2 truncate text-xs text-fg-subtle">{agent.ip_address}</p>
-                  <p className="mt-1.5 text-xs text-fg-subtle">
-                    {agent.site_domain ?? t('pages.dashboard.unassigned')}
-                  </p>
-                  <p className="mt-1 text-xs text-fg-subtle/80">
-                    {agent.last_heartbeat
-                      ? formatRelative(agent.last_heartbeat)
-                      : t('pages.agents.neverSeen')}
-                  </p>
-                </Link>
-              ))}
-            </div>
-          )}
-        </CardBody>
-      </Card>
-
-      {/* Traffic by site */}
-      {!siteId && (
-        <Card className="mt-4">
+      <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-2">
+        {/* Top paths */}
+        <Card>
           <CardHeader
-            title={t('pages.dashboard.topSites')}
-            description={t('pages.dashboard.topSitesDescription')}
-            action={
-              <Link to="/sites">
-                <Button variant="ghost" size="sm" icon={<ArrowRight weight="bold" className="h-3.5 w-3.5" />}>
-                  {t('nav.sites')}
-                </Button>
-              </Link>
-            }
+            title={t('pages.dashboard.topPaths')}
+            description={t('pages.dashboard.topPathsDescription')}
           />
           <CardBody className="px-0 py-0">
-            {topSites.isPending ? (
-              <SkeletonRows rows={4} columns={5} />
-            ) : (topSites.data ?? []).length === 0 ? (
+            {topPaths.isPending ? (
+              <SkeletonRows rows={5} columns={4} />
+            ) : topPaths.isError ? (
+              <div className="p-4">
+                <ErrorState variant="inline" error={topPaths.error} onRetry={() => topPaths.refetch()} />
+              </div>
+            ) : (topPaths.data ?? []).length === 0 ? (
               <EmptyState
                 className="py-10"
-                icon={<Globe weight="duotone" className="h-7 w-7" />}
-                title={t('pages.sites.emptyTitle')}
-                description={t('pages.sites.emptyDescription')}
+                icon={<ArrowsDownUp weight="duotone" className="h-7 w-7" />}
+                title={t('pages.dashboard.noTraffic')}
+                description={t('pages.dashboard.noTrafficDescription')}
               />
             ) : (
-              <div className="divide-y divide-line">
-                {(topSites.data ?? []).map((site) => {
-                  const max = Math.max(1, ...(topSites.data ?? []).map((x) => x.requests))
-                  return (
-                    <Link
-                      key={site.site_id}
-                      to={`/sites/${site.site_id}/security/waf`}
-                      className="flex items-center gap-4 px-5 py-3 transition-colors hover:bg-recessed/60"
-                    >
-                      <div className="min-w-0 flex-1">
-                        <p className="truncate text-[13px] font-medium text-fg">{site.name}</p>
-                        <p className="pw-mono truncate text-xs text-fg-subtle">{site.domain}</p>
-                      </div>
-                      <div className="hidden w-40 sm:block">
-                        <div className="h-1.5 overflow-hidden rounded-full bg-recessed">
-                          <div
-                            className="h-full rounded-full bg-brand transition-[width] duration-500"
-                            style={{ width: `${Math.max(2, (site.requests / max) * 100)}%` }}
-                          />
-                        </div>
-                      </div>
-                      <div className="w-20 text-right text-[13px] tabular-nums text-fg">
-                        {formatCompactNumber(site.requests)}
-                      </div>
-                      <div className="w-20 text-right text-[13px] tabular-nums text-fg-danger">
-                        {formatCompactNumber(site.blocked)}
-                      </div>
-                      <Badge
-                        size="sm"
-                        tone={site.status === 'active' ? 'success' : site.status === 'paused' ? 'warning' : 'neutral'}
-                      >
-                        {t(`status.${site.status}`, site.status)}
-                      </Badge>
-                    </Link>
-                  )
-                })}
+              <Table columns={pathColumns} data={topPaths.data ?? []} rowKey={(r) => r.path} dense />
+            )}
+          </CardBody>
+        </Card>
+
+        {/* Status codes */}
+        <Card>
+          <CardHeader
+            title={t('pages.dashboard.statusCodes')}
+            description={t('pages.dashboard.statusCodesDescription')}
+          />
+          <CardBody>
+            {statusCodes.isPending ? (
+              <SkeletonRows rows={5} columns={3} />
+            ) : statusCodes.isError ? (
+              <ErrorState
+                variant="inline"
+                error={statusCodes.error}
+                onRetry={() => statusCodes.refetch()}
+                retrying={statusCodes.isFetching}
+              />
+            ) : statusRows.length === 0 ? (
+              <EmptyState
+                className="py-10"
+                icon={<Gauge weight="duotone" className="h-7 w-7" />}
+                title={t('pages.dashboard.noTraffic')}
+                description={t('pages.dashboard.noTrafficDescription')}
+              />
+            ) : (
+              <div className="space-y-3">
+                {statusRows.map((row) => (
+                  <div key={row.status_code} className="flex items-center gap-3">
+                    <Badge size="sm" tone={statusCodeTone(row.status_code)} className="w-14 justify-center">
+                      {row.status_code}
+                    </Badge>
+                    <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-recessed">
+                      <div
+                        className={cn('h-full rounded-full', statusCodeBar(row.status_code))}
+                        style={{ width: `${Math.max(2, (row.requests / statusTotal) * 100)}%` }}
+                      />
+                    </div>
+                    <span className="w-20 text-right text-[13px] tabular-nums text-fg">
+                      {formatCompactNumber(row.requests)}
+                    </span>
+                    <span className="w-12 text-right text-xs tabular-nums text-fg-subtle">
+                      {statusTotal > 0 ? formatPercent(row.requests / statusTotal) : '—'}
+                    </span>
+                  </div>
+                ))}
               </div>
             )}
           </CardBody>
         </Card>
-      )}
+      </div>
     </div>
   )
 }
