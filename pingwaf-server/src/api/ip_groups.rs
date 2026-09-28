@@ -253,6 +253,11 @@ async fn create(
         )));
     }
     let ip_ranges = validate_ip_ranges(&payload.ip_ranges)?;
+    let source_url = non_empty(&payload.source_url);
+    if let Some(url) = &source_url {
+        crate::subscription::validate_source_url(url)
+            .map_err(ApiError::BadRequest)?;
+    }
 
     let timestamp = chrono::Utc::now();
     let model = ip_groups::ActiveModel {
@@ -262,7 +267,7 @@ async fn create(
         ip_ranges: Set(ip_ranges),
         action: Set(payload.action),
         is_global: Set(payload.is_global),
-        source_url: Set(non_empty(&payload.source_url)),
+        source_url: Set(source_url),
         sync_interval_minutes: Set(normalise_interval(
             payload.sync_interval_minutes,
         )),
@@ -328,7 +333,12 @@ async fn update(
         active.is_global = Set(is_global);
     }
     if let Some(url) = payload.source_url {
-        active.source_url = Set(non_empty(&Some(url)));
+        let stored = non_empty(&Some(url));
+        if let Some(url) = &stored {
+            crate::subscription::validate_source_url(url)
+                .map_err(ApiError::BadRequest)?;
+        }
+        active.source_url = Set(stored);
     }
     if let Some(interval) = payload.sync_interval_minutes {
         active.sync_interval_minutes = Set(normalise_interval(Some(interval)));
