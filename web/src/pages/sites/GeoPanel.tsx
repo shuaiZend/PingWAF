@@ -9,6 +9,7 @@ import {
   MagnifyingGlass,
   Check,
   Buildings,
+  Minus,
 } from '@phosphor-icons/react'
 import {
   BarChart,
@@ -19,7 +20,6 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from 'recharts'
-import { PageHeader } from '@/components/PageHeader'
 import { Card, CardBody, CardHeader } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
@@ -47,12 +47,8 @@ import {
   type GeoConfig,
 } from '@/api/types'
 
-interface AsnForm {
-  asn: string
-  description: string
-}
-
-export function GeoPage() {
+/** The geo restriction module of the site's access-control tab. */
+export function GeoPanel() {
   const { t } = useTranslation()
   const toast = useToast()
   const queryClient = useQueryClient()
@@ -61,7 +57,7 @@ export function GeoPage() {
 
   const [config, setConfig] = useState<GeoConfig | null>(null)
   const [dirty, setDirty] = useState(false)
-  const [asnForm, setAsnForm] = useState<AsnForm>({ asn: '', description: '' })
+  const [asnInput, setAsnInput] = useState('')
 
   const configQuery = useQuery({
     queryKey: geoKeys.config(siteId),
@@ -96,6 +92,7 @@ export function GeoPage() {
   const save = useMutation({
     mutationFn: (payload: GeoConfig) =>
       geoApi.update(siteId, {
+        enabled: payload.enabled,
         mode: payload.mode,
         countries: payload.countries,
         blocked_asns: payload.blocked_asns,
@@ -124,60 +121,50 @@ export function GeoPage() {
 
   const addAsn = () => {
     if (!config) return
-    const asn = Number(asnForm.asn)
-    if (!Number.isFinite(asn) || asn <= 0) {
+    // Stored as sent: "13335" and "AS13335" are both accepted by the edge.
+    const asn = asnInput.trim().toUpperCase()
+    if (!/^(AS)?\d{1,10}$/.test(asn)) {
       toast.warning(t('pages.geo.invalidAsn'))
       return
     }
-    if (config.blocked_asns.some((a) => a.asn === asn)) {
+    if (config.blocked_asns.includes(asn)) {
       toast.warning(t('pages.geo.duplicateAsn'))
       return
     }
-    patch({
-      blocked_asns: [
-        ...config.blocked_asns,
-        { asn, description: asnForm.description.trim() },
-      ],
-    })
-    setAsnForm({ asn: '', description: '' })
+    patch({ blocked_asns: [...config.blocked_asns, asn] })
+    setAsnInput('')
   }
 
-  const removeAsn = (asn: number) => {
+  const removeAsn = (asn: string) => {
     if (!config) return
-    patch({ blocked_asns: config.blocked_asns.filter((a) => a.asn !== asn) })
+    patch({ blocked_asns: config.blocked_asns.filter((a) => a !== asn) })
   }
 
   return (
-    <div className="animate-slide-up">
-      <PageHeader
-        title={t('pages.geo.title')}
-        description={t('pages.geo.description')}
-        actions={
-          <div className="flex items-center gap-2">
-            <Button
-              variant="secondary"
-              loading={configQuery.isFetching}
-              onClick={() => {
-                configQuery.refetch()
-                statsQuery.refetch()
-              }}
-              icon={<ArrowClockwise weight="duotone" className="h-4 w-4" />}
-            >
-              {t('common.refresh')}
-            </Button>
-            {canWrite && (
-              <Button
-                variant="primary"
-                disabled={!dirty || save.isPending}
-                loading={save.isPending}
-                onClick={() => config && save.mutate(config)}
-              >
-                {t('common.save')}
-              </Button>
-            )}
-          </div>
-        }
-      />
+    <div>
+      <div className="mb-4 flex items-center justify-end gap-2">
+        <Button
+          variant="secondary"
+          loading={configQuery.isFetching}
+          onClick={() => {
+            configQuery.refetch()
+            statsQuery.refetch()
+          }}
+          icon={<ArrowClockwise weight="duotone" className="h-4 w-4" />}
+        >
+          {t('common.refresh')}
+        </Button>
+        {canWrite && (
+          <Button
+            variant="primary"
+            disabled={!dirty || save.isPending}
+            loading={save.isPending}
+            onClick={() => config && save.mutate(config)}
+          >
+            {t('common.save')}
+          </Button>
+        )}
+      </div>
 
       {configQuery.isError && !config ? (
         <ErrorState
@@ -190,8 +177,23 @@ export function GeoPage() {
           <div className="flex flex-col gap-6">
             {/* Policy */}
             <Card>
-              <CardHeader title={t('pages.geo.policy')} description={t('pages.geo.policyHint')} />
+              <CardHeader
+                title={t('pages.geo.policy')}
+                description={t('pages.geo.policyHint')}
+                action={
+                  <Badge tone={config.enabled ? 'success' : 'neutral'} dot size="sm">
+                    {config.enabled ? t('common.enabled') : t('common.disabled')}
+                  </Badge>
+                }
+              />
               <CardBody className="flex flex-col gap-5">
+                <Switch
+                  checked={config.enabled}
+                  disabled={!canWrite}
+                  onCheckedChange={(enabled) => patch({ enabled })}
+                  label={t('pages.geo.enabled')}
+                  description={t('pages.geo.enabledHint')}
+                />
                 <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                   <Select
                     label={t('pages.geo.mode')}
@@ -230,9 +232,9 @@ export function GeoPage() {
               <CardHeader
                 title={t('pages.geo.countries')}
                 description={
-                  config.mode === 'block'
-                    ? t('pages.geo.countriesBlockHint')
-                    : t('pages.geo.countriesAllowHint')
+                  config.mode === 'allow_list'
+                    ? t('pages.geo.countriesAllowHint')
+                    : t('pages.geo.countriesBlockHint')
                 }
                 action={
                   <Badge tone={config.countries.length ? 'brand' : 'neutral'} size="sm">
@@ -265,22 +267,18 @@ export function GeoPage() {
                 {canWrite && (
                   <div className="flex flex-wrap items-end gap-2">
                     <Input
-                      type="number"
                       label={t('pages.geo.asn')}
-                      value={asnForm.asn}
-                      placeholder="13335"
-                      containerClassName="w-32"
-                      min={1}
-                      onChange={(e) => setAsnForm((f) => ({ ...f, asn: e.target.value }))}
-                    />
-                    <Input
-                      label={t('common.description')}
-                      value={asnForm.description}
-                      placeholder="Cloudflare"
-                      containerClassName="flex-1 min-w-40"
-                      onChange={(e) =>
-                        setAsnForm((f) => ({ ...f, description: e.target.value }))
-                      }
+                      value={asnInput}
+                      placeholder="AS13335"
+                      containerClassName="w-40"
+                      hint={t('pages.geo.asnHint')}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault()
+                          addAsn()
+                        }
+                      }}
+                      onChange={(e) => setAsnInput(e.target.value)}
                     />
                     <Button
                       variant="secondary"
@@ -296,31 +294,24 @@ export function GeoPage() {
                     {t('pages.geo.noAsns')}
                   </p>
                 ) : (
-                  <ul className="flex flex-col gap-1.5">
+                  <ul className="flex flex-wrap gap-1.5">
                     {config.blocked_asns.map((asn) => (
                       <li
-                        key={asn.asn}
-                        className="flex items-center justify-between gap-3 rounded-md border border-line bg-recessed/40 px-3 py-2"
+                        key={asn}
+                        className="inline-flex items-center gap-1.5 rounded-full border border-line bg-recessed/40 px-2.5 py-1"
                       >
-                        <div className="min-w-0">
-                          <span className="pw-mono text-[13px] font-medium text-fg-strong">
-                            AS{asn.asn}
-                          </span>
-                          {asn.description && (
-                            <span className="ml-2 text-[13px] text-fg-subtle">
-                              {asn.description}
-                            </span>
-                          )}
-                        </div>
+                        <span className="pw-mono text-[13px] font-medium text-fg-strong">
+                          {asn.startsWith('AS') ? asn : `AS${asn}`}
+                        </span>
                         {canWrite && (
-                          <Button
-                            size="icon"
-                            variant="ghost"
-                            className="hover:text-fg-danger"
-                            aria-label={t('common.delete')}
-                            onClick={() => removeAsn(asn.asn)}
-                            icon={<Trash weight="duotone" className="h-4 w-4" />}
-                          />
+                          <button
+                            type="button"
+                            aria-label={`${t('common.delete')} ${asn}`}
+                            onClick={() => removeAsn(asn)}
+                            className="text-fg-subtle hover:text-fg-danger"
+                          >
+                            <Trash weight="bold" className="h-3 w-3" />
+                          </button>
                         )}
                       </li>
                     ))}
@@ -439,6 +430,18 @@ function CountryPicker({
     )
   }
 
+  /** Selects or clears every country of one continent — the filtered ones when searching. */
+  const toggleContinent = (codes: string[], allSelected: boolean) => {
+    if (disabled) return
+    if (allSelected) {
+      onChange(selected.filter((c) => !codes.includes(c)))
+      return
+    }
+    const next = new Set(selected)
+    codes.forEach((c) => next.add(c))
+    onChange([...next])
+  }
+
   return (
     <div className="flex flex-col gap-3">
       <div className="relative">
@@ -460,11 +463,38 @@ function CountryPicker({
             {t('pages.geo.noCountriesFound')}
           </p>
         ) : (
-          grouped.map((group) => (
+          grouped.map((group) => {
+            const codes = group.countries.map((c) => c.code)
+            const selectedCount = codes.filter((c) => selected.includes(c)).length
+            const allSelected = selectedCount === codes.length
+            return (
             <div key={group.continent}>
-              <p className="sticky top-0 z-10 bg-recessed px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-fg-subtle">
-                {t(`continents.${group.continent}`, group.continent)}
-              </p>
+              <div className="sticky top-0 z-10 flex items-center justify-between gap-2 bg-recessed px-3 py-1.5">
+                <span className="text-[11px] font-semibold uppercase tracking-wide text-fg-subtle">
+                  {t(`continents.${group.continent}`, group.continent)}
+                  <span className="ml-1.5 font-normal normal-case tabular-nums text-fg-subtle/70">
+                    {selectedCount}/{codes.length}
+                  </span>
+                </span>
+                <button
+                  type="button"
+                  disabled={disabled}
+                  aria-label={
+                    allSelected
+                      ? t('pages.geo.clearContinent', { continent: t(`continents.${group.continent}`, group.continent) })
+                      : t('pages.geo.selectContinent', { continent: t(`continents.${group.continent}`, group.continent) })
+                  }
+                  onClick={() => toggleContinent(codes, allSelected)}
+                  className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium text-link transition-colors hover:bg-elevated disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {allSelected ? (
+                    <Minus weight="bold" className="h-3 w-3" />
+                  ) : (
+                    <Check weight="bold" className="h-3 w-3" />
+                  )}
+                  {allSelected ? t('pages.geo.clearContinentShort') : t('pages.geo.selectContinentShort')}
+                </button>
+              </div>
               <div className="grid grid-cols-1 sm:grid-cols-2">
                 {group.countries.map((c) => (
                   <CountryRow
@@ -477,7 +507,8 @@ function CountryPicker({
                 ))}
               </div>
             </div>
-          ))
+            )
+          })
         )}
       </div>
       {selected.length > 0 && (
@@ -543,4 +574,4 @@ function CountryRow({
   )
 }
 
-export default GeoPage
+export default GeoPanel

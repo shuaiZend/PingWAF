@@ -12,14 +12,13 @@
     "securityRateLimiting": "レート制限",
     "securityBot": "ボット対策",
     "securityCc": "CC 対策",
-    "securityIpRules": "IP ルール",
+    "securityAccess": "アクセス制限",
     "caching": "キャッシュ",
     "ssl": "SSL/TLS",
     "traffic": "トラフィック",
     "logs": "ログ",
     "agents": "エージェント",
     "settings": "設定",
-    "securityGeo": "地域",
     "ipGroups": "IP グループ",
     "selectSiteFirst": "サイトを選択してください"
   },
@@ -1200,7 +1199,14 @@
       "noAsns": "ブロックする ASN がありません",
       "invalidAsn": "有効な ASN 番号を入力してください。",
       "duplicateAsn": "その ASN は既にブロックされています。",
-      "byCountry": "国別リクエスト"
+      "byCountry": "国別リクエスト",
+      "enabled": "地域制限を有効にする",
+      "enabledHint": "オフの間、これらのルールはリクエストを拒否しません。",
+      "asnHint": "ASN 番号（AS 接頭辞可）例: AS13335",
+      "selectContinent": "{{continent}}をすべて選択",
+      "clearContinent": "{{continent}}の選択を解除",
+      "selectContinentShort": "すべて選択",
+      "clearContinentShort": "選択解除"
     },
     "sslGlobal": {
       "title": "SSL/TLS 証明書",
@@ -1303,6 +1309,12 @@
       "syncFailed": "同期に失敗しました",
       "confirmDeleteTitle": "IP グループを削除しますか？",
       "confirmDeleteDesc": "IP グループ「{{name}}」を完全に削除します。"
+    },
+    "accessControl": {
+      "title": "アクセス制限",
+      "description": "IP アドレスと地域でトラフィックを許可・拒否します。今後、Basic 認証や OAuth などの制限モジュールもここに追加されます。",
+      "tabIpRules": "IP ルール",
+      "tabGeo": "地域制限"
     }
   },
   "challengeLevels": {
@@ -1312,8 +1324,8 @@
     "interactive": "インタラクティブ"
   },
   "geoModes": {
-    "block": "特定の国をブロック",
-    "allow": "特定の国のみ許可"
+    "block_list": "特定の国をブロック",
+    "allow_list": "特定の国のみ許可"
   },
   "continents": {
     "Africa": "アフリカ",

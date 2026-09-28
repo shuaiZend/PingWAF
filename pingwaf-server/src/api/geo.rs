@@ -5,10 +5,12 @@ use axum::routing::get;
 use axum::Json;
 use axum::Router;
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::api::common::{load_site_read, load_site_write, parse_uuid};
+use crate::api::common::{
+    load_site_read, load_site_write, parse_uuid, query_all,
+};
 use crate::api::error::ApiError;
 use crate::api::sites::touch_site;
 use crate::api::state::AppState;
@@ -42,9 +44,62 @@ pub struct UpdateGeoRequest {
     pub action: Option<String>,
 }
 
+/// How far back the country statistics look.
+const STATS_WINDOW_HOURS: i64 = 24;
+/// Countries returned by the statistics endpoint.
+const STATS_LIMIT: i64 = 20;
+
+/// One country's request count over the trailing window.
+#[derive(Debug, Serialize)]
+pub struct CountryStat {
+    pub country_code: String,
+    pub requests: i64,
+}
+
 /// Routes contributed to `/api/v1`.
 pub fn routes() -> Router<AppState> {
-    Router::new().route("/sites/{site_id}/geo", get(get_geo).put(update_geo))
+    Router::new()
+        .route("/sites/{site_id}/geo", get(get_geo).put(update_geo))
+        .route("/sites/{site_id}/geo/stats", get(geo_stats))
+}
+
+/// `GET /api/v1/sites/{site_id}/geo/stats`
+///
+/// Requests per country over the last 24 hours, for the bar chart next to the
+/// policy editor. Traffic whose country could not be resolved is skipped.
+async fn geo_stats(
+    State(state): State<AppState>,
+    current: AuthUser,
+    Path(site_id): Path<String>,
+) -> Result<Json<Vec<CountryStat>>, ApiError> {
+    let id = parse_uuid(&site_id, "site id")?;
+    load_site_read(&state.db, id, &current).await?;
+
+    let since =
+        chrono::Utc::now() - chrono::Duration::hours(STATS_WINDOW_HOURS);
+    let rows = query_all(
+        &state.db,
+        "SELECT country_code, COUNT(*) AS requests \
+         FROM access_logs \
+         WHERE site_id = $1 AND timestamp >= $2 \
+           AND country_code IS NOT NULL AND country_code <> '' \
+         GROUP BY country_code ORDER BY requests DESC LIMIT $3",
+        vec![id.into(), since.into(), STATS_LIMIT.into()],
+    )
+    .await?;
+
+    Ok(Json(
+        rows.iter()
+            .map(|row| CountryStat {
+                country_code: row
+                    .try_get::<String>("", "country_code")
+                    .unwrap_or_default(),
+                requests: row
+                    .try_get::<i64>("", "requests")
+                    .unwrap_or_default(),
+            })
+            .collect(),
+    ))
 }
 
 /// `GET /api/v1/sites/{site_id}/geo`

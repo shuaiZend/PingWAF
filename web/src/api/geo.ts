@@ -4,9 +4,10 @@ import type { GeoConfig, GeoCountryStat, UpdateGeoRequest } from './types'
 /**
  * Geo restrictions — `/api/v1/sites/{siteId}/geo`.
  *
- * Either deny a blocklist of countries (`mode: block`) or deny everything except
- * an allowlist (`mode: allow`). Matched traffic is subjected to `action`. A list
- * of ASNs can be denied independently of country.
+ * Either deny a blocklist of countries (`mode: block_list`) or deny everything
+ * except an allowlist (`mode: allow_list`). Matched traffic is subjected to
+ * `action`. A list of ASNs can be denied independently of country. The whole
+ * policy is inert until `enabled` is switched on.
  */
 export const geoApi = {
   get: (siteId: string) => apiClient.get<GeoConfig>(`/sites/${siteId}/geo`),
@@ -23,7 +24,8 @@ export const geoApi = {
 export function defaultGeoConfig(siteId: string): GeoConfig {
   return {
     site_id: siteId,
-    mode: 'block',
+    enabled: false,
+    mode: 'block_list',
     countries: [],
     blocked_asns: [],
     block_unknown: false,

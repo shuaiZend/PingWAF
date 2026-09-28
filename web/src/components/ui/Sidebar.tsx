@@ -86,8 +86,8 @@ export function Sidebar({ collapsed, onNavigate }: SidebarProps) {
         { to: site('security/bot'), labelKey: 'nav.securityBot', icon: Robot, requiresSite: true },
         { to: site('security/cc'), labelKey: 'nav.securityCc', icon: Cloud, requiresSite: true },
         {
-          to: site('security/ip-rules'),
-          labelKey: 'nav.securityIpRules',
+          to: site('security/access'),
+          labelKey: 'nav.securityAccess',
           icon: IdentificationCard,
           requiresSite: true,
         },

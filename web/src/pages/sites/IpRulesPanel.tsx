@@ -11,7 +11,6 @@ import {
   UploadSimple,
   Users,
 } from '@phosphor-icons/react'
-import { PageHeader } from '@/components/PageHeader'
 import { Card, CardBody, CardHeader } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
@@ -87,7 +86,8 @@ function formFromRule(rule: IpRule): FormState {
   }
 }
 
-export function IpRulesPage() {
+/** The IP rule module of the site's access-control tab. */
+export function IpRulesPanel() {
   const { t } = useTranslation()
   const toast = useToast()
   const queryClient = useQueryClient()
@@ -104,8 +104,22 @@ export function IpRulesPage() {
   const [error, setError] = useState<string | null>(null)
   const [pendingDelete, setPendingDelete] = useState<IpRule | null>(null)
 
-  // Quick-block deep link: /security/ip-rules?block=1.2.3.4
+  // Quick-block deep link: /security/access?tab=ip&block=1.2.3.4
+  // The param is consumed when the dialog closes — clearing it on open would
+  // re-trigger the form-reset effect below and wipe the prefill.
   const prefillBlock = searchParams.get('block')
+
+  useEffect(() => {
+    if (!prefillBlock) return
+    setTab('single')
+    setForm({
+      ...emptyForm(),
+      mode: 'manual',
+      ranges: prefillBlock,
+      action: 'block',
+    })
+    setDialogOpen(true)
+  }, [prefillBlock])
 
   const rulesQuery = useQuery({
     queryKey: ipRuleKeys.list(siteId),
@@ -135,21 +149,6 @@ export function IpRulesPage() {
     setForm({ ...emptyForm(), mode })
     setDialogOpen(true)
   }
-
-  useEffect(() => {
-    if (prefillBlock) {
-      setTab('single')
-      setForm({
-        ...emptyForm(),
-        mode: 'manual',
-        ranges: prefillBlock,
-        action: 'block',
-      })
-      setDialogOpen(true)
-      searchParams.delete('block')
-      setSearchParams(searchParams, { replace: true })
-    }
-  }, [prefillBlock, searchParams, setSearchParams])
 
   useEffect(() => {
     if (!dialogOpen) return
@@ -221,6 +220,11 @@ export function IpRulesPage() {
     setForm(emptyForm())
     setBulk('')
     setError(null)
+    if (prefillBlock) {
+      const params = new URLSearchParams(searchParams)
+      params.delete('block')
+      setSearchParams(params, { replace: true })
+    }
   }
 
   const submitSingle = () => {
@@ -388,32 +392,26 @@ export function IpRulesPage() {
   const parsedManual = parseIpList(form.ranges)
 
   return (
-    <div className="animate-slide-up">
-      <PageHeader
-        title={t('pages.ipRules.title')}
-        description={t('pages.ipRules.description')}
-        actions={
-          <div className="flex items-center gap-2">
-            <Button
-              variant="secondary"
-              loading={rulesQuery.isFetching}
-              onClick={() => rulesQuery.refetch()}
-              icon={<ArrowClockwise weight="duotone" className="h-4 w-4" />}
-            >
-              {t('common.refresh')}
-            </Button>
-            {canWrite && (
-              <Button
-                variant="primary"
-                icon={<Plus weight="bold" className="h-4 w-4" />}
-                onClick={() => openCreate('group')}
-              >
-                {t('pages.ipRules.addRule')}
-              </Button>
-            )}
-          </div>
-        }
-      />
+    <div>
+      <div className="mb-4 flex items-center justify-end gap-2">
+        <Button
+          variant="secondary"
+          loading={rulesQuery.isFetching}
+          onClick={() => rulesQuery.refetch()}
+          icon={<ArrowClockwise weight="duotone" className="h-4 w-4" />}
+        >
+          {t('common.refresh')}
+        </Button>
+        {canWrite && (
+          <Button
+            variant="primary"
+            icon={<Plus weight="bold" className="h-4 w-4" />}
+            onClick={() => openCreate('group')}
+          >
+            {t('pages.ipRules.addRule')}
+          </Button>
+        )}
+      </div>
 
       {rules.length > 0 && (
         <div className="mb-4 flex flex-wrap items-center gap-4 rounded-lg border border-line bg-elevated px-4 py-3">
@@ -673,4 +671,4 @@ export function IpRulesPage() {
   )
 }
 
-export default IpRulesPage
+export default IpRulesPanel
