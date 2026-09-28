@@ -21,6 +21,10 @@ EXPOSE 80 443 9080 9090
 
 VOLUME ["/var/lib/pingwaf"]
 
+# ./data/cache (PINGWAF_CACHE_DIR default) and the ACME state file are
+# relative paths; anchor them in the writable, volume-backed directory.
+WORKDIR /var/lib/pingwaf
+
 USER pingwaf
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
