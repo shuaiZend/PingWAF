@@ -1,4 +1,5 @@
 pub mod cache;
+pub mod cert_events;
 pub mod client;
 pub mod config;
 pub mod heartbeat;
@@ -35,6 +36,8 @@ pub struct SecurityEvent {
     pub request_id: String,
     pub client_ip: String,
     pub method: String,
+    pub scheme: String,
+    pub protocol: String,
     pub host: String,
     pub path: String,
     pub query_string: String,
@@ -43,6 +46,9 @@ pub struct SecurityEvent {
     pub action: String,
     pub score: u32,
     pub details: String,
+    /// Status code actually returned to the client for this event
+    /// (403 for block, 503 for challenge, 0 when the request continues).
+    pub response_status: u32,
     pub user_agent: String,
     pub country_code: String,
     pub matched_tags: Vec<String>,
@@ -156,6 +162,14 @@ impl PingWafAgent {
         AGENT_INSTANCE.load_full()
     }
 
+    /// Replace the global agent instance. Only compiled with the
+    /// `test-util` feature: lets integration tests install an agent built
+    /// without connecting to a control plane.
+    #[cfg(feature = "test-util")]
+    pub fn set_agent_instance(agent: Option<Arc<Self>>) {
+        AGENT_INSTANCE.store(agent);
+    }
+
     /// Get rules for a specific domain (used by WAF plugin on the hot path).
     ///
     /// Returns `None` if no rules are cached for this domain.
@@ -189,16 +203,16 @@ impl PingWafAgent {
             request_id: event.request_id,
             client_ip: event.client_ip,
             method: event.method,
-            scheme: "https".to_string(),
+            scheme: event.scheme,
             host: event.host,
             path: event.path,
             query_string: event.query_string,
-            protocol: "HTTP/1.1".to_string(),
+            protocol: event.protocol,
             request_headers: std::collections::HashMap::new(),
             request_body: None,
             request_body_size: 0,
             request_body_truncated: false,
-            response_status: 403,
+            response_status: event.response_status,
             response_headers: std::collections::HashMap::new(),
             upstream_addr: String::new(),
             upstream_latency_ms: 0,

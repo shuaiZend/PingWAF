@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize};
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub id: Uuid,
-    pub certificate_id: Uuid,
+    /// `None` for raw agent-emitted events that predate a matching
+    /// `site_certificates` row.
+    pub certificate_id: Option<Uuid>,
     pub site_id: Option<Uuid>,
     pub event_type: String,
     #[sea_orm(column_type = "Text")]

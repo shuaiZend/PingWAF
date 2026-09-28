@@ -16,6 +16,7 @@ pub mod m20240101_000008_agent_host_samples;
 pub mod m20240101_000009_create_certificate_events;
 pub mod m20240101_000010_create_ip_groups;
 pub mod m20240101_000011_site_origin_pools;
+pub mod m20240101_000012_acme_events_and_ip_rule_groups;
 
 use sea_orm_migration::prelude::*;
 
@@ -37,6 +38,9 @@ impl MigratorTrait for Migrator {
             Box::new(m20240101_000009_create_certificate_events::Migration),
             Box::new(m20240101_000010_create_ip_groups::Migration),
             Box::new(m20240101_000011_site_origin_pools::Migration),
+            Box::new(
+                m20240101_000012_acme_events_and_ip_rule_groups::Migration,
+            ),
         ]
     }
 }
@@ -48,7 +52,7 @@ mod tests {
     #[test]
     fn migrations_are_ordered_and_unique() {
         let migrations = Migrator::migrations();
-        assert_eq!(migrations.len(), 11);
+        assert_eq!(migrations.len(), 12);
         let names: Vec<String> =
             migrations.iter().map(|m| m.name().to_owned()).collect();
         let mut sorted = names.clone();

@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -518,6 +518,12 @@ impl RuleCache {
         cache.apply_cache_quotas();
 
         Ok(cache)
+    }
+
+    /// Directory where the agent persists its state (rules, blocked IPs,
+    /// and the ACME account/certificate store used by the data plane).
+    pub fn cache_dir(&self) -> &Path {
+        &self.cache_dir
     }
 
     /// Applies the `disk_quota_mb` of every enabled, cache-eligible rule to the

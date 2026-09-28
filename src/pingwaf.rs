@@ -18,6 +18,7 @@
 //! Agent (data plane only), and AllInOne (both in a single process).
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -27,15 +28,18 @@ use crate::cli::{
 };
 use crate::config_manager::try_init_memory_config_manager;
 use crate::locations::{new_location_provider, try_init_locations};
-use crate::plugin::new_plugin_provider;
+use crate::plugin::{new_plugin_provider, try_init_plugins};
 use crate::server_locations::{
     new_server_locations_provider, try_init_server_locations,
 };
 use crate::upstreams::{new_upstream_provider, try_init_upstreams};
+use pingap_acme::new_lets_encrypt_service;
 use pingap_config::{
-    BasicConf, CertificateConf, LocationConf, PingapConfig,
-    ServerConf as PingapServerConf, UpstreamConf,
+    BasicConf, CertificateConf, LocationConf, PingapConfig, PingapTomlConfig,
+    PluginConf, ServerConf as PingapServerConf, UpstreamConf,
+    normalize_dns_provider,
 };
+use pingap_core::BackgroundTaskService;
 use pingap_proxy::{
     AppContext, Server as ProxyServer, ServerConf, parse_from_conf,
 };
@@ -43,7 +47,7 @@ use pingap_upstream::new_upstream_health_check_task;
 use pingora::server;
 use pingora::server::configuration::Opt;
 use pingora::services::background::background_service;
-use pingwaf_agent::cache::{CachedRules, RuleCache};
+use pingwaf_agent::cache::{CachedRules, RuleCache, SslConfig};
 use pingwaf_agent::config::AgentConfig;
 use pingwaf_server::ServerConfig;
 use tracing::{error, info, warn};
@@ -172,6 +176,10 @@ fn sanitize_algo(algo: &str) -> Option<String> {
     }
 }
 
+/// Name under which the WAF plugin is registered and referenced from
+/// every generated location.
+const WAF_PLUGIN_NAME: &str = "pingwaf:waf";
+
 /// Build a `PingapConfig` from the agent's cached site rules.
 ///
 /// Each origin pool becomes one upstream keyed by its pool id (or the
@@ -190,6 +198,14 @@ fn cached_rules_to_pingap_config(cached: &CachedRules) -> Option<PingapConfig> {
     let mut locations: HashMap<String, LocationConf> = HashMap::new();
     let mut certificates: HashMap<String, CertificateConf> = HashMap::new();
     let mut location_names: Vec<String> = Vec::new();
+    // The WAF plugin is referenced from every location: this is what makes
+    // the data plane enforce rules and emit access/security events.
+    let mut plugins: HashMap<String, PluginConf> = HashMap::new();
+    plugins.insert(
+        WAF_PLUGIN_NAME.to_string(),
+        toml::from_str::<PluginConf>(r###"category = "waf""###)
+            .unwrap_or_default(),
+    );
 
     for (site_id, site) in &cached.sites {
         if site.domain.is_empty() {
@@ -296,6 +312,7 @@ fn cached_rules_to_pingap_config(cached: &CachedRules) -> Option<PingapConfig> {
                     upstream: Some(key),
                     host: Some(host.clone()),
                     path: Some("/".to_string()),
+                    plugins: Some(vec![WAF_PLUGIN_NAME.to_string()]),
                     ..Default::default()
                 },
             );
@@ -323,18 +340,20 @@ fn cached_rules_to_pingap_config(cached: &CachedRules) -> Option<PingapConfig> {
                     weight: route
                         .priority
                         .map(|p| p.clamp(1, u16::MAX as i32) as u16),
+                    plugins: Some(vec![WAF_PLUGIN_NAME.to_string()]),
                     ..Default::default()
                 },
             );
             location_names.push(loc_name);
         }
 
-        // Convert SSL certificate
+        // Convert SSL certificate: an uploaded PEM is served as-is, while a
+        // site asking for ACME without one gets a certificate entry the
+        // lets-encrypt task issues against — and later fills in — inside
+        // this config.
         if let Some(ref ssl) = site.ssl_config
             && ssl.enabled
-            && !ssl.cert_pem.is_empty()
         {
-            let cert_name = format!("{site_id}_cert");
             let domains = if site.alternate_domains.is_empty() {
                 site.domain.clone()
             } else {
@@ -342,13 +361,21 @@ fn cached_rules_to_pingap_config(cached: &CachedRules) -> Option<PingapConfig> {
                 d.extend(site.alternate_domains.clone());
                 d.join(",")
             };
-            let cert = CertificateConf {
-                domains: Some(domains),
-                tls_cert: Some(ssl.cert_pem.clone()),
-                tls_key: Some(ssl.key_pem.clone()),
-                ..Default::default()
+            let cert = if !ssl.cert_pem.is_empty() {
+                Some(CertificateConf {
+                    domains: Some(domains),
+                    tls_cert: Some(ssl.cert_pem.clone()),
+                    tls_key: Some(ssl.key_pem.clone()),
+                    ..Default::default()
+                })
+            } else if ssl.acme_enabled && !ssl.acme_email.is_empty() {
+                Some(acme_certificate_conf(ssl, domains))
+            } else {
+                None
             };
-            certificates.insert(cert_name, cert);
+            if let Some(cert) = cert {
+                certificates.insert(format!("{site_id}_cert"), cert);
+            }
         }
     }
 
@@ -373,6 +400,7 @@ fn cached_rules_to_pingap_config(cached: &CachedRules) -> Option<PingapConfig> {
         locations,
         servers,
         certificates,
+        plugins,
         ..Default::default()
     })
 }
@@ -380,6 +408,165 @@ fn cached_rules_to_pingap_config(cached: &CachedRules) -> Option<PingapConfig> {
 /// Build a `PingapConfig` from the agent's cached rules.
 fn build_pingap_config(rule_cache: &RuleCache) -> Option<PingapConfig> {
     cached_rules_to_pingap_config(&rule_cache.all_sites())
+}
+
+/// Build the certificate entry a lets-encrypt issuance is driven by.
+///
+/// `acme` is only a marker (never parsed); the email keeps the convention
+/// legacy pingap used so operators recognize it in a config dump. DNS-01
+/// carries the provider plus credentials: the endpoint defaults to the
+/// provider's API host and every `acme_dns_config` entry becomes a query
+/// pair — the layout pingap's DNS tasks parse.
+fn acme_certificate_conf(ssl: &SslConfig, domains: String) -> CertificateConf {
+    let mut cert = CertificateConf {
+        domains: Some(domains),
+        acme: Some(format!("http://{}", ssl.acme_email)),
+        ..Default::default()
+    };
+    if ssl.acme_challenge_type != "AcmeDns01" {
+        return cert;
+    }
+    let Some(provider) = normalize_dns_provider(&ssl.acme_dns_provider) else {
+        // Unknown provider: stay on HTTP-01 rather than emit an entry the
+        // config validation rejects outright.
+        return cert;
+    };
+    if provider == "manual" {
+        return cert;
+    }
+    cert.dns_challenge = Some(true);
+    cert.dns_provider = Some(provider.to_string());
+    if let Some(url) = acme_dns_service_url(provider, &ssl.acme_dns_config) {
+        cert.dns_service_url = Some(url);
+    }
+    cert
+}
+
+/// The DNS provider endpoint with credentials appended as query pairs.
+///
+/// An explicit `endpoint` entry (full URL, or host getting the default
+/// scheme) wins; `region` is only used to build the Huawei cloud host.
+/// Without either, the provider's documented API host applies — Huawei has
+/// per-region hosts and cannot have one. Every other entry becomes
+/// `key=value` — names match what the provider task expects, e.g.
+/// `access_key_id` / `access_key_secret` / `token`.
+fn acme_dns_service_url(
+    provider: &str,
+    config: &HashMap<String, String>,
+) -> Option<String> {
+    let base = match config.get("endpoint").filter(|v| !v.is_empty()) {
+        Some(v) if v.contains("://") => v.clone(),
+        Some(v) => format!("https://{v}"),
+        None => {
+            if let Some(region) = config.get("region").filter(|r| !r.is_empty())
+            {
+                format!("https://dns.{region}.myhuaweicloud.com")
+            } else if provider == "huawei" {
+                warn!(
+                    "acme dns-01: huawei needs a region or endpoint, \
+                     issuance will need manual DNS"
+                );
+                return None;
+            } else {
+                // Providers accepted by acme_certificate_conf all have a
+                // documented host; the tasks error out on an empty URL.
+                let host = match provider {
+                    "ali" => "alidns.aliyuncs.com",
+                    "cf" => "api.cloudflare.com",
+                    "tencent" => "dnspod.tencentcloudapi.com",
+                    _ => {
+                        warn!(
+                            "acme dns-01: no endpoint configured for \
+                             {provider}, issuance will need manual DNS"
+                        );
+                        return None;
+                    },
+                };
+                format!("https://{host}")
+            }
+        },
+    };
+    let mut pairs: Vec<String> = config
+        .iter()
+        .filter(|(k, _)| !matches!(k.as_str(), "endpoint" | "region"))
+        .map(|(k, v)| {
+            format!("{}={}", urlencoding::encode(k), urlencoding::encode(v))
+        })
+        .collect();
+    pairs.sort();
+    if pairs.is_empty() {
+        return Some(base);
+    }
+    Some(format!("{base}?{}", pairs.join("&")))
+}
+
+/// The agent's ACME state file: the memory config manager mirrors every
+/// write there, so issued certificates and challenge tokens survive a
+/// restart (Let's Encrypt caps duplicate certificates per week, and a
+/// stateless restart would burn that quota).
+fn acme_state_path(rule_cache: &RuleCache) -> PathBuf {
+    rule_cache.cache_dir().join("acme_state.toml")
+}
+
+/// Merge a freshly converted config with a previous one, carrying over the
+/// state only the lets-encrypt task produces: issued PEMs (filled into
+/// certificate entries the new config left empty) and the whole `storages`
+/// section — challenge tokens and ACME account credentials. Uploads always
+/// win: a new config that carries its own PEM is never overwritten.
+fn merge_config_state(new_toml: &str, prev_toml: &str) -> String {
+    if prev_toml.trim().is_empty() {
+        return new_toml.to_string();
+    }
+    let Ok(mut doc) = new_toml.parse::<toml::Table>() else {
+        return new_toml.to_string();
+    };
+    let Ok(prev) = prev_toml.parse::<toml::Table>() else {
+        return new_toml.to_string();
+    };
+
+    if let Some(prev_certs) =
+        prev.get("certificates").and_then(|v| v.as_table())
+    {
+        let certs = doc
+            .entry("certificates")
+            .or_insert(toml::Value::Table(toml::Table::new()));
+        if let Some(certs) = certs.as_table_mut() {
+            for (name, prev_cert) in prev_certs {
+                let pem = prev_cert
+                    .get("tls_cert")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                if pem.is_empty() {
+                    continue;
+                }
+                let Some(cert) = certs.get_mut(name) else {
+                    continue;
+                };
+                let has_pem = cert
+                    .get("tls_cert")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|v| !v.is_empty());
+                if has_pem {
+                    continue;
+                }
+                if let Some(cert) = cert.as_table_mut() {
+                    cert.insert(
+                        "tls_cert".to_string(),
+                        toml::Value::String(pem.to_string()),
+                    );
+                    if let Some(key) = prev_cert.get("tls_key") {
+                        cert.insert("tls_key".to_string(), key.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(storages) = prev.get("storages") {
+        doc.insert("storages".to_string(), storages.clone());
+    }
+
+    toml::to_string_pretty(&doc).unwrap_or_else(|_| new_toml.to_string())
 }
 
 /// Start the Pingora-based data plane proxy from the agent's cached rules.
@@ -429,14 +616,41 @@ pub async fn start_data_plane(
         site_count,
     );
 
-    // Serialize to TOML and create a memory-backed config manager
+    // Serialize to TOML and create a memory-backed config manager. The
+    // freshly converted config is merged with the ACME state left by the
+    // previous run first, so already-issued certificates are served (and
+    // not reordered) from the first request on.
     let toml_str = toml::to_string_pretty(&config).map_err(|e| {
         anyhow::anyhow!("failed to serialize proxy config: {}", e)
     })?;
-    let config_manager = try_init_memory_config_manager(&toml_str, None)
-        .map_err(|e| anyhow::anyhow!("failed to init config manager: {}", e))?;
+    let acme_state = acme_state_path(&rule_cache);
+    let toml_str = merge_config_state(
+        &toml_str,
+        &std::fs::read_to_string(&acme_state).unwrap_or_default(),
+    );
+    let config_manager =
+        try_init_memory_config_manager(&toml_str, Some(acme_state)).map_err(
+            |e| anyhow::anyhow!("failed to init config manager: {}", e),
+        )?;
 
-    // Initialize providers from the converted config
+    // The lets-encrypt task scans current_config for certificates to issue,
+    // so it must reflect the merged state; validation keeps a malformed
+    // merge from taking the proxy down (falls back to the fresh config).
+    let config = match PingapTomlConfig::from_toml(&toml_str)
+        .and_then(|toml_config| toml_config.to_pingap_config(true))
+    {
+        Ok(merged) => merged,
+        Err(e) => {
+            warn!(
+                error = %e,
+                "data plane: merged config failed validation, using freshly converted config"
+            );
+            config
+        },
+    };
+    config_manager.set_current_config(config.clone());
+
+    // Initialize providers from the (merged) config
     try_init_upstreams(&config.upstreams, None)
         .map_err(|e| anyhow::anyhow!("failed to init upstreams: {}", e))?;
     try_init_locations(&config.locations)
@@ -444,6 +658,19 @@ pub async fn start_data_plane(
     try_init_server_locations(&config.servers, &config.locations).map_err(
         |e| anyhow::anyhow!("failed to init server locations: {}", e),
     )?;
+
+    // Activate the WAF plugin: without it the data plane forwards traffic
+    // uninspected and no access/security events are ever emitted.
+    let (updated_plugins, plugin_errors) = try_init_plugins(&config.plugins);
+    if !updated_plugins.is_empty() {
+        info!(
+            plugins = updated_plugins.join(","),
+            "data plane: plugins initialized"
+        );
+    }
+    if !plugin_errors.is_empty() {
+        error!(error = plugin_errors, "data plane: plugin init errors");
+    }
 
     // Initialize certificates
     let cert_provider = new_certificate_provider();
@@ -462,8 +689,41 @@ pub async fn start_data_plane(
     let mut my_server = server::Server::new(Some(opt))?;
     let bootstrap_handle = my_server.bootstrap_as_a_service();
 
+    // ACME (Let's Encrypt): issue and renew certificates for sites whose
+    // SSL config carries no uploaded PEM. The task shares the config manager
+    // with the proxy — the HTTP-01 challenge handler reads tokens from it,
+    // and a renewed PEM lands in both the config and the certificate
+    // provider below. PINGAP_DISABLE_ACME opts out entirely.
+    let acme_enabled = !config.certificates.is_empty()
+        && std::env::var("PINGAP_DISABLE_ACME")
+            .unwrap_or_default()
+            .is_empty();
+    let mut background_tasks = BackgroundTaskService::new(
+        "data_plane_background_tasks",
+        Duration::from_secs(60),
+        vec![],
+    );
+    background_tasks.set_immediately(true);
+    background_tasks.set_initial_delay(Some(Duration::from_secs(3)));
+    if acme_enabled {
+        background_tasks.add_task(
+            "lets_encrypt",
+            new_lets_encrypt_service(
+                config_manager.clone(),
+                cert_provider.clone(),
+                None,
+            ),
+        );
+        info!("data plane: ACME certificate management enabled");
+    }
+    let background_tasks_name = background_tasks.name().to_string();
+    my_server.add_service(background_service(
+        &background_tasks_name,
+        background_tasks,
+    ));
+
     // Parse server configs and start proxy servers
-    let server_conf_list: Vec<ServerConf> = parse_from_conf(config);
+    let server_conf_list: Vec<ServerConf> = parse_from_conf(config.clone());
 
     for server_conf in server_conf_list {
         let ctx = AppContext {
@@ -475,7 +735,17 @@ pub async fn start_data_plane(
             config_manager: config_manager.clone(),
             logger: None,
         };
-        let ps = ProxyServer::new(&server_conf, ctx)?;
+        let mut ps = ProxyServer::new(&server_conf, ctx)?;
+        // The HTTP-01 challenge is served on port 80; the single data plane
+        // server listens on a combined "0.0.0.0:80,0.0.0.0:443" address.
+        if acme_enabled
+            && server_conf
+                .addr
+                .split(',')
+                .any(|addr| addr.trim().ends_with(":80"))
+        {
+            ps.enable_lets_encrypt();
+        }
         let services = ps.run(my_server.configuration.clone())?;
         my_server
             .add_service(services.lb)
@@ -506,6 +776,106 @@ pub async fn start_data_plane(
     // The thread exits when the process shuts down.
     std::thread::spawn(move || {
         my_server.run_forever();
+    });
+
+    // Hot-reload watcher: poll the rule cache config hash and re-init the
+    // ArcSwap providers when the control plane pushes new rules. The proxy
+    // reads these providers per request, so no restart is needed. The config
+    // manager itself is updated in place: on every reload the freshly
+    // converted config is merged with the previous document (preserving
+    // issued PEMs and ACME state such as challenge tokens and the account
+    // key) and set as current, so the ACME renewal task keeps working.
+    let watcher_cache = Arc::clone(&rule_cache);
+    let watcher_config_manager = Arc::clone(&config_manager);
+    let mut last_hash = watcher_cache.config_hash();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let hash = watcher_cache.config_hash();
+            if hash == last_hash {
+                continue;
+            }
+            info!(
+                old = %last_hash,
+                new = %hash,
+                "data plane: rule change detected, reloading"
+            );
+            let Some(converted) = build_pingap_config(&watcher_cache) else {
+                warn!(
+                    "data plane: reload produced no usable config, keeping current"
+                );
+                last_hash = hash;
+                continue;
+            };
+            let Ok(new_toml) = toml::to_string_pretty(&converted) else {
+                error!(
+                    "data plane: reload config serialization failed, keeping current"
+                );
+                last_hash = hash;
+                continue;
+            };
+            let prev_toml = watcher_config_manager
+                .load_all_raw()
+                .await
+                .unwrap_or_default();
+            let merged_toml = merge_config_state(&new_toml, &prev_toml);
+            let config = match PingapTomlConfig::from_toml(&merged_toml)
+                .and_then(|toml_config| toml_config.to_pingap_config(true))
+            {
+                Ok(config) => config,
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        "data plane: merged reload config failed to parse, using freshly converted config"
+                    );
+                    converted
+                },
+            };
+            if let Ok(toml_config) = PingapTomlConfig::from_toml(&merged_toml)
+                && let Err(e) =
+                    watcher_config_manager.save_all(&toml_config).await
+            {
+                warn!(error = %e, "data plane: failed to persist merged config");
+            }
+            watcher_config_manager.set_current_config(config.clone());
+            if let Err(e) = try_init_upstreams(&config.upstreams, None) {
+                error!(error = %e, "data plane: reload upstreams failed");
+            }
+            if let Err(e) = try_init_locations(&config.locations) {
+                error!(error = %e, "data plane: reload locations failed");
+            }
+            if let Err(e) =
+                try_init_server_locations(&config.servers, &config.locations)
+            {
+                error!(error = %e, "data plane: reload server locations failed");
+            }
+            let (updated, errors) =
+                try_update_certificates(&config.certificates);
+            if !updated.is_empty() {
+                info!(
+                    certs = updated.join(","),
+                    "data plane: certificates reloaded"
+                );
+            }
+            if !errors.is_empty() {
+                error!(error = errors, "data plane: certificate reload errors");
+            }
+            let (updated_plugins, plugin_errors) =
+                try_init_plugins(&config.plugins);
+            if !updated_plugins.is_empty() {
+                info!(
+                    plugins = updated_plugins.join(","),
+                    "data plane: plugins reloaded"
+                );
+            }
+            if !plugin_errors.is_empty() {
+                error!(
+                    error = plugin_errors,
+                    "data plane: plugin reload errors"
+                );
+            }
+            last_hash = hash;
+        }
     });
 
     // Keep the async task alive until the tokio runtime shuts down.
@@ -670,9 +1040,12 @@ fn init_tracing() {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info"));
 
+    // Siphons pingap's raw ACME events into the buffer the agent ships to the
+    // control plane, so certificate-issuance logs show up on the admin panel.
     tracing_subscriber::registry()
         .with(filter)
         .with(fmt::layer().with_target(true))
+        .with(pingwaf_agent::cert_events::AcmeCaptureLayer)
         .init();
 }
 
@@ -942,5 +1315,168 @@ mod tests {
         let mut site = site_rules("site1", "");
         site.upstreams = vec![pool("", vec![peer("10.0.0.1:8080")])];
         assert!(cached_rules_to_pingap_config(&one_site_cache(site)).is_none());
+    }
+
+    #[test]
+    fn waf_plugin_is_injected_and_referenced_by_every_location() {
+        let mut site = site_rules("site1", "a.example.com");
+        let mut default_pool = pool("pool1", vec![peer("10.0.0.1:8080")]);
+        default_pool.is_default = true;
+        site.upstreams = vec![default_pool];
+        site.routes = vec![route("r1", "prefix", "/api", "pool1")];
+        let config = cached_rules_to_pingap_config(&one_site_cache(site))
+            .expect("config should build");
+
+        let category = config
+            .plugins
+            .get("pingwaf:waf")
+            .and_then(|c| c.get("category"))
+            .and_then(|v| v.as_str());
+        assert_eq!(category, Some("waf"));
+
+        assert!(config.locations.contains_key("site1_loc"));
+        assert!(config.locations.contains_key("site1_route_r1"));
+        for (name, loc) in &config.locations {
+            assert_eq!(
+                loc.plugins.as_deref(),
+                Some(["pingwaf:waf".to_string()].as_slice()),
+                "location {name} must reference the waf plugin"
+            );
+        }
+    }
+
+    fn acme_ssl() -> SslConfig {
+        SslConfig {
+            cert_pem: String::new(),
+            key_pem: String::new(),
+            acme_enabled: true,
+            acme_email: "admin@example.com".to_string(),
+            acme_challenge_type: "AcmeHttp01".to_string(),
+            acme_dns_provider: String::new(),
+            acme_dns_config: HashMap::new(),
+            min_tls_version: String::new(),
+            hsts_enabled: false,
+            hsts_max_age: 0,
+            always_use_https: false,
+            enabled: true,
+            max_tls_version: String::new(),
+            self_signed: false,
+            mtls_enabled: false,
+            mtls_client_ca: String::new(),
+            certificate_id: String::new(),
+        }
+    }
+
+    #[test]
+    fn acme_http01_conf_marks_acme_without_dns_fields() {
+        let ssl = acme_ssl();
+        let cert = acme_certificate_conf(&ssl, "a.example.com".to_string());
+        assert_eq!(cert.acme.as_deref(), Some("http://admin@example.com"));
+        assert_eq!(cert.domains.as_deref(), Some("a.example.com"));
+        assert_eq!(cert.dns_challenge, None);
+        assert_eq!(cert.dns_provider, None);
+    }
+
+    #[test]
+    fn acme_dns01_conf_builds_provider_endpoint_with_credentials() {
+        let mut ssl = acme_ssl();
+        ssl.acme_challenge_type = "AcmeDns01".to_string();
+        // "aliyun" is an accepted alias; the canonical name the config
+        // carries is "ali".
+        ssl.acme_dns_provider = "aliyun".to_string();
+        ssl.acme_dns_config
+            .insert("access_key_id".to_string(), "AK 1/2".to_string());
+        ssl.acme_dns_config
+            .insert("access_key_secret".to_string(), "s3cret".to_string());
+
+        let cert = acme_certificate_conf(&ssl, "a.example.com".to_string());
+        assert_eq!(cert.dns_challenge, Some(true));
+        assert_eq!(cert.dns_provider.as_deref(), Some("ali"));
+        let url = cert.dns_service_url.expect("service url");
+        assert!(
+            url.starts_with("https://alidns.aliyuncs.com?"),
+            "{url}"
+        );
+        assert!(url.contains("access_key_id=AK%201%2F2"), "{url}");
+        assert!(url.contains("access_key_secret=s3cret"), "{url}");
+    }
+
+    #[test]
+    fn acme_dns01_unknown_provider_stays_on_http01() {
+        let mut ssl = acme_ssl();
+        ssl.acme_challenge_type = "AcmeDns01".to_string();
+        ssl.acme_dns_provider = "not-a-provider".to_string();
+
+        let cert = acme_certificate_conf(&ssl, "a.example.com".to_string());
+        assert_eq!(cert.dns_challenge, None);
+        assert_eq!(cert.dns_provider, None);
+    }
+
+    #[test]
+    fn merge_config_state_empty_prev_is_identity() {
+        let new_toml = "[certificates.c1]\ntls_key = \"k\"\n";
+        assert_eq!(merge_config_state(new_toml, ""), new_toml);
+    }
+
+    #[test]
+    fn merge_config_state_carries_issued_pems_and_storages() {
+        let prev_toml = "\
+[certificates.c1]
+tls_cert = \"ISSUED\"
+tls_key = \"KEY\"
+
+[certificates.c2]
+tls_cert = \"UPLOAD\"
+tls_key = \"UPKEY\"
+
+[storages.acme]
+type = \"file\"
+path = \"/tmp/acme\"
+";
+        let new_toml = "\
+[certificates.c1]
+acme = \"http://a@example.com\"
+
+[certificates.c2]
+tls_cert = \"NEWUPLOAD\"
+tls_key = \"NEWKEY\"
+";
+        let merged = merge_config_state(new_toml, prev_toml)
+            .parse::<toml::Table>()
+            .expect("merged config must parse");
+
+        let c1 = merged
+            .get("certificates")
+            .and_then(|v| v.get("c1"))
+            .expect("c1 entry");
+        assert_eq!(
+            c1.get("tls_cert").and_then(|v| v.as_str()),
+            Some("ISSUED"),
+            "issued pem must be carried over"
+        );
+        assert_eq!(
+            c1.get("tls_key").and_then(|v| v.as_str()),
+            Some("KEY"),
+            "issued key must be carried over"
+        );
+
+        let c2 = merged
+            .get("certificates")
+            .and_then(|v| v.get("c2"))
+            .expect("c2 entry");
+        assert_eq!(
+            c2.get("tls_cert").and_then(|v| v.as_str()),
+            Some("NEWUPLOAD"),
+            "fresh upload must win over the previous pem"
+        );
+
+        let storages = merged.get("storages").expect("storages section");
+        assert_eq!(
+            storages
+                .get("acme")
+                .and_then(|v| v.get("path"))
+                .and_then(|v| v.as_str()),
+            Some("/tmp/acme")
+        );
     }
 }

@@ -1,5 +1,6 @@
 import { apiClient } from './client'
 import type {
+  BulkImportIpRequest,
   CreateIpRuleRequest,
   IpRule,
   Page,
@@ -10,9 +11,9 @@ import type {
 /**
  * IP access rules — `/api/v1/sites/{siteId}/ip-rules`.
  *
- * Allow / block / challenge traffic from a single address or a CIDR range.
- * Rules are evaluated before the WAF, so an explicit allow short-circuits
- * everything downstream.
+ * Allow / block / challenge traffic from an explicit IP/CIDR list or by
+ * referencing an IP group. Rules are evaluated before the WAF, so an explicit
+ * allow short-circuits everything downstream.
  */
 export const ipRulesApi = {
   list: (siteId: string, query: PaginationQuery = {}) =>
@@ -31,6 +32,12 @@ export const ipRulesApi = {
 
   toggleEnabled: (siteId: string, id: string, enabled: boolean) =>
     ipRulesSafePut(siteId, id, { enabled }),
+
+  bulkImport: (siteId: string, data: BulkImportIpRequest) =>
+    apiClient.post<{ id: string; imported: number }>(
+      `/sites/${siteId}/ip-rules/bulk`,
+      data,
+    ),
 }
 
 /** Kept separate so `toggleEnabled` reads cleanly at the call site. */

@@ -9,6 +9,7 @@ import {
   Trash,
   ArrowClockwise,
   UploadSimple,
+  Users,
 } from '@phosphor-icons/react'
 import { PageHeader } from '@/components/PageHeader'
 import { Card, CardBody, CardHeader } from '@/components/ui/Card'
@@ -26,37 +27,63 @@ import { EmptyState } from '@/components/ui/EmptyState'
 import { SkeletonRows } from '@/components/ui/Skeleton'
 import { useToast } from '@/components/ui/Toast'
 import { ErrorState } from '@/components/ErrorState'
-import { ipRulesApi, ipRuleKeys, validateIpCidr, parseIpList } from '@/api/ipRules'
+import {
+  ipRulesApi,
+  ipRuleKeys,
+  parseIpList,
+} from '@/api/ipRules'
+import { ipGroupsApi, ipGroupKeys } from '@/api/ipGroups'
 import { useCanWrite } from '@/hooks'
 import { formatDateTime } from '@/lib/format'
-import { IP_RULE_ACTIONS, type CreateIpRuleRequest, type IpRule } from '@/api/types'
+import {
+  IP_RULE_ACTIONS,
+  type BulkImportIpRequest,
+  type CreateIpRuleRequest,
+  type IpRule,
+} from '@/api/types'
 
 const ACTION_TONE: Record<string, 'danger' | 'warning' | 'success' | 'neutral'> = {
   block: 'danger',
   challenge: 'warning',
+  js_challenge: 'warning',
   allow: 'success',
 }
 
+type RuleMode = 'group' | 'manual'
+type DialogTab = 'single' | 'bulk'
+
 interface FormState {
-  ip_cidr: string
+  mode: RuleMode
+  name: string
+  group_id: string
+  ranges: string
   action: string
   note: string
   enabled: boolean
+  priority: number
 }
 
 const emptyForm = (): FormState => ({
-  ip_cidr: '',
+  mode: 'group',
+  name: '',
+  group_id: '',
+  ranges: '',
   action: 'block',
   note: '',
   enabled: true,
+  priority: 0,
 })
 
 function formFromRule(rule: IpRule): FormState {
   return {
-    ip_cidr: rule.ip_cidr,
+    mode: rule.group_id ? 'group' : 'manual',
+    name: rule.name,
+    group_id: rule.group_id ?? '',
+    ranges: rule.ip_ranges.join('\n'),
     action: rule.action,
     note: rule.note ?? '',
     enabled: rule.enabled,
+    priority: rule.priority,
   }
 }
 
@@ -69,7 +96,7 @@ export function IpRulesPage() {
   const [searchParams, setSearchParams] = useSearchParams()
 
   const [dialogOpen, setDialogOpen] = useState(false)
-  const [tab, setTab] = useState<'single' | 'bulk'>('single')
+  const [tab, setTab] = useState<DialogTab>('single')
   const [editing, setEditing] = useState<IpRule | null>(null)
   const [form, setForm] = useState<FormState>(emptyForm())
   const [bulk, setBulk] = useState('')
@@ -87,6 +114,13 @@ export function IpRulesPage() {
     select: (page) => page.items,
   })
 
+  const groupsQuery = useQuery({
+    queryKey: ipGroupKeys.list({ enabled: true }),
+    queryFn: () => ipGroupsApi.list({ enabled: true }),
+    select: (page) => page.items,
+  })
+  const groups = groupsQuery.data ?? []
+
   const rules = useMemo(
     () =>
       [...(rulesQuery.data ?? [])].sort(
@@ -95,11 +129,22 @@ export function IpRulesPage() {
     [rulesQuery.data],
   )
 
+  const openCreate = (mode: RuleMode = 'group') => {
+    setEditing(null)
+    setTab('single')
+    setForm({ ...emptyForm(), mode })
+    setDialogOpen(true)
+  }
+
   useEffect(() => {
     if (prefillBlock) {
-      setEditing(null)
       setTab('single')
-      setForm({ ...emptyForm(), ip_cidr: prefillBlock, action: 'block' })
+      setForm({
+        ...emptyForm(),
+        mode: 'manual',
+        ranges: prefillBlock,
+        action: 'block',
+      })
       setDialogOpen(true)
       searchParams.delete('block')
       setSearchParams(searchParams, { replace: true })
@@ -117,6 +162,17 @@ export function IpRulesPage() {
     void queryClient.invalidateQueries({ queryKey: ipRuleKeys.all(siteId) })
   }
 
+  const buildPayload = (): CreateIpRuleRequest => ({
+    name: form.name.trim(),
+    action: form.action,
+    note: form.note.trim() || null,
+    enabled: form.enabled,
+    priority: form.priority,
+    ...(form.mode === 'group'
+      ? { group_id: form.group_id }
+      : { ip_ranges: parseIpList(form.ranges).valid }),
+  })
+
   const save = useMutation({
     mutationFn: (payload: CreateIpRuleRequest) =>
       editing
@@ -125,7 +181,7 @@ export function IpRulesPage() {
     onSuccess: (rule) => {
       toast.success(
         editing ? t('pages.ipRules.ruleUpdated') : t('pages.ipRules.ruleCreated'),
-        rule.ip_cidr,
+        rule.name,
       )
       closeDialog()
       invalidate()
@@ -134,14 +190,10 @@ export function IpRulesPage() {
   })
 
   const bulkSave = useMutation({
-    mutationFn: (entries: string[]) =>
-      Promise.all(
-        entries.map((ip) =>
-          ipRulesApi.create(siteId, { ip_cidr: ip, action: bulkAction, enabled: true }),
-        ),
-      ),
-    onSuccess: (created) => {
-      toast.success(t('pages.ipRules.bulkCreated', { count: created.length }))
+    mutationFn: (payload: BulkImportIpRequest) =>
+      ipRulesApi.bulkImport(siteId, payload),
+    onSuccess: (result) => {
+      toast.success(t('pages.ipRules.bulkCreated', { count: result.imported }))
       closeDialog()
       invalidate()
     },
@@ -157,7 +209,7 @@ export function IpRulesPage() {
   const remove = useMutation({
     mutationFn: (id: string) => ipRulesApi.delete(siteId, id),
     onSuccess: (_d, id) => {
-      toast.success(t('pages.ipRules.ruleDeleted'), rules.find((r) => r.id === id)?.ip_cidr)
+      toast.success(t('pages.ipRules.ruleDeleted'), rules.find((r) => r.id === id)?.name)
       setPendingDelete(null)
       invalidate()
     },
@@ -173,17 +225,32 @@ export function IpRulesPage() {
 
   const submitSingle = () => {
     setError(null)
-    const reason = validateIpCidr(form.ip_cidr)
-    if (reason) {
-      setError(t(`pages.ipRules.invalid.${reason}`, t('pages.ipRules.invalidGeneric')))
+    if (!form.name.trim()) {
+      setError(t('pages.ipRules.nameRequired'))
       return
     }
-    save.mutate({
-      ip_cidr: form.ip_cidr.trim(),
-      action: form.action,
-      note: form.note.trim() || null,
-      enabled: form.enabled,
-    })
+    if (form.mode === 'group') {
+      if (!form.group_id) {
+        setError(t('pages.ipRules.groupRequired'))
+        return
+      }
+    } else {
+      const { valid, invalid } = parseIpList(form.ranges)
+      if (valid.length === 0) {
+        setError(t('pages.ipRules.manualNone'))
+        return
+      }
+      if (invalid.length > 0) {
+        setError(
+          t('pages.ipRules.bulkInvalid', {
+            count: invalid.length,
+            list: invalid.slice(0, 5).join(', '),
+          }),
+        )
+        return
+      }
+    }
+    save.mutate(buildPayload())
   }
 
   const submitBulk = () => {
@@ -197,18 +264,39 @@ export function IpRulesPage() {
       setError(t('pages.ipRules.bulkInvalid', { count: invalid.length, list: invalid.slice(0, 5).join(', ') }))
       return
     }
-    bulkSave.mutate(valid)
+    bulkSave.mutate({ ip_ranges: valid, action: bulkAction, enabled: true })
   }
 
   const columns: Column<IpRule>[] = [
     {
-      key: 'ip_cidr',
-      header: t('pages.ipRules.ipCidr'),
-      accessor: (r) => r.ip_cidr,
+      key: 'name',
+      header: t('pages.ipRules.name'),
+      accessor: (r) => r.name,
       sortable: true,
       cell: (r) => (
-        <span className="pw-mono text-[13px] font-medium text-fg-strong">{r.ip_cidr}</span>
+        <div className="min-w-0">
+          <p className="truncate text-[13px] font-medium text-fg-strong">{r.name}</p>
+          {r.note && (
+            <p className="line-clamp-1 text-xs text-fg-subtle">{r.note}</p>
+          )}
+        </div>
       ),
+    },
+    {
+      key: 'target',
+      header: t('pages.ipRules.target'),
+      accessor: (r) => r.group_name ?? r.ip_ranges.join(' '),
+      cell: (r) =>
+        r.group_name ? (
+          <Badge tone="info">
+            <Users weight="duotone" className="mr-1 h-3 w-3" />
+            {r.group_name}
+          </Badge>
+        ) : (
+          <span className="text-[13px] text-fg-subtle">
+            {t('pages.ipRules.rangeCount', { count: r.ip_ranges.length })}
+          </span>
+        ),
     },
     {
       key: 'action',
@@ -222,13 +310,13 @@ export function IpRulesPage() {
       ),
     },
     {
-      key: 'note',
-      header: t('pages.ipRules.note'),
-      accessor: (r) => r.note ?? '',
+      key: 'priority',
+      header: t('pages.ipRules.priority'),
+      accessor: (r) => r.priority,
+      sortable: true,
+      width: '1%',
       cell: (r) => (
-        <span className="line-clamp-1 text-[13px] text-fg-subtle">
-          {r.note || <span className="text-fg-subtle/50">—</span>}
-        </span>
+        <span className="text-[13px] text-fg-subtle">{r.priority}</span>
       ),
     },
     {
@@ -251,7 +339,7 @@ export function IpRulesPage() {
           size="sm"
           checked={r.enabled}
           disabled={!canWrite || toggle.isPending}
-          aria-label={`${t('common.enabled')}: ${r.ip_cidr}`}
+          aria-label={`${t('common.enabled')}: ${r.name}`}
           onCheckedChange={(enabled) => toggle.mutate({ rule: r, enabled })}
         />
       ),
@@ -290,6 +378,14 @@ export function IpRulesPage() {
   ]
 
   const blockedCount = rules.filter((r) => r.action === 'block' && r.enabled).length
+  const groupedCount = rules.filter((r) => r.group_id).length
+
+  const groupOptions = groups.map((g) => ({
+    value: g.id,
+    label: `${g.name} (${g.ip_ranges.length})`,
+  }))
+
+  const parsedManual = parseIpList(form.ranges)
 
   return (
     <div className="animate-slide-up">
@@ -310,11 +406,7 @@ export function IpRulesPage() {
               <Button
                 variant="primary"
                 icon={<Plus weight="bold" className="h-4 w-4" />}
-                onClick={() => {
-                  setEditing(null)
-                  setTab('single')
-                  setDialogOpen(true)
-                }}
+                onClick={() => openCreate('group')}
               >
                 {t('pages.ipRules.addRule')}
               </Button>
@@ -332,7 +424,9 @@ export function IpRulesPage() {
             <p className="text-sm font-medium text-fg-strong">
               {t('pages.ipRules.summary', { total: rules.length, blocked: blockedCount })}
             </p>
-            <p className="text-xs text-fg-subtle">{t('pages.ipRules.summaryHint')}</p>
+            <p className="text-xs text-fg-subtle">
+              {t('pages.ipRules.summaryHint', { grouped: groupedCount })}
+            </p>
           </div>
         </div>
       )}
@@ -348,7 +442,7 @@ export function IpRulesPage() {
           <CardHeader title={t('pages.ipRules.rulesTitle')} />
           <CardBody className="p-0">
             {rulesQuery.isPending ? (
-              <SkeletonRows rows={5} columns={6} />
+              <SkeletonRows rows={5} columns={7} />
             ) : rules.length === 0 ? (
               <EmptyState
                 className="border-0 py-12"
@@ -360,10 +454,7 @@ export function IpRulesPage() {
                     <Button
                       variant="primary"
                       icon={<Plus weight="bold" className="h-4 w-4" />}
-                      onClick={() => {
-                        setEditing(null)
-                        setDialogOpen(true)
-                      }}
+                      onClick={() => openCreate('group')}
                     >
                       {t('pages.ipRules.addRule')}
                     </Button>
@@ -419,7 +510,7 @@ export function IpRulesPage() {
             variant="pill"
             className="mb-4"
             value={tab}
-            onChange={(v) => setTab(v as 'single' | 'bulk')}
+            onChange={(v) => setTab(v as DialogTab)}
             items={[
               { value: 'single', label: t('pages.ipRules.single') },
               { value: 'bulk', label: t('pages.ipRules.bulk'), icon: <UploadSimple weight="duotone" className="h-4 w-4" /> },
@@ -427,18 +518,56 @@ export function IpRulesPage() {
           />
         )}
 
-        {tab === 'single' || editing ? (
+        {tab === 'single' ? (
           <div className="flex flex-col gap-4">
+            <Tabs
+              variant="pill"
+              value={form.mode}
+              onChange={(v) => setForm((f) => ({ ...f, mode: v as RuleMode }))}
+              items={[
+                { value: 'group', label: t('pages.ipRules.modeGroup') },
+                { value: 'manual', label: t('pages.ipRules.modeManual') },
+              ]}
+            />
             <Input
-              label={t('pages.ipRules.ipCidr')}
-              value={form.ip_cidr}
+              label={t('pages.ipRules.name')}
+              value={form.name}
               autoFocus
-              className="pw-mono"
-              placeholder="203.0.113.44 or 10.0.0.0/24"
-              hint={t('pages.ipRules.ipHint')}
-              onChange={(e) => setForm((f) => ({ ...f, ip_cidr: e.target.value }))}
+              placeholder={t('pages.ipRules.namePlaceholder')}
+              onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
               required
             />
+            {form.mode === 'group' ? (
+              <Select
+                label={t('pages.ipRules.groupName')}
+                value={form.group_id}
+                options={[
+                  { value: '', label: t('pages.ipRules.selectGroup'), disabled: true },
+                  ...groupOptions,
+                ]}
+                hint={t('pages.ipRules.groupHint')}
+                onChange={(e) => setForm((f) => ({ ...f, group_id: e.target.value }))}
+                required
+              />
+            ) : (
+              <Textarea
+                label={t('pages.ipRules.rangesLabel')}
+                mono
+                rows={6}
+                value={form.ranges}
+                placeholder={'203.0.113.44\n10.0.0.0/24'}
+                hint={t('pages.ipRules.rangesHint')}
+                onChange={(e) => setForm((f) => ({ ...f, ranges: e.target.value }))}
+              />
+            )}
+            {form.mode === 'manual' && form.ranges.trim() && (
+              <p className="text-xs text-fg-subtle">
+                {t('pages.ipRules.bulkPreview', {
+                  valid: parsedManual.valid.length,
+                  invalid: parsedManual.invalid.length,
+                })}
+              </p>
+            )}
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <Select
                 label={t('pages.waf.action')}
@@ -456,11 +585,25 @@ export function IpRulesPage() {
                 onChange={(e) => setForm((f) => ({ ...f, note: e.target.value }))}
               />
             </div>
-            <Switch
-              checked={form.enabled}
-              onCheckedChange={(enabled) => setForm((f) => ({ ...f, enabled }))}
-              label={t('common.enabled')}
-            />
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <Input
+                label={t('pages.ipRules.priority')}
+                type="number"
+                min={0}
+                value={form.priority}
+                hint={t('pages.ipRules.priorityHint')}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, priority: Number(e.target.value) || 0 }))
+                }
+              />
+              <div className="flex items-end pb-1">
+                <Switch
+                  checked={form.enabled}
+                  onCheckedChange={(enabled) => setForm((f) => ({ ...f, enabled }))}
+                  label={t('common.enabled')}
+                />
+              </div>
+            </div>
           </div>
         ) : (
           <div className="flex flex-col gap-4">
@@ -515,10 +658,13 @@ export function IpRulesPage() {
         {pendingDelete && (
           <div className="rounded-md border border-line bg-recessed px-3 py-2">
             <p className="pw-mono text-[13px] font-medium text-fg-strong">
-              {pendingDelete.ip_cidr}
+              {pendingDelete.name}
             </p>
-            {pendingDelete.note && (
-              <p className="mt-0.5 text-xs text-fg-subtle">{pendingDelete.note}</p>
+            {pendingDelete.group_name && (
+              <p className="mt-0.5 text-xs text-fg-subtle">
+                <Users weight="duotone" className="mr-1 inline h-3 w-3" />
+                {pendingDelete.group_name}
+              </p>
             )}
           </div>
         )}

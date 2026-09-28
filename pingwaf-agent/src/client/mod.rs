@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,6 +13,7 @@ use pingwaf_proto::control_plane::{
 };
 
 use crate::cache::RuleCache;
+use crate::cert_events::cert_event_buffer;
 use crate::config::AgentConfig;
 use crate::heartbeat::{MetricsCollector, SystemMetrics};
 use crate::probe::{self, HostSample, ProbeBuffer};
@@ -100,6 +101,10 @@ pub struct ControlPlaneClient {
     command_handlers: Arc<tokio::sync::RwLock<CommandHandlers>>,
     /// Buffered host probe samples, shipped with each heartbeat
     probe: Arc<ProbeBuffer>,
+    /// Current reconnect backoff in milliseconds, shared between the
+    /// connection loop and the registration path so a successful register
+    /// can retire stale backoff immediately.
+    retry_delay_ms: AtomicU64,
 }
 
 impl ControlPlaneClient {
@@ -113,6 +118,7 @@ impl ControlPlaneClient {
     ) -> Self {
         let agent_id = config.resolved_agent_id();
         let (log_tx, log_rx) = mpsc::channel(4096);
+        let retry_delay_ms = AtomicU64::new(config.reconnect_initial_delay_ms);
 
         // A purge is actionable without the host application: the edge cache
         // and its quota ledger live in the rule cache, so the default handler
@@ -153,6 +159,7 @@ impl ControlPlaneClient {
             log_receiver: Arc::new(tokio::sync::Mutex::new(log_rx)),
             command_handlers: Arc::new(tokio::sync::RwLock::new(handlers)),
             probe: Arc::new(ProbeBuffer::new()),
+            retry_delay_ms,
         }
     }
 
@@ -186,6 +193,13 @@ impl ControlPlaneClient {
                 },
             }
         }
+    }
+
+    /// Pop the next queued log entry without the shipper task running.
+    /// Only compiled with the `test-util` feature.
+    #[cfg(feature = "test-util")]
+    pub async fn pop_log(&self) -> Option<LogEntry> {
+        self.log_receiver.lock().await.try_recv().ok()
     }
 
     /// Establish the gRPC channel to the control plane server.
@@ -280,26 +294,35 @@ impl ControlPlaneClient {
         Ok(handles)
     }
 
-    /// Main connection loop with exponential backoff reconnection.
-    async fn connection_loop(self: &Arc<Self>) {
-        let mut retry_delay =
-            Duration::from_millis(self.config.reconnect_initial_delay_ms);
-        let max_delay =
-            Duration::from_millis(self.config.reconnect_max_delay_ms);
+    /// Retires backoff accumulated by earlier outages: registration just
+    /// proved the connection healthy, so the next reconnect must start from
+    /// the initial delay instead of paying for failures long past.
+    fn retire_backoff(&self) {
+        self.retry_delay_ms
+            .store(self.config.reconnect_initial_delay_ms, Ordering::Relaxed);
+    }
 
+    /// Main connection loop with exponential backoff reconnection.
+    ///
+    /// The backoff lives in `retry_delay_ms` so that a successful
+    /// registration (see `try_connect_and_run`) can reset it: backoff
+    /// accumulated by past outages must not penalize the next reconnect
+    /// after a healthy connection drops.
+    async fn connection_loop(self: &Arc<Self>) {
         loop {
             if self.shutdown_signal.load(Ordering::Relaxed) {
                 info!("Agent shutting down");
                 break;
             }
 
+            let retry_delay = Duration::from_millis(
+                self.retry_delay_ms.load(Ordering::Relaxed),
+            );
+
             match self.try_connect_and_run().await {
                 Ok(()) => {
                     // Clean disconnect (server closed connection gracefully)
                     info!("Disconnected from control plane, will reconnect");
-                    retry_delay = Duration::from_millis(
-                        self.config.reconnect_initial_delay_ms,
-                    );
                 },
                 Err(e) => {
                     warn!(
@@ -314,7 +337,11 @@ impl ControlPlaneClient {
 
             // Wait before reconnecting with exponential backoff
             tokio::time::sleep(retry_delay).await;
-            retry_delay = (retry_delay * 2).min(max_delay);
+            let next = next_backoff(
+                retry_delay.as_millis() as u64,
+                self.config.reconnect_max_delay_ms,
+            );
+            self.retry_delay_ms.store(next, Ordering::Relaxed);
         }
     }
 
@@ -325,12 +352,14 @@ impl ControlPlaneClient {
 
         // Register
         let reg_response = self.register(channel.clone()).await?;
+        self.retire_backoff();
         self.connected.store(true, Ordering::Relaxed);
         info!("Connected to control plane at {}", self.config.server_url);
 
         // Run heartbeat and log shipping concurrently
         let heartbeat_fut = self.run_heartbeat(channel.clone(), &reg_response);
         let log_shipper_fut = self.run_log_shipper(channel.clone());
+        let cert_shipper_fut = self.run_cert_event_shipper(channel);
 
         // Wait for either to complete (usually means disconnection)
         tokio::select! {
@@ -343,6 +372,12 @@ impl ControlPlaneClient {
             result = log_shipper_fut => {
                 if let Err(e) = result {
                     error!(error = %e, "Log shipper ended");
+                    return Err(e);
+                }
+            }
+            result = cert_shipper_fut => {
+                if let Err(e) = result {
+                    error!(error = %e, "Cert event shipper ended");
                     return Err(e);
                 }
             }
@@ -678,6 +713,84 @@ impl ControlPlaneClient {
         let _ = agent_id; // Used in log context
     }
 
+    /// Run the certificate-event shipping loop.
+    ///
+    /// Drains the global ACME capture buffer on the same cadence as the log
+    /// shipper. Errors are logged and swallowed: a control plane without the
+    /// `ShipCertEvents` RPC must not tear down an otherwise healthy
+    /// connection.
+    async fn run_cert_event_shipper(
+        &self,
+        channel: Channel,
+    ) -> anyhow::Result<()> {
+        let mut client = ProtoClient::new(channel);
+
+        let flush_interval =
+            Duration::from_secs(self.config.log_flush_interval_secs.max(1));
+        let mut interval = tokio::time::interval(flush_interval);
+        interval
+            .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        let agent_id = self.agent_id.clone();
+
+        loop {
+            if self.shutdown_signal.load(Ordering::Relaxed) {
+                let entries = cert_event_buffer().drain(&agent_id);
+                if !entries.is_empty() {
+                    Self::flush_cert_events(&mut client, entries).await;
+                }
+                break;
+            }
+
+            tokio::select! {
+                _ = interval.tick() => {
+                    let entries = cert_event_buffer().drain(&agent_id);
+                    if !entries.is_empty() {
+                        Self::flush_cert_events(&mut client, entries).await;
+                    }
+                }
+                _ = self.wait_for_shutdown() => {
+                    let entries = cert_event_buffer().drain(&agent_id);
+                    if !entries.is_empty() {
+                        Self::flush_cert_events(&mut client, entries).await;
+                    }
+                    break;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Flush a batch of certificate events to the server.
+    async fn flush_cert_events(
+        client: &mut ProtoClient<Channel>,
+        entries: Vec<proto::CertEventEntry>,
+    ) {
+        let count = entries.len();
+        let stream = tokio_stream::iter(entries);
+        match client.ship_cert_events(stream).await {
+            Ok(response) => {
+                let ack = response.into_inner();
+                if ack.success {
+                    debug!(
+                        count,
+                        received = ack.received_count,
+                        "Flushed cert events to server"
+                    );
+                } else {
+                    warn!(
+                        error = %ack.error_message,
+                        "Server rejected cert event batch"
+                    );
+                }
+            },
+            Err(e) => {
+                error!(error = %e, count, "Failed to ship cert events");
+            },
+        }
+    }
+
     /// Convert a local LogEntry to the proto LogEntry type.
     fn convert_log_entry(agent_id: &str, entry: &LogEntry) -> proto::LogEntry {
         proto::LogEntry {
@@ -749,6 +862,11 @@ impl ControlPlaneClient {
 // ─────────────────────────────────────────────────────────────
 // Helper functions for system information
 // ─────────────────────────────────────────────────────────────
+
+/// Doubles the current reconnect backoff, capped at the configured maximum.
+fn next_backoff(current_ms: u64, max_ms: u64) -> u64 {
+    current_ms.saturating_mul(2).min(max_ms)
+}
 
 /// Convert a probe sample into its wire representation.
 fn to_proto_sample(sample: &HostSample) -> proto::HostSample {
@@ -842,5 +960,89 @@ fn get_total_memory() -> u64 {
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_client(initial_ms: u64, max_ms: u64) -> Arc<ControlPlaneClient> {
+        test_client_at("http://127.0.0.1:1", initial_ms, max_ms)
+    }
+
+    fn test_client_at(
+        server_url: &str,
+        initial_ms: u64,
+        max_ms: u64,
+    ) -> Arc<ControlPlaneClient> {
+        let dir = tempfile::tempdir().unwrap();
+        let config = AgentConfig {
+            server_url: server_url.to_string(),
+            api_key: "test-key".to_string(),
+            reconnect_initial_delay_ms: initial_ms,
+            reconnect_max_delay_ms: max_ms,
+            ..AgentConfig::default()
+        };
+        let rule_cache = RuleCache::new(
+            dir.path().to_path_buf(),
+            config.resolved_agent_id(),
+        )
+        .unwrap();
+        Arc::new(ControlPlaneClient::new(
+            config,
+            rule_cache,
+            Arc::new(MetricsCollector::new()),
+        ))
+    }
+
+    #[test]
+    fn backoff_doubles_and_is_capped() {
+        assert_eq!(next_backoff(100, 60_000), 200);
+        assert_eq!(next_backoff(50_000, 60_000), 60_000);
+        assert_eq!(next_backoff(60_000, 60_000), 60_000);
+        // A pathological current value must not overflow.
+        assert_eq!(next_backoff(u64::MAX, 1_000), 1_000);
+    }
+
+    #[test]
+    fn retire_backoff_restores_initial_delay() {
+        let client = test_client(1_000, 60_000);
+        client.retry_delay_ms.store(60_000, Ordering::Relaxed);
+        client.retire_backoff();
+        assert_eq!(
+            client.retry_delay_ms.load(Ordering::Relaxed),
+            1_000,
+            "a successful registration must retire accumulated backoff"
+        );
+    }
+
+    #[tokio::test]
+    async fn connection_loop_backs_off_against_dead_endpoint() {
+        // Bind and drop a listener so the endpoint reliably refuses
+        // connections, then let the loop exhaust its short backoff budget.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let client =
+            test_client_at(&format!("http://127.0.0.1:{port}"), 10, 80);
+
+        let this = Arc::clone(&client);
+        let handle = tokio::spawn(async move { this.connection_loop().await });
+        tokio::time::sleep(Duration::from_millis(1_000)).await;
+
+        let observed = client.retry_delay_ms.load(Ordering::Relaxed);
+        assert_eq!(
+            observed, 80,
+            "repeated failures must grow backoff up to the configured max"
+        );
+
+        client.shutdown_signal.store(true, Ordering::Relaxed);
+        handle.await.unwrap();
+        assert_eq!(
+            client.retry_delay_ms.load(Ordering::Relaxed),
+            80,
+            "no registration happened, so backoff must stay at the max"
+        );
     }
 }

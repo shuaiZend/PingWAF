@@ -956,7 +956,13 @@ export interface UpdateSslSettingsRequest {
 
 /* ── Certificate events ────────────────────────────────────────────── */
 
-export type CertEventType = 'created' | 'renewal_requested' | 'renewed' | 'failed' | 'deleted'
+export type CertEventType =
+  | 'created'
+  | 'renewal_requested'
+  | 'renewed'
+  | 'failed'
+  | 'deleted'
+  | 'acme_raw'
 
 export const CERT_EVENT_TYPES: CertEventType[] = [
   'created',
@@ -964,11 +970,12 @@ export const CERT_EVENT_TYPES: CertEventType[] = [
   'renewed',
   'failed',
   'deleted',
+  'acme_raw',
 ]
 
 export interface CertificateEvent {
   id: string
-  certificate_id: string
+  certificate_id: string | null
   site_id: string | null
   event_type: CertEventType | string
   message: string
@@ -1090,23 +1097,45 @@ export interface ChallengeStats {
 
 /* ── IP access rules ──────────────────────────────────────────────── */
 
-export type IpRuleAction = 'block' | 'challenge' | 'allow'
+export type IpRuleAction = 'block' | 'challenge' | 'js_challenge' | 'allow'
 
-export const IP_RULE_ACTIONS: IpRuleAction[] = ['block', 'challenge', 'allow']
+export const IP_RULE_ACTIONS: IpRuleAction[] = [
+  'block',
+  'challenge',
+  'js_challenge',
+  'allow',
+]
 
 export interface IpRule {
   id: string
   site_id: string
-  /** Single address or CIDR range. */
-  ip_cidr: string
+  name: string
+  /** Manual mode: explicit addresses/CIDRs. Empty in group mode. */
+  ip_ranges: string[]
+  /** Group mode: targets the referenced IP group's live ranges. */
+  group_id: string | null
+  group_name?: string | null
   action: IpRuleAction | string
   note: string | null
   enabled: boolean
+  priority: number
   created_at: string
+  updated_at: string
 }
 
 export interface CreateIpRuleRequest {
-  ip_cidr: string
+  name: string
+  /** Exactly one of group_id / ip_ranges must be set. */
+  group_id?: string
+  ip_ranges?: string[]
+  action?: IpRuleAction | string
+  note?: string | null
+  enabled?: boolean
+  priority?: number
+}
+
+export interface BulkImportIpRequest {
+  ip_ranges: string[]
   action?: IpRuleAction | string
   note?: string | null
   enabled?: boolean

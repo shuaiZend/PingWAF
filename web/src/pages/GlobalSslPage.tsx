@@ -339,6 +339,7 @@ export function GlobalSslPage() {
     renewed: 'success',
     failed: 'danger',
     deleted: 'warning',
+    acme_raw: 'brand',
   }
 
   const events = useMemo(() => eventsQuery.data?.items ?? [], [eventsQuery.data])
@@ -387,7 +388,15 @@ export function GlobalSslPage() {
       header: t('pages.sslGlobal.eventMessage'),
       accessor: (r) => r.message,
       cell: (r) => (
-        <span className="text-[13px] text-fg-subtle line-clamp-2">{r.message}</span>
+        <span
+          className={
+            r.event_type === 'acme_raw'
+              ? 'pw-mono text-[12px] text-fg-subtle line-clamp-2'
+              : 'text-[13px] text-fg-subtle line-clamp-2'
+          }
+        >
+          {r.message}
+        </span>
       ),
     },
   ]
