@@ -1393,10 +1393,7 @@ mod tests {
         assert_eq!(cert.dns_challenge, Some(true));
         assert_eq!(cert.dns_provider.as_deref(), Some("ali"));
         let url = cert.dns_service_url.expect("service url");
-        assert!(
-            url.starts_with("https://alidns.aliyuncs.com?"),
-            "{url}"
-        );
+        assert!(url.starts_with("https://alidns.aliyuncs.com?"), "{url}");
         assert!(url.contains("access_key_id=AK%201%2F2"), "{url}");
         assert!(url.contains("access_key_secret=s3cret"), "{url}");
     }
