@@ -59,6 +59,7 @@ interface FormState {
   acmeEmail: string
   challengeType: string
   dnsProvider: string
+  dnsConfig: Array<{ key: string; value: string }>
   certPem: string
   keyPem: string
   activate: boolean
@@ -72,6 +73,7 @@ const emptyForm = (): FormState => ({
   acmeEmail: '',
   challengeType: 'http-01',
   dnsProvider: '',
+  dnsConfig: [],
   certPem: '',
   keyPem: '',
   activate: true,
@@ -198,6 +200,14 @@ export function GlobalSslPage() {
       if (email) payload.acme_email = email
       if (form.challengeType === 'dns-01' && form.dnsProvider) {
         payload.acme_dns_provider = form.dnsProvider
+        const config = Object.fromEntries(
+          form.dnsConfig
+            .map((row) => [row.key.trim(), row.value.trim()] as const)
+            .filter(([key]) => key.length > 0),
+        )
+        if (Object.keys(config).length > 0) {
+          payload.acme_dns_config = config
+        }
       }
     } else {
       const certPem = form.certPem.trim()
@@ -701,16 +711,89 @@ export function GlobalSslPage() {
                 />
               </div>
               {form.challengeType === 'dns-01' && (
-                <Select
-                  label={t('pages.ssl.dnsProvider')}
-                  hint={t('pages.sslGlobal.dnsProviderHint')}
-                  options={[
-                    { value: '', label: t('pages.ssl.manualDns') },
-                    ...ACME_DNS_PROVIDERS.map((p) => ({ value: p, label: p })),
-                  ]}
-                  value={form.dnsProvider}
-                  onChange={(e) => setForm((f) => ({ ...f, dnsProvider: e.target.value }))}
-                />
+                <>
+                  <Select
+                    label={t('pages.ssl.dnsProvider')}
+                    hint={t('pages.sslGlobal.dnsProviderHint')}
+                    options={[
+                      { value: '', label: t('pages.ssl.manualDns') },
+                      ...ACME_DNS_PROVIDERS.map((p) => ({ value: p, label: p })),
+                    ]}
+                    value={form.dnsProvider}
+                    onChange={(e) => setForm((f) => ({ ...f, dnsProvider: e.target.value }))}
+                  />
+                  {form.dnsProvider && form.dnsProvider !== 'manual' && (
+                    <div className="flex flex-col gap-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[13px] font-medium text-fg">
+                          {t('pages.sslGlobal.dnsConfigLabel')}
+                        </span>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          type="button"
+                          onClick={() =>
+                            setForm((f) => ({
+                              ...f,
+                              dnsConfig: [...f.dnsConfig, { key: '', value: '' }],
+                            }))
+                          }
+                        >
+                          {t('common.add')}
+                        </Button>
+                      </div>
+                      <p className="text-xs text-fg-subtle">
+                        {t('pages.sslGlobal.dnsConfigHint')}
+                      </p>
+                      {form.dnsProvider === 'huawei' && (
+                        <p className="text-xs text-fg-subtle">
+                          {t('pages.sslGlobal.dnsConfigRegionRequired')}
+                        </p>
+                      )}
+                      {form.dnsConfig.map((row, i) => (
+                        <div key={i} className="flex items-start gap-2">
+                          <Input
+                            placeholder="token"
+                            value={row.key}
+                            onChange={(e) =>
+                              setForm((f) => ({
+                                ...f,
+                                dnsConfig: f.dnsConfig.map((r, j) =>
+                                  j === i ? { ...r, key: e.target.value } : r,
+                                ),
+                              }))
+                            }
+                          />
+                          <Input
+                            placeholder="••••••"
+                            value={row.value}
+                            onChange={(e) =>
+                              setForm((f) => ({
+                                ...f,
+                                dnsConfig: f.dnsConfig.map((r, j) =>
+                                  j === i ? { ...r, value: e.target.value } : r,
+                                ),
+                              }))
+                            }
+                          />
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            type="button"
+                            onClick={() =>
+                              setForm((f) => ({
+                                ...f,
+                                dnsConfig: f.dnsConfig.filter((_, j) => j !== i),
+                              }))
+                            }
+                          >
+                            {t('common.delete')}
+                          </Button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </>
               )}
               <Switch
                 checked={form.autoRenew}

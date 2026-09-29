@@ -869,6 +869,7 @@ export const ACME_DNS_PROVIDERS = [
   'aliyun',
   'dnspod',
   'cloudxns',
+  'huawei',
   'manual',
 ] as const
 
