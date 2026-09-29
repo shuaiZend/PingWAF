@@ -233,6 +233,18 @@ fi
 
 chmod +x "$BINARY_PATH"
 
+# The release binaries are linked against the glibc of the runner that built
+# them (Ubuntu 24.04 today), so an older distro gets as far as systemd before
+# failing with a versioned-symbol error. Catch that here instead, while the
+# message can still name the cause.
+if ! "$BINARY_PATH" --version >/dev/null 2>&1; then
+    smoke_error="$("$BINARY_PATH" --version 2>&1 | head -n1 || true)"
+    fatal "The downloaded binary cannot run on this system: ${smoke_error}
+       Release assets are built on Ubuntu 24.04 and need glibc 2.39 or newer.
+       On older distributions (CentOS/RHEL, Debian 11, Ubuntu 20.04, Alpine,
+       ...) build from source instead: https://github.com/${REPO}/blob/main/docs/quick-start.md#path-2-build-from-source"
+fi
+
 info "Installing binary to ${INSTALL_DIR}/${BINARY_NAME}..."
 if [[ -w "$INSTALL_DIR" ]]; then
     mv "$BINARY_PATH" "${INSTALL_DIR}/${BINARY_NAME}"

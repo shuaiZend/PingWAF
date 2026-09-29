@@ -63,6 +63,12 @@ curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh |
 
 > Prebuilt release assets are published for **Linux** (amd64/arm64) only; on
 > macOS, [build from source](./quick-start.md#path-2-build-from-source).
+>
+> The binaries are linked against the glibc of the runner that builds them
+> (Ubuntu 24.04, **glibc 2.39**), so they run on Debian 12+/Ubuntu 24.04+ and
+> equivalent. On older distributions (CentOS/RHEL 8, Debian 11, Ubuntu 22.04,
+> Alpine, ...) `install.sh` stops with the loader's error — build from source
+> there, or run the container image.
 
 ### 2. Set Up PostgreSQL
 
