@@ -361,7 +361,7 @@ fn cached_rules_to_pingap_config(
         // The `/` fallback location points at the default pool. Caches
         // written before pools existed mark nothing default, so the only
         // pool serves when no routes exist.
-        let fallback_key = default_key.or_else(|| {
+        let fallback_key = default_key.clone().or_else(|| {
             if site.routes.is_empty() {
                 pool_keys.first().cloned()
             } else {
@@ -393,11 +393,36 @@ fn cached_rules_to_pingap_config(
         }
 
         for route in &site.routes {
-            // Route only to pools this site actually built — an empty
-            // pool has no upstream to receive traffic.
-            if !route.enabled || !pool_keys.contains(&route.pool_id) {
+            if !route.enabled {
                 continue;
             }
+            // Route only to pools this site actually built — an empty pool
+            // has no upstream to receive traffic. Fall back to the site's
+            // default pool instead of silently dropping the route.
+            let target = if pool_keys.contains(&route.pool_id) {
+                route.pool_id.clone()
+            } else {
+                match default_key.clone().or_else(|| pool_keys.first().cloned())
+                {
+                    Some(fallback) => {
+                        warn!(
+                            site = %site.domain,
+                            route = %route.id,
+                            pool = %route.pool_id,
+                            "route pool has no peers; falling back to the site default pool"
+                        );
+                        fallback
+                    },
+                    None => {
+                        warn!(
+                            site = %site.domain,
+                            route = %route.id,
+                            "route pool has no peers and the site has no usable upstream; route skipped"
+                        );
+                        continue;
+                    },
+                }
+            };
             let path = match route.match_type.as_str() {
                 "exact" => format!("={}", route.path),
                 "regex" => format!("~{}", route.path),
@@ -407,7 +432,7 @@ fn cached_rules_to_pingap_config(
             locations.insert(
                 loc_name.clone(),
                 LocationConf {
-                    upstream: Some(route.pool_id.clone()),
+                    upstream: Some(target),
                     host: Some(host.clone()),
                     path: Some(path),
                     weight: route
@@ -482,12 +507,18 @@ fn cached_rules_to_pingap_config(
             },
         );
     } else {
-        // Nothing to serve over TLS yet; both ports stay plaintext until the
-        // first certificate lands and the next reload splits the listeners.
+        // Nothing to serve over TLS yet: bind only the plaintext port.
+        // Serving HTTP on 443 would train clients into a broken TLS
+        // endpoint; the next reload after the first certificate lands
+        // splits the listeners.
+        warn!(
+            "data plane: no certificates yet — binding 0.0.0.0:80 only; \
+             443 will open once a certificate is issued or uploaded"
+        );
         servers.insert(
             "pingwaf".to_string(),
             PingapServerConf {
-                addr: "0.0.0.0:80,0.0.0.0:443".to_string(),
+                addr: "0.0.0.0:80".to_string(),
                 locations: Some(location_names),
                 ..Default::default()
             },
@@ -904,7 +935,15 @@ pub async fn start_data_plane(
             .add_dependency(&bootstrap_handle);
     }
 
-    info!("data plane: proxy server is running on 0.0.0.0:80,0.0.0.0:443");
+    info!(
+        addrs = %config
+            .servers
+            .values()
+            .map(|s| s.addr.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
+        "data plane: proxy server is running"
+    );
 
     // Start the upstream health check background task.
     // This also drives periodic DNS discovery updates — without it,
@@ -1351,7 +1390,8 @@ mod tests {
         let r3 = route("r3", "regex", r"^/static/.*", "pool-b");
         let mut disabled = route("r4", "prefix", "/gone", "pool-b");
         disabled.enabled = false;
-        // Route referencing the skipped empty pool is dropped.
+        // Route referencing the skipped empty pool falls back to the
+        // site's default pool instead of disappearing.
         let orphan = route("r5", "prefix", "/orphan", "pool-empty");
         site.routes = vec![r1, r2, r3, disabled, orphan];
 
@@ -1401,7 +1441,11 @@ mod tests {
         assert_eq!(static_route.path.as_deref(), Some("~^/static/.*"));
 
         assert!(!config.locations.contains_key("site1_route_r4"));
-        assert!(!config.locations.contains_key("site1_route_r5"));
+        let orphan = config
+            .locations
+            .get("site1_route_r5")
+            .expect("orphan route falls back to the default pool");
+        assert_eq!(orphan.upstream.as_deref(), Some("pool-a"));
     }
 
     #[test]
@@ -1648,7 +1692,7 @@ mod tests {
     }
 
     #[test]
-    fn sites_without_certificates_keep_one_combined_server() {
+    fn sites_without_certificates_bind_only_http() {
         let mut site = site_rules("site1", "a.example.com");
         let mut default_pool = pool("pool1", vec![peer("10.0.0.1:8080")]);
         default_pool.is_default = true;
@@ -1661,8 +1705,31 @@ mod tests {
 
         assert_eq!(config.servers.len(), 1);
         let server = config.servers.get("pingwaf").expect("server");
-        assert_eq!(server.addr, "0.0.0.0:80,0.0.0.0:443");
+        assert_eq!(server.addr, "0.0.0.0:80");
         assert_eq!(server.global_certificates, None);
+    }
+
+    #[test]
+    fn routes_fall_back_to_the_default_pool_when_theirs_is_empty() {
+        let mut site = site_rules("site1", "a.example.com");
+        let mut default_pool = pool("pool1", vec![peer("10.0.0.1:8080")]);
+        default_pool.is_default = true;
+        site.upstreams = vec![default_pool];
+        let mut empty_pool = pool("pool2", vec![]);
+        empty_pool.is_default = false;
+        site.upstreams.push(empty_pool);
+        site.routes.push(route("r1", "prefix", "/api", "pool2"));
+        let config = cached_rules_to_pingap_config(
+            &one_site_cache(site),
+            Path::new("/tmp/pingwaf-test-cache"),
+        )
+        .expect("config should build");
+
+        let location = config
+            .locations
+            .get("site1_route_r1")
+            .expect("route location should exist");
+        assert_eq!(location.upstream.as_deref(), Some("pool1"));
     }
 
     fn acme_ssl() -> SslConfig {

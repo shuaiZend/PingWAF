@@ -271,7 +271,7 @@ PingWAF is configured through **`PINGWAF_*` environment variables** and **CLI fl
 | --- | --- |
 | `9080` | REST API + embedded dashboard (health: `GET /healthz`) |
 | `9090` | gRPC control plane (agents connect here) |
-| `80` / `443` | Proxied traffic (bound once the first site exists; until a certificate is issued or uploaded, both ports serve plaintext HTTP) |
+| `80` / `443` | Proxied traffic (bound once the first site exists; `443` opens only after a certificate is issued or uploaded — until then only port `80` serves HTTP) |
 
 👉 Full configuration reference: **[docs/deployment.md](./docs/deployment.md)** and **[docs/api.md](./docs/api.md)**.
 
