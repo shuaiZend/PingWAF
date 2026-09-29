@@ -264,7 +264,7 @@ Create an origin pool.
 }
 ```
 
-`lb_algorithm` accepts `round_robin` or `hash:<type>[:<key>]` with type in `ip`, `url`, `path` (no key) or `header`, `cookie`, `query` (key required). A non-empty `sni` enables TLS to the origin.
+`lb_algorithm` accepts `round_robin`, `random`, `least_connections` or `hash:<type>[:<key>]` with type in `ip`, `url`, `path` (no key) or `header`, `cookie`, `query` (key required). A non-empty `sni` enables TLS to the origin.
 
 ### PUT /sites/{site_id}/upstream-pools/{pool_id}
 
@@ -702,7 +702,7 @@ Create a rate limit rule.
 }
 ```
 
-`characteristics` accepts `ip`, `ip_nat`, `host`, `path`, `header`, `cookie`, `query`, `asn`, `country`, `ja3`. `expression` is an optional filter — empty means all requests.
+`characteristics` accepts `ip`, `ip_nat`, `host`, `path`, `asn`, `country`, and the parameterized forms `header:<name>`, `cookie:<name>`, `query:<name>` (requests missing the value bucket together). Header names match case-insensitively; cookie and query names are case-sensitive. `ja3` is reserved for future use. `expression` is an optional filter — empty means all requests.
 
 ### PUT /sites/{site_id}/rate-limit-rules/{rule_id}
 

@@ -38,8 +38,8 @@ Un unique **plan de contrôle** définit les sites, les règles et les politique
 - **Protection anti-bots** — liste blanche des bots vérifiés, passage des navigateurs connus et action configurable pour le reste.
 - **Règles d'accès IP** — `block` / `allow` / `challenge` / `js_challenge`, avec plages CIDR, import CSV et **groupes IP globaux** synchronisés par abonnement (p. ex. les plages Cloudflare).
 - **Restriction géographique** — autoriser ou bloquer par pays et par numéro de système autonome (ASN).
-- **Limitation de débit multidimensionnelle** — par IP, hôte, chemin, ASN, pays et plus.
-- **Pools d'origine et routes** — équilibrage de charge round-robin ou par hachage cohérent, avec routage par préfixe, correspondance exacte ou regex.
+- **Limitation de débit multidimensionnelle** — par IP, hôte, chemin, ASN, pays, ou selon un en-tête, un cookie ou un paramètre de requête.
+- **Pools d'origine et routes** — équilibrage de charge round-robin, moindres connexions, aléatoire ou par hachage cohérent, avec routage par préfixe, correspondance exacte ou regex.
 - **Cache en périphérie** — quotas disque par site, `stale-while-revalidate` et contrôle du TTL navigateur.
 - **Réécriture requêtes/réponses** et **pages d'erreur personnalisées** avec des modèles Tera.
 - **TLS automatique** — émission et renouvellement ACME / Let's Encrypt en périphérie (HTTP-01 et DNS-01 avec Cloudflare, Route 53, DigitalOcean, Aliyun, DNSPod, CloudXNS ou manuel), avec état du certificat par site remonté au plan de contrôle.
