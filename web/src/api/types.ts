@@ -394,14 +394,13 @@ export type RateLimitCharacteristic =
   | 'country'
   | 'ja3'
 
+/** Characteristics selectable as bare pills; `header` / `cookie` / `query` are
+ * only accepted in the parameterized `kind:name` form via the custom input. */
 export const RATE_LIMIT_CHARACTERISTICS: RateLimitCharacteristic[] = [
   'ip',
   'ip_nat',
   'host',
   'path',
-  'header',
-  'cookie',
-  'query',
   'asn',
   'country',
   'ja3',
@@ -410,11 +409,23 @@ export const RATE_LIMIT_CHARACTERISTICS: RateLimitCharacteristic[] = [
 /** Characteristics the edge cannot key counters on yet: rules that use them
  * are stored but not enforced. */
 export const RATE_LIMIT_CHARACTERISTICS_PENDING: RateLimitCharacteristic[] = [
-  'header',
-  'cookie',
-  'query',
   'ja3',
 ]
+
+/** Valid forms for parameterized characteristics, e.g. `header:X-Api-Key`. */
+const PARAMETERIZED_CHARACTERISTIC_RE = /^(header|cookie|query):[^\s]+$/i
+
+export function isParameterizedCharacteristic(value: string): boolean {
+  return PARAMETERIZED_CHARACTERISTIC_RE.test(value)
+}
+
+/** True for anything the rate-limit form can submit as a characteristic. */
+export function isValidRateLimitCharacteristic(value: string): boolean {
+  return (
+    (RATE_LIMIT_CHARACTERISTICS as string[]).includes(value) ||
+    isParameterizedCharacteristic(value)
+  )
+}
 
 /** `models::rules::rate_limit_rules::Model` */
 export interface RateLimitRule {

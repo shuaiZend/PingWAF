@@ -312,6 +312,10 @@ message RateLimitRule {
   uint32 mitigation_timeout_seconds = 8;
   bool enabled = 9;
   uint32 priority = 10;
+  // Parameter name (header name, cookie name or query parameter name) for the
+  // characteristic at the matching index; only HEADER/COOKIE/QUERY carry one
+  // (e.g. "X-Api-Key", "session", "token"), every other index stays empty.
+  repeated string characteristic_params = 11;
 }
 
 enum RateLimitCharacteristics {

@@ -168,6 +168,11 @@ pub struct RateLimitRule {
     pub name: String,
     pub expression: String,
     pub characteristics: Vec<String>,
+    /// Parameter names for `RateLimitCharHeader/Cookie/Query` characteristics,
+    /// parallel to `characteristics`. Older caches without this field load as
+    /// empty.
+    #[serde(default)]
+    pub characteristic_params: Vec<String>,
     pub period_seconds: u32,
     pub threshold: u32,
     pub action: WafAction,
@@ -1108,6 +1113,7 @@ impl RuleCache {
                     )
                 })
                 .collect(),
+            characteristic_params: r.characteristic_params.clone(),
             period_seconds: r.period_seconds,
             threshold: r.threshold,
             action: WafAction::from(r.action),

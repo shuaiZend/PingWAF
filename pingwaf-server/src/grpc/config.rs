@@ -353,6 +353,11 @@ fn rate_limit_to_proto(row: &rate_limit_rules::Model) -> RateLimitRule {
             .iter()
             .map(|value| characteristic::to_proto(value))
             .collect(),
+        characteristic_params: row
+            .characteristics
+            .iter()
+            .map(|value| characteristic::to_param(value))
+            .collect(),
         period_seconds: row.period_seconds.max(0) as u32,
         threshold: row.threshold.max(0) as u32,
         action: action::to_proto(&row.action),

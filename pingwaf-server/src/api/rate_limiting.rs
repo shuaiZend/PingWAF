@@ -117,17 +117,39 @@ pub fn routes() -> Router<AppState> {
 fn normalise_characteristics(raw: &[String]) -> Result<Vec<String>, ApiError> {
     let mut out: Vec<String> = Vec::new();
     for value in raw {
-        let trimmed = value.trim().to_lowercase();
+        let trimmed = value.trim();
         if trimmed.is_empty() {
             continue;
         }
-        if !characteristic::is_valid(&trimmed) {
+        // Keep the parameter's case for cookie and query (their names match
+        // case-sensitively at the edge); header names are matched
+        // case-insensitively, so their parameter is lowercased to dedup.
+        let (kind, param) = match trimmed.split_once(':') {
+            Some((kind, param)) => {
+                (kind.trim().to_lowercase(), Some(param.trim()))
+            },
+            None => (trimmed.to_lowercase(), None),
+        };
+        let candidate = match (kind.as_str(), param) {
+            (characteristic::HEADER, Some(p)) if !p.is_empty() => {
+                format!("{kind}:{}", p.to_lowercase())
+            },
+            (_, Some(p)) if !p.is_empty() => format!("{kind}:{p}"),
+            _ => kind.clone(),
+        };
+        if matches!(candidate.as_str(), "header" | "cookie" | "query") {
             return Err(ApiError::BadRequest(format!(
-                "unknown rate limit characteristic '{trimmed}'"
+                "characteristic '{candidate}' requires a parameter name \
+                 (e.g. '{candidate}:lang')"
             )));
         }
-        if !out.contains(&trimmed) {
-            out.push(trimmed);
+        if !characteristic::is_valid(&candidate) {
+            return Err(ApiError::BadRequest(format!(
+                "unknown rate limit characteristic '{candidate}'"
+            )));
+        }
+        if !out.contains(&candidate) {
+            out.push(candidate);
         }
     }
     if out.is_empty() {
@@ -368,6 +390,25 @@ mod tests {
         assert_eq!(out, vec!["ip".to_string(), "path".to_string()]);
         assert!(normalise_characteristics(&["unknown".into()]).is_err());
         assert!(normalise_characteristics(&[]).is_err());
+    }
+
+    #[test]
+    fn parameterized_characteristics_keep_the_param_case() {
+        let out = normalise_characteristics(&[
+            "Header: X-Api-Key ".into(),
+            "header:x-api-key".into(),
+            "cookie:Session".into(),
+        ])
+        .unwrap();
+        assert_eq!(
+            out,
+            vec!["header:x-api-key".to_string(), "cookie:Session".to_string()]
+        );
+        // Bare kinds carry no key to count on and are rejected.
+        assert!(normalise_characteristics(&["header".into()]).is_err());
+        assert!(normalise_characteristics(&["cookie:".into()]).is_err());
+        assert!(normalise_characteristics(&["query:has space".into()]).is_err());
+        assert!(normalise_characteristics(&["host:nope".into()]).is_err());
     }
 
     #[test]
