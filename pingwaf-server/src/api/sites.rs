@@ -1443,11 +1443,11 @@ fn validate_upstream(
     Ok(())
 }
 
-/// Validates a pingap load-balancing spec: `round_robin` or
-/// `hash:<type>` for ip/url/path and `hash:<type>:<key>` for
-/// header/cookie/query.
+/// Validates a pingap load-balancing spec: `round_robin`, `random`,
+/// `least_connections`, or `hash:<type>` for ip/url/path and
+/// `hash:<type>:<key>` for header/cookie/query.
 fn is_valid_lb_algorithm(value: &str) -> bool {
-    if value == "round_robin" {
+    if matches!(value, "round_robin" | "random" | "least_connections") {
         return true;
     }
     let Some(rest) = value.strip_prefix("hash:") else {
@@ -1478,8 +1478,9 @@ fn validate_pool(
     }
     if lb_algorithm.len() > 64 || !is_valid_lb_algorithm(lb_algorithm) {
         return Err(ApiError::BadRequest(format!(
-            "lb_algorithm '{lb_algorithm}' is invalid; expected round_robin \
-             or hash:<type>[:<key>] with type in ip/url/path/header/cookie/query"
+            "lb_algorithm '{lb_algorithm}' is invalid; expected round_robin, \
+             random, least_connections or hash:<type>[:<key>] with type in \
+             ip/url/path/header/cookie/query"
         )));
     }
     if let Some(sni) = sni.filter(|s| !s.is_empty()) {

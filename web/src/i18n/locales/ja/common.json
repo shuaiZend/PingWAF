@@ -317,6 +317,8 @@
       "lbKeyHint": "ハッシュ計算に使う Header / Cookie / Query パラメータ名",
       "lb": {
         "roundRobin": "ラウンドロビン",
+        "leastConnections": "最小コネクション",
+        "random": "ランダム",
         "hashIp": "IP ハッシュ",
         "hashUrl": "URL ハッシュ",
         "hashPath": "Path ハッシュ",

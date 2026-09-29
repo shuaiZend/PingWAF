@@ -44,9 +44,11 @@ use pingora::lb::Backend;
 use pingora::lb::UpdateTimings;
 use pingora::lb::health_check::{HealthObserve, HealthObserveCallback};
 use pingora::lb::selection::{
-    BackendIter, BackendSelection, Consistent, RoundRobin,
+    BackendIter, BackendSelection, Consistent, Random, RoundRobin,
 };
 use pingora::lb::{Backends, LoadBalancer};
+
+use crate::least_connections::{InflightCounters, LeastConnections};
 use pingora::protocols::ALPN;
 use pingora::protocols::l4::ext::TcpKeepalive;
 use pingora::protocols::tls::CaType;
@@ -106,10 +108,17 @@ impl HealthObserve for BackendObserveNotification {
 
 // SelectionLb represents different load balancing strategies:
 // - RoundRobin: Distributes requests evenly across backends
+// - LeastConnections: Picks the backend with the fewest in-flight requests
+// - Random: Distributes requests randomly across backends
 // - Consistent: Uses consistent hashing to map requests to backends
 // - Transparent: Passes requests through without load balancing
 enum SelectionLb {
     RoundRobin(LoadBalancer<RoundRobin>),
+    LeastConnections {
+        lb: LoadBalancer<LeastConnections>,
+        inflight: Arc<InflightCounters>,
+    },
+    Random(LoadBalancer<Random>),
     Consistent {
         lb: LoadBalancer<Consistent>,
         hash: HashStrategy,
@@ -124,6 +133,14 @@ impl SelectionLb {
                 lb.update_frequency.unwrap_or_default().as_secs(),
                 lb.health_check_frequency.unwrap_or_default().as_secs(),
             ),
+            SelectionLb::LeastConnections { lb, .. } => (
+                lb.update_frequency.unwrap_or_default().as_secs(),
+                lb.health_check_frequency.unwrap_or_default().as_secs(),
+            ),
+            SelectionLb::Random(lb) => (
+                lb.update_frequency.unwrap_or_default().as_secs(),
+                lb.health_check_frequency.unwrap_or_default().as_secs(),
+            ),
             SelectionLb::Consistent { lb, .. } => (
                 lb.update_frequency.unwrap_or_default().as_secs(),
                 lb.health_check_frequency.unwrap_or_default().as_secs(),
@@ -134,6 +151,8 @@ impl SelectionLb {
     async fn update(&self) -> pingora::Result<()> {
         match self {
             SelectionLb::RoundRobin(lb) => lb.update().await,
+            SelectionLb::LeastConnections { lb, .. } => lb.update().await,
+            SelectionLb::Random(lb) => lb.update().await,
             SelectionLb::Consistent { lb, .. } => lb.update().await,
             SelectionLb::Transparent => Ok(()),
         }
@@ -142,6 +161,8 @@ impl SelectionLb {
     fn last_update_timing(&self) -> Option<UpdateTimings> {
         match self {
             SelectionLb::RoundRobin(lb) => lb.last_update_timing(),
+            SelectionLb::LeastConnections { lb, .. } => lb.last_update_timing(),
+            SelectionLb::Random(lb) => lb.last_update_timing(),
             SelectionLb::Consistent { lb, .. } => lb.last_update_timing(),
             SelectionLb::Transparent => None,
         }
@@ -149,6 +170,16 @@ impl SelectionLb {
     async fn run_health_check(&self) {
         match self {
             SelectionLb::RoundRobin(lb) => {
+                lb.backends()
+                    .run_health_check(lb.parallel_health_check)
+                    .await
+            },
+            SelectionLb::LeastConnections { lb, .. } => {
+                lb.backends()
+                    .run_health_check(lb.parallel_health_check)
+                    .await
+            },
+            SelectionLb::Random(lb) => {
                 lb.backends()
                     .run_health_check(lb.parallel_health_check)
                     .await
@@ -406,6 +437,30 @@ fn new_load_balancer(
             )?;
             Ok(SelectionLb::RoundRobin(lb))
         },
+        // Least connections: the in-flight counters live outside the
+        // selector, which pingora rebuilds on every backend refresh.
+        "least_connections" => {
+            let inflight = Arc::new(InflightCounters::default());
+            let lb = update_health_check_params(
+                LoadBalancer::<LeastConnections>::from_backends_with_config(
+                    backends,
+                    Some(Arc::clone(&inflight)),
+                ),
+                name,
+                conf,
+                sender,
+            )?;
+            Ok(SelectionLb::LeastConnections { lb, inflight })
+        },
+        "random" => {
+            let lb = update_health_check_params(
+                LoadBalancer::<Random>::from_backends(backends),
+                name,
+                conf,
+                sender,
+            )?;
+            Ok(SelectionLb::Random(lb))
+        },
         "hash" => {
             let hash_type = parts.next().unwrap_or_default().trim();
             let hash_key = parts.next().unwrap_or_default();
@@ -423,7 +478,7 @@ fn new_load_balancer(
             Ok(SelectionLb::Consistent { lb, hash })
         },
         _ => Err(invalid(format!(
-            "algo {algo:?} is invalid, expected round_robin or hash:<type>[:<key>]"
+            "algo {algo:?} is invalid, expected round_robin, random, least_connections or hash:<type>[:<key>]"
         ))),
     }
 }
@@ -797,6 +852,26 @@ impl Upstream {
                 })?;
                 HttpPeer::new(backend, self.tls, self.sni.clone())
             },
+            // Least connections: the selector orders backends by in-flight
+            // requests; the chosen one is counted only on the request's first
+            // attempt (retries re-enter this method and would otherwise leak
+            // counts, while `release` below runs exactly once).
+            SelectionLb::LeastConnections { lb, inflight } => {
+                let backend = lb.select_with(b"", 4, |backend, healthy| {
+                    self.accept_backend(backend, healthy)
+                })?;
+                if count_processing {
+                    inflight.acquire(&backend.addr.to_string());
+                }
+                HttpPeer::new(backend, self.tls, self.sni.clone())
+            },
+            // For random, use empty key since selection ignores it
+            SelectionLb::Random(lb) => {
+                let backend = lb.select_with(b"", 4, |backend, healthy| {
+                    self.accept_backend(backend, healthy)
+                })?;
+                HttpPeer::new(backend, self.tls, self.sni.clone())
+            },
             // For consistent hashing, generate hash value from request details
             SelectionLb::Consistent { lb, hash } => {
                 let value = hash.get_value(session, client_ip);
@@ -899,6 +974,8 @@ impl Upstream {
     pub fn get_backends(&self) -> Option<&Backends> {
         match &self.lb {
             SelectionLb::RoundRobin(lb) => Some(lb.backends()),
+            SelectionLb::LeastConnections { lb, .. } => Some(lb.backends()),
+            SelectionLb::Random(lb) => Some(lb.backends()),
             SelectionLb::Consistent { lb, .. } => Some(lb.backends()),
             SelectionLb::Transparent => None,
         }
@@ -969,6 +1046,16 @@ impl UpstreamInstance for Upstream {
     fn completed(&self) -> i32 {
         // `fetch_sub` returns the previous value; subtract 1 for the new one.
         self.processing.fetch_sub(1, Ordering::Relaxed) - 1
+    }
+    /// Decrements the least-connections counter of the backend the request
+    /// ran on; nothing to release for the other balancing strategies.
+    fn release(&self, address: &str) {
+        if address.is_empty() {
+            return;
+        }
+        if let SelectionLb::LeastConnections { inflight, .. } = &self.lb {
+            inflight.release(address);
+        }
     }
     fn on_transport_failure(&self, address: &str) {
         let Some(backend_stats) = &self.backend_stats else {
@@ -1533,7 +1620,7 @@ mod tests {
         };
         let addrs = vec!["192.168.1.1:8001".to_string()];
         assert_eq!(
-            "Common error, category: new_upstream, algo \"least_conn\" is invalid, expected round_robin or hash:<type>[:<key>]",
+            "Common error, category: new_upstream, algo \"least_conn\" is invalid, expected round_robin, random, least_connections or hash:<type>[:<key>]",
             build(UpstreamConf {
                 addrs: addrs.clone(),
                 algo: Some("least_conn".to_string()),

@@ -317,6 +317,8 @@
       "lbKeyHint": "Header / cookie / query parameter name to hash on",
       "lb": {
         "roundRobin": "Round robin",
+        "leastConnections": "Least connections",
+        "random": "Random",
         "hashIp": "IP hash",
         "hashUrl": "URL hash",
         "hashPath": "Path hash",

@@ -1867,6 +1867,7 @@ impl ProxyHttp for Server {
         // get from cache does not connect to upstream
         if let Some(upstream_instance) = &ctx.upstream.upstream_instance {
             ctx.upstream.processing_count = Some(upstream_instance.completed());
+            upstream_instance.release(&ctx.upstream.address);
         }
         if ctx.state.status.is_none()
             && let Some(header) = session.response_written()

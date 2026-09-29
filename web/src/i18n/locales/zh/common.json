@@ -317,6 +317,8 @@
       "lbKeyHint": "参与 Hash 的 Header / Cookie / Query 参数名",
       "lb": {
         "roundRobin": "轮询",
+        "leastConnections": "最小连接",
+        "random": "随机",
         "hashIp": "IP Hash",
         "hashUrl": "URL Hash",
         "hashPath": "Path Hash",
