@@ -626,12 +626,13 @@ impl ControlPlaneTrait for ControlPlaneService {
 
             let now = Utc::now();
             let reported = from_timestamp(batch.timestamp.as_ref());
-            let in_window = reported <= now
-                && reported
-                    > now - chrono::Duration::days(
-                        self.config.metric_retention_days,
-                    );
-            let recorded_at = if in_window { reported } else { now };
+            let retention =
+                chrono::Duration::days(self.config.metric_retention_days);
+            let recorded_at = if reported <= now && reported > now - retention {
+                reported
+            } else {
+                now
+            };
 
             for metric in &batch.metrics {
                 rows.push(metric_row(agent_id, metric, recorded_at));
