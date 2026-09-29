@@ -1164,7 +1164,7 @@ async fn create_route(
     let match_type = payload.match_type.trim().to_string();
     let path = payload.path.trim().to_string();
     validate_route(&name, &match_type, &path, payload.priority)?;
-    ensure_pool_belongs_to_site(&state, id, payload.pool_id).await?;
+    ensure_pool_can_serve(&state, id, payload.pool_id).await?;
 
     let model = site_routes::ActiveModel {
         id: Set(Uuid::new_v4()),
@@ -1207,7 +1207,7 @@ async fn update_route(
         })?;
 
     if let Some(pool_id) = payload.pool_id {
-        ensure_pool_belongs_to_site(&state, id, pool_id).await?;
+        ensure_pool_can_serve(&state, id, pool_id).await?;
     }
 
     let mut active: site_routes::ActiveModel = row.into();
@@ -1604,6 +1604,26 @@ async fn ensure_pool_belongs_to_site(
     if !owned {
         return Err(ApiError::BadRequest(format!(
             "pool {pool_id} does not belong to this site"
+        )));
+    }
+    Ok(())
+}
+
+/// Routes must target a pool that can actually receive traffic: a pool
+/// without origin nodes would make the route vanish from the data plane.
+async fn ensure_pool_can_serve(
+    state: &AppState,
+    site_id: Uuid,
+    pool_id: Uuid,
+) -> Result<(), ApiError> {
+    ensure_pool_belongs_to_site(state, site_id, pool_id).await?;
+    let peer_count = site_upstreams::Entity::find()
+        .filter(site_upstreams::Column::PoolId.eq(pool_id))
+        .count(&state.db)
+        .await?;
+    if peer_count == 0 {
+        return Err(ApiError::BadRequest(format!(
+            "pool {pool_id} has no origin nodes; add a node before routing traffic to it"
         )));
     }
     Ok(())
