@@ -138,10 +138,23 @@ static LONG_VERSION: LazyLock<String> = LazyLock::new(|| {
     )
 });
 
+/// The version banner: crate version, build commit and TLS backend. Shared
+/// by `--version` and the PingWAF-mode CLI, which answers the flag itself.
+pub(crate) fn version_banner() -> &'static str {
+    &LONG_VERSION
+}
+
 /// Command line arguments structure for the pingap.
 /// A reverse proxy like nginx.
 #[derive(Parser, Debug, Default)]
-#[command(author, version, about, long_version = LONG_VERSION.as_str(), long_about = None)]
+#[command(
+    name = env!("CARGO_BIN_NAME"),
+    author,
+    version,
+    about,
+    long_version = LONG_VERSION.as_str(),
+    long_about = None
+)]
 struct Args {
     /// The config file or directory path
     #[arg(short, long, required_unless_present = "upstream")]
