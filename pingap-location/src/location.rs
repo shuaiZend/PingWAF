@@ -17,6 +17,7 @@ use ahash::AHashMap;
 use arc_swap::ArcSwapOption;
 use http::HeaderName;
 use http::HeaderValue;
+use ipnet::IpNet;
 use pingap_config::Hashable;
 use pingap_config::LocationConf;
 use pingap_core::new_internal_error;
@@ -26,6 +27,7 @@ use pingora::http::RequestHeader;
 use regex::Regex;
 use snafu::{ResultExt, Snafu};
 use std::borrow::Cow;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
@@ -339,6 +341,40 @@ fn parse_match_conditions(
         .unwrap_or_default()
 }
 
+/// Compiles `match_ip_ranges` into networks. A bare address is read as a
+/// host route; an entry that is neither an address nor a CIDR network is a
+/// configuration error, so a typo cannot quietly turn a gated location into
+/// one that matches nobody (or everybody).
+fn parse_ip_conditions(list: &Option<Vec<String>>) -> Result<Vec<IpNet>> {
+    let Some(items) = list else {
+        return Ok(vec![]);
+    };
+    items
+        .iter()
+        .map(|item| item.trim())
+        .filter(|item| !item.is_empty())
+        .map(|item| {
+            item.parse::<IpNet>()
+                .or_else(|_| item.parse::<IpAddr>().map(IpNet::from))
+                .map_err(|_| Error::Invalid {
+                    message: format!("ip or cidr: {item}"),
+                })
+        })
+        .collect()
+}
+
+/// Rewrites an IPv4-mapped IPv6 address (`::ffff:a.b.c.d`, what a dual-stack
+/// listener reports for IPv4 peers) to its IPv4 form so v4 ranges match it.
+#[inline]
+fn normalize_client_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => {
+            v6.to_ipv4_mapped().map_or(IpAddr::V6(v6), IpAddr::V4)
+        },
+        v4 => v4,
+    }
+}
+
 /// Returns true if `actual` satisfies `expected`: present with the exact value,
 /// or merely present when no value is required.
 #[inline]
@@ -396,6 +432,11 @@ pub struct Location {
     header_conditions: Vec<(String, Option<String>)>,
     query_conditions: Vec<(String, Option<String>)>,
     cookie_conditions: Vec<(String, Option<String>)>,
+
+    /// Optional client-IP condition: the peer address must fall inside one of
+    /// these networks for the location to serve. Empty (the common case)
+    /// always matches.
+    ip_conditions: Vec<IpNet>,
 
     /// Optional URL rewriting rule consisting of:
     /// - regex pattern to match against request path
@@ -520,6 +561,7 @@ impl Location {
         let header_conditions = parse_match_conditions(&conf.match_headers);
         let query_conditions = parse_match_conditions(&conf.match_query);
         let cookie_conditions = parse_match_conditions(&conf.match_cookies);
+        let ip_conditions = parse_ip_conditions(&conf.match_ip_ranges)?;
 
         let mut headers: Vec<(HeaderName, HeaderValue, bool)> = vec![];
         if conf.enable_reverse_proxy_headers.unwrap_or_default() {
@@ -555,6 +597,7 @@ impl Location {
             header_conditions,
             query_conditions,
             cookie_conditions,
+            ip_conditions,
             upstream,
             reg_rewrite,
             plugins: conf.plugins.as_ref().map(|list| {
@@ -719,10 +762,27 @@ impl Location {
     }
 
     /// Returns true when the request satisfies this location's optional
-    /// header / query / cookie match conditions. With none configured this is a
-    /// cheap `true`, so non-conditional locations pay nothing.
+    /// header / query / cookie / client-IP match conditions. With none
+    /// configured this is a cheap `true`, so non-conditional locations pay
+    /// nothing.
     #[inline]
-    pub fn match_conditions(&self, req_header: &RequestHeader) -> bool {
+    pub fn match_conditions(
+        &self,
+        req_header: &RequestHeader,
+        client_ip: Option<IpAddr>,
+    ) -> bool {
+        if !self.ip_conditions.is_empty() {
+            let Some(client_ip) = client_ip.map(normalize_client_ip) else {
+                return false;
+            };
+            if !self
+                .ip_conditions
+                .iter()
+                .any(|network| network.contains(&client_ip))
+            {
+                return false;
+            }
+        }
         self.header_conditions.iter().all(|(name, expected)| {
             condition_met(
                 pingap_core::get_req_header_value(req_header, name),
@@ -1322,24 +1382,24 @@ mod tests {
 
         // No matching headers -> no match.
         let req = RequestHeader::build("GET", b"/", None).unwrap();
-        assert_eq!(false, lo.match_conditions(&req));
+        assert_eq!(false, lo.match_conditions(&req, None));
 
         // Only one condition satisfied -> no match.
         let mut req = RequestHeader::build("GET", b"/", None).unwrap();
         req.insert_header("x-version", "2").unwrap();
-        assert_eq!(false, lo.match_conditions(&req));
+        assert_eq!(false, lo.match_conditions(&req, None));
 
         // Exact value + presence both satisfied -> match.
         let mut req = RequestHeader::build("GET", b"/", None).unwrap();
         req.insert_header("x-version", "2").unwrap();
         req.insert_header("x-canary", "anything").unwrap();
-        assert_eq!(true, lo.match_conditions(&req));
+        assert_eq!(true, lo.match_conditions(&req, None));
 
         // Wrong value -> no match.
         let mut req = RequestHeader::build("GET", b"/", None).unwrap();
         req.insert_header("x-version", "3").unwrap();
         req.insert_header("x-canary", "y").unwrap();
-        assert_eq!(false, lo.match_conditions(&req));
+        assert_eq!(false, lo.match_conditions(&req, None));
 
         // A location without conditions matches any request (zero overhead).
         let lo2 = Location::new(
@@ -1352,7 +1412,7 @@ mod tests {
         )
         .unwrap();
         let req = RequestHeader::build("GET", b"/", None).unwrap();
-        assert_eq!(true, lo2.match_conditions(&req));
+        assert_eq!(true, lo2.match_conditions(&req, None));
 
         // Query-param (exact) and cookie (presence) conditions.
         let lo3 = Location::new(
@@ -1369,14 +1429,131 @@ mod tests {
         // Query value matches and the session cookie is present -> match.
         let mut req = RequestHeader::build("GET", b"/?ver=2", None).unwrap();
         req.insert_header("Cookie", "session=abc").unwrap();
-        assert_eq!(true, lo3.match_conditions(&req));
+        assert_eq!(true, lo3.match_conditions(&req, None));
         // Cookie missing -> no match.
         let req = RequestHeader::build("GET", b"/?ver=2", None).unwrap();
-        assert_eq!(false, lo3.match_conditions(&req));
+        assert_eq!(false, lo3.match_conditions(&req, None));
         // Wrong query value -> no match.
         let mut req = RequestHeader::build("GET", b"/?ver=3", None).unwrap();
         req.insert_header("Cookie", "session=abc").unwrap();
-        assert_eq!(false, lo3.match_conditions(&req));
+        assert_eq!(false, lo3.match_conditions(&req, None));
+    }
+
+    fn ip_location(ranges: Vec<&str>) -> Location {
+        Location::new(
+            "ip",
+            &LocationConf {
+                upstream: Some("charts".to_string()),
+                path: Some("/".to_string()),
+                match_ip_ranges: Some(
+                    ranges.into_iter().map(str::to_string).collect(),
+                ),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_match_conditions_ip_ranges() {
+        let lo = ip_location(vec!["192.168.0.0/16", "10.0.0.1"]);
+        let req = RequestHeader::build("GET", b"/", None).unwrap();
+
+        // Inside a CIDR / an exact address -> match.
+        assert_eq!(
+            true,
+            lo.match_conditions(&req, Some("192.168.1.7".parse().unwrap()))
+        );
+        assert_eq!(
+            true,
+            lo.match_conditions(&req, Some("10.0.0.1".parse().unwrap()))
+        );
+        // Outside every range -> no match.
+        assert_eq!(
+            false,
+            lo.match_conditions(&req, Some("192.169.0.1".parse().unwrap()))
+        );
+        assert_eq!(
+            false,
+            lo.match_conditions(&req, Some("10.0.0.2".parse().unwrap()))
+        );
+        // A v4 range never matches a v6 client (only mapped addresses do).
+        assert_eq!(
+            false,
+            lo.match_conditions(&req, Some("2001:db8::1".parse().unwrap()))
+        );
+        // No client address known -> no match.
+        assert_eq!(false, lo.match_conditions(&req, None));
+
+        // A dual-stack listener reports v4 peers as `::ffff:a.b.c.d`.
+        assert_eq!(
+            true,
+            lo.match_conditions(
+                &req,
+                Some("::ffff:192.168.1.7".parse().unwrap())
+            )
+        );
+
+        // IPv6 ranges work on their own.
+        let lo6 = ip_location(vec!["2001:db8::/32"]);
+        assert_eq!(
+            true,
+            lo6.match_conditions(&req, Some("2001:db8::1".parse().unwrap()))
+        );
+        assert_eq!(
+            false,
+            lo6.match_conditions(&req, Some("2001:db9::1".parse().unwrap()))
+        );
+
+        // An empty list behaves like no IP condition at all.
+        let lo_empty = ip_location(vec![]);
+        assert_eq!(true, lo_empty.match_conditions(&req, None));
+        assert_eq!(
+            true,
+            lo_empty.match_conditions(&req, Some("8.8.8.8".parse().unwrap()))
+        );
+
+        // Invalid entries are a configuration error, not a silent match-all.
+        let err = Location::new(
+            "bad",
+            &LocationConf {
+                upstream: Some("charts".to_string()),
+                path: Some("/".to_string()),
+                match_ip_ranges: Some(vec!["not-an-ip".to_string()]),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(err, Err(Error::Invalid { .. })));
+
+        // IP conditions AND with the header conditions.
+        let lo_and = Location::new(
+            "and",
+            &LocationConf {
+                upstream: Some("charts".to_string()),
+                path: Some("/".to_string()),
+                match_headers: Some(vec!["x-version:2".to_string()]),
+                match_ip_ranges: Some(vec!["192.168.0.0/16".to_string()]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut req = RequestHeader::build("GET", b"/", None).unwrap();
+        req.insert_header("x-version", "2").unwrap();
+        assert_eq!(
+            true,
+            lo_and.match_conditions(&req, Some("192.168.1.1".parse().unwrap()))
+        );
+        // Header matches but the IP is outside the range -> no match.
+        assert_eq!(
+            false,
+            lo_and.match_conditions(&req, Some("8.8.8.8".parse().unwrap()))
+        );
+        // IP matches but the header is missing -> no match.
+        let req = RequestHeader::build("GET", b"/", None).unwrap();
+        assert_eq!(
+            false,
+            lo_and.match_conditions(&req, Some("192.168.1.1".parse().unwrap()))
+        );
     }
 
     #[tokio::test]

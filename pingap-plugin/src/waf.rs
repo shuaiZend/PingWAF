@@ -30,7 +30,7 @@ use super::{
 };
 use crate::challenge::{
     ChallengeKind, VERIFY_ENDPOINT, block_page, build_challenge_response,
-    rate_limit_page, resolve_cookie_secret,
+    paused_page, rate_limit_page, resolve_cookie_secret,
 };
 use async_trait::async_trait;
 use bytes::{BufMut, BytesMut};
@@ -47,8 +47,9 @@ use pingora::proxy::Session;
 use pingwaf_agent::cache::{
     BotProtectionConfig as CacheBotProtection, GeoConfig as CacheGeoConfig,
     IpAccessAction as CacheIpAccessAction, RateLimitRule as CacheRateLimitRule,
-    SiteRules as CacheSiteRules, WafAction as CacheWafAction,
-    WafConfig as CacheWafConfig, WafMode as CacheWafMode,
+    SiteRules as CacheSiteRules, SslConfig as CacheSslConfig,
+    WafAction as CacheWafAction, WafConfig as CacheWafConfig,
+    WafMode as CacheWafMode,
 };
 use pingwaf_agent::{AccessLogEntry, PingWafAgent, SecurityEvent};
 use pingwaf_challenge::{
@@ -82,6 +83,60 @@ enum EngineChoice {
     Disabled,
 }
 
+/// Client certificate policy of a site, built from its SSL posture. The
+/// listener verifies the chain against the union of every mTLS site's CA;
+/// what is left per site is requiring a certificate at all, rejecting the
+/// ones the dashboard revoked and pinning the organization.
+struct MtlsPolicy {
+    require_client_cert: bool,
+    /// Organization every presented certificate must carry; empty skips the
+    /// check.
+    organization: String,
+    /// Lowercase hex SHA-256 fingerprints of revoked certificates.
+    revoked: HashSet<String>,
+}
+
+impl MtlsPolicy {
+    /// `None` when the site does not use mTLS at all.
+    fn build(ssl: Option<&CacheSslConfig>) -> Option<Self> {
+        let ssl = ssl.filter(|ssl| ssl.mtls_enabled)?;
+        Some(Self {
+            require_client_cert: ssl.mtls_requires_cert(),
+            organization: ssl.mtls_organization.trim().to_string(),
+            revoked: ssl
+                .mtls_revoked_fingerprints
+                .iter()
+                .map(|fingerprint| fingerprint.trim().to_lowercase())
+                .filter(|fingerprint| !fingerprint.is_empty())
+                .collect(),
+        })
+    }
+
+    /// The reason this request is refused, `None` when the client
+    /// certificate — or its absence — is acceptable.
+    fn denial(&self, ctx: &Ctx) -> Option<&'static str> {
+        let digest = ctx.conn.tls_peer_cert_digest.as_deref();
+        let Some(digest) = digest else {
+            return self
+                .require_client_cert
+                .then_some("client certificate required");
+        };
+        if self.revoked.contains(&digest.to_lowercase()) {
+            return Some("client certificate revoked");
+        }
+        if !self.organization.is_empty()
+            && ctx
+                .conn
+                .tls_peer_organization
+                .as_deref()
+                .is_none_or(|org| org != self.organization)
+        {
+            return Some("client certificate organization mismatch");
+        }
+        None
+    }
+}
+
 /// Site data resolved from the agent cache, compiled once per config
 /// fingerprint: the WAF engine, the access restrictions and the custom rule
 /// names used to label security events.
@@ -92,8 +147,12 @@ struct SiteContext {
     bot: Option<BotPolicy>,
     /// Rate limit rules; `None` when the site has none that are enforceable.
     rate_limits: Option<RateLimitPolicy>,
+    /// mTLS enforcement; `None` when the site does not use mTLS.
+    mtls: Option<MtlsPolicy>,
     /// Custom rule id → name.
     rule_names: HashMap<String, String>,
+    /// Site paused from the dashboard: every request gets the maintenance page.
+    paused: bool,
 }
 
 impl SiteContext {
@@ -111,6 +170,7 @@ impl SiteContext {
                 .filter(|cfg| cfg.enabled)
                 .map(BotPolicy::build),
             rate_limits: (!rate_limits.rules.is_empty()).then_some(rate_limits),
+            mtls: MtlsPolicy::build(site_rules.ssl_config.as_ref()),
             rule_names: waf_cfg
                 .map(|cfg| {
                     cfg.custom_rules
@@ -119,6 +179,7 @@ impl SiteContext {
                         .collect()
                 })
                 .unwrap_or_default(),
+            paused: site_rules.is_paused(),
         }
     }
 
@@ -1802,6 +1863,47 @@ impl Plugin for WafPlugin {
             protocol,
         };
 
+        // ── Paused sites answer with a maintenance page before any other
+        // rule runs. TLS termination and the log pipeline stay untouched, so
+        // the certificate keeps serving and the traffic remains visible. ──
+        if context.as_ref().is_some_and(|site| site.paused) {
+            if let Some(agent) = agent.as_ref()
+                && let Some((_, pending)) = PENDING_ACCESS.remove(&request_id)
+            {
+                emit_access(
+                    agent,
+                    &request_id,
+                    pending,
+                    ResponseFacts::generated(503),
+                );
+            }
+            return Ok(RequestPluginResult::Respond(paused_page(&request_id)));
+        }
+
+        // ── mTLS: a site that requires a client certificate refuses the
+        // request before any other rule runs. Revoked certificates and
+        // organization mismatches are refused here too, since the TLS layer
+        // only proves the chain is trusted, not which site it was issued for.
+        // The denial is logged as access only - it is not a WAF verdict. ──
+        if let Some(mtls) = context.as_ref().and_then(|site| site.mtls.as_ref())
+            && let Some(reason) = mtls.denial(ctx)
+        {
+            if let Some(agent) = agent.as_ref()
+                && let Some((_, pending)) = PENDING_ACCESS.remove(&request_id)
+            {
+                emit_access(
+                    agent,
+                    &request_id,
+                    pending,
+                    ResponseFacts::generated(403),
+                );
+            }
+            return Ok(RequestPluginResult::Respond(block_page(
+                &request_id,
+                reason,
+            )));
+        }
+
         // ── Access restrictions: IP rules and geo stop a request before the
         // WAF engine runs, and apply whether or not it is enabled ──
         if let Some(site) = &context
@@ -2422,6 +2524,225 @@ ml_threshold = 0.75
             })
             .unwrap();
         installed
+    }
+
+    /// Installs an agent whose only site is paused and carries a catch-all
+    /// block rule, so the pause must win over the restriction.
+    async fn install_paused_agent() -> (
+        tokio::sync::MutexGuard<'static, ()>,
+        Arc<PingWafAgent>,
+        tempfile::TempDir,
+    ) {
+        let installed = install_test_agent().await;
+        installed
+            .1
+            .rule_cache
+            .update_from_site_config(&proto::SiteConfig {
+                sites: vec![proto::Site {
+                    id: "site-1".to_string(),
+                    name: "example".to_string(),
+                    domain: "example.com".to_string(),
+                    alternate_domains: Vec::new(),
+                    status: 1, // SITE_STATUS_PAUSED
+                    rules: Some(proto::RuleBundle {
+                        site_id: "site-1".to_string(),
+                        config_hash: "hash-1".to_string(),
+                        ip_access_rules: vec![proto::IpAccessRule {
+                            id: "block-all".to_string(),
+                            name: "block everything".to_string(),
+                            ip_ranges: vec!["0.0.0.0/0".to_string()],
+                            action: proto::IpAccessAction::IpAccessBlock as i32,
+                            note: String::new(),
+                            enabled: true,
+                        }],
+                        ..Default::default()
+                    }),
+                }],
+                config_hash: "hash-1".to_string(),
+                updated_at: None,
+            })
+            .unwrap();
+        installed
+    }
+
+    /// A paused site answers with a 503 maintenance page (and a Retry-After
+    /// hint) instead of proxying, while still producing an access log row.
+    #[tokio::test]
+    async fn test_paused_site_answers_maintenance_page() {
+        let (_guard, agent, _dir) = install_paused_agent().await;
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        let RequestPluginResult::Respond(resp) =
+            run_request(&plugin, "203.0.113.7").await
+        else {
+            panic!("expected the paused site to answer");
+        };
+        assert_eq!(http::StatusCode::SERVICE_UNAVAILABLE, resp.status);
+        let retry_after = resp.headers.as_ref().and_then(|headers| {
+            headers
+                .iter()
+                .find(|(name, _)| name.as_str() == "retry-after")
+                .map(|(_, value)| {
+                    value.to_str().unwrap_or_default().to_string()
+                })
+        });
+        assert_eq!(Some("3600".to_string()), retry_after);
+
+        // The access row ships immediately with the 503; the pause is not a
+        // WAF decision, so no security event is queued.
+        let entry = agent.client.pop_log().await.unwrap();
+        assert_eq!(503, entry.response_status);
+        assert_eq!("GET", entry.method);
+        assert!(agent.client.pop_log().await.is_none());
+    }
+
+    /// Installs an agent whose only site enforces mTLS, revoking `revoked`
+    /// and pinning the organization to `organization`.
+    async fn install_mtls_agent(
+        require_client_cert: bool,
+        organization: &str,
+        revoked: &[&str],
+    ) -> (
+        tokio::sync::MutexGuard<'static, ()>,
+        Arc<PingWafAgent>,
+        tempfile::TempDir,
+    ) {
+        let installed = install_test_agent().await;
+        // The per-domain context cache is keyed on the agent's config hash:
+        // give each posture its own so a test that reinstalls the agent does
+        // not reuse the previous context.
+        let config_hash = format!(
+            "hash-mtls-{require_client_cert}-{organization}-{}",
+            revoked.join(",")
+        );
+        installed
+            .1
+            .rule_cache
+            .update_from_site_config(&proto::SiteConfig {
+                sites: vec![proto::Site {
+                    id: "site-1".to_string(),
+                    name: "example".to_string(),
+                    domain: "example.com".to_string(),
+                    alternate_domains: Vec::new(),
+                    status: 0,
+                    rules: Some(proto::RuleBundle {
+                        site_id: "site-1".to_string(),
+                        config_hash: config_hash.clone(),
+                        ssl: Some(proto::SslConfig {
+                            enabled: true,
+                            mtls_enabled: true,
+                            mtls_client_ca: "CA".to_string(),
+                            mtls_organization: organization.to_string(),
+                            mtls_require_client_cert: require_client_cert,
+                            mtls_revoked_fingerprints: revoked
+                                .iter()
+                                .map(|f| f.to_string())
+                                .collect(),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
+                }],
+                config_hash,
+                updated_at: None,
+            })
+            .unwrap();
+        installed
+    }
+
+    /// Builds one request carrying the client certificate facts the TLS layer
+    /// would have put on the connection.
+    async fn run_request_with_cert(
+        plugin: &WafPlugin,
+        digest: Option<&str>,
+        organization: Option<&str>,
+    ) -> RequestPluginResult {
+        let input_header = "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let mock_io = Builder::new().read(input_header.as_bytes()).build();
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+        let mut ctx = Ctx::default();
+        ctx.conn.client_ip = Some("203.0.113.7".to_string());
+        ctx.conn.tls_peer_cert_digest = digest.map(str::to_string);
+        ctx.conn.tls_peer_organization = organization.map(str::to_string);
+        plugin
+            .handle_request(PluginStep::EarlyRequest, &mut session, &mut ctx)
+            .await
+            .unwrap()
+    }
+
+    /// A site that requires client certificates answers 403 without one —
+    /// and without touching the WAF event stream — while a site that only
+    /// trusts them still serves the request.
+    #[tokio::test]
+    async fn test_mtls_requires_a_client_certificate() {
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        {
+            let (_guard, agent, _dir) = install_mtls_agent(true, "", &[]).await;
+            let RequestPluginResult::Respond(resp) =
+                run_request_with_cert(&plugin, None, None).await
+            else {
+                panic!("expected the missing certificate to be refused");
+            };
+            assert_eq!(http::StatusCode::FORBIDDEN, resp.status);
+            let entry = agent.client.pop_log().await.unwrap();
+            assert_eq!(403, entry.response_status);
+            // A denial, not a WAF verdict: nothing is queued as a security
+            // event.
+            assert!(agent.client.pop_log().await.is_none());
+        }
+
+        let (_guard, _agent, _dir) = install_mtls_agent(false, "", &[]).await;
+        assert!(
+            run_request_with_cert(&plugin, None, None).await
+                == RequestPluginResult::Continue
+        );
+    }
+
+    /// Revoked certificates and certificates issued for another organization
+    /// are refused even though their chain verified at the TLS layer.
+    #[tokio::test]
+    async fn test_mtls_refuses_revoked_and_foreign_certificates() {
+        let revoked = "0a1b2c3d";
+        let (_guard, _agent, _dir) =
+            install_mtls_agent(true, "Acme", &[revoked]).await;
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        // The certificate this site trusts passes.
+        assert!(
+            run_request_with_cert(&plugin, Some("00ff"), Some("Acme")).await
+                == RequestPluginResult::Continue
+        );
+
+        let RequestPluginResult::Respond(resp) =
+            run_request_with_cert(&plugin, Some(revoked), Some("Acme")).await
+        else {
+            panic!("expected the revoked certificate to be refused");
+        };
+        assert_eq!(http::StatusCode::FORBIDDEN, resp.status);
+
+        let RequestPluginResult::Respond(resp) =
+            run_request_with_cert(&plugin, Some("00ff"), Some("Other")).await
+        else {
+            panic!("expected the foreign certificate to be refused");
+        };
+        assert_eq!(http::StatusCode::FORBIDDEN, resp.status);
+
+        let RequestPluginResult::Respond(_) =
+            run_request_with_cert(&plugin, Some("00ff"), None).await
+        else {
+            panic!("expected a certificate without an organization to fail");
+        };
     }
 
     /// Builds one request against the plugin from `client_ip`.

@@ -26,11 +26,13 @@ use crate::api::challenge::challenge_level;
 use crate::api::ip_rules::ip_action;
 use crate::models::{
     acme_challenge, action, bot_protection, cache_rules, challenge_settings,
-    characteristic, error_pages, geo_rules, ip_access_rules, ip_group_sites,
-    ip_groups, mode, rate_limit_rules, rewrite_rules, rule, rule_groups, site,
+    characteristic, client_cert_status, error_pages, geo_rules,
+    ip_access_rules, ip_group_sites, ip_groups, mode, mtls_client_certificate,
+    rate_limit_rules, rewrite_rules, rule, rule_groups, site,
     site_certificates, site_routes, site_ssl, site_status, site_upstream_pools,
     site_upstreams,
 };
+use crate::pki::mtls::normalise_fingerprint;
 
 /// `pingwaf.WafMode` values from control_plane.proto.
 ///
@@ -272,6 +274,25 @@ async fn load_referenced_groups(
     rules: &[ip_access_rules::Model],
 ) -> Result<HashMap<Uuid, ip_groups::Model>, sea_orm::DbErr> {
     let ids: Vec<Uuid> = rules.iter().filter_map(|r| r.group_id).collect();
+    load_enabled_groups(db, ids).await
+}
+
+/// Loads the enabled IP groups gating the given routes. A group that is
+/// missing or disabled expands to nothing, which drops the route from the
+/// pushed config — the API refuses such writes, so this only happens after an
+/// out-of-band change.
+async fn load_route_groups(
+    db: &DatabaseConnection,
+    routes: &[site_routes::Model],
+) -> Result<HashMap<Uuid, ip_groups::Model>, sea_orm::DbErr> {
+    let ids: Vec<Uuid> = routes.iter().filter_map(|r| r.ip_group_id).collect();
+    load_enabled_groups(db, ids).await
+}
+
+async fn load_enabled_groups(
+    db: &DatabaseConnection,
+    ids: Vec<Uuid>,
+) -> Result<HashMap<Uuid, ip_groups::Model>, sea_orm::DbErr> {
     if ids.is_empty() {
         return Ok(HashMap::new());
     }
@@ -395,6 +416,7 @@ fn cache_rule_to_proto(
 fn ssl_to_proto(
     row: &site_ssl::Model,
     certs: &[site_certificates::Model],
+    mtls: &MtlsPush,
 ) -> SslConfig {
     // The posture row selects a certificate but does not copy its material:
     // the PEM of an uploaded certificate and every ACME setting (email,
@@ -468,11 +490,46 @@ fn ssl_to_proto(
         certificate_id,
         // Revocations and the expected organization come from the managed-CA
         // tables loaded by the caller.
-        mtls_revoked_fingerprints: Vec::new(),
-        mtls_organization: String::new(),
+        mtls_revoked_fingerprints: mtls.revoked_fingerprints.clone(),
+        mtls_organization: row.mtls_organization.clone().unwrap_or_default(),
         // Turning mTLS on means clients must present a certificate.
-        mtls_require_client_cert: row.mtls_enabled,
+        mtls_require_client_cert: row.mtls_enabled
+            && row.mtls_require_client_cert,
     }
+}
+
+/// The mTLS material a site adds to the pushed configuration that is not stored
+/// on `site_ssl`: the fingerprints the edge rejects.
+///
+/// The trust anchor itself travels as `SslConfig.mtls_client_ca`; the edge
+/// unions the anchors of every mTLS site into the shared TLS listener.
+#[derive(Debug, Default, Clone)]
+pub struct MtlsPush {
+    pub revoked_fingerprints: Vec<String>,
+}
+
+/// Loads the mTLS material pushed to agents for one site.
+///
+/// Only revoked certificates are pushed: the edge compares the fingerprint of
+/// whatever the client presents against this list, so it stays small.
+async fn load_mtls(
+    db: &DatabaseConnection,
+    site_id: Uuid,
+) -> Result<MtlsPush, sea_orm::DbErr> {
+    let revoked = mtls_client_certificate::Entity::find()
+        .filter(mtls_client_certificate::Column::SiteId.eq(site_id))
+        .filter(
+            mtls_client_certificate::Column::Status
+                .eq(client_cert_status::REVOKED),
+        )
+        .all(db)
+        .await?;
+    Ok(MtlsPush {
+        revoked_fingerprints: revoked
+            .into_iter()
+            .map(|row| normalise_fingerprint(&row.fingerprint_sha256))
+            .collect(),
+    })
 }
 
 /// Turns origin pools into one `UpstreamConfig` per pool.
@@ -520,10 +577,15 @@ fn pools_to_proto(
 /// that are disabled or point at a pool without nodes (the agent would have
 /// no upstream to serve them with). The path is passed through verbatim; the
 /// data plane adds the `=`/`~` marker pingap's location syntax expects.
+///
+/// A route gated on an IP group carries the group's ranges; a gate that no
+/// longer resolves (group deleted or disabled behind the API's back) drops the
+/// route rather than turning it into a match-everything location.
 fn routes_to_proto(
     routes: &[site_routes::Model],
     pools: &[site_upstream_pools::Model],
     upstreams: &[site_upstreams::Model],
+    groups: &HashMap<Uuid, ip_groups::Model>,
 ) -> Vec<RouteConfig> {
     let served: HashSet<Uuid> = pools
         .iter()
@@ -533,16 +595,31 @@ fn routes_to_proto(
     routes
         .iter()
         .filter(|route| route.enabled && served.contains(&route.pool_id))
-        .map(|route| RouteConfig {
-            id: route.id.to_string(),
-            name: route.name.clone(),
-            match_type: route.match_type.clone(),
-            path: route.path.clone(),
-            priority: route.priority,
-            enabled: route.enabled,
-            pool_id: route.pool_id.to_string(),
-            // Filled from the route's IP group by the caller.
-            ip_ranges: Vec::new(),
+        .filter_map(|route| {
+            let ip_ranges = match route.ip_group_id {
+                Some(group_id) => match groups.get(&group_id) {
+                    Some(group) => group.ip_ranges.clone(),
+                    None => {
+                        tracing::warn!(
+                            route = %route.id,
+                            group = %group_id,
+                            "route IP group is missing or disabled; route dropped",
+                        );
+                        return None;
+                    },
+                },
+                None => Vec::new(),
+            };
+            Some(RouteConfig {
+                id: route.id.to_string(),
+                name: route.name.clone(),
+                match_type: route.match_type.clone(),
+                path: route.path.clone(),
+                priority: route.priority,
+                enabled: route.enabled,
+                pool_id: route.pool_id.to_string(),
+                ip_ranges,
+            })
         })
         .collect()
 }
@@ -813,6 +890,7 @@ pub async fn build_rule_bundle(
     let upstreams = load_upstreams(db, site_row.id).await?;
     let pools = load_pools(db, site_row.id).await?;
     let routes = load_routes(db, site_row.id).await?;
+    let route_groups = load_route_groups(db, &routes).await?;
     let ssl = load_ssl(db, site_row.id).await?;
     let ip_rules = load_ip_access_rules(db, site_row.id).await?;
     let ip_groups = load_ip_groups(db, site_row.id).await?;
@@ -823,6 +901,7 @@ pub async fn build_rule_bundle(
     let err_pages = load_error_pages(db, site_row.id).await?;
     let certificates = load_certificates(db, site_row.id).await?;
     let bot = load_bot_protection(db, site_row.id).await?;
+    let mtls = load_mtls(db, site_row.id).await?;
 
     let custom_rules: Vec<WafRule> =
         rules_rows.iter().map(rule_to_proto).collect();
@@ -847,9 +926,11 @@ pub async fn build_rule_bundle(
         challenge: Some(challenge_to_proto(challenge.as_ref())),
         rewrite_rules: rewrites.iter().map(rewrite_rule_to_proto).collect(),
         error_pages: err_pages.iter().map(error_page_to_proto).collect(),
-        ssl: ssl.as_ref().map(|row| ssl_to_proto(row, &certificates)),
+        ssl: ssl
+            .as_ref()
+            .map(|row| ssl_to_proto(row, &certificates, &mtls)),
         upstreams: pools_to_proto(&pools, &upstreams),
-        routes: routes_to_proto(&routes, &pools, &upstreams),
+        routes: routes_to_proto(&routes, &pools, &upstreams, &route_groups),
         bot_protection: Some(bot_protection_to_proto(bot.as_ref())),
     };
 
@@ -1126,6 +1207,7 @@ mod tests {
             priority,
             enabled,
             pool_id,
+            ip_group_id: None,
             created_at: Utc::now(),
         }
     }
@@ -1141,8 +1223,12 @@ mod tests {
             route_model(false, None, pool.id),
             route_model(true, None, empty.id),
         ];
-        let protos =
-            routes_to_proto(&routes, &[pool.clone(), empty.clone()], &nodes);
+        let protos = routes_to_proto(
+            &routes,
+            &[pool.clone(), empty.clone()],
+            &nodes,
+            &HashMap::new(),
+        );
         assert_eq!(protos.len(), 1);
         assert_eq!(protos[0].pool_id, routes[0].pool_id.to_string());
         assert_eq!(protos[0].match_type, route_match_type::EXACT);
@@ -1150,7 +1236,60 @@ mod tests {
         assert_eq!(protos[0].priority, Some(10));
 
         // Losing the last node drops the route along with the pool.
-        let protos = routes_to_proto(&routes, &[pool, empty], &[]);
+        let protos =
+            routes_to_proto(&routes, &[pool, empty], &[], &HashMap::new());
+        assert!(protos.is_empty());
+    }
+
+    #[test]
+    fn route_gates_expand_from_their_ip_group() {
+        let pool = pool_model("default", "round_robin", None, true);
+        let nodes = vec![node_model(pool.id, "10.0.0.1:8080", 1)];
+        let group_id = Uuid::new_v4();
+        let group = ip_groups::Model {
+            id: group_id,
+            name: "internal".into(),
+            description: None,
+            ip_ranges: vec!["10.0.0.0/8".into(), "192.168.0.0/16".into()],
+            action: "allow".into(),
+            is_global: false,
+            source_url: None,
+            sync_interval_minutes: None,
+            last_synced_at: None,
+            last_sync_error: None,
+            enabled: true,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        let mut gated = route_model(true, None, pool.id);
+        gated.ip_group_id = Some(group_id);
+        let open = route_model(true, None, pool.id);
+
+        let groups: HashMap<Uuid, ip_groups::Model> =
+            [(group_id, group)].into_iter().collect();
+        let protos = routes_to_proto(
+            &[gated.clone(), open],
+            std::slice::from_ref(&pool),
+            &nodes,
+            &groups,
+        );
+        assert_eq!(protos.len(), 2);
+        assert_eq!(
+            protos[0].ip_ranges,
+            vec!["10.0.0.0/8".to_string(), "192.168.0.0/16".to_string()]
+        );
+        // An ungated route keeps matching every client.
+        assert!(protos[1].ip_ranges.is_empty());
+
+        // A gate the control plane can no longer resolve drops the route
+        // instead of publishing it as match-everything.
+        let protos = routes_to_proto(
+            &[gated],
+            std::slice::from_ref(&pool),
+            &nodes,
+            &HashMap::new(),
+        );
         assert!(protos.is_empty());
     }
 

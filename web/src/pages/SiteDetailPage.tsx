@@ -1,6 +1,7 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { NavLink, Outlet, useParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Globe,
   Shield,
@@ -10,18 +11,25 @@ import {
   Sliders,
   Gauge,
   CaretLeft,
+  Pause,
+  Play,
   Robot,
   Cloud,
   IdentificationCard,
   FileHtml,
   Network,
+  Warning,
 } from '@phosphor-icons/react'
 import { Link } from 'react-router-dom'
 import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/Badge'
+import { Button } from '@/components/ui/Button'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { Skeleton } from '@/components/ui/Skeleton'
+import { useToast } from '@/components/ui/Toast'
 import { ErrorState } from '@/components/ErrorState'
-import { useSiteDetail } from '@/hooks'
+import { sitesApi, siteKeys } from '@/api/sites'
+import { useCanWrite, useSiteDetail } from '@/hooks'
 import { useSiteStore } from '@/stores/siteStore'
 import type { SiteStatus } from '@/api/types'
 
@@ -35,6 +43,10 @@ export function SiteDetailPage() {
   const { t } = useTranslation()
   const { siteId } = useParams<{ siteId: string }>()
   const setCurrentSiteId = useSiteStore((s) => s.setCurrentSiteId)
+  const canWrite = useCanWrite()
+  const toast = useToast()
+  const queryClient = useQueryClient()
+  const [confirmToggle, setConfirmToggle] = useState(false)
 
   useEffect(() => {
     if (siteId) setCurrentSiteId(siteId)
@@ -42,6 +54,20 @@ export function SiteDetailPage() {
 
   const detail = useSiteDetail(siteId)
   const site = detail.data?.site
+
+  const toggleStatus = useMutation({
+    mutationFn: (status: SiteStatus) => sitesApi.update(siteId as string, { status }),
+    onSuccess: (updated) => {
+      toast.success(
+        updated.status === 'active' ? t('pages.sites.activated') : t('pages.sites.deactivated'),
+        updated.domain,
+      )
+      setConfirmToggle(false)
+      void queryClient.invalidateQueries({ queryKey: siteKeys.all })
+    },
+  })
+
+  const paused = site?.status === 'paused'
 
   const base = `/sites/${siteId}`
   const tabs = [
@@ -63,7 +89,7 @@ export function SiteDetailPage() {
     { to: `${base}/ssl`, label: t('nav.ssl'), icon: Lock },
     { to: `${base}/traffic`, label: t('nav.traffic'), icon: ChartLine },
     { to: `${base}/rules/rewrite`, label: t('pages.rewrite.title'), icon: Sliders },
-    { to: `${base}/rules/error-pages`, label: t('pages.errorPages.title'), icon: FileHtml },
+    { to: `${base}/rules/error-pages`, label: t('nav.errorPages'), icon: FileHtml },
   ]
 
   // The server answers 404 for sites the caller may not see — surface that
@@ -126,21 +152,51 @@ export function SiteDetailPage() {
         </div>
 
         {/* Live counters straight from SiteDetail */}
-        {detail.data && (
-          <div className="flex shrink-0 items-center gap-4 text-[13px]">
-            <Counter
-              label={t('nav.securityWaf')}
-              value={detail.data.rule_count}
-            />
-            <Counter
-              label={t('nav.securityRateLimiting')}
-              value={detail.data.rate_limit_count}
-            />
-            <Counter label={t('nav.ssl')} value={detail.data.ssl ? 1 : 0} />
-            <Counter label={t('pages.siteDetail.upstreams')} value={detail.data.upstreams.length} />
-          </div>
-        )}
+        <div className="flex shrink-0 items-center gap-4">
+          {detail.data && (
+            <div className="flex items-center gap-4 text-[13px]">
+              <Counter
+                label={t('nav.securityWaf')}
+                value={detail.data.rule_count}
+              />
+              <Counter
+                label={t('nav.securityRateLimiting')}
+                value={detail.data.rate_limit_count}
+              />
+              <Counter label={t('nav.ssl')} value={detail.data.ssl ? 1 : 0} />
+              <Counter
+                label={t('pages.siteDetail.upstreams')}
+                value={detail.data.upstreams.length}
+              />
+            </div>
+          )}
+          {site && canWrite && (
+            <Button
+              variant={paused ? 'primary' : 'secondary'}
+              size="sm"
+              loading={toggleStatus.isPending}
+              icon={
+                paused ? (
+                  <Play weight="duotone" className="h-4 w-4" />
+                ) : (
+                  <Pause weight="duotone" className="h-4 w-4" />
+                )
+              }
+              onClick={() => setConfirmToggle(true)}
+            >
+              {paused ? t('pages.sites.activate') : t('pages.sites.deactivate')}
+            </Button>
+          )}
+        </div>
       </div>
+
+      {/* The edge answers a paused site with a maintenance page, so say so. */}
+      {paused && (
+        <div className="mb-4 flex items-start gap-2 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-[13px] text-fg">
+          <Warning weight="duotone" className="mt-0.5 h-4 w-4 shrink-0 text-fg" />
+          <p>{t('pages.siteDetail.pausedNote')}</p>
+        </div>
+      )}
 
       {/* Tab nav */}
       <div className="mb-6 flex gap-1 overflow-x-auto border-b border-line">
@@ -152,7 +208,7 @@ export function SiteDetailPage() {
               to={tab.to}
               className={({ isActive }) =>
                 cn(
-                  '-mb-px inline-flex shrink-0 items-center gap-2 border-b-2 px-3 py-2.5 text-sm font-medium transition-colors',
+                  '-mb-px inline-flex shrink-0 items-center gap-2 whitespace-nowrap border-b-2 px-3 py-2.5 text-sm font-medium transition-colors',
                   isActive
                     ? 'border-brand text-fg-strong'
                     : 'border-transparent text-fg-subtle hover:text-fg',
@@ -167,6 +223,25 @@ export function SiteDetailPage() {
       </div>
 
       <Outlet />
+
+      <ConfirmDialog
+        open={confirmToggle}
+        onClose={() => setConfirmToggle(false)}
+        onConfirm={() => toggleStatus.mutate(paused ? 'active' : 'paused')}
+        title={paused ? t('pages.sites.resumeTitle') : t('pages.sites.pauseTitle')}
+        description={
+          paused ? t('pages.sites.resumeDescription') : t('pages.sites.pauseDescription')
+        }
+        confirmLabel={paused ? t('pages.sites.activate') : t('pages.sites.deactivate')}
+        tone={paused ? 'primary' : 'danger'}
+        loading={toggleStatus.isPending}
+      >
+        {site && (
+          <div className="rounded-md border border-line bg-recessed px-3 py-2">
+            <p className="pw-mono text-[13px] font-medium text-fg-strong">{site.domain}</p>
+          </div>
+        )}
+      </ConfirmDialog>
     </div>
   )
 }

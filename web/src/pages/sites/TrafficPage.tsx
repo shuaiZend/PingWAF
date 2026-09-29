@@ -1,5 +1,5 @@
 import { useMemo, useState, type ReactNode } from 'react'
-import { useParams } from 'react-router-dom'
+import { useNavigate, useParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { useQuery } from '@tanstack/react-query'
 import {
@@ -49,6 +49,15 @@ import { TRAFFIC_RANGES, type TopIp, type TopRule, type TrafficRange } from '@/a
 
 const PIE_COLORS = ['#18794e', '#0051c3', '#ffb224', '#e54d2a']
 
+/** Traffic range → logs page `preset` (hours). */
+const LOGS_PRESET: Record<TrafficRange, string> = {
+  '1h': '1',
+  '6h': '6',
+  '24h': '24',
+  '7d': '168',
+  '30d': '720',
+}
+
 const tooltipStyle = {
   background: 'var(--color-bg-elevated)',
   border: '1px solid var(--color-border-line)',
@@ -66,9 +75,17 @@ const tooltipStyle = {
  */
 export function TrafficPanels({ siteId }: { siteId?: string }) {
   const { t } = useTranslation()
+  const navigate = useNavigate()
   const [range, setRange] = useState<TrafficRange>('24h')
 
   const scoped = siteId !== undefined
+
+  // Top IPs and top rules double as entry points into the matching log rows.
+  const drillDown = (tab: 'access' | 'security', q: string) => {
+    const params = new URLSearchParams({ tab, q, preset: LOGS_PRESET[range] })
+    if (siteId) params.set('site_id', siteId)
+    navigate(`/logs?${params.toString()}`)
+  }
 
   const overviewQuery = useQuery({
     queryKey: trafficKeys.overview(siteId, range),
@@ -414,6 +431,7 @@ export function TrafficPanels({ siteId }: { siteId?: string }) {
                   data={data?.topIps ?? []}
                   rowKey={(r) => r.client_ip}
                   dense
+                  onRowClick={(r) => drillDown('access', `client_ip:${r.client_ip}`)}
                   empty={<div className="py-8 text-center text-sm text-fg-subtle">{t('common.noData')}</div>}
                 />
               </CardBody>
@@ -428,6 +446,7 @@ export function TrafficPanels({ siteId }: { siteId?: string }) {
                   data={data?.topRules ?? []}
                   rowKey={(r) => r.rule_id}
                   dense
+                  onRowClick={(r) => drillDown('security', `rule:${r.rule_id}`)}
                   empty={<div className="py-8 text-center text-sm text-fg-subtle">{t('common.noData')}</div>}
                 />
               </CardBody>

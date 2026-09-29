@@ -131,6 +131,8 @@ pub mod site_routes {
         pub priority: Option<i32>,
         pub enabled: bool,
         pub pool_id: Uuid,
+        /// IP group whose ranges gate this route; `None` matches every client.
+        pub ip_group_id: Option<Uuid>,
         pub created_at: DateTimeUtc,
     }
 
@@ -178,6 +180,11 @@ pub mod site_ssl {
         pub mtls_enabled: bool,
         #[sea_orm(column_type = "Text")]
         pub mtls_client_ca: Option<String>,
+        /// Organization a presented client certificate must carry; `None`
+        /// accepts any organization.
+        pub mtls_organization: Option<String>,
+        /// Whether a request without a client certificate is rejected.
+        pub mtls_require_client_cert: bool,
         pub hsts_enabled: bool,
         pub hsts_max_age: i32,
         pub always_use_https: bool,

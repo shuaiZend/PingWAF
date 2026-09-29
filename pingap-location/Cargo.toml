@@ -16,6 +16,7 @@ path = "src/lib.rs"
 arc-swap = { workspace = true }
 ahash = { workspace = true }
 http = { workspace = true }
+ipnet = { workspace = true }
 pingap-config = { workspace = true }
 pingap-core = { workspace = true }
 pingora = { workspace = true }

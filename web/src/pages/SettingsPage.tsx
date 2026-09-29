@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -7,17 +7,22 @@ import {
   Monitor,
   Check,
   Database,
+  Eye,
+  EyeSlash,
+  Fingerprint,
   Key,
+  PencilSimple,
   Plus,
   Trash,
   Copy,
   PlugsConnected,
   ArrowClockwise,
+  BookOpen,
   UserCircle,
   Warning,
 } from '@phosphor-icons/react'
 import { PageHeader } from '@/components/PageHeader'
-import { Card, CardBody, CardHeader } from '@/components/ui/Card'
+import { Card, CardBody, CardFooter, CardHeader } from '@/components/ui/Card'
 import { Switch } from '@/components/ui/Switch'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
@@ -39,16 +44,25 @@ import {
   type EsConfigDraft,
 } from '@/api/settings'
 import { KEY_PERMISSIONS, keyKeys, keysApi } from '@/api/keys'
+import { passkeyKeys, passkeysApi } from '@/api/passkeys'
 import { authApi } from '@/api/auth'
+import { errorMessage } from '@/api/errors'
+import { isPasskeyCancellation, passkeysSupported } from '@/lib/webauthn'
 import { useAuthStore } from '@/stores/authStore'
 import { useCanWrite } from '@/hooks'
 import { useThemeStore, type ThemeMode } from '@/stores/themeStore'
 import { supportedLanguages } from '@/i18n'
 import { cn } from '@/lib/utils'
 import { formatDateTime, formatRelative, fromLocalInputValue, toLocalInputValue } from '@/lib/format'
-import type { ApiKey, CreateApiKeyRequest, EsTestResult } from '@/api/types'
+import type { ApiKey, CreateApiKeyRequest, EsTestResult, PasskeySummary } from '@/api/types'
 
 const langLabels: Record<string, string> = { en: 'English', zh: '中文', ja: '日本語' }
+
+/** Mirrors the server-side minimum in `validate_password`. */
+const MIN_PASSWORD = 8
+
+/** Public REST reference shipped with the repository. */
+const API_DOCS_URL = 'https://github.com/shuaiZend/PingWAF/blob/main/docs/api.md'
 
 export function SettingsPage() {
   const { t, i18n } = useTranslation()
@@ -69,6 +83,7 @@ export function SettingsPage() {
       <div className="flex max-w-4xl flex-col gap-4">
         <AppearanceCard themeOptions={themeOptions} mode={mode} setMode={setMode} i18n={i18n} />
         <AccountCard />
+        <PasskeysCard />
         {isAdmin ? (
           <ElasticsearchCard canWrite={canWrite} />
         ) : (
@@ -180,6 +195,9 @@ function AccountCard() {
   const [name, setName] = useState('')
   const [currentPassword, setCurrentPassword] = useState('')
   const [newPassword, setNewPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
+  const [showPassword, setShowPassword] = useState(false)
+  const [passwordError, setPasswordError] = useState<string | null>(null)
 
   useEffect(() => {
     setName(user?.name ?? '')
@@ -200,12 +218,44 @@ function AccountCard() {
         current_password: currentPassword,
         new_password: newPassword,
       }),
+    // A wrong current password is a 400 whose message belongs next to the
+    // fields, not in a toast.
+    meta: { silentToast: true },
     onSuccess: () => {
       setCurrentPassword('')
       setNewPassword('')
+      setConfirmPassword('')
+      setPasswordError(null)
       toast.success(t('pages.settings.passwordChanged'))
     },
+    onError: (err) => {
+      const message = errorMessage(err)
+      setPasswordError(
+        /current password is incorrect/i.test(message)
+          ? t('pages.settings.passwordWrongCurrent')
+          : message,
+      )
+    },
   })
+
+  const submitPassword = (event: FormEvent) => {
+    event.preventDefault()
+    if (password.isPending) return
+    setPasswordError(null)
+    if (newPassword.length < MIN_PASSWORD) {
+      setPasswordError(t('auth.passwordTooShort', { min: MIN_PASSWORD }))
+      return
+    }
+    if (newPassword === currentPassword) {
+      setPasswordError(t('pages.settings.passwordUnchanged'))
+      return
+    }
+    if (newPassword !== confirmPassword) {
+      setPasswordError(t('pages.settings.passwordMismatch'))
+      return
+    }
+    password.mutate()
+  }
 
   return (
     <Card>
@@ -243,35 +293,351 @@ function AccountCard() {
           <p className="mb-3 text-[13px] font-medium text-fg">
             {t('pages.settings.changePassword')}
           </p>
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
-            <Input
-              type="password"
-              label={t('pages.settings.currentPassword')}
-              value={currentPassword}
-              autoComplete="current-password"
-              className="sm:max-w-[200px]"
-              onChange={(e) => setCurrentPassword(e.target.value)}
-            />
-            <Input
-              type="password"
-              label={t('pages.settings.newPassword')}
-              value={newPassword}
-              autoComplete="new-password"
-              hint={t('auth.passwordHint', { min: 8 })}
-              className="sm:max-w-[200px]"
-              onChange={(e) => setNewPassword(e.target.value)}
-            />
-            <Button
-              variant="secondary"
-              loading={password.isPending}
-              disabled={!currentPassword || newPassword.length < 8}
-              onClick={() => password.mutate()}
-            >
-              {t('pages.settings.updatePassword')}
-            </Button>
-          </div>
+          <form onSubmit={submitPassword} className="flex flex-col gap-4">
+            <div className="grid max-w-3xl grid-cols-1 gap-4 sm:grid-cols-3">
+              <Input
+                type="password"
+                label={t('pages.settings.currentPassword')}
+                value={currentPassword}
+                autoComplete="current-password"
+                onChange={(e) => setCurrentPassword(e.target.value)}
+              />
+              <Input
+                label={t('pages.settings.newPassword')}
+                type={showPassword ? 'text' : 'password'}
+                value={newPassword}
+                autoComplete="new-password"
+                hint={t('auth.passwordHint', { min: MIN_PASSWORD })}
+                suffixIcon={
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword((s) => !s)}
+                    aria-label={
+                      showPassword ? t('auth.hidePassword') : t('auth.showPassword')
+                    }
+                    className="transition-colors hover:text-fg"
+                  >
+                    {showPassword ? (
+                      <EyeSlash weight="duotone" />
+                    ) : (
+                      <Eye weight="duotone" />
+                    )}
+                  </button>
+                }
+                onChange={(e) => setNewPassword(e.target.value)}
+              />
+              <Input
+                type={showPassword ? 'text' : 'password'}
+                label={t('pages.settings.confirmPassword')}
+                value={confirmPassword}
+                autoComplete="new-password"
+                error={
+                  confirmPassword !== '' && confirmPassword !== newPassword
+                    ? t('pages.settings.passwordMismatch')
+                    : undefined
+                }
+                onChange={(e) => setConfirmPassword(e.target.value)}
+              />
+            </div>
+            <div className="flex flex-wrap items-center gap-3">
+              <Button
+                type="submit"
+                variant="secondary"
+                loading={password.isPending}
+                disabled={!currentPassword || !newPassword || !confirmPassword}
+              >
+                {t('pages.settings.updatePassword')}
+              </Button>
+              {passwordError && (
+                <p role="alert" className="text-[13px] text-fg-danger">
+                  {passwordError}
+                </p>
+              )}
+            </div>
+          </form>
         </div>
       </CardBody>
+    </Card>
+  )
+}
+
+/* ── Passkeys ───────────────────────────────────────────────────────── */
+
+/**
+ * Passkeys bound to the signed-in account.
+ *
+ * Every account manages its own credentials, so the card is not gated on the
+ * admin role — a viewer may sign in with a passkey too.
+ */
+function PasskeysCard() {
+  const { t } = useTranslation()
+  const toast = useToast()
+  const queryClient = useQueryClient()
+
+  const [addOpen, setAddOpen] = useState(false)
+  const [name, setName] = useState('')
+  const [addError, setAddError] = useState<string | null>(null)
+  const [pendingRename, setPendingRename] = useState<PasskeySummary | null>(null)
+  const [renameTo, setRenameTo] = useState('')
+  const [pendingDelete, setPendingDelete] = useState<PasskeySummary | null>(null)
+
+  const supported = passkeysSupported()
+
+  const query = useQuery({
+    queryKey: passkeyKeys.list(),
+    queryFn: () => passkeysApi.list(),
+    enabled: supported,
+  })
+  const passkeys = query.data ?? []
+
+  const invalidate = () => void queryClient.invalidateQueries({ queryKey: passkeyKeys.all })
+
+  const add = useMutation({
+    mutationFn: (label: string) => passkeysApi.register(label),
+    // Dismissing the browser prompt is not an API failure worth a toast.
+    meta: { silentToast: true },
+    onSuccess: () => {
+      setAddOpen(false)
+      setName('')
+      setAddError(null)
+      invalidate()
+      toast.success(t('pages.settings.passkeyAdded'))
+    },
+    onError: (err) => {
+      if (isPasskeyCancellation(err)) return
+      setAddError(errorMessage(err))
+    },
+  })
+
+  const rename = useMutation({
+    mutationFn: (passkey: PasskeySummary) => passkeysApi.rename(passkey.id, renameTo.trim()),
+    onSuccess: () => {
+      setPendingRename(null)
+      invalidate()
+      toast.success(t('pages.settings.passkeyRenamed'))
+    },
+  })
+
+  const remove = useMutation({
+    mutationFn: (passkey: PasskeySummary) => passkeysApi.remove(passkey.id),
+    onSuccess: () => {
+      setPendingDelete(null)
+      invalidate()
+      toast.success(t('pages.settings.passkeyRemoved'))
+    },
+  })
+
+  const columns: Column<PasskeySummary>[] = useMemo(
+    () => [
+      {
+        key: 'name',
+        header: t('common.name'),
+        accessor: (p) => p.name,
+        sortable: true,
+        cell: (p) => (
+          <div className="flex min-w-0 items-center gap-2">
+            <Fingerprint weight="duotone" className="h-4 w-4 shrink-0 text-fg-subtle" />
+            <span className="truncate text-[13px] font-medium text-fg-strong">{p.name}</span>
+          </div>
+        ),
+      },
+      {
+        key: 'created_at',
+        header: t('pages.settings.passkeyCreated'),
+        accessor: (p) => p.created_at,
+        sortable: true,
+        width: '1%',
+        cell: (p) => (
+          <span className="text-[13px] text-fg-subtle">{formatDateTime(p.created_at)}</span>
+        ),
+      },
+      {
+        key: 'last_used_at',
+        header: t('pages.settings.passkeyLastUsed'),
+        accessor: (p) => p.last_used_at,
+        width: '1%',
+        cell: (p) => (
+          <span className="text-[13px] text-fg-subtle">{formatRelative(p.last_used_at)}</span>
+        ),
+      },
+      {
+        key: 'row-actions',
+        header: '',
+        align: 'right',
+        width: '1%',
+        cell: (p) => (
+          <div className="flex items-center justify-end gap-1">
+            <Button
+              size="icon"
+              variant="ghost"
+              aria-label={t('pages.settings.renamePasskey')}
+              onClick={() => {
+                setRenameTo(p.name)
+                setPendingRename(p)
+              }}
+              icon={<PencilSimple weight="duotone" className="h-4 w-4" />}
+            />
+            <Button
+              size="icon"
+              variant="ghost"
+              className="hover:text-fg-danger"
+              aria-label={t('pages.settings.deletePasskeyTitle')}
+              onClick={() => setPendingDelete(p)}
+              icon={<Trash weight="duotone" className="h-4 w-4" />}
+            />
+          </div>
+        ),
+      },
+    ],
+    [t],
+  )
+
+  return (
+    <Card>
+      <CardHeader
+        title={t('pages.settings.passkeys')}
+        description={t('pages.settings.passkeysDescription')}
+        action={
+          supported && passkeys.length > 0 ? (
+            <Button
+              size="sm"
+              variant="secondary"
+              icon={<Plus weight="bold" className="h-4 w-4" />}
+              onClick={() => setAddOpen(true)}
+            >
+              {t('pages.settings.addPasskey')}
+            </Button>
+          ) : undefined
+        }
+      />
+      <CardBody className={passkeys.length === 0 ? undefined : 'p-0'}>
+        {!supported ? (
+          <p className="flex items-start gap-2 text-sm text-fg-subtle">
+            <Warning weight="duotone" className="mt-0.5 h-4 w-4 shrink-0 text-fg-warning" />
+            {t('pages.settings.passkeyUnsupported')}
+          </p>
+        ) : query.isError && !query.data ? (
+          <ErrorState
+            variant="inline"
+            error={query.error}
+            onRetry={() => query.refetch()}
+            retrying={query.isFetching}
+          />
+        ) : query.isPending ? (
+          <SkeletonRows rows={2} columns={3} />
+        ) : passkeys.length === 0 ? (
+          <EmptyState
+            className="py-10"
+            icon={<Fingerprint weight="duotone" className="h-8 w-8" />}
+            title={t('pages.settings.noPasskeys')}
+            description={t('pages.settings.noPasskeysDescription')}
+            action={
+              <Button
+                variant="primary"
+                icon={<Plus weight="bold" className="h-4 w-4" />}
+                onClick={() => setAddOpen(true)}
+              >
+                {t('pages.settings.addPasskey')}
+              </Button>
+            }
+          />
+        ) : (
+          <Table columns={columns} data={passkeys} rowKey={(p) => p.id} dense />
+        )}
+      </CardBody>
+
+      {supported && (
+        <CardFooter className="justify-start text-left text-xs text-fg-subtle">
+          {t('pages.settings.passkeysDomainHint')}
+        </CardFooter>
+      )}
+
+      {/* Bind a new authenticator */}
+      <Dialog
+        open={addOpen}
+        onClose={add.isPending ? () => undefined : () => setAddOpen(false)}
+        title={t('pages.settings.addPasskey')}
+        description={t('pages.settings.passkeysDescription')}
+        footer={
+          <>
+            <Button
+              variant="ghost"
+              onClick={() => setAddOpen(false)}
+              disabled={add.isPending}
+            >
+              {t('common.cancel')}
+            </Button>
+            <Button
+              variant="primary"
+              loading={add.isPending}
+              disabled={!name.trim()}
+              onClick={() => add.mutate(name.trim())}
+            >
+              {t('pages.settings.addPasskey')}
+            </Button>
+          </>
+        }
+      >
+        <div className="flex flex-col gap-3">
+          <Input
+            label={t('pages.settings.passkeyName')}
+            value={name}
+            autoFocus
+            placeholder={t('pages.settings.passkeyNamePlaceholder')}
+            error={addError ?? undefined}
+            onChange={(e) => setName(e.target.value)}
+          />
+        </div>
+      </Dialog>
+
+      {/* Rename */}
+      <Dialog
+        open={pendingRename !== null}
+        onClose={() => setPendingRename(null)}
+        title={t('pages.settings.renamePasskey')}
+        description={t('pages.settings.renamePasskeyDescription')}
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setPendingRename(null)}>
+              {t('common.cancel')}
+            </Button>
+            <Button
+              variant="primary"
+              loading={rename.isPending}
+              disabled={!renameTo.trim()}
+              onClick={() => pendingRename && rename.mutate(pendingRename)}
+            >
+              {t('common.save')}
+            </Button>
+          </>
+        }
+      >
+        <Input
+          label={t('pages.settings.passkeyName')}
+          value={renameTo}
+          autoFocus
+          onChange={(e) => setRenameTo(e.target.value)}
+        />
+      </Dialog>
+
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        onClose={() => setPendingDelete(null)}
+        onConfirm={() => pendingDelete && remove.mutate(pendingDelete)}
+        title={t('pages.settings.deletePasskeyTitle')}
+        description={t('pages.settings.deletePasskeyDescription')}
+        confirmLabel={t('common.delete')}
+        loading={remove.isPending}
+      >
+        {pendingDelete && (
+          <div className="rounded-md border border-line bg-recessed px-3 py-2">
+            <p className="text-[13px] font-medium text-fg-strong">{pendingDelete.name}</p>
+            <p className="mt-0.5 text-xs text-fg-subtle">
+              {formatDateTime(pendingDelete.created_at)}
+            </p>
+          </div>
+        )}
+      </ConfirmDialog>
     </Card>
   )
 }
@@ -753,16 +1119,30 @@ function ApiKeysCard({ canWrite }: { canWrite: boolean }) {
         title={t('pages.settings.apiKeys')}
         description={t('pages.settings.apiKeysDescription')}
         action={
-          canWrite ? (
-            <Button
-              size="sm"
-              variant="primary"
-              icon={<Plus weight="bold" className="h-4 w-4" />}
-              onClick={() => setDialogOpen(true)}
+          <div className="flex items-center gap-2">
+            <a
+              href={API_DOCS_URL}
+              target="_blank"
+              rel="noreferrer noopener"
+              className={cn(
+                'inline-flex h-8 items-center gap-1.5 rounded-md border border-line bg-elevated px-3',
+                'text-[13px] font-medium text-fg shadow-sm transition-colors hover:bg-recessed',
+              )}
             >
-              {t('common.create')}
-            </Button>
-          ) : undefined
+              <BookOpen weight="duotone" className="h-4 w-4" />
+              {t('pages.settings.apiDocs')}
+            </a>
+            {canWrite && (
+              <Button
+                size="sm"
+                variant="primary"
+                icon={<Plus weight="bold" className="h-4 w-4" />}
+                onClick={() => setDialogOpen(true)}
+              >
+                {t('common.create')}
+              </Button>
+            )}
+          </div>
         }
       />
       <CardBody className="p-0">

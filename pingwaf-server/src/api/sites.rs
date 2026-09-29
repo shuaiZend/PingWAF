@@ -23,9 +23,9 @@ use crate::api::state::AppState;
 use crate::auth::AuthUser;
 use crate::grpc::notify_config_changed;
 use crate::models::{
-    acme_challenge, cache_rules, rate_limit_rules, route_match_type, rule,
-    rule_groups, site, site_certificates, site_routes, site_ssl, site_status,
-    site_upstream_pools, site_upstreams, tls_version,
+    acme_challenge, cache_rules, ip_groups, rate_limit_rules, route_match_type,
+    rule, rule_groups, site, site_certificates, site_routes, site_ssl,
+    site_status, site_upstream_pools, site_upstreams, tls_version,
 };
 
 /// Public representation of a site.
@@ -93,6 +93,8 @@ pub struct SslResponse {
     pub certificate_id: Option<Uuid>,
     pub mtls_enabled: bool,
     pub has_mtls_client_ca: bool,
+    pub mtls_organization: Option<String>,
+    pub mtls_require_client_cert: bool,
     pub hsts_enabled: bool,
     pub hsts_max_age: i32,
     pub always_use_https: bool,
@@ -130,6 +132,8 @@ impl From<site_ssl::Model> for SslResponse {
                 .mtls_client_ca
                 .as_ref()
                 .is_some_and(|v| !v.is_empty()),
+            mtls_organization: model.mtls_organization,
+            mtls_require_client_cert: model.mtls_require_client_cert,
             hsts_enabled: model.hsts_enabled,
             hsts_max_age: model.hsts_max_age,
             always_use_https: model.always_use_https,
@@ -249,6 +253,9 @@ pub struct CreateRouteRequest {
     #[serde(default = "default_true")]
     pub enabled: bool,
     pub pool_id: Uuid,
+    /// Gate the route on an IP group's ranges; `None` matches every client.
+    #[serde(default)]
+    pub ip_group_id: Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -266,6 +273,9 @@ pub struct UpdateRouteRequest {
     pub enabled: Option<bool>,
     #[serde(default)]
     pub pool_id: Option<Uuid>,
+    /// An empty string clears the gate; the field must be present to change it.
+    #[serde(default)]
+    pub ip_group_id: Option<Option<Uuid>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -312,6 +322,10 @@ pub struct TlsPostureRequest {
     #[serde(default)]
     pub mtls_client_ca: Option<String>,
     #[serde(default)]
+    pub mtls_organization: Option<String>,
+    #[serde(default)]
+    pub mtls_require_client_cert: Option<bool>,
+    #[serde(default)]
     pub hsts_enabled: Option<bool>,
     #[serde(default)]
     pub hsts_max_age: Option<i32>,
@@ -332,6 +346,8 @@ pub(crate) struct TlsPosture {
     pub certificate_id: Option<Uuid>,
     pub mtls_enabled: bool,
     pub mtls_client_ca: Option<String>,
+    pub mtls_organization: Option<String>,
+    pub mtls_require_client_cert: bool,
     pub hsts_enabled: bool,
     pub hsts_max_age: i32,
     pub always_use_https: bool,
@@ -349,6 +365,8 @@ impl TlsPosture {
             certificate_id: None,
             mtls_enabled: false,
             mtls_client_ca: None,
+            mtls_organization: None,
+            mtls_require_client_cert: false,
             hsts_enabled: false,
             hsts_max_age: 0,
             always_use_https: false,
@@ -364,6 +382,8 @@ impl TlsPosture {
             certificate_id: model.certificate_id,
             mtls_enabled: model.mtls_enabled,
             mtls_client_ca: model.mtls_client_ca.clone(),
+            mtls_organization: model.mtls_organization.clone(),
+            mtls_require_client_cert: model.mtls_require_client_cert,
             hsts_enabled: model.hsts_enabled,
             hsts_max_age: model.hsts_max_age,
             always_use_https: model.always_use_https,
@@ -385,6 +405,12 @@ impl TlsPosture {
         }
         if let Some(value) = req.mtls_enabled {
             next.mtls_enabled = value;
+        }
+        if let Some(value) = req.mtls_require_client_cert {
+            next.mtls_require_client_cert = value;
+        }
+        if let Some(raw) = non_empty(&req.mtls_organization) {
+            next.mtls_organization = Some(raw);
         }
         if let Some(value) = req.hsts_enabled {
             next.hsts_enabled = value;
@@ -431,6 +457,11 @@ impl TlsPosture {
                 "mtls_enabled requires the client CA bundle".to_string(),
             ));
         }
+        if !next.mtls_enabled {
+            // Switching mTLS off must not leave checks armed behind it.
+            next.mtls_require_client_cert = false;
+            next.mtls_organization = None;
+        }
         if next.self_signed {
             next.certificate_id = None;
             next.https_enabled = true;
@@ -447,6 +478,8 @@ impl TlsPosture {
         active.certificate_id = Set(self.certificate_id);
         active.mtls_enabled = Set(self.mtls_enabled);
         active.mtls_client_ca = Set(self.mtls_client_ca.clone());
+        active.mtls_organization = Set(self.mtls_organization.clone());
+        active.mtls_require_client_cert = Set(self.mtls_require_client_cert);
         active.hsts_enabled = Set(self.hsts_enabled);
         active.hsts_max_age = Set(self.hsts_max_age);
         active.always_use_https = Set(self.always_use_https);
@@ -511,6 +544,8 @@ pub(crate) async fn save_tls_posture(
                 certificate_id: Set(None),
                 mtls_enabled: Set(false),
                 mtls_client_ca: Set(None),
+                mtls_organization: Set(None),
+                mtls_require_client_cert: Set(false),
                 hsts_enabled: Set(false),
                 hsts_max_age: Set(0),
                 always_use_https: Set(false),
@@ -649,7 +684,7 @@ async fn create(
     let domain = normalise_domain(&payload.domain)?;
     let upstream_name = non_empty(&payload.upstream_name)
         .unwrap_or_else(|| "origin".to_string());
-    let upstream_address = payload.upstream_address.trim().to_string();
+    let upstream_address = normalize_origin_address(&payload.upstream_address)?;
     validate_upstream(&upstream_name, &upstream_address, default_weight())?;
 
     // New sites are live immediately; the dashboard toggles them between
@@ -869,7 +904,7 @@ async fn create_upstream(
     load_site_write(&state.db, id, &current).await?;
 
     let name = payload.name.trim().to_string();
-    let address = payload.address.trim().to_string();
+    let address = normalize_origin_address(&payload.address)?;
     validate_upstream(&name, &address, payload.weight)?;
     let pool_id = resolve_pool(&state, id, payload.pool_id.as_ref()).await?;
 
@@ -918,7 +953,7 @@ async fn update_upstream(
         active.name = Set(name);
     }
     if let Some(address) = non_empty(&payload.address) {
-        active.address = Set(address);
+        active.address = Set(normalize_origin_address(&address)?);
     }
     if let Some(weight) = payload.weight {
         active.weight = Set(weight);
@@ -1165,6 +1200,9 @@ async fn create_route(
     let path = payload.path.trim().to_string();
     validate_route(&name, &match_type, &path, payload.priority)?;
     ensure_pool_can_serve(&state, id, payload.pool_id).await?;
+    if let Some(group_id) = payload.ip_group_id {
+        ensure_route_ip_group(&state, group_id).await?;
+    }
 
     let model = site_routes::ActiveModel {
         id: Set(Uuid::new_v4()),
@@ -1175,6 +1213,7 @@ async fn create_route(
         priority: Set(payload.priority),
         enabled: Set(payload.enabled),
         pool_id: Set(payload.pool_id),
+        ip_group_id: Set(payload.ip_group_id),
         created_at: Set(Utc::now()),
     }
     .insert(&state.db)
@@ -1209,6 +1248,9 @@ async fn update_route(
     if let Some(pool_id) = payload.pool_id {
         ensure_pool_can_serve(&state, id, pool_id).await?;
     }
+    if let Some(Some(group_id)) = payload.ip_group_id {
+        ensure_route_ip_group(&state, group_id).await?;
+    }
 
     let mut active: site_routes::ActiveModel = row.into();
     if let Some(name) = non_empty(&payload.name) {
@@ -1229,6 +1271,9 @@ async fn update_route(
     }
     if let Some(pool_id) = payload.pool_id {
         active.pool_id = Set(pool_id);
+    }
+    if let Some(ip_group_id) = payload.ip_group_id {
+        active.ip_group_id = Set(ip_group_id);
     }
 
     let updated = active.update(&state.db).await?;
@@ -1379,6 +1424,8 @@ async fn upsert_ssl(
                 certificate_id: Set(None),
                 mtls_enabled: Set(false),
                 mtls_client_ca: Set(None),
+                mtls_organization: Set(None),
+                mtls_require_client_cert: Set(false),
                 hsts_enabled: Set(false),
                 hsts_max_age: Set(0),
                 always_use_https: Set(false),
@@ -1419,7 +1466,91 @@ async fn delete_ssl(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+/// Canonicalizes an origin address to `host[:port]`.
+///
+/// Copy-pasting a URL is common, so a scheme is stripped. Anything beyond a
+/// trailing slash is rejected: a path would be silently dropped by the edge
+/// and would also poison the SNI derived from the host, which is worse than a
+/// 400 at save time.
+fn normalize_origin_address(raw: &str) -> Result<String, ApiError> {
+    let mut address = raw.trim().to_string();
+    for scheme in ["http://", "https://"] {
+        if let Some(rest) = address.strip_prefix(scheme) {
+            address = rest.to_string();
+            break;
+        }
+    }
+    while address.ends_with('/') {
+        address.pop();
+    }
+    if address.is_empty() || address.len() > 255 {
+        return Err(ApiError::BadRequest(
+            "upstream address must be 1-255 characters".to_string(),
+        ));
+    }
+    if address.contains('?') || address.contains('#') {
+        return Err(ApiError::BadRequest(
+            "upstream address must be host[:port] without query or fragment"
+                .to_string(),
+        ));
+    }
+    if address.contains('/') {
+        return Err(ApiError::BadRequest(
+            "upstream address must be host[:port] without a path".to_string(),
+        ));
+    }
+
+    let Some((host, port)) = split_origin_host_port(&address) else {
+        return Err(ApiError::BadRequest(
+            "upstream address must be host[:port]".to_string(),
+        ));
+    };
+    if port.is_some_and(|port| port.parse::<u16>().map_or(true, |p| p == 0)) {
+        return Err(ApiError::BadRequest(
+            "upstream port must be between 1 and 65535".to_string(),
+        ));
+    }
+    let host_ok = !host.is_empty()
+        && host.len() <= 253
+        && host.chars().all(|c| {
+            c.is_ascii_alphanumeric()
+                || c == '.'
+                || c == '-'
+                || c == '_'
+                || c == ':'
+        });
+    if !host_ok {
+        return Err(ApiError::BadRequest(
+            "upstream host must be an IP address or hostname".to_string(),
+        ));
+    }
+
+    Ok(address)
+}
+
+/// Splits `host[:port]`, brackets included for IPv6. `None` when the address
+/// has more than one colon outside brackets (`::1` without brackets).
+fn split_origin_host_port(address: &str) -> Option<(&str, Option<&str>)> {
+    if let Some(rest) = address.strip_prefix('[') {
+        let (host, tail) = rest.split_once(']')?;
+        return match tail {
+            "" => Some((host, None)),
+            tail => Some((host, Some(tail.strip_prefix(':')?))),
+        };
+    }
+    match address.split_once(':') {
+        Some((host, port)) if !host.is_empty() && !port.is_empty() => {
+            Some((host, Some(port)))
+        },
+        Some(_) => None,
+        None => Some((address, None)),
+    }
+}
+
 /// Validates the fields shared by upstream create/update.
+///
+/// The address is expected to be canonical already — write paths run it
+/// through [`normalize_origin_address`] first.
 fn validate_upstream(
     name: &str,
     address: &str,
@@ -1630,6 +1761,33 @@ async fn ensure_pool_can_serve(
     Ok(())
 }
 
+/// A route gated on an IP group only serves when the data plane can expand the
+/// group: a missing, disabled or empty group would drop the gate entirely.
+async fn ensure_route_ip_group(
+    state: &AppState,
+    group_id: Uuid,
+) -> Result<(), ApiError> {
+    let group = ip_groups::Entity::find_by_id(group_id)
+        .one(&state.db)
+        .await?
+        .ok_or_else(|| {
+            ApiError::BadRequest(format!("IP group {group_id} not found"))
+        })?;
+    if !group.enabled {
+        return Err(ApiError::BadRequest(format!(
+            "IP group '{}' is disabled; enable it or clear the route gate",
+            group.name
+        )));
+    }
+    if group.ip_ranges.is_empty() {
+        return Err(ApiError::BadRequest(format!(
+            "IP group '{}' has no ranges; a route gated on it would never match",
+            group.name
+        )));
+    }
+    Ok(())
+}
+
 /// Host part of a `host:port` origin address, used to pre-fill the pool SNI.
 fn origin_host(address: &str) -> &str {
     let host = match address.rsplit_once(':') {
@@ -1653,4 +1811,61 @@ pub async fn touch_site(
         .exec(&state.db)
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn origin_addresses_are_normalized_to_host_port() {
+        assert_eq!(
+            normalize_origin_address(" 10.0.0.1:8080 ").unwrap(),
+            "10.0.0.1:8080"
+        );
+        assert_eq!(
+            normalize_origin_address("https://origin.example.com").unwrap(),
+            "origin.example.com"
+        );
+        assert_eq!(
+            normalize_origin_address("http://origin.example.com:8080/")
+                .unwrap(),
+            "origin.example.com:8080"
+        );
+        assert_eq!(
+            normalize_origin_address("[::1]:8443").unwrap(),
+            "[::1]:8443"
+        );
+    }
+
+    #[test]
+    fn origin_addresses_reject_paths_and_bad_ports() {
+        assert!(
+            normalize_origin_address("https://origin.example.com/api").is_err()
+        );
+        assert!(normalize_origin_address("origin.example.com?x=1").is_err());
+        assert!(normalize_origin_address("origin.example.com#frag").is_err());
+        assert!(normalize_origin_address("origin.example.com:0").is_err());
+        assert!(normalize_origin_address("origin.example.com:70000").is_err());
+        assert!(normalize_origin_address("::1").is_err());
+        assert!(normalize_origin_address("").is_err());
+    }
+
+    #[test]
+    fn split_origin_host_port_handles_ipv6() {
+        assert_eq!(
+            split_origin_host_port("example.com"),
+            Some(("example.com", None))
+        );
+        assert_eq!(
+            split_origin_host_port("example.com:443"),
+            Some(("example.com", Some("443")))
+        );
+        assert_eq!(
+            split_origin_host_port("[::1]:443"),
+            Some(("::1", Some("443")))
+        );
+        assert_eq!(split_origin_host_port("[::1]"), Some(("::1", None)));
+        assert_eq!(split_origin_host_port("::1"), None);
+    }
 }

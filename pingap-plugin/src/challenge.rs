@@ -194,6 +194,27 @@ pub(crate) fn block_page(request_id: &str, reason: &str) -> HttpResponse {
         .finish()
 }
 
+/// A 503 maintenance page for a paused site. Sending a response instead of
+/// dropping the site from the data-plane config keeps the certificate and the
+/// log pipeline live, so the dashboard still shows the traffic.
+pub(crate) fn paused_page(request_id: &str) -> HttpResponse {
+    const RETRY_AFTER_SECS: &str = "3600";
+    let body = format!(
+        "<html><body><h1>503 Service Unavailable</h1>\
+<p>This site is temporarily paused.</p>\
+<p>Event ID: {request_id}</p></body></html>"
+    );
+    HttpResponse::builder(StatusCode::SERVICE_UNAVAILABLE)
+        .body(body)
+        .header(HTTP_HEADER_CONTENT_HTML.clone())
+        .header((
+            header::RETRY_AFTER,
+            HeaderValue::from_static(RETRY_AFTER_SECS),
+        ))
+        .no_store()
+        .finish()
+}
+
 /// A 429 HTML page for requests stopped by a rate limit rule, telling the
 /// client when it may retry.
 pub(crate) fn rate_limit_page(

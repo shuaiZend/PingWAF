@@ -135,6 +135,14 @@ pub struct ConnectionInfo {
     pub tls_version: Option<Cow<'static, str>>,
     /// The TLS cipher used for the connection, if any.
     pub tls_cipher: Option<Cow<'static, str>>,
+    /// Organization (O) of the client certificate, when the client presented
+    /// one that passed the listener's verification.
+    pub tls_peer_organization: Option<String>,
+    /// Serial number of the client certificate, when there is one.
+    pub tls_peer_serial: Option<String>,
+    /// Lowercase hex SHA-256 of the client certificate's DER, when there is
+    /// one. Matches what `openssl x509 -fingerprint -sha256` prints.
+    pub tls_peer_cert_digest: Option<String>,
     /// Indicates whether the connection was reused (e.g., HTTP keep-alive).
     pub reused: bool,
 }
@@ -485,6 +493,14 @@ pub struct DigestDetail {
     pub tls_version: Option<Cow<'static, str>>,
     /// TLS cipher suite in use if using HTTPS
     pub tls_cipher: Option<Cow<'static, str>>,
+    /// Organization of the client certificate, when one was presented and
+    /// verified against the listener's CA store.
+    pub tls_peer_organization: Option<String>,
+    /// Serial number of the client certificate, when there is one.
+    pub tls_peer_serial: Option<String>,
+    /// Lowercase hex SHA-256 of the client certificate's DER, when there is
+    /// one. Empty digests (no certificate) are reported as `None`.
+    pub tls_peer_cert_digest: Option<String>,
 }
 
 #[inline]
@@ -538,7 +554,22 @@ pub fn get_digest_detail(digest: &Digest) -> DigestDetail {
         // Clone the Cow: Borrowed(&'static str) is allocation-free.
         tls_version: Some(ssl_digest.version.clone()),
         tls_cipher: Some(ssl_digest.cipher.clone()),
+        tls_peer_organization: ssl_digest.organization.clone(),
+        tls_peer_serial: ssl_digest.serial_number.clone(),
+        tls_peer_cert_digest: (!ssl_digest.cert_digest.is_empty())
+            .then(|| hex_lower(&ssl_digest.cert_digest)),
     }
+}
+
+/// Lowercase hex, the form `openssl x509 -fingerprint -sha256` prints once
+/// its colons are stripped.
+fn hex_lower(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(char::from_digit(u32::from(byte >> 4), 16).unwrap_or('0'));
+        out.push(char::from_digit(u32::from(byte & 0x0f), 16).unwrap_or('0'));
+    }
+    out
 }
 
 /// The layer's own establishment time, when pingora measured it.
@@ -1616,6 +1647,9 @@ mod tests {
         assert_eq!(detail.tls_established, 3000);
         assert_eq!(detail.tls_version.as_deref(), Some("1.3"));
         assert_eq!(detail.tls_cipher.as_deref(), Some("123"));
+        // No client certificate on the connection: no digest to report.
+        assert_eq!(detail.tls_peer_cert_digest, None);
+        assert_eq!(detail.tls_peer_organization.as_deref(), Some("cloudflare"));
         // Nothing measured on these entries.
         assert_eq!(detail.tcp_connect, None);
         assert_eq!(detail.tls_handshake, None);
@@ -1652,6 +1686,25 @@ mod tests {
         let detail = get_digest_detail(&digest);
         assert_eq!(detail.tcp_connect, Some(12));
         assert_eq!(detail.tls_handshake, None);
+    }
+
+    #[test]
+    fn peer_certificate_digest_is_reported_as_lowercase_hex() {
+        let digest = Digest {
+            ssl_digest: Some(Arc::new(SslDigest {
+                version: "1.3".into(),
+                cipher: "123".into(),
+                organization: Some("Acme".to_string()),
+                serial_number: Some("0a1b".to_string()),
+                cert_digest: vec![0x00, 0x0f, 0xa5, 0xff],
+                extension: SslDigestExtension::default(),
+            })),
+            ..Default::default()
+        };
+        let detail = get_digest_detail(&digest);
+        assert_eq!(detail.tls_peer_cert_digest.as_deref(), Some("000fa5ff"));
+        assert_eq!(detail.tls_peer_organization.as_deref(), Some("Acme"));
+        assert_eq!(detail.tls_peer_serial.as_deref(), Some("0a1b"));
     }
 
     #[test]

@@ -30,6 +30,7 @@ import { SkeletonRows, SkeletonStat } from '@/components/ui/Skeleton'
 import { useToast } from '@/components/ui/Toast'
 import { ErrorState } from '@/components/ErrorState'
 import { sslApi, sslKeys, daysUntilExpiry, expiryTone } from '@/api/ssl'
+import { MtlsMaterial } from '@/pages/sites/MtlsMaterial'
 import { useCanWrite, useNow } from '@/hooks'
 import { cn } from '@/lib/utils'
 import { formatDate, formatDateTime } from '@/lib/format'
@@ -42,6 +43,9 @@ import {
 
 /** Largest HSTS lifetime the server accepts, in seconds (two years). */
 const MAX_HSTS_AGE = 63_072_000
+
+/** Pre-filled HSTS window when the switch is turned on: 180 days. */
+const DEFAULT_HSTS_AGE = 15_552_000
 
 /** Which card a save belongs to — the server merges, so each sends its fields. */
 type SaveScope = 'https' | 'tls' | 'mtls'
@@ -62,6 +66,8 @@ interface TlsDraft {
 
 interface MtlsDraft {
   mtls_enabled: boolean
+  mtls_require_client_cert: boolean
+  mtls_organization: string
 }
 
 interface PostureDrafts {
@@ -84,7 +90,11 @@ const toTlsDraft = (s: SslSettings): TlsDraft => ({
   always_use_https: s.always_use_https,
 })
 
-const toMtlsDraft = (s: SslSettings): MtlsDraft => ({ mtls_enabled: s.mtls_enabled })
+const toMtlsDraft = (s: SslSettings): MtlsDraft => ({
+  mtls_enabled: s.mtls_enabled,
+  mtls_require_client_cert: s.mtls_require_client_cert,
+  mtls_organization: s.mtls_organization ?? '',
+})
 
 const toDrafts = (s: SslSettings): PostureDrafts => ({
   https: toHttpsDraft(s),
@@ -271,8 +281,13 @@ export function SslPage() {
       setMtlsError(t('pages.ssl.clientCaRequired'))
       return
     }
-    const payload: UpdateSslSettingsRequest = { mtls_enabled: drafts.mtls.mtls_enabled }
+    const payload: UpdateSslSettingsRequest = {
+      mtls_enabled: drafts.mtls.mtls_enabled,
+      mtls_require_client_cert: drafts.mtls.mtls_require_client_cert,
+    }
     if (ca) payload.mtls_client_ca = ca
+    const organization = drafts.mtls.mtls_organization.trim()
+    if (organization) payload.mtls_organization = organization
     saveSettings.mutate({ scope: 'mtls', payload })
   }
 
@@ -624,7 +639,17 @@ export function SslPage() {
             <Switch
               checked={drafts.tls.hsts_enabled}
               disabled={!canWrite}
-              onCheckedChange={(hsts_enabled) => patchTls({ hsts_enabled })}
+              onCheckedChange={(hsts_enabled) =>
+                patchTls({
+                  hsts_enabled,
+                  // A fresh switch would otherwise save max-age=0, which the
+                  // edge reads as "send no header" — seed the common window.
+                  hsts_max_age:
+                    hsts_enabled && drafts.tls.hsts_max_age <= 0
+                      ? DEFAULT_HSTS_AGE
+                      : drafts.tls.hsts_max_age,
+                })
+              }
               label={t('pages.ssl.hsts')}
               description={t('pages.ssl.hstsHint')}
             />
@@ -635,6 +660,7 @@ export function SslPage() {
                 value={drafts.tls.hsts_max_age}
                 min={0}
                 max={MAX_HSTS_AGE}
+                step={86400}
                 disabled={!canWrite}
                 containerClassName="max-w-xs"
                 hint={t('pages.ssl.hstsMaxAgeHint')}
@@ -678,7 +704,7 @@ export function SslPage() {
               checked={drafts.mtls.mtls_enabled}
               disabled={!canWrite}
               onCheckedChange={(mtls_enabled) => {
-                setDrafts((prev) => (prev ? { ...prev, mtls: { mtls_enabled } } : prev))
+                setDrafts((prev) => (prev ? { ...prev, mtls: { ...prev.mtls, mtls_enabled } } : prev))
               }}
               label={t('pages.ssl.mtlsEnabled')}
               description={t('pages.ssl.mtlsEnabledHint')}
@@ -689,6 +715,37 @@ export function SslPage() {
                 <Warning weight="duotone" className="h-4 w-4 shrink-0 text-warning" />
                 {t('pages.ssl.mtlsNeedsHttps')}
               </p>
+            )}
+
+            {drafts.mtls.mtls_enabled && (
+              <>
+                <Switch
+                  checked={drafts.mtls.mtls_require_client_cert}
+                  disabled={!canWrite}
+                  onCheckedChange={(mtls_require_client_cert) =>
+                    setDrafts((prev) =>
+                      prev ? { ...prev, mtls: { ...prev.mtls, mtls_require_client_cert } } : prev,
+                    )
+                  }
+                  label={t('pages.ssl.mtlsRequire')}
+                  description={t('pages.ssl.mtlsRequireHint')}
+                />
+                <Input
+                  label={t('pages.ssl.mtlsOrganization')}
+                  value={drafts.mtls.mtls_organization}
+                  disabled={!canWrite}
+                  containerClassName="max-w-2xl"
+                  placeholder="Acme Corp"
+                  hint={t('pages.ssl.mtlsOrganizationHint')}
+                  onChange={(e) =>
+                    setDrafts((prev) =>
+                      prev
+                        ? { ...prev, mtls: { ...prev.mtls, mtls_organization: e.target.value } }
+                        : prev,
+                    )
+                  }
+                />
+              </>
             )}
 
             <div className="flex flex-wrap items-center gap-2">
@@ -726,6 +783,9 @@ export function SslPage() {
           </CardBody>
         </Card>
       )}
+
+      {/* Managed CAs and client certificates (admins only — the routes are write-scoped) */}
+      {canWrite && siteId !== '' && <MtlsMaterial siteId={siteId} />}
 
       {/* Certificates installed on this site */}
       {certsQuery.isError && !certsQuery.data ? (

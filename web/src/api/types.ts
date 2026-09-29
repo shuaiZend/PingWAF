@@ -60,6 +60,16 @@ export interface LoginResponse {
 export interface AuthStatus {
   needs_setup: boolean
   registration_open: boolean
+  /** Whether the login form should offer a passkey. */
+  passkey_enabled: boolean
+}
+
+/** `api::passkeys::PasskeySummary` */
+export interface PasskeySummary {
+  id: string
+  name: string
+  created_at: string
+  last_used_at: string
 }
 
 export interface ChangePasswordRequest {
@@ -126,6 +136,8 @@ export interface Route {
   priority: number | null
   enabled: boolean
   pool_id: string
+  /** When set, the route only matches clients inside this IP group. */
+  ip_group_id: string | null
   created_at: string
 }
 
@@ -218,6 +230,8 @@ export interface CreateRouteRequest {
   priority?: number | null
   enabled?: boolean
   pool_id: string
+  /** Client IPs outside the group cannot reach this route. */
+  ip_group_id?: string | null
 }
 
 export interface UpdateRouteRequest {
@@ -228,6 +242,8 @@ export interface UpdateRouteRequest {
   priority?: number | null
   enabled?: boolean
   pool_id?: string
+  /** `null` clears the gate so every client matches again. */
+  ip_group_id?: string | null
 }
 
 export interface UpsertSslRequest {
@@ -979,6 +995,8 @@ export interface SslSettings {
   certificate_id: string | null
   mtls_enabled: boolean
   has_mtls_client_ca: boolean
+  mtls_organization: string | null
+  mtls_require_client_cert: boolean
   hsts_enabled: boolean
   hsts_max_age: number
   always_use_https: boolean
@@ -993,9 +1011,86 @@ export interface UpdateSslSettingsRequest {
   certificate_id?: string | null
   mtls_enabled?: boolean
   mtls_client_ca?: string | null
+  mtls_organization?: string | null
+  mtls_require_client_cert?: boolean
   hsts_enabled?: boolean
   hsts_max_age?: number
   always_use_https?: boolean
+}
+
+/* ── Managed mTLS material ─────────────────────────────────────────── */
+
+/** How a certificate authority ended up in the store. */
+export type MtlsCaSource = 'generated' | 'imported'
+
+/** `api::mtls::CaResponse` — a trust anchor configured for one site. */
+export interface MtlsCa {
+  id: string
+  site_id: string
+  name: string
+  source: MtlsCaSource | string
+  cert_pem: string
+  /** Generated CAs can sign; imported ones are trust anchors only. */
+  has_private_key: boolean
+  subject_dn: string
+  serial: string
+  fingerprint_sha256: string
+  expected_organization: string | null
+  not_before: string
+  not_after: string
+  is_active: boolean
+  created_at: string
+  /** Client certificates issued from this CA, all statuses. */
+  certificate_count: number
+}
+
+/** Creation response — `key_pem` is only ever returned here. */
+export interface MtlsCaCreated extends MtlsCa {
+  key_pem: string | null
+}
+
+export type MtlsCertStatus = 'active' | 'revoked'
+
+/** `api::mtls::ClientCertResponse`. */
+export interface MtlsClientCertificate {
+  id: string
+  site_id: string
+  ca_id: string
+  ca_name: string | null
+  name: string
+  common_name: string
+  organization: string | null
+  serial: string
+  fingerprint_sha256: string
+  cert_pem: string
+  has_private_key: boolean
+  not_before: string
+  not_after: string
+  status: MtlsCertStatus | string
+  revoked_at: string | null
+  revocation_reason: string | null
+  created_at: string
+}
+
+/** Issue response — `key_pem` is only ever returned here. */
+export interface MtlsClientCertIssued extends MtlsClientCertificate {
+  key_pem: string | null
+}
+
+export interface CreateMtlsCaRequest {
+  name: string
+  /** When set, the CA is imported as-is instead of generated. */
+  cert_pem?: string
+  organization?: string
+  validity_days?: number
+}
+
+export interface IssueMtlsClientCertRequest {
+  ca_id: string
+  name?: string
+  common_name?: string
+  organization?: string
+  validity_days?: number
 }
 
 /* ── Certificate events ────────────────────────────────────────────── */

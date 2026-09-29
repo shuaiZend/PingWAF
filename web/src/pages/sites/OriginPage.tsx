@@ -27,6 +27,7 @@ import { SkeletonRows } from '@/components/ui/Skeleton'
 import { useToast } from '@/components/ui/Toast'
 import { ErrorState } from '@/components/ErrorState'
 import { sitesApi, siteKeys } from '@/api/sites'
+import { ipGroupsApi, ipGroupKeys } from '@/api/ipGroups'
 import { errorMessage } from '@/api/errors'
 import { useCanWrite } from '@/hooks'
 import { formatDateTime } from '@/lib/format'
@@ -34,6 +35,7 @@ import type {
   CreatePoolRequest,
   CreateRouteRequest,
   CreateUpstreamRequest,
+  IpGroupResponse,
   Route,
   Upstream,
   UpstreamPool,
@@ -110,12 +112,58 @@ const emptyNodeForm = (poolId: string): NodeFormState => ({
   poolId,
 })
 
+/**
+ * Mirrors the server's origin-address normalization (`host[:port]`) so a
+ * pasted URL fails inline instead of as a generic 400.
+ *
+ * Returns the i18n key of the error, or the canonical address.
+ */
+function parseOriginAddress(raw: string): { error: string } | { address: string } {
+  let address = raw.trim()
+  for (const scheme of ['http://', 'https://']) {
+    if (address.toLowerCase().startsWith(scheme)) {
+      address = address.slice(scheme.length)
+      break
+    }
+  }
+  address = address.replace(/\/+$/, '')
+  if (!address || address.length > 255) return { error: 'errors.addressRequired' }
+  if (/[?#]/.test(address) || address.includes('/')) return { error: 'errors.addressPath' }
+
+  let host = address
+  let port = ''
+  if (address.startsWith('[')) {
+    const end = address.indexOf(']')
+    if (end < 2) return { error: 'errors.addressInvalid' }
+    host = address.slice(1, end)
+    const tail = address.slice(end + 1)
+    if (tail && !tail.startsWith(':')) return { error: 'errors.addressInvalid' }
+    port = tail.slice(1)
+    if (!/^[0-9A-Fa-f:.]+$/.test(host)) return { error: 'errors.addressInvalid' }
+  } else {
+    const parts = address.split(':')
+    // A bare IPv6 literal has to be bracketed, otherwise the port is ambiguous.
+    if (parts.length > 2) return { error: 'errors.addressInvalid' }
+    if (parts.length === 2) {
+      host = parts[0]
+      port = parts[1]
+    }
+    if (!/^[A-Za-z0-9._-]+$/.test(host)) return { error: 'errors.addressInvalid' }
+  }
+  if (port && (!/^\d+$/.test(port) || Number(port) < 1 || Number(port) > 65535)) {
+    return { error: 'errors.addressPort' }
+  }
+  return { address }
+}
+
 interface RouteFormState {
   name: string
   matchType: string
   path: string
   priority: string
   poolId: string
+  /** Empty string gates the route to no group (every client matches). */
+  ipGroupId: string
   enabled: boolean
 }
 
@@ -125,6 +173,7 @@ const emptyRouteForm = (poolId: string): RouteFormState => ({
   path: '',
   priority: '',
   poolId,
+  ipGroupId: '',
   enabled: true,
 })
 
@@ -152,6 +201,24 @@ export function OriginPage() {
     queryFn: () => sitesApi.listRoutes(siteId),
     enabled: Boolean(siteId),
   })
+  const ipGroupsQuery = useQuery({
+    queryKey: ipGroupKeys.list({ page_size: 100 }),
+    queryFn: () => ipGroupsApi.list({ page_size: 100 }),
+  })
+
+  const ipGroups: IpGroupResponse[] = useMemo(
+    () => ipGroupsQuery.data?.items ?? [],
+    [ipGroupsQuery.data],
+  )
+  const ipGroupById = useMemo(
+    () => new Map(ipGroups.map((g) => [g.id, g])),
+    [ipGroups],
+  )
+  /** Groups the server accepts as a route gate: enabled with ranges. */
+  const gateableGroups = useMemo(
+    () => ipGroups.filter((g) => g.enabled && g.ip_ranges.length > 0),
+    [ipGroups],
+  )
 
   const pools = useMemo(
     () =>
@@ -385,11 +452,12 @@ export function OriginPage() {
       setNodeError(t('pages.origin.errors.nameRequired'))
       return
     }
-    const address = nodeForm.address.trim().replace(/^https?:\/\//, '')
-    if (!address || address.length > 255) {
-      setNodeError(t('pages.origin.errors.addressRequired'))
+    const parsed = parseOriginAddress(nodeForm.address)
+    if ('error' in parsed) {
+      setNodeError(t(`pages.origin.${parsed.error}`))
       return
     }
+    const address = parsed.address
     const weight = Number(nodeForm.weight)
     if (!Number.isInteger(weight) || weight < 1 || weight > 10_000) {
       setNodeError(t('pages.origin.errors.weightInvalid'))
@@ -470,6 +538,7 @@ export function OriginPage() {
       path: route.path,
       priority: route.priority === null ? '' : String(route.priority),
       poolId: route.pool_id,
+      ipGroupId: route.ip_group_id ?? '',
       enabled: route.enabled,
     })
     setRouteError(null)
@@ -537,6 +606,7 @@ export function OriginPage() {
           priority: priority ?? 0,
           enabled: routeForm.enabled,
           pool_id: routeForm.poolId,
+          ip_group_id: routeForm.ipGroupId === '' ? null : routeForm.ipGroupId,
         },
       })
       return
@@ -550,6 +620,7 @@ export function OriginPage() {
         priority,
         enabled: routeForm.enabled,
         pool_id: routeForm.poolId,
+        ip_group_id: routeForm.ipGroupId === '' ? null : routeForm.ipGroupId,
       },
     })
   }
@@ -605,6 +676,21 @@ export function OriginPage() {
           {r.priority ?? t('pages.origin.auto')}
         </span>
       ),
+    },
+    {
+      key: 'ip_group',
+      header: t('pages.origin.ipGroup'),
+      accessor: (r) => (r.ip_group_id ? ipGroupById.get(r.ip_group_id)?.name ?? '' : ''),
+      cell: (r) => {
+        if (!r.ip_group_id) {
+          return <span className="text-xs text-fg-subtle">—</span>
+        }
+        const group = ipGroupById.get(r.ip_group_id)
+        if (!group) {
+          return <Badge tone="warning">{t('pages.origin.ipGroupMissing')}</Badge>
+        }
+        return <Badge tone="brand">{group.name}</Badge>
+      },
     },
     {
       key: 'pool',
@@ -1100,7 +1186,7 @@ export function OriginPage() {
           <Input
             label={t('pages.origin.nodeAddress')}
             value={nodeForm.address}
-            placeholder="10.0.0.1:8080"
+            placeholder="http://10.0.0.1:8080"
             hint={t('pages.origin.nodeAddressHint')}
             prefixIcon={<Globe weight="duotone" />}
             className="pw-mono"
@@ -1223,6 +1309,25 @@ export function OriginPage() {
               onChange={(e) => setRouteForm((f) => ({ ...f, poolId: e.target.value }))}
             />
           </div>
+          <Select
+            label={t('pages.origin.ipGroup')}
+            value={routeForm.ipGroupId}
+            options={[
+              { value: '', label: t('pages.origin.ipGroupNone') },
+              ...gateableGroups.map((g) => ({ value: g.id, label: g.name })),
+              ...(editingRoute?.ip_group_id &&
+              !gateableGroups.some((g) => g.id === editingRoute.ip_group_id)
+                ? [
+                    {
+                      value: editingRoute.ip_group_id,
+                      label: `${ipGroupById.get(editingRoute.ip_group_id)?.name ?? editingRoute.ip_group_id} (${t('pages.origin.ipGroupUnusable')})`,
+                    },
+                  ]
+                : []),
+            ]}
+            hint={t('pages.origin.ipGroupHint')}
+            onChange={(e) => setRouteForm((f) => ({ ...f, ipGroupId: e.target.value }))}
+          />
           <Switch
             checked={routeForm.enabled}
             onCheckedChange={(enabled) => setRouteForm((f) => ({ ...f, enabled }))}

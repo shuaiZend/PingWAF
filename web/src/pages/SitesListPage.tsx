@@ -6,11 +6,14 @@ import {
   Plus,
   Globe,
   MagnifyingGlass,
+  Pause,
   PencilSimple,
+  Play,
   Trash,
 } from '@phosphor-icons/react'
 import { PageHeader } from '@/components/PageHeader'
 import { Card, CardBody } from '@/components/ui/Card'
+import { Badge, type BadgeTone } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { Switch } from '@/components/ui/Switch'
@@ -25,13 +28,12 @@ import { sitesApi, siteKeys } from '@/api/sites'
 import { analyticsApi, analyticsKeys } from '@/api/analytics'
 import { useCanWrite, useDebouncedValue } from '@/hooks'
 import { formatCompactNumber, formatDateTime, formatNumber } from '@/lib/format'
-import { cn } from '@/lib/utils'
 import type { CreateSiteRequest, Site, SiteStatus, UpdateSiteRequest } from '@/api/types'
 
-const STATUS_DOT: Record<SiteStatus, string> = {
-  active: 'bg-success',
-  paused: 'bg-warning',
-  pending: 'bg-fg-subtle',
+const STATUS_TONE: Record<SiteStatus, BadgeTone> = {
+  active: 'success',
+  paused: 'warning',
+  pending: 'neutral',
 }
 
 interface SiteFormState {
@@ -65,6 +67,7 @@ export function SitesListPage() {
   const [form, setForm] = useState<SiteFormState>(emptyForm)
   const [formError, setFormError] = useState<string | null>(null)
   const [pendingDelete, setPendingDelete] = useState<Site | null>(null)
+  const [pendingToggle, setPendingToggle] = useState<Site | null>(null)
 
   const sitesQuery = useQuery({
     queryKey: siteKeys.list({ search: debouncedQuery || undefined }),
@@ -114,7 +117,7 @@ export function SitesListPage() {
     },
   })
 
-  /** The status column is a one-click activate / pause toggle. */
+  /** Pausing takes a site off the air, so it always goes through a confirm. */
   const toggleStatus = useMutation({
     mutationFn: ({ site, status }: { site: Site; status: SiteStatus }) =>
       sitesApi.update(site.id, { status }),
@@ -123,6 +126,7 @@ export function SitesListPage() {
         site.status === 'active' ? t('pages.sites.activated') : t('pages.sites.deactivated'),
         site.domain,
       )
+      setPendingToggle(null)
       invalidate()
     },
   })
@@ -222,30 +226,12 @@ export function SitesListPage() {
       key: 'status',
       header: t('common.status'),
       accessor: (r) => (r.status === 'active' ? 1 : 0),
-      width: '140px',
-      cell: (r) => {
-        const active = r.status === 'active'
-        return (
-          <Button
-            size="sm"
-            variant={active ? 'secondary' : 'primary'}
-            loading={toggleStatus.isPending && toggleStatus.variables?.site.id === r.id}
-            disabled={!canWrite || toggleStatus.isPending}
-            onClick={(e) => {
-              e.stopPropagation()
-              toggleStatus.mutate({ site: r, status: active ? 'paused' : 'active' })
-            }}
-          >
-            <span
-              className={cn(
-                'h-1.5 w-1.5 rounded-full',
-                STATUS_DOT[r.status as SiteStatus] ?? 'bg-fg-subtle',
-              )}
-            />
-            {active ? t('pages.sites.deactivate') : t('pages.sites.activate')}
-          </Button>
-        )
-      },
+      width: '120px',
+      cell: (r) => (
+        <Badge tone={STATUS_TONE[r.status as SiteStatus] ?? 'neutral'} dot>
+          {t(`status.${r.status}`, r.status)}
+        </Badge>
+      ),
     },
     {
       key: 'requests',
@@ -291,6 +277,23 @@ export function SitesListPage() {
       width: '1%',
       cell: (r) => (
         <div className="flex items-center justify-end gap-1" onClick={(e) => e.stopPropagation()}>
+          <Button
+            size="icon"
+            variant="ghost"
+            aria-label={
+              r.status === 'active' ? t('pages.sites.deactivate') : t('pages.sites.activate')
+            }
+            disabled={!canWrite || toggleStatus.isPending}
+            loading={toggleStatus.isPending && toggleStatus.variables?.site.id === r.id}
+            onClick={() => setPendingToggle(r)}
+            icon={
+              r.status === 'active' ? (
+                <Pause weight="duotone" className="h-4 w-4" />
+              ) : (
+                <Play weight="duotone" className="h-4 w-4" />
+              )
+            }
+          />
           <Button
             size="icon"
             variant="ghost"
@@ -446,7 +449,7 @@ export function SitesListPage() {
               <Input
                 label={t('pages.sites.upstream')}
                 value={form.upstreamAddress}
-                placeholder="origin.example.com:443"
+                placeholder="https://origin.example.com:443"
                 hint={t('pages.sites.upstreamHint')}
                 onChange={(e) => setForm((f) => ({ ...f, upstreamAddress: e.target.value }))}
                 required
@@ -471,6 +474,44 @@ export function SitesListPage() {
           )}
         </div>
       </Dialog>
+
+      {/* Pause / resume confirmation */}
+      <ConfirmDialog
+        open={pendingToggle !== null}
+        onClose={() => setPendingToggle(null)}
+        onConfirm={() =>
+          pendingToggle &&
+          toggleStatus.mutate({
+            site: pendingToggle,
+            status: pendingToggle.status === 'active' ? 'paused' : 'active',
+          })
+        }
+        title={
+          pendingToggle?.status === 'active'
+            ? t('pages.sites.pauseTitle')
+            : t('pages.sites.resumeTitle')
+        }
+        description={
+          pendingToggle?.status === 'active'
+            ? t('pages.sites.pauseDescription')
+            : t('pages.sites.resumeDescription')
+        }
+        confirmLabel={
+          pendingToggle?.status === 'active'
+            ? t('pages.sites.deactivate')
+            : t('pages.sites.activate')
+        }
+        tone={pendingToggle?.status === 'active' ? 'danger' : 'primary'}
+        loading={toggleStatus.isPending}
+      >
+        {pendingToggle && (
+          <div className="rounded-md border border-line bg-recessed px-3 py-2">
+            <p className="pw-mono text-[13px] font-medium text-fg-strong">
+              {pendingToggle.domain}
+            </p>
+          </div>
+        )}
+      </ConfirmDialog>
 
       {/* Delete confirmation */}
       <ConfirmDialog

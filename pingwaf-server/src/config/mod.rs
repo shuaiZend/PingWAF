@@ -41,6 +41,8 @@ const DEFAULT_DB_MIN_CONNECTIONS: u32 = 1;
 const DEFAULT_LOG_BATCH_SIZE: usize = 500;
 /// Days of edge-metric samples kept before the hourly sweep prunes them.
 const DEFAULT_METRIC_RETENTION_DAYS: i64 = 7;
+/// Name authenticators show when a passkey is created.
+const DEFAULT_PASSKEY_RP_NAME: &str = "PingWAF";
 
 fn default_db_url() -> String {
     DEFAULT_DB_URL.to_string()
@@ -92,6 +94,10 @@ fn default_log_batch_size() -> usize {
 
 fn default_metric_retention_days() -> i64 {
     DEFAULT_METRIC_RETENTION_DAYS
+}
+
+fn default_passkey_rp_name() -> String {
+    DEFAULT_PASSKEY_RP_NAME.to_string()
 }
 
 fn default_true() -> bool {
@@ -154,6 +160,26 @@ pub struct ServerConfig {
     /// Whether the embedded dashboard SPA is served for non-API routes.
     #[serde(default = "default_true")]
     pub serve_frontend: bool,
+    /// Whether passkey (WebAuthn) registration and login are offered.
+    #[serde(default = "default_true")]
+    pub passkey_enabled: bool,
+    /// Relying party name shown by the authenticator when a passkey is created.
+    #[serde(default = "default_passkey_rp_name")]
+    pub passkey_rp_name: String,
+    /// Relying party ID, i.e. the effective domain the passkey is scoped to.
+    /// Derived from the request `Host` when unset, which is what a deployment
+    /// that is reached under a single hostname wants.
+    #[serde(default)]
+    pub passkey_rp_id: Option<String>,
+    /// Origin the dashboard is served from, e.g. `https://waf.example.com`.
+    /// Derived from the request when unset.
+    #[serde(default)]
+    pub passkey_origin: Option<String>,
+    /// Whether `X-Forwarded-Proto` may be believed when deriving the origin of a
+    /// request. Off by default: with it on, any client that can reach the
+    /// control plane directly could claim an `https` origin it did not use.
+    #[serde(default)]
+    pub passkey_trust_forwarded_proto: bool,
 }
 
 impl Default for ServerConfig {
@@ -176,6 +202,11 @@ impl Default for ServerConfig {
             elasticsearch: None,
             cors_origins: Vec::new(),
             serve_frontend: true,
+            passkey_enabled: true,
+            passkey_rp_name: DEFAULT_PASSKEY_RP_NAME.to_string(),
+            passkey_rp_id: None,
+            passkey_origin: None,
+            passkey_trust_forwarded_proto: false,
         }
     }
 }
@@ -246,6 +277,26 @@ impl ServerConfig {
         }
         if let Ok(value) = std::env::var("PINGWAF_SERVE_FRONTEND") {
             config.serve_frontend = parse_bool(&value);
+        }
+        if let Ok(value) = std::env::var("PINGWAF_PASSKEY_ENABLED") {
+            config.passkey_enabled = parse_bool(&value);
+        }
+        if let Ok(value) = std::env::var("PINGWAF_PASSKEY_RP_NAME") {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                config.passkey_rp_name = trimmed.to_string();
+            }
+        }
+        if let Ok(value) = std::env::var("PINGWAF_PASSKEY_RP_ID") {
+            config.passkey_rp_id = non_empty_env(&value);
+        }
+        if let Ok(value) = std::env::var("PINGWAF_PASSKEY_ORIGIN") {
+            config.passkey_origin = non_empty_env(&value);
+        }
+        if let Ok(value) =
+            std::env::var("PINGWAF_PASSKEY_TRUST_FORWARDED_PROTO")
+        {
+            config.passkey_trust_forwarded_proto = parse_bool(&value);
         }
         apply_es_env(&mut config);
         config
@@ -324,6 +375,17 @@ fn parse_bool(value: &str) -> bool {
         value.trim().to_ascii_lowercase().as_str(),
         "1" | "true" | "yes" | "on"
     )
+}
+
+/// Environment values that are meaningful only when non-empty; an empty
+/// variable reads as "unset" rather than as an empty override.
+fn non_empty_env(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 /// Layers `PINGWAF_ES_*` environment variables onto the Elasticsearch config.

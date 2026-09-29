@@ -405,19 +405,21 @@ pub struct SslConfig {
     /// check.
     #[serde(default)]
     pub mtls_organization: String,
-    /// Whether a client certificate is required; defaults to
-    /// `mtls_enabled` for caches written before the field existed. Read this
-    /// instead of the raw flag.
+    /// Whether a client certificate is required. `None` means the cache
+    /// predates the flag, when turning mTLS on always required one.
     #[serde(default)]
-    pub mtls_require_client_cert: bool,
+    pub mtls_require_client_cert: Option<bool>,
 }
 
 impl SslConfig {
-    /// Whether clients must present a certificate. Caches written before the
-    /// dedicated flag existed only stored `mtls_enabled`, which always meant
-    /// enforcement.
+    /// Whether clients must present a certificate.
+    ///
+    /// A site may instead only *trust* client certificates (optional mTLS),
+    /// in which case a request without one still passes; caches written
+    /// before the dedicated flag existed only stored `mtls_enabled`, which
+    /// always meant enforcement.
     pub fn mtls_requires_cert(&self) -> bool {
-        self.mtls_require_client_cert || self.mtls_enabled
+        self.mtls_require_client_cert.unwrap_or(self.mtls_enabled)
     }
 }
 
@@ -1304,7 +1306,7 @@ impl RuleCache {
                 .map(|f| f.to_lowercase())
                 .collect(),
             mtls_organization: s.mtls_organization.clone(),
-            mtls_require_client_cert: s.mtls_require_client_cert,
+            mtls_require_client_cert: Some(s.mtls_require_client_cert),
         }
     }
 
@@ -1573,6 +1575,31 @@ mod tests {
         assert_eq!(site_status_str(0), site_status::ACTIVE);
         assert_eq!(site_status_str(2), site_status::PENDING);
         assert_eq!(site_status_str(7), site_status::ACTIVE);
+    }
+
+    #[test]
+    fn optional_mtls_does_not_require_a_client_certificate() {
+        let site = proto::Site {
+            id: "site-1".to_string(),
+            name: "Example".to_string(),
+            domain: "example.com".to_string(),
+            alternate_domains: Vec::new(),
+            status: 0,
+            rules: Some(proto::RuleBundle {
+                ssl: Some(proto::SslConfig {
+                    mtls_enabled: true,
+                    mtls_client_ca: "PEM".to_string(),
+                    mtls_require_client_cert: false,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+        };
+        let rules =
+            RuleCache::convert_bundle(site.rules.as_ref().expect("bundle"));
+        let ssl = rules.ssl_config.as_ref().expect("ssl config");
+        assert!(ssl.mtls_enabled);
+        assert!(!ssl.mtls_requires_cert());
     }
 
     #[test]

@@ -22,6 +22,8 @@ pub mod host_samples;
 pub mod ip_access_rules;
 pub mod ip_group_sites;
 pub mod ip_groups;
+pub mod mtls;
+pub mod passkeys;
 pub mod rate_limit_stats;
 pub mod rewrite_rules;
 pub mod rules;
@@ -33,6 +35,13 @@ pub use agent_metrics::agent_metrics as agent_metric;
 pub use agents::{agent_status, agents as agent};
 pub use certificates::site_certificates;
 pub use host_samples::host_samples as host_sample;
+pub use mtls::{
+    ca_source, client_cert_status, mtls_cas as mtls_ca,
+    mtls_client_certificates as mtls_client_certificate,
+};
+pub use passkeys::{
+    passkey_credentials as passkey_credential, passkey_states as passkey_state,
+};
 pub use rules::{
     action, cache_rules, characteristic, mode, rate_limit_rules, rule_groups,
     rules as rule,

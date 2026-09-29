@@ -10,6 +10,7 @@ export * from './types'
 export * from './errors'
 
 export * from './auth'
+export * from './passkeys'
 export * from './sites'
 export * from './rules'
 export * from './rateLimiting'
