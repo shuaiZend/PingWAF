@@ -72,6 +72,7 @@ fn server_config_from_opts(opts: &ServerOpts) -> ServerConfig {
     config.jwt_secret = opts.jwt_secret.clone();
     config.default_admin_email = opts.admin_email.clone();
     config.default_admin_password = opts.admin_password.clone();
+    config.serve_frontend = opts.serve_frontend;
     config
 }
 
@@ -84,6 +85,7 @@ fn server_config_from_all_in_one(opts: &AllInOneOpts) -> ServerConfig {
     config.jwt_secret = opts.jwt_secret.clone();
     config.default_admin_email = opts.admin_email.clone();
     config.default_admin_password = opts.admin_password.clone();
+    config.serve_frontend = opts.serve_frontend;
     config
 }
 

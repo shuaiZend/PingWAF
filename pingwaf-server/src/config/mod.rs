@@ -25,7 +25,7 @@ pub const DEFAULT_JWT_SECRET: &str = "change-me-in-production";
 /// Default administrator seeded on an empty database.
 pub const DEFAULT_ADMIN_EMAIL: &str = "admin@pingwaf.local";
 /// Default administrator password, only used to bootstrap the first account.
-pub const DEFAULT_ADMIN_PASSWORD: &str = "pingwaf-admin";
+pub const DEFAULT_ADMIN_PASSWORD: &str = "pingwaf123";
 
 /// How long an access token stays valid, in hours.
 const DEFAULT_JWT_EXPIRATION_HOURS: i64 = 12;
@@ -142,6 +142,9 @@ pub struct ServerConfig {
     /// Origins allowed by CORS; `*` keeps the permissive development default.
     #[serde(default)]
     pub cors_origins: Vec<String>,
+    /// Whether the embedded dashboard SPA is served for non-API routes.
+    #[serde(default = "default_true")]
+    pub serve_frontend: bool,
 }
 
 impl Default for ServerConfig {
@@ -162,6 +165,7 @@ impl Default for ServerConfig {
             log_batch_size: DEFAULT_LOG_BATCH_SIZE,
             elasticsearch: None,
             cors_origins: Vec::new(),
+            serve_frontend: true,
         }
     }
 }
@@ -183,7 +187,9 @@ impl ServerConfig {
                 config.db_url = value;
             }
         }
-        if let Ok(value) = std::env::var("PINGWAF_HTTP_ADDR") {
+        if let Ok(value) = std::env::var("PINGWAF_ADMIN_ADDR")
+            .or_else(|_| std::env::var("PINGWAF_HTTP_ADDR"))
+        {
             config.http_addr = value;
         }
         if let Ok(value) = std::env::var("PINGWAF_GRPC_ADDR") {
@@ -222,6 +228,9 @@ impl ServerConfig {
                 .map(|origin| origin.trim().to_string())
                 .filter(|origin| !origin.is_empty())
                 .collect();
+        }
+        if let Ok(value) = std::env::var("PINGWAF_SERVE_FRONTEND") {
+            config.serve_frontend = parse_bool(&value);
         }
         apply_es_env(&mut config);
         config

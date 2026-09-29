@@ -73,13 +73,16 @@ pub fn build_router(state: AppState) -> Router {
         .route("/version", get(version))
         .fallback(api_not_found);
 
-    Router::new()
+    let mut root = Router::new()
         .nest(API_PREFIX, api)
         // Load balancers and container probes usually hit the root path.
-        .route("/healthz", get(health))
-        // Serve the embedded React frontend for all non-API routes (SPA)
-        .fallback(serve_frontend)
-        .layer(build_cors(&config.cors_origins))
+        .route("/healthz", get(health));
+    // Serve the embedded React frontend for all non-API routes (SPA)
+    if config.serve_frontend {
+        root = root.fallback(serve_frontend);
+    }
+
+    root.layer(build_cors(&config.cors_origins))
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http().make_span_with(
             |request: &axum::http::Request<_>| {
