@@ -64,7 +64,7 @@ from which it inherits the proxy data plane.
 | Version | Status | Receives security fixes |
 | --- | --- | --- |
 | `main` | Active development | Yes — but expect breaking changes |
-| `0.17.x` (current release line, 0.17.0) | Supported | **Yes** |
+| `0.17.x` (current release line, 0.17.1) | Supported | **Yes** |
 | `0.16.x` | Security fixes only | No |
 | `0.15.x` | Security fixes only | No |
 | `0.14.x` | Security fixes only | No |
