@@ -43,6 +43,9 @@ const DEFAULT_LOG_BATCH_SIZE: usize = 500;
 const DEFAULT_METRIC_RETENTION_DAYS: i64 = 7;
 /// Name authenticators show when a passkey is created.
 const DEFAULT_PASSKEY_RP_NAME: &str = "PingWAF";
+/// Subject common name of the self-signed certificate the control plane
+/// generates when no certificate has been uploaded yet.
+pub const DEFAULT_TLS_COMMON_NAME: &str = "PingWAF Control Plane";
 
 fn default_db_url() -> String {
     DEFAULT_DB_URL.to_string()
@@ -102,6 +105,16 @@ fn default_passkey_rp_name() -> String {
 
 fn default_true() -> bool {
     true
+}
+
+/// Subject names a generated self-signed certificate is valid for when the
+/// operator did not name any.
+fn default_tls_sans() -> Vec<String> {
+    vec![
+        "localhost".to_string(),
+        "127.0.0.1".to_string(),
+        "::1".to_string(),
+    ]
 }
 
 /// Runtime configuration of the PingWAF control plane.
@@ -180,6 +193,22 @@ pub struct ServerConfig {
     /// control plane directly could claim an `https` origin it did not use.
     #[serde(default)]
     pub passkey_trust_forwarded_proto: bool,
+    /// Whether the REST API and the dashboard are served over TLS.
+    ///
+    /// On by default: browsers only offer passkeys on a secure origin, and a
+    /// self-signed certificate is generated on first boot when nothing has been
+    /// uploaded yet. Turn it off when a reverse proxy in front of the control
+    /// plane terminates TLS (and configure `passkey_origin`, since the control
+    /// plane then only sees plain HTTP).
+    #[serde(default = "default_true")]
+    pub tls_enabled: bool,
+    /// Subject alternative names of the generated self-signed certificate.
+    ///
+    /// DNS names and IP addresses are both accepted; the host the dashboard is
+    /// reached under has to appear here (or in an uploaded certificate) for the
+    /// browser to accept the connection without a warning.
+    #[serde(default = "default_tls_sans")]
+    pub tls_sans: Vec<String>,
 }
 
 impl Default for ServerConfig {
@@ -207,6 +236,8 @@ impl Default for ServerConfig {
             passkey_rp_id: None,
             passkey_origin: None,
             passkey_trust_forwarded_proto: false,
+            tls_enabled: true,
+            tls_sans: default_tls_sans(),
         }
     }
 }
@@ -298,6 +329,19 @@ impl ServerConfig {
         {
             config.passkey_trust_forwarded_proto = parse_bool(&value);
         }
+        if let Ok(value) = std::env::var("PINGWAF_TLS_ENABLED") {
+            config.tls_enabled = parse_bool(&value);
+        }
+        if let Ok(value) = std::env::var("PINGWAF_TLS_SANS") {
+            let sans: Vec<String> = value
+                .split(',')
+                .map(|san| san.trim().to_string())
+                .filter(|san| !san.is_empty())
+                .collect();
+            if !sans.is_empty() {
+                config.tls_sans = sans;
+            }
+        }
         apply_es_env(&mut config);
         config
     }
@@ -363,6 +407,31 @@ impl ServerConfig {
         self.jwt_secret == DEFAULT_JWT_SECRET
     }
 
+    /// Subject names a generated self-signed certificate should carry.
+    ///
+    /// The configured list is widened with the machine's hostname and the
+    /// configured passkey relying party, so a first boot produces a certificate
+    /// the dashboard can be reached under in the common deployments.
+    pub fn effective_tls_sans(&self) -> Vec<String> {
+        // Trim and drop blanks: a half-written entry would otherwise reach the
+        // certificate as an empty subject alternative name.
+        let mut sans: Vec<String> = self
+            .tls_sans
+            .iter()
+            .map(|san| san.trim().to_string())
+            .filter(|san| !san.is_empty())
+            .collect();
+        if let Ok(hostname) = std::env::var("HOSTNAME") {
+            push_unique(&mut sans, hostname.trim());
+        }
+        if let Some(rp_id) = self.passkey_rp_id.as_deref() {
+            push_unique(&mut sans, rp_id.trim());
+        }
+        push_unique(&mut sans, "localhost");
+        push_unique(&mut sans, "127.0.0.1");
+        sans
+    }
+
     /// Redacted view of the DSN, safe to log.
     pub fn db_url_redacted(&self) -> String {
         redact_url(&self.db_url)
@@ -386,6 +455,14 @@ fn non_empty_env(value: &str) -> Option<String> {
     } else {
         Some(trimmed.to_string())
     }
+}
+
+/// Appends a subject name unless it is blank or already present.
+fn push_unique(sans: &mut Vec<String>, candidate: &str) {
+    if candidate.is_empty() || sans.iter().any(|san| san == candidate) {
+        return;
+    }
+    sans.push(candidate.to_string());
 }
 
 /// Layers `PINGWAF_ES_*` environment variables onto the Elasticsearch config.
@@ -506,5 +583,23 @@ mod tests {
         assert_eq!(config.metric_retention_days, DEFAULT_METRIC_RETENTION_DAYS);
         assert!(config.allow_registration);
         assert_eq!(config.heartbeat_interval_seconds, 15);
+        // TLS is on by default so a fresh deployment can use passkeys.
+        assert!(config.tls_enabled);
+        assert!(config.tls_sans.contains(&"localhost".to_string()));
+    }
+
+    #[test]
+    fn effective_sans_are_unique_and_include_the_relying_party() {
+        let config = ServerConfig {
+            tls_sans: vec!["waf.example.com".to_string(), "  ".to_string()],
+            passkey_rp_id: Some("waf.example.com".to_string()),
+            ..Default::default()
+        };
+        let sans = config.effective_tls_sans();
+        assert!(sans.contains(&"waf.example.com".to_string()));
+        assert!(sans.contains(&"localhost".to_string()));
+        assert!(!sans.iter().any(|san| san.trim().is_empty()));
+        let unique: std::collections::BTreeSet<&String> = sans.iter().collect();
+        assert_eq!(unique.len(), sans.len(), "subject names must be unique");
     }
 }

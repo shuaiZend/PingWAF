@@ -16,6 +16,7 @@ pub mod bot_protection;
 pub mod certificate_events;
 pub mod certificates;
 pub mod challenge_settings;
+pub mod control_plane_tls;
 pub mod error_pages;
 pub mod geo_rules;
 pub mod host_samples;
@@ -34,6 +35,10 @@ pub mod users;
 pub use agent_metrics::agent_metrics as agent_metric;
 pub use agents::{agent_status, agents as agent};
 pub use certificates::site_certificates;
+pub use control_plane_tls::{
+    control_plane_certificates as control_plane_certificate,
+    source as tls_source,
+};
 pub use host_samples::host_samples as host_sample;
 pub use mtls::{
     ca_source, client_cert_status, mtls_cas as mtls_ca,

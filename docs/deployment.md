@@ -27,11 +27,14 @@ export POSTGRES_PASSWORD=$(openssl rand -hex 16)
 # Start all services
 docker compose up -d
 
-# Verify
+# Verify (the health endpoint answers on HTTP and HTTPS alike)
 curl http://localhost:9080/healthz
 ```
 
-Dashboard: `http://localhost:9080`  
+Dashboard: `https://localhost:9080` — served over TLS with a self-signed
+certificate generated on first boot, so the browser warns until it is trusted
+or replaced (**Settings → Control plane HTTPS**). Set `TLS_SANS` to the hostname
+you use if it is not `localhost`.  
 Default credentials: `admin@pingwaf.local` / value of `$ADMIN_PASSWORD`
 
 ### Environment Variables (docker-compose)
@@ -55,7 +58,7 @@ Default credentials: `admin@pingwaf.local` / value of `$ADMIN_PASSWORD`
 curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh | bash
 
 # Or specify version and mode
-./install.sh --version 0.15.0 --mode all-in-one
+./install.sh --version 0.16.0 --mode all-in-one
 ```
 
 > Prebuilt release assets are published for **Linux** (amd64/arm64) only; on
@@ -89,13 +92,16 @@ Environment=PINGWAF_JWT_SECRET=generate-a-random-32-char-secret
 Environment=PINGWAF_ADMIN_EMAIL=admin@yourdomain.com
 Environment=PINGWAF_ADMIN_PASSWORD=strong-password-here
 Environment=PINGWAF_ALLOW_REGISTRATION=false
+# Serve the dashboard over HTTPS (default true). Add the hostname you use so the
+# generated self-signed certificate covers it:
+Environment=PINGWAF_TLS_ENABLED=true
+Environment=PINGWAF_TLS_SANS=waf.example.com
 ```
 
 > **Note:** the `/etc/pingwaf/pingwaf.toml` file that `install.sh` writes is a
-> reference example only — v0.15.0 does not load it (the systemd unit sets
-> `PINGWAF_CONFIG`, but the binary never reads that variable), so settings
-> placed there have no effect. Configure through environment variables as
-> above; agent options (`PINGWAF_SERVER_URL`, `PINGWAF_CACHE_DIR`, …) are
+> reference example only — the binary takes no configuration file at all, so
+> settings placed there have no effect. Configure through environment variables
+> as above; agent options (`PINGWAF_SERVER_URL`, `PINGWAF_CACHE_DIR`, …) are
 > listed in the [Configuration Reference](#configuration-reference).
 
 ### 4. Start the Service
@@ -116,6 +122,8 @@ sudo journalctl -u pingwaf -f
 |-----|------|---------|-------------|
 | `db_url` | string | `postgres://pingwaf:pingwaf@localhost:5432/pingwaf` | PostgreSQL DSN |
 | `http_addr` | string | `0.0.0.0:9080` | REST API + dashboard address |
+| `tls_enabled` | bool | `true` | Serve the REST API + dashboard over HTTPS; cleartext requests get a `308` redirect, health probes are exempt. Turn off behind a TLS-terminating proxy |
+| `tls_sans` | string[] | hostname, `localhost`, `127.0.0.1` | Subject alternative names of the generated self-signed certificate |
 | `grpc_addr` | string | `0.0.0.0:9090` | gRPC control plane address |
 | `jwt_secret` | string | — | JWT signing secret (≥16 chars, required) |
 | `jwt_expiration_hours` | int | `12` | Access token lifetime |
@@ -162,6 +170,8 @@ All config values can be set via environment variables with the `PINGWAF_` prefi
 | `PINGWAF_HEARTBEAT_INTERVAL` | `server.heartbeat_interval_seconds` |
 | `PINGWAF_DB_MAX_CONNECTIONS` | `server.db_max_connections` |
 | `PINGWAF_METRIC_RETENTION_DAYS` | `server.metric_retention_days` |
+| `PINGWAF_TLS_ENABLED` | `server.tls_enabled` |
+| `PINGWAF_TLS_SANS` | `server.tls_sans` (comma-separated) |
 | `PINGWAF_CORS_ORIGINS` | `server.cors_origins` (comma-separated) |
 | `PINGWAF_MODE` | CLI mode (`all-in-one`, `server`, `agent`) |
 | `PINGWAF_SERVER_URL` | `agent.server_url` |
@@ -220,7 +230,7 @@ Certificates are automatically renewed before expiry.
 Upload PEM-encoded certificate and key through the dashboard or API:
 
 ```bash
-curl -X POST http://localhost:9080/api/v1/sites/{site_id}/certificates \
+curl -k -X POST https://localhost:9080/api/v1/sites/{site_id}/certificates \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -231,13 +241,36 @@ curl -X POST http://localhost:9080/api/v1/sites/{site_id}/certificates \
   }'
 ```
 
+### Control-Plane Certificate (dashboard)
+
+The dashboard and REST API are served over HTTPS with a certificate that is
+managed from the dashboard itself — no files to edit:
+
+1. **First boot** generates a self-signed pair (EC P-256) covering the
+   configured `tls_sans` plus the machine hostname, `localhost` and `127.0.0.1`.
+2. **Settings → Control plane HTTPS** shows what is being served (subject,
+   SANs, fingerprint, expiry) and lets you download it, upload a real
+   certificate + key, or regenerate the self-signed pair.
+3. Uploads are validated first — a mismatched key or a broken chain is rejected
+   with `400` and the previous certificate keeps serving — and take effect
+   immediately, without a restart.
+
+`PINGWAF_TLS_ENABLED=false` (or `tls_enabled = false`) switches the port back
+to plain HTTP, which is the right setting behind a reverse proxy that
+terminates TLS. Passkeys require a secure origin, so with plain HTTP they are
+unavailable unless the proxy publishes an HTTPS origin and
+`PINGWAF_PASSKEY_TRUST_FORWARDED_PROTO=true` is set.
+
+The API for all of this is documented in
+[`docs/api.md` → Control-plane certificate](./api.md#control-plane-certificate).
+
 ## Firewall & Port Requirements
 
 | Port | Protocol | Purpose | Required |
 |------|----------|---------|----------|
 | 80 | TCP | HTTP traffic / ACME HTTP-01 | Yes (for proxied sites) |
 | 443 | TCP | HTTPS traffic | Yes (for proxied sites) |
-| 9080 | TCP | Admin dashboard + REST API | Yes |
+| 9080 | TCP | Admin dashboard + REST API (HTTPS) | Yes |
 | 9090 | TCP | gRPC control plane (agents) | Distributed mode |
 | 5432 | TCP | PostgreSQL | Internal only |
 

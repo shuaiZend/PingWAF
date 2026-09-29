@@ -3012,7 +3012,7 @@ ml_threshold = 0.75
     fn cap_headers_keeps_credentials_verbatim() {
         // Cookies and authorization values must survive: incident response
         // replays the captured request, so the log keeps them.
-        let headers = vec![
+        let headers = [
             ("Authorization".to_string(), "Bearer tok".to_string()),
             ("cookie".to_string(), "sid=secret".to_string()),
             ("Proxy-Authorization".to_string(), "Basic xyz".to_string()),

@@ -62,7 +62,7 @@ docker compose up -d
 
 Abre el panel:
 
-- **URL:** http://localhost:9080
+- **URL:** https://localhost:9080 (certificado autofirmado; súbelo o reemplázalo en Ajustes → HTTPS del plano de control)
 - **Correo:** `admin@pingwaf.local`
 - **Contraseña:** `pingwaf123`
 
@@ -93,7 +93,7 @@ cargo build --release --bin pingwaf --features full
 
 | Puerto | Propósito |
 | --- | --- |
-| `9080` | API REST + panel integrado (salud: `GET /healthz`) |
+| `9080` | API REST + panel integrado por HTTPS (salud: `GET /healthz`, también en HTTP) |
 | `9090` | Plano de control gRPC (los agentes se conectan aquí) |
 | `80` / `443` | Tráfico proxificado (se vinculan al crear el primer sitio) |
 
@@ -106,7 +106,7 @@ cargo build --release --bin pingwaf --features full
 | [docs/quick-start.md](./docs/quick-start.md) | De cero a tu primer sitio protegido |
 | [docs/deployment.md](./docs/deployment.md) | Docker, binario + systemd, topologías distribuidas |
 | [docs/user-guide.md](./docs/user-guide.md) | Guía del panel, sitios, reglas y políticas |
-| [docs/api.md](./docs/api.md) | Referencia de la API REST (`http://<host>:9080/api/v1`) |
+| [docs/api.md](./docs/api.md) | Referencia de la API REST (`https://<host>:9080/api/v1`) |
 | [docs/README.md](./docs/README.md) | Índice completo de la documentación |
 | [CONTRIBUTING.md](./CONTRIBUTING.md) | Cómo contribuir |
 | [SECURITY.md](./SECURITY.md) | Política de divulgación de vulnerabilidades |

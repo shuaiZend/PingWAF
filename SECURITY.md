@@ -64,7 +64,8 @@ from which it inherits the proxy data plane.
 | Version | Status | Receives security fixes |
 | --- | --- | --- |
 | `main` | Active development | Yes — but expect breaking changes |
-| `0.15.x` (current release line, 0.15.0) | Supported | **Yes** |
+| `0.16.x` (current release line, 0.16.0) | Supported | **Yes** |
+| `0.15.x` | Security fixes only | No |
 | `0.14.x` | Security fixes only | No |
 | `0.13.x` and older (pingap lineage) | Legacy | Best effort, case by case |
 
@@ -158,6 +159,9 @@ control.**
 
 - [ ] Bind the dashboard/REST API to an internal interface where possible, and
       put it behind a reverse proxy or VPN rather than exposing `0.0.0.0:9080`.
+      The port serves HTTPS by default with a self-signed certificate — upload a
+      real one (**Settings → Control plane HTTPS**) or set
+      `PINGWAF_TLS_ENABLED=false` behind a proxy that terminates TLS.
 - [ ] Allow port `9090` (gRPC control plane) only from your agent hosts — it is
       not needed by end users.
 - [ ] Never expose PostgreSQL (`5432`) publicly; keep it on a private network or

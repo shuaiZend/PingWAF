@@ -14,7 +14,7 @@ centrally-controlled Web Application Firewall built on
 | [quick-start.md](./quick-start.md) | From zero to your first protected site: prerequisites, install, first run |
 | [deployment.md](./deployment.md) | Docker Compose, binary + systemd, and distributed (server + agents) topologies |
 | [user-guide.md](./user-guide.md) | Dashboard walkthrough — sites, rules, policies, IP access, rate limiting |
-| [api.md](./api.md) | REST API reference (base URL `http://<host>:9080/api/v1`) |
+| [api.md](./api.md) | REST API reference (base URL `https://<host>:9080/api/v1`) |
 | [profiling.md](./profiling.md) | Built-in profiling: `go tool pprof` captures, SVG flame graphs, memory snapshots |
 
 ## 🧭 Project & community
@@ -33,7 +33,7 @@ Client ──HTTP/HTTPS──► Data-plane Agent (:80/:443)
                               │  gRPC bidi streams (rules / logs / metrics)
                               ▼
                     Control-plane Server
-                    ├─ REST API + Dashboard (:9080)
+                    ├─ REST API + Dashboard (:9080, HTTPS)
                     ├─ gRPC ControlPlane    (:9090)
                     ├─ PostgreSQL (state)
                     └─ Elasticsearch (logs, optional)

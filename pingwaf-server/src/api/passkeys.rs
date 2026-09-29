@@ -39,6 +39,7 @@ use sea_orm::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::api::common::host_without_port;
 use crate::api::error::ApiError;
 use crate::api::state::AppState;
 use crate::auth::middleware::AuthUser;
@@ -341,7 +342,7 @@ fn relying_party(
                         .to_string(),
                 )
             })?;
-            let domain = strip_port(host);
+            let domain = host_without_port(host);
             if domain.parse::<std::net::IpAddr>().is_ok() {
                 return Err(ApiError::BadRequest(format!(
                     "passkeys need a hostname, but the console was reached at \
@@ -383,37 +384,26 @@ fn relying_party(
 /// The scheme the browser used, as far as the control plane can tell.
 ///
 /// Only the explicit opt-in flag makes `X-Forwarded-Proto` believable; without
-/// it a direct caller could claim an origin it never used.
+/// it a direct caller could claim an origin it never used. When the flag is off
+/// the answer comes from how this process is deployed: a listener that
+/// terminates TLS only serves handlers over HTTPS (cleartext requests are
+/// redirected before they get here), so a request that reaches a handler on it
+/// arrived over TLS.
 fn request_scheme<'a>(state: &AppState, headers: &'a HeaderMap) -> &'a str {
-    if !state.config.passkey_trust_forwarded_proto {
-        return "http";
+    if state.config.passkey_trust_forwarded_proto {
+        if let Some(value @ ("http" | "https")) = headers
+            .get("x-forwarded-proto")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(',').next())
+            .map(str::trim)
+        {
+            return value;
+        }
     }
-    match headers
-        .get("x-forwarded-proto")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').next())
-        .map(str::trim)
-    {
-        Some(value @ ("http" | "https")) => value,
-        _ => "http",
+    if state.control_tls.is_enabled() {
+        return "https";
     }
-}
-
-/// Drops a `:port` suffix from a `Host` header value.
-fn strip_port(host: &str) -> &str {
-    // Brackets delimit an IPv6 literal, never a port.
-    if let Some(rest) = host.strip_prefix('[') {
-        return match rest.split_once(']') {
-            Some((address, _)) => address,
-            None => rest,
-        };
-    }
-    match host.rsplit_once(':') {
-        Some((domain, port)) if port.chars().all(|c| c.is_ascii_digit()) => {
-            domain
-        },
-        _ => host,
-    }
+    "http"
 }
 
 /// Maps a library error onto the API envelope.
@@ -744,14 +734,86 @@ mod tests {
     }
 
     #[test]
+    fn the_scheme_follows_the_listener_and_the_forwarded_header() {
+        let plain = state_with(crate::config::ServerConfig::default());
+        let host = headers(&[("host", "waf.example.com:9080")]);
+        assert_eq!(request_scheme(&plain, &host), "http");
+
+        // A listener that terminates TLS serves every handler over https.
+        let mut terminated = plain.clone();
+        terminated.control_tls =
+            std::sync::Arc::new(crate::tls::ControlPlaneTls::new(true));
+        assert_eq!(request_scheme(&terminated, &host), "https");
+
+        // Behind a proxy the header decides, but only when the operator opted
+        // in; a bogus value is ignored rather than trusted.
+        let mut behind_proxy = terminated.clone();
+        behind_proxy.config =
+            std::sync::Arc::new(crate::config::ServerConfig {
+                passkey_trust_forwarded_proto: true,
+                ..Default::default()
+            });
+        assert_eq!(
+            request_scheme(
+                &behind_proxy,
+                &headers(&[("x-forwarded-proto", "https")])
+            ),
+            "https"
+        );
+        assert_eq!(
+            request_scheme(
+                &behind_proxy,
+                &headers(&[("x-forwarded-proto", "http")])
+            ),
+            "http"
+        );
+        assert_eq!(request_scheme(&behind_proxy, &host), "https");
+        assert_eq!(
+            request_scheme(
+                &behind_proxy,
+                &headers(&[("x-forwarded-proto", "ftp")])
+            ),
+            "https"
+        );
+        // A list of proxies takes the first (client-facing) entry.
+        assert_eq!(
+            request_scheme(
+                &behind_proxy,
+                &headers(&[("x-forwarded-proto", "https, http")])
+            ),
+            "https"
+        );
+
+        // Without the flag the same header must not be believed.
+        let mut untrusted = terminated.clone();
+        untrusted.config = std::sync::Arc::new(crate::config::ServerConfig {
+            tls_enabled: false,
+            passkey_trust_forwarded_proto: false,
+            ..Default::default()
+        });
+        untrusted.control_tls =
+            std::sync::Arc::new(crate::tls::ControlPlaneTls::new(false));
+        assert_eq!(
+            request_scheme(
+                &untrusted,
+                &headers(&[("x-forwarded-proto", "https")])
+            ),
+            "http"
+        );
+    }
+
+    #[test]
     fn ports_are_stripped_from_the_host_header() {
-        assert_eq!(strip_port("waf.example.com"), "waf.example.com");
-        assert_eq!(strip_port("waf.example.com:8443"), "waf.example.com");
-        assert_eq!(strip_port("localhost:5173"), "localhost");
-        assert_eq!(strip_port("[::1]:9080"), "::1");
-        assert_eq!(strip_port("[::1]"), "::1");
+        assert_eq!(host_without_port("waf.example.com"), "waf.example.com");
+        assert_eq!(
+            host_without_port("waf.example.com:8443"),
+            "waf.example.com"
+        );
+        assert_eq!(host_without_port("localhost:5173"), "localhost");
+        assert_eq!(host_without_port("[::1]:9080"), "::1");
+        assert_eq!(host_without_port("[::1]"), "::1");
         // A host that merely contains a colon but no numeric port is kept.
-        assert_eq!(strip_port("example.com:http"), "example.com:http");
+        assert_eq!(host_without_port("example.com:http"), "example.com:http");
     }
 
     #[test]

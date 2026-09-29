@@ -850,6 +850,51 @@ export interface EsTestResult {
   template_installed: boolean
 }
 
+/* ── Control-plane certificate ────────────────────────────────────── */
+
+export type TlsCertificateSource = 'self_signed' | 'uploaded'
+
+/** `api::system_tls::TlsCertificateView` — never includes the private key. */
+export interface TlsCertificateView {
+  id: string
+  source: TlsCertificateSource | string
+  subject_dn: string
+  common_name: string | null
+  sans: string[]
+  serial: string
+  fingerprint_sha256: string
+  not_before: string
+  not_after: string
+  created_at: string
+  /** Days until `not_after`, negative once the certificate has expired. */
+  expires_in_days: number
+}
+
+/** `api::system_tls::TlsStatusView` */
+export interface TlsStatusView {
+  /** Whether this process terminates TLS on the control-plane port. */
+  enabled: boolean
+  /** Whether a certificate is loaded in the running listener. */
+  has_certificate: boolean
+  certificate?: TlsCertificateView | null
+  /** Names the self-signed generator uses for this deployment. */
+  default_sans: string[]
+  max_validity_days: number
+}
+
+export interface UploadControlPlaneCertificateRequest {
+  /** PEM certificate, chain included when the issuer is not a root. */
+  cert_pem: string
+  /** PEM private key (PKCS#8, PKCS#1 or SEC1), matching the certificate. */
+  key_pem: string
+}
+
+export interface GenerateControlPlaneCertificateRequest {
+  common_name?: string
+  sans?: string[]
+  validity_days?: number
+}
+
 /* ── API keys ─────────────────────────────────────────────────────── */
 
 export type ApiKeyPermission = 'agent' | 'read' | 'write'

@@ -225,6 +225,27 @@ pub async fn load_site_write(
     load_site(db, site_id, user, true).await
 }
 
+/// Drops a `:port` suffix from a `Host` header value.
+///
+/// Used wherever the host has to become a name rather than an authority: a
+/// WebAuthn relying party id and a certificate subject alternative name both
+/// reject the port part.
+pub fn host_without_port(host: &str) -> &str {
+    // Brackets delimit an IPv6 literal, never a port.
+    if let Some(rest) = host.strip_prefix('[') {
+        return match rest.split_once(']') {
+            Some((address, _)) => address,
+            None => rest,
+        };
+    }
+    match host.rsplit_once(':') {
+        Some((domain, port)) if port.chars().all(|ch| ch.is_ascii_digit()) => {
+            domain
+        },
+        _ => host,
+    }
+}
+
 /// Restricts a site id filter to what `user` is allowed to query.
 ///
 /// Returns `None` when the caller asked for "all sites" *and* is an admin; in

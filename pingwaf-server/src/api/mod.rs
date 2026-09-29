@@ -28,10 +28,13 @@ pub mod settings;
 pub mod sites;
 pub mod ssl;
 pub mod state;
+pub mod system_tls;
 
 use crate::frontend::serve_frontend;
-use axum::extract::State;
+use crate::tls::ConnInfo;
+use axum::extract::{Request, State};
 use axum::http::{HeaderValue, Method, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Json;
@@ -73,6 +76,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(rewrite::routes())
         .merge(error_pages::routes())
         .merge(debug::routes())
+        .merge(system_tls::routes())
         .route("/health", get(health))
         .route("/version", get(version))
         .fallback(api_not_found);
@@ -86,18 +90,22 @@ pub fn build_router(state: AppState) -> Router {
         root = root.fallback(serve_frontend);
     }
 
-    root.layer(build_cors(&config.cors_origins))
-        .layer(CompressionLayer::new())
-        .layer(TraceLayer::new_for_http().make_span_with(
-            |request: &axum::http::Request<_>| {
-                tracing::info_span!(
-                    "http_request",
-                    method = %request.method(),
-                    path = %request.uri().path(),
-                )
-            },
-        ))
-        .with_state(state)
+    root.layer(middleware::from_fn_with_state(
+        state.clone(),
+        redirect_cleartext_to_https,
+    ))
+    .layer(build_cors(&config.cors_origins))
+    .layer(CompressionLayer::new())
+    .layer(TraceLayer::new_for_http().make_span_with(
+        |request: &axum::http::Request<_>| {
+            tracing::info_span!(
+                "http_request",
+                method = %request.method(),
+                path = %request.uri().path(),
+            )
+        },
+    ))
+    .with_state(state)
 }
 
 /// Permissive by default (the dashboard is served from the same origin in
@@ -137,6 +145,65 @@ fn build_cors(origins: &[String]) -> CorsLayer {
         tracing::info!(origins = ?parsed, "CORS restricted to the configured origins");
         layer.allow_origin(AllowOrigin::list(parsed))
     }
+}
+
+/// Sends cleartext requests to the HTTPS listener.
+///
+/// Only meaningful when this process terminates TLS: the mixed listener keeps
+/// accepting plaintext so probes and an operator typing `http://` get a real
+/// HTTP answer instead of a reset, and this middleware is what turns that
+/// answer into a redirect. Health endpoints are exempt so container and load
+/// balancer probes keep working without trusting a certificate. The decision
+/// is made from the connection, not from `X-Forwarded-Proto`: a caller talking
+/// plaintext to this port must not be able to talk its way past the redirect.
+async fn redirect_cleartext_to_https(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let secured = request
+        .extensions()
+        .get::<ConnInfo>()
+        .is_some_and(|info| info.tls);
+    if !state.control_tls.is_enabled()
+        || secured
+        || is_health_probe(request.uri().path())
+    {
+        return next.run(request).await;
+    }
+
+    match https_location(&request) {
+        // `308` keeps the method and body, which a `301` would not.
+        Some(location) => (
+            StatusCode::PERMANENT_REDIRECT,
+            [(axum::http::header::LOCATION, location)],
+        )
+            .into_response(),
+        // Without a Host header there is no absolute URL to build; let the
+        // request through so the failure is the usual 400 rather than a
+        // redirect loop.
+        None => next.run(request).await,
+    }
+}
+
+/// The `https://` URL of the request, when the Host header allows building one.
+fn https_location(request: &Request) -> Option<HeaderValue> {
+    let host = request
+        .headers()
+        .get(axum::http::header::HOST)?
+        .to_str()
+        .ok()?;
+    let target = request
+        .uri()
+        .path_and_query()
+        .map(|value| value.as_str())
+        .unwrap_or("/");
+    HeaderValue::from_str(&format!("https://{host}{target}")).ok()
+}
+
+/// Paths that answer on both schemes, so probes need no certificate.
+fn is_health_probe(path: &str) -> bool {
+    matches!(path, "/healthz" | "/api/v1/health")
 }
 
 /// `GET /healthz` and `GET /api/v1/health` — verifies the database is reachable.
@@ -187,11 +254,48 @@ async fn api_not_found(uri: axum::http::Uri) -> Response {
 mod tests {
     use super::*;
 
+    fn request(uri: &str, host: Option<&str>) -> Request {
+        let mut builder = Request::builder().uri(uri);
+        if let Some(host) = host {
+            builder = builder.header(axum::http::header::HOST, host);
+        }
+        builder.body(axum::body::Body::empty()).unwrap()
+    }
+
     #[test]
     fn cors_accepts_explicit_origins() {
         let _ = build_cors(&["http://localhost:5173".to_string()]);
         let _ = build_cors(&[]);
         // An unparsable origin is dropped rather than panicking.
         let _ = build_cors(&["not a header value".to_string()]);
+    }
+
+    #[test]
+    fn the_redirect_target_keeps_the_path_query_and_port() {
+        let location = https_location(&request(
+            "/api/v1/sites?page=2",
+            Some("waf.example.com:9080"),
+        ))
+        .unwrap();
+        assert_eq!(
+            location,
+            "https://waf.example.com:9080/api/v1/sites?page=2"
+        );
+
+        // An empty path still points at the root.
+        assert_eq!(
+            https_location(&request("/", Some("localhost:9080"))).unwrap(),
+            "https://localhost:9080/"
+        );
+        // Without a Host header there is nothing to redirect to.
+        assert!(https_location(&request("/", None)).is_none());
+    }
+
+    #[test]
+    fn only_health_endpoints_answer_on_both_schemes() {
+        assert!(is_health_probe("/healthz"));
+        assert!(is_health_probe("/api/v1/health"));
+        assert!(!is_health_probe("/api/v1/sites"));
+        assert!(!is_health_probe("/healthz/extra"));
     }
 }

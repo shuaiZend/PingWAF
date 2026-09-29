@@ -81,7 +81,7 @@ Examples:
   ./install.sh --mode agent --server-url http://10.0.0.1:9090 --api-key pwk_xxx
 
   # Install specific version as agent only
-  ./install.sh --version 0.15.0 --mode agent
+  ./install.sh --version 0.16.0 --mode agent
 
   # Custom database URL
   ./install.sh --db-url "postgres://user:pass@db-host:5432/pingwaf"
@@ -297,6 +297,12 @@ write_config() {
 db_url = "${DB_URL}"
 http_addr = "0.0.0.0:9080"
 grpc_addr = "0.0.0.0:9090"
+# Dashboard + REST API over HTTPS (passkeys require a secure origin).
+# A self-signed certificate is generated on first boot; upload a real one in
+# Settings -> Control plane HTTPS. Add the hostname you use to reach the
+# dashboard so the generated certificate covers it:
+# tls_sans = ["waf.example.com"]
+tls_enabled = true
 jwt_secret = "$(head -c 32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 32)"
 admin_email = "admin@pingwaf.local"
 admin_password = "pingwaf123"
@@ -362,6 +368,12 @@ install_systemd() {
         agent_env="Environment=PINGWAF_SERVER_URL=${SERVER_URL}
 Environment=PINGWAF_API_KEY=${API_KEY}
 Environment=PINGWAF_CACHE_DIR=${DATA_DIR}/cache"
+    else
+        # The dashboard is served over HTTPS with a self-signed certificate
+        # until a real one is uploaded. Add the hostname it is reached under so
+        # the generated certificate covers it:
+        # Environment=PINGWAF_TLS_SANS=waf.example.com
+        agent_env="Environment=PINGWAF_TLS_ENABLED=true"
     fi
 
     info "Creating systemd service..."
@@ -482,7 +494,7 @@ print_firewall_hints() {
     info "Firewall ports to open:"
     echo "    80/tcp   — HTTP traffic (proxied sites)"
     echo "    443/tcp  — HTTPS traffic (proxied sites)"
-    echo "    9080/tcp — Admin dashboard & REST API"
+    echo "    9080/tcp — Admin dashboard & REST API (HTTPS)"
     echo "    9090/tcp — gRPC control plane (agent connections)"
     echo ""
     if has ufw; then
@@ -527,7 +539,7 @@ else
     echo "  Quick start:"
     echo "    ${BINARY_NAME} ${MODE} --db-url \"${DB_URL}\""
     echo ""
-    echo "  Dashboard: http://localhost:9080"
+    echo "  Dashboard: https://localhost:9080  (self-signed certificate)"
     echo "  Default credentials:"
     echo "    Email:    admin@pingwaf.local"
     echo "    Password: pingwaf123"

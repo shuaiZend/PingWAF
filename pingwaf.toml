@@ -10,8 +10,15 @@
 [server]
 # PostgreSQL connection string
 db_url = "postgres://pingwaf:pingwaf@localhost:5432/pingwaf"
-# HTTP REST API + dashboard listen address
+# REST API + dashboard listen address (served over HTTPS when tls_enabled)
 http_addr = "0.0.0.0:9080"
+# Serve the REST API and dashboard over TLS (required by passkeys).
+# A self-signed certificate is generated on first boot; replace it from
+# Settings → Control plane HTTPS once a real certificate is available.
+tls_enabled = true
+# Names the generated self-signed certificate covers. Add the hostname you
+# open the dashboard on, otherwise the browser warns about a name mismatch.
+# tls_sans = ["waf.example.com"]
 # gRPC control plane listen address (agents connect here)
 grpc_addr = "0.0.0.0:9090"
 # JWT signing secret (must be >= 16 characters, change in production!)
