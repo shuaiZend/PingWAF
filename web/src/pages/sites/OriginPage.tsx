@@ -51,9 +51,12 @@ function isHashKeyType(value: string) {
   return HASH_KEY_TYPES.includes(value)
 }
 
-/** Parses `round_robin | hash:ip | hash:header:key` into form fields. */
+/** Parses `round_robin | least_connections | random | hash:ip | hash:header:key` into form fields. */
 function splitLbAlgorithm(algo: string): { lbType: string; hashKey: string } {
   if (!algo || algo === 'round_robin') return { lbType: 'round_robin', hashKey: '' }
+  if (algo === 'least_connections' || algo === 'random') {
+    return { lbType: algo, hashKey: '' }
+  }
   const parts = algo.split(':')
   if (parts[0] !== 'hash' || parts.length < 2) {
     return { lbType: 'round_robin', hashKey: '' }
@@ -184,6 +187,8 @@ export function OriginPage() {
 
   const lbOptions = [
     { value: 'round_robin', label: t('pages.origin.lb.roundRobin') },
+    { value: 'least_connections', label: t('pages.origin.lb.leastConnections') },
+    { value: 'random', label: t('pages.origin.lb.random') },
     { value: 'hash:ip', label: t('pages.origin.lb.hashIp') },
     { value: 'hash:url', label: t('pages.origin.lb.hashUrl') },
     { value: 'hash:path', label: t('pages.origin.lb.hashPath') },

@@ -200,6 +200,11 @@ pub trait UpstreamInstance: Send + Sync {
     /// Returns the number of in-flight requests still being processed *after*
     /// releasing this one (so a zero means the upstream is idle).
     fn completed(&self) -> i32;
+    /// Releases the in-flight request counted against the backend at
+    /// `address` (least-connections balancing). A no-op for strategies that
+    /// do not track per-backend load and for requests that never selected a
+    /// peer.
+    fn release(&self, _address: &str) {}
 }
 
 /// Trait for location instance

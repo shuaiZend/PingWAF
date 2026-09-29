@@ -156,15 +156,18 @@ pub fn build_run_mode(cli: PingWafCli) -> RunMode {
 
 /// Sanitize a control-plane LB algorithm into a pingap `algo` value.
 ///
-/// pingap accepts only `round_robin` (its default) and
-/// `hash:<type>[:<key>]` with type in {ip, url, path, header, cookie,
-/// query}; anything else — including legacy enum Debug names such as
-/// `lbconsistenthash` — is a hard error at upstream construction, so it
-/// must collapse to the default here.
+/// pingap accepts `round_robin` (its default), `random`,
+/// `least_connections` and `hash:<type>[:<key>]` with type in {ip, url,
+/// path, header, cookie, query}; anything else — including legacy enum
+/// Debug names such as `lbconsistenthash` — is a hard error at upstream
+/// construction, so it must collapse to the default here.
 fn sanitize_algo(algo: &str) -> Option<String> {
     let algo = algo.trim();
     if algo.is_empty() || algo == "round_robin" {
         return None;
+    }
+    if matches!(algo, "random" | "least_connections") {
+        return Some(algo.to_string());
     }
     let spec = algo.strip_prefix("hash:")?;
     let hash_type = spec.split(':').next().unwrap_or_default();
@@ -1493,8 +1496,11 @@ mod tests {
     fn sanitize_algo_rejects_unknown_names() {
         assert_eq!(sanitize_algo(""), None);
         assert_eq!(sanitize_algo("round_robin"), None);
-        assert_eq!(sanitize_algo("least_connections"), None);
-        assert_eq!(sanitize_algo("random"), None);
+        assert_eq!(
+            sanitize_algo("least_connections"),
+            Some("least_connections".to_string())
+        );
+        assert_eq!(sanitize_algo("random"), Some("random".to_string()));
         assert_eq!(sanitize_algo("lbconsistenthash"), None);
         assert_eq!(sanitize_algo("hash:"), None);
         assert_eq!(sanitize_algo("hash:bogus"), None);
