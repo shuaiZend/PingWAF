@@ -80,6 +80,7 @@ use tracing::{error, info, warn};
 
 mod certificates;
 mod cli;
+mod config_file;
 mod config_manager;
 mod locations;
 mod pingwaf;

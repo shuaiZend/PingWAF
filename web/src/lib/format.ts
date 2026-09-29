@@ -38,41 +38,73 @@ export function formatLatency(ms: number | null | undefined): string {
   return `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1000)}s`
 }
 
-const ABSOLUTE = new Intl.DateTimeFormat(undefined, {
-  year: 'numeric',
-  month: 'short',
-  day: '2-digit',
-  hour: '2-digit',
-  minute: '2-digit',
-  second: '2-digit',
-})
+/**
+ * BCP-47 tag the date formatters use.
+ *
+ * Defaults to the browser locale, but the i18n layer calls
+ * {@link setDisplayLocale} so a console switched to 中文 or 日本語 renders its
+ * timestamps in that language instead of whatever the machine happens to run.
+ */
+let displayLocale: string | undefined = undefined
 
-const SHORT_TIME = new Intl.DateTimeFormat(undefined, {
-  hour: '2-digit',
-  minute: '2-digit',
-})
+/** Point the date formatters at a language; called by the i18n layer. */
+export function setDisplayLocale(locale: string): void {
+  displayLocale = locale
+}
 
-const SHORT_DATE = new Intl.DateTimeFormat(undefined, {
-  month: 'short',
-  day: '2-digit',
-})
+interface DateFormatters {
+  absolute: Intl.DateTimeFormat
+  shortTime: Intl.DateTimeFormat
+  shortDate: Intl.DateTimeFormat
+  relative: Intl.RelativeTimeFormat
+}
+
+const formatterCache = new Map<string, DateFormatters>()
+
+function formatters(): DateFormatters {
+  const key = displayLocale ?? 'default'
+  const cached = formatterCache.get(key)
+  if (cached) return cached
+  const locale = displayLocale
+  const set: DateFormatters = {
+    absolute: new Intl.DateTimeFormat(locale, {
+      year: 'numeric',
+      month: 'short',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    }),
+    shortTime: new Intl.DateTimeFormat(locale, {
+      hour: '2-digit',
+      minute: '2-digit',
+    }),
+    shortDate: new Intl.DateTimeFormat(locale, {
+      month: 'short',
+      day: '2-digit',
+    }),
+    relative: new Intl.RelativeTimeFormat(locale, { numeric: 'auto' }),
+  }
+  formatterCache.set(key, set)
+  return set
+}
 
 /** Full local timestamp for table cells and detail rows. */
 export function formatDateTime(value: string | number | Date | null | undefined): string {
   const date = toDate(value)
-  return date ? ABSOLUTE.format(date) : '—'
+  return date ? formatters().absolute.format(date) : '—'
 }
 
 /** Time only — for a chart axis bucketed within one day. */
 export function formatTime(value: string | number | Date | null | undefined): string {
   const date = toDate(value)
-  return date ? SHORT_TIME.format(date) : '—'
+  return date ? formatters().shortTime.format(date) : '—'
 }
 
 /** Date only — for a chart axis spanning several days. */
 export function formatDate(value: string | number | Date | null | undefined): string {
   const date = toDate(value)
-  return date ? SHORT_DATE.format(date) : '—'
+  return date ? formatters().shortDate.format(date) : '—'
 }
 
 /**
@@ -85,7 +117,8 @@ export function formatBucket(
 ): string {
   const date = toDate(value)
   if (!date) return '—'
-  return spanMs > 36 * 3600_000 ? SHORT_DATE.format(date) : SHORT_TIME.format(date)
+  const { shortDate, shortTime } = formatters()
+  return spanMs > 36 * 3600_000 ? shortDate.format(date) : shortTime.format(date)
 }
 
 function toDate(value: string | number | Date | null | undefined): Date | null {
@@ -104,7 +137,7 @@ export function formatRelative(
   const diff = date.getTime() - now
   const abs = Math.abs(diff)
 
-  const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' })
+  const rtf = formatters().relative
   if (abs < 45_000) return rtf.format(0, 'minute')
   if (abs < 60_000) return rtf.format(Math.round(diff / 1000), 'second')
 

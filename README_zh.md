@@ -251,14 +251,24 @@ PINGWAF_MODE=all-in-one ./pingwaf
 
 ## ⚙️ 配置说明
 
-PingWAF 通过 **`PINGWAF_*` 环境变量**与 **CLI 参数**进行配置（CLI 参数优先级高于环境变量）。
+PingWAF 通过 **TOML 配置文件**、**`PINGWAF_*` 环境变量**与 **CLI 参数**进行配置，优先级依次升高（后者覆盖前者）。
 
-> ℹ️ 仓库根目录的 [`pingwaf.toml`](./pingwaf.toml) 仅为**参考示例**——进程运行时并不会加载它。请使用环境变量或 CLI 参数。
+```bash
+pingwaf all-in-one --config /etc/pingwaf/pingwaf.toml
+
+PINGWAF_CONFIG=/etc/pingwaf/pingwaf.toml pingwaf all-in-one   # 等价写法
+```
+
+> ℹ️ 仓库根目录的 [`pingwaf.toml`](./pingwaf.toml) 是可用的示例配置——用
+> `--config` 指定后，其中 `[server]` / `[agent]` 两张表即会生效（启动时会打印
+> `pingwaf: loaded N setting(s)`）。键名即 CLI 参数名（下划线形式，如
+> `admin_addr`、`max_body_log_size`）；无法识别的键会被提示并忽略。
 
 ### 关键环境变量
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
+| `PINGWAF_CONFIG` | — | TOML 配置文件路径 |
 | `PINGWAF_MODE` | — | `server`、`agent` 或 `all-in-one` |
 | `PINGWAF_DB_URL` | `postgres://pingwaf:pingwaf@localhost:5432/pingwaf` | PostgreSQL DSN |
 | `PINGWAF_ADMIN_ADDR` | `0.0.0.0:9080` | REST API + 控制台监听地址 |

@@ -47,7 +47,7 @@ Default credentials: `admin@pingwaf.local` / value of `$ADMIN_PASSWORD`
 | `ADMIN_PASSWORD` | `pingwaf123` | Initial admin password |
 | `ALLOW_REGISTRATION` | `false` | Allow new user signups |
 | `HEARTBEAT_INTERVAL` | `15` | Agent heartbeat interval (seconds) |
-| `RUST_LOG` | `info` | Log level filter |
+| `RUST_LOG` | `info,sqlx=warn` | Log level filter |
 
 ## Manual Installation (Binary + systemd)
 
@@ -58,7 +58,7 @@ Default credentials: `admin@pingwaf.local` / value of `$ADMIN_PASSWORD`
 curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh | bash
 
 # Or specify version and mode
-./install.sh --version 0.16.0 --mode all-in-one
+./install.sh --version 0.17.0 --mode all-in-one
 ```
 
 > Prebuilt release assets are published for **Linux** (amd64/arm64) only; on
@@ -78,31 +78,36 @@ sudo -u postgres psql -c "ALTER USER pingwaf PASSWORD 'your-secure-password';"
 
 ### 3. Configure
 
-PingWAF is configured through CLI flags and `PINGWAF_*` environment variables.
-Set them as `Environment=` lines in the systemd unit (e.g. via a drop-in
-override with `sudo systemctl edit pingwaf`, which survives upgrades):
+Settings come from three places, each overriding the one before it: a TOML
+file, `PINGWAF_*` environment variables, and command-line flags.
+
+1. **A TOML file** — `--config /etc/pingwaf/pingwaf.toml` (or
+   `PINGWAF_CONFIG`). `install.sh` writes one and points the unit at it; its
+   `[server]` and `[agent]` tables hold the settings listed in the
+   [Configuration Reference](#configuration-reference).
+2. **Environment variables** — set as `Environment=` lines in the systemd unit
+   (a drop-in override with `sudo systemctl edit pingwaf` survives package
+   upgrades).
+3. **Command-line flags** — in the unit's `ExecStart`, e.g.
+   `pingwaf all-in-one --tls-enabled false`.
 
 ```ini
 [Service]
-Environment=PINGWAF_MODE=all-in-one
-Environment=PINGWAF_DB_URL=postgres://pingwaf:your-secure-password@localhost:5432/pingwaf
-Environment=PINGWAF_ADMIN_ADDR=0.0.0.0:9080
-Environment=PINGWAF_GRPC_ADDR=0.0.0.0:9090
-Environment=PINGWAF_JWT_SECRET=generate-a-random-32-char-secret
-Environment=PINGWAF_ADMIN_EMAIL=admin@yourdomain.com
-Environment=PINGWAF_ADMIN_PASSWORD=strong-password-here
+Environment=PINGWAF_CONFIG=/etc/pingwaf/pingwaf.toml
+# Environment variables remain useful for the settings the file cannot
+# express, and for secrets you would rather not put in a file:
 Environment=PINGWAF_ALLOW_REGISTRATION=false
-# Serve the dashboard over HTTPS (default true). Add the hostname you use so the
-# generated self-signed certificate covers it:
-Environment=PINGWAF_TLS_ENABLED=true
-Environment=PINGWAF_TLS_SANS=waf.example.com
+Environment=PINGWAF_DB_MAX_CONNECTIONS=40
+Environment=RUST_LOG=info,sqlx=warn
 ```
 
-> **Note:** the `/etc/pingwaf/pingwaf.toml` file that `install.sh` writes is a
-> reference example only — the binary takes no configuration file at all, so
-> settings placed there have no effect. Configure through environment variables
-> as above; agent options (`PINGWAF_SERVER_URL`, `PINGWAF_CACHE_DIR`, …) are
-> listed in the [Configuration Reference](#configuration-reference).
+The settings with no file key — `allow_registration`, `db_max_connections`,
+`metric_retention_days`, `cors_origins`, the passkey settings and the
+`PINGWAF_ES_*` Elasticsearch block — are listed under
+[Environment-only settings](#server-configuration-server).
+
+There is no reload signal: edit the file or the drop-in and
+`sudo systemctl restart pingwaf`.
 
 ### 4. Start the Service
 
@@ -116,75 +121,112 @@ sudo journalctl -u pingwaf -f
 
 ## Configuration Reference
 
+The `[server]` and `[agent]` tables of the configuration file
+(`--config` / `PINGWAF_CONFIG`) take the long-flag names with dashes written as
+underscores (`--admin-addr` → `admin_addr`); list values are TOML arrays. The
+`all-in-one` mode reads both tables, `server` and `agent` only their own. A key
+that is not recognised is reported and ignored, and a setting given both in the
+file and in the environment is taken from the environment.
+
 ### Server Configuration (`[server]`)
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `db_url` | string | `postgres://pingwaf:pingwaf@localhost:5432/pingwaf` | PostgreSQL DSN |
-| `http_addr` | string | `0.0.0.0:9080` | REST API + dashboard address |
-| `tls_enabled` | bool | `true` | Serve the REST API + dashboard over HTTPS; cleartext requests get a `308` redirect, health probes are exempt. Turn off behind a TLS-terminating proxy |
-| `tls_sans` | string[] | hostname, `localhost`, `127.0.0.1` | Subject alternative names of the generated self-signed certificate |
+| `admin_addr` | string | `0.0.0.0:9080` | REST API + dashboard address |
 | `grpc_addr` | string | `0.0.0.0:9090` | gRPC control plane address |
-| `jwt_secret` | string | — | JWT signing secret (≥16 chars, required) |
-| `jwt_expiration_hours` | int | `12` | Access token lifetime |
-| `refresh_token_expiration_hours` | int | `720` | Refresh token lifetime |
+| `jwt_secret` | string | `change-me-in-production` | JWT signing secret (≥16 chars, required) |
 | `admin_email` | string | `admin@pingwaf.local` | Seeded admin email |
 | `admin_password` | string | `pingwaf123` | Seeded admin password |
-| `allow_registration` | bool | `true` | Allow new user signups (code default; `docker-compose.yml` and `install.sh` set `false`) |
-| `db_max_connections` | int | `20` | Connection pool max |
-| `db_min_connections` | int | `1` | Connection pool min |
-| `heartbeat_interval_seconds` | int | `15` | Agent heartbeat interval |
-| `log_batch_size` | int | `500` | Log entries per batch insert |
-| `cors_origins` | string[] | `[]` | Allowed CORS origins (empty = all) |
+| `serve_frontend` | bool | `true` | Serve the embedded dashboard SPA for non-API routes |
+| `tls_enabled` | bool | `true` | Serve the REST API + dashboard over HTTPS; cleartext requests get a `308` redirect, health probes are exempt. Turn off behind a TLS-terminating proxy |
+| `tls_sans` | string[] | hostname, `localhost`, `127.0.0.1` | Subject alternative names of the generated self-signed certificate |
+
+The rest of the server settings are **environment-only** — they have no flag
+and therefore no file key:
+
+| Environment Variable | Default | Description |
+|----------------------|---------|-------------|
+| `PINGWAF_JWT_EXPIRATION_HOURS` | `12` | Access token lifetime |
+| `PINGWAF_ALLOW_REGISTRATION` | `true` (code); `docker-compose.yml` and `install.sh` set `false` | Allow new user signups |
+| `PINGWAF_HEARTBEAT_INTERVAL` | `15` | Heartbeat interval handed to agents at registration |
+| `PINGWAF_DB_MAX_CONNECTIONS` | `20` | Connection pool maximum |
+| `PINGWAF_METRIC_RETENTION_DAYS` | `7` | Days of edge-metric samples kept in `agent_metrics` |
+| `PINGWAF_CORS_ORIGINS` | `[]` (all) | Allowed CORS origins, comma-separated |
+| `PINGWAF_PASSKEY_ENABLED` | `true` | Offer passkey (WebAuthn) registration and login |
+| `PINGWAF_PASSKEY_RP_NAME` | `PingWAF` | Relying party name shown by the authenticator |
+| `PINGWAF_PASSKEY_RP_ID` | derived from the request | Relying party ID, i.e. the effective domain |
+| `PINGWAF_PASSKEY_ORIGIN` | derived from the request | Origin the dashboard is served from |
+| `PINGWAF_PASSKEY_TRUST_FORWARDED_PROTO` | `false` | Believe `X-Forwarded-Proto` when deriving the origin |
+
+The refresh-token lifetime (30 days), the minimum pool size (`1`) and the
+server-side log batch size (`500`) are compiled-in constants with no override.
 
 ### Agent Configuration (`[agent]`)
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `server_url` | string | `http://127.0.0.1:9090` | Control plane gRPC URL |
-| `api_key` | string | `""` | Agent authentication key |
+| `server_url` | string | `http://localhost:9090` | Control plane gRPC URL |
+| `api_key` | string | `""` | Agent authentication key (empty = auto-register over loopback in all-in-one) |
 | `cache_dir` | string | `./data/cache` | Local rule cache directory |
+| `fail_open` | bool | `true` | Allow traffic when disconnected |
 | `heartbeat_interval_secs` | int | `30` | Heartbeat frequency |
 | `log_batch_size` | int | `100` | Log entries before flush |
 | `log_flush_interval_secs` | int | `5` | Max time between flushes |
 | `max_body_log_size` | int | `8192` | Max request body bytes to log |
-| `fail_open` | bool | `true` | Allow traffic when disconnected |
-| `reconnect_initial_delay_ms` | int | `1000` | Initial reconnect backoff |
-| `reconnect_max_delay_ms` | int | `60000` | Maximum reconnect backoff |
 | `metrics_ship_interval_secs` | int | `30` | Edge-metrics ship interval; `0` disables shipping |
+
+Environment variables: `PINGWAF_SERVER_URL`, `PINGWAF_API_KEY`,
+`PINGWAF_CACHE_DIR`, `PINGWAF_FAIL_OPEN`, `PINGWAF_HEARTBEAT_INTERVAL`,
+`PINGWAF_METRICS_SHIP_INTERVAL`. The three log settings and the reconnect
+backoff constants (`1 s` doubling to `60 s`) have no environment variable.
 
 ### Environment Variables
 
-All config values can be set via environment variables with the `PINGWAF_` prefix:
+Every setting can be given as an environment variable. The ones with a file key
+are listed against it below; the dash in a table entry means the setting has no
+`--flag` and is environment-only (or compiled in).
 
-| Variable | Config Key |
+| Variable | File key |
 |----------|-----------|
+| `PINGWAF_CONFIG` | — (names the configuration file itself) |
 | `PINGWAF_DB_URL` | `server.db_url` |
-| `PINGWAF_HTTP_ADDR` | `server.http_addr` |
-| `PINGWAF_ADMIN_ADDR` | `server.http_addr` (alias) |
+| `PINGWAF_ADMIN_ADDR` | `server.admin_addr` |
+| `PINGWAF_HTTP_ADDR` | `server.admin_addr` (alias) |
+| `DATABASE_URL` | `server.db_url` (used only when `PINGWAF_DB_URL` is unset) |
 | `PINGWAF_GRPC_ADDR` | `server.grpc_addr` |
 | `PINGWAF_JWT_SECRET` | `server.jwt_secret` |
 | `PINGWAF_ADMIN_EMAIL` | `server.admin_email` |
 | `PINGWAF_ADMIN_PASSWORD` | `server.admin_password` |
-| `PINGWAF_ALLOW_REGISTRATION` | `server.allow_registration` |
-| `PINGWAF_HEARTBEAT_INTERVAL` | `server.heartbeat_interval_seconds` |
-| `PINGWAF_DB_MAX_CONNECTIONS` | `server.db_max_connections` |
-| `PINGWAF_METRIC_RETENTION_DAYS` | `server.metric_retention_days` |
+| `PINGWAF_SERVE_FRONTEND` | `server.serve_frontend` |
+| `PINGWAF_JWT_EXPIRATION_HOURS` | — |
+| `PINGWAF_ALLOW_REGISTRATION` | — |
+| `PINGWAF_HEARTBEAT_INTERVAL` | `agent.heartbeat_interval_secs` (also the default the control plane hands to agents) |
+| `PINGWAF_DB_MAX_CONNECTIONS` | — |
+| `PINGWAF_METRIC_RETENTION_DAYS` | — |
 | `PINGWAF_TLS_ENABLED` | `server.tls_enabled` |
 | `PINGWAF_TLS_SANS` | `server.tls_sans` (comma-separated) |
-| `PINGWAF_CORS_ORIGINS` | `server.cors_origins` (comma-separated) |
+| `PINGWAF_CORS_ORIGINS` | — (comma-separated) |
+| `PINGWAF_PASSKEY_ENABLED` | — |
+| `PINGWAF_PASSKEY_RP_NAME` | — |
+| `PINGWAF_PASSKEY_RP_ID` | — |
+| `PINGWAF_PASSKEY_ORIGIN` | — |
+| `PINGWAF_PASSKEY_TRUST_FORWARDED_PROTO` | — |
 | `PINGWAF_MODE` | CLI mode (`all-in-one`, `server`, `agent`) |
 | `PINGWAF_SERVER_URL` | `agent.server_url` |
 | `PINGWAF_API_KEY` | `agent.api_key` |
 | `PINGWAF_CACHE_DIR` | `agent.cache_dir` |
+| `PINGWAF_FAIL_OPEN` | `agent.fail_open` |
 | `PINGWAF_METRICS_SHIP_INTERVAL` | `agent.metrics_ship_interval_secs` |
-| `PINGWAF_ES_ENABLED` | Elasticsearch shipper toggle |
-| `PINGWAF_ES_URLS` | Elasticsearch URLs (comma-separated) |
-| `PINGWAF_ES_INDEX_PREFIX` | ES index prefix |
-| `PINGWAF_ES_USERNAME` | ES basic auth username |
-| `PINGWAF_ES_PASSWORD` | ES basic auth password |
-| `PINGWAF_ES_API_KEY` | ES API key |
-| `RUST_LOG` | Tracing log level filter |
+| `PINGWAF_ES_ENABLED` | — Elasticsearch shipper toggle |
+| `PINGWAF_ES_URLS` | — Elasticsearch URLs (comma-separated) |
+| `PINGWAF_ES_INDEX_PREFIX` | — ES index prefix |
+| `PINGWAF_ES_USERNAME` | — ES basic auth username |
+| `PINGWAF_ES_PASSWORD` | — ES basic auth password |
+| `PINGWAF_ES_API_KEY` | — ES API key |
+| `PINGWAF_ES_MAX_BODY_SIZE` | — ES body truncation limit |
+| `PINGWAF_ES_BUFFER_DIR` | — ES on-disk buffer directory |
+| `RUST_LOG` | Tracing log filter (default `info,sqlx=warn`) |
 
 ## Deployment Modes
 
