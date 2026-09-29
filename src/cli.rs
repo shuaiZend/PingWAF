@@ -296,6 +296,32 @@ pub fn is_pingwaf_mode() -> bool {
     from_argv || mode_from_env().is_some()
 }
 
+/// The version banner shared with the pingap-mode `--version`.
+fn version_banner() -> &'static str {
+    crate::version_banner()
+}
+
+/// Print the version and exit. `--version` carries the long banner, `-V` the
+/// bare number, matching how clap answers the two forms elsewhere.
+///
+/// clap serves `--version` from the top-level command, which an injected
+/// subcommand hides, so the flag is answered here instead.
+fn print_version(args: &[String]) -> ! {
+    if args.iter().skip(1).any(|arg| arg == "--version") {
+        println!("pingwaf {}", version_banner());
+    } else {
+        println!("pingwaf {}", env!("CARGO_PKG_VERSION"));
+    }
+    std::process::exit(0);
+}
+
+/// Whether the arguments ask for the version rather than a mode.
+fn wants_version(args: &[String]) -> bool {
+    args.iter()
+        .skip(1)
+        .any(|arg| arg == "--version" || arg == "-V")
+}
+
 /// Parse the PingWAF CLI from command line arguments.
 ///
 /// If `PINGWAF_MODE` is set but no subcommand is given on the command line,
@@ -303,6 +329,10 @@ pub fn is_pingwaf_mode() -> bool {
 /// settings of a `--config` file are added last, underneath the command line.
 pub fn parse_pingwaf_cli() -> PingWafCli {
     let args: Vec<String> = std::env::args().collect();
+
+    if wants_version(&args) {
+        print_version(&args);
+    }
 
     let mode = args
         .get(1)
@@ -413,5 +443,19 @@ mod tests {
                 Some(format!("/{mode}.toml").as_str())
             );
         }
+    }
+
+    #[test]
+    fn the_version_flag_is_recognised_wherever_it_appears() {
+        // With PINGWAF_MODE the mode is injected, so the flag must be caught
+        // before the subcommand would reject it as an unknown argument.
+        let argv = |args: &[&str]| {
+            args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>()
+        };
+        assert!(wants_version(&argv(&["pingwaf", "--version"])));
+        assert!(wants_version(&argv(&["pingwaf", "-V"])));
+        assert!(wants_version(&argv(&["pingwaf", "server", "--version"])));
+        assert!(!wants_version(&argv(&["pingwaf", "server", "--config=x"])));
+        assert!(!wants_version(&argv(&["pingwaf"])));
     }
 }
