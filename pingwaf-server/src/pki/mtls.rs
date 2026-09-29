@@ -230,7 +230,7 @@ fn first_attr<'a>(
         .map(str::to_string)
 }
 
-fn parse_x509<'a>(
+pub(crate) fn parse_x509<'a>(
     block: &'a x509_parser::pem::Pem,
 ) -> Result<x509_parser::certificate::X509Certificate<'a>, MtlsError> {
     block.parse_x509().map_err(|err| {
@@ -238,7 +238,9 @@ fn parse_x509<'a>(
     })
 }
 
-fn parse_pem_block(cert_pem: &str) -> Result<x509_parser::pem::Pem, MtlsError> {
+pub(crate) fn parse_pem_block(
+    cert_pem: &str,
+) -> Result<x509_parser::pem::Pem, MtlsError> {
     let (_, block) = x509_parser::pem::parse_x509_pem(cert_pem.as_bytes())
         .map_err(|err| {
             MtlsError::Certificate(format!(
@@ -254,7 +256,11 @@ fn ca_public_key_der(cert_pem: &str) -> Result<Vec<u8>, MtlsError> {
     Ok(parse_x509(&block)?.public_key().raw.to_vec())
 }
 
-fn clamp_days(days: i64, max: i64, field: &str) -> Result<i64, MtlsError> {
+pub(crate) fn clamp_days(
+    days: i64,
+    max: i64,
+    field: &str,
+) -> Result<i64, MtlsError> {
     if !(1..=max).contains(&days) {
         return Err(MtlsError::Invalid(format!(
             "{field} must be between 1 and {max} days"
@@ -265,7 +271,7 @@ fn clamp_days(days: i64, max: i64, field: &str) -> Result<i64, MtlsError> {
 
 /// `now - 5 min` to `now + days`, so a client whose clock lags slightly still
 /// accepts a fresh certificate.
-fn validity_window(days: i64) -> (OffsetDateTime, OffsetDateTime) {
+pub(crate) fn validity_window(days: i64) -> (OffsetDateTime, OffsetDateTime) {
     let now = OffsetDateTime::now_utc();
     (now - Duration::minutes(5), now + Duration::days(days))
 }

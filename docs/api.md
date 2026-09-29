@@ -1,6 +1,19 @@
 # PingWAF REST API Reference
 
-Base URL: `http://your-server:9080/api/v1`
+Base URL: `https://your-server:9080/api/v1`
+
+The control plane serves HTTPS by default (`tls_enabled = true`) with a
+self-signed certificate generated on first boot, so `curl` needs `-k` until the
+certificate is trusted or replaced (see
+[Control-plane certificate](#control-plane-certificate)). When TLS is disabled
+(`tls_enabled = false`, e.g. TLS terminated by a reverse proxy) the same port
+serves plain HTTP.
+
+Cleartext requests to a TLS-enabled listener are answered with `308 Permanent
+Redirect` to the `https://` URL on the same host, so scripts should either use
+`https://` directly or follow redirects. The two health endpoints (`/healthz`
+and `/api/v1/health`) are exempt and answer on both schemes, which keeps
+container health checks working without a certificate.
 
 ## Authentication
 
@@ -131,7 +144,10 @@ Two conditions must hold for the browser prompt to even appear:
   server setting, on by default). When it is `false` every endpoint below
   answers `501`.
 * The page is a secure context: HTTPS, or `localhost`. A passkey cannot be
-  created for a bare IP address or over plain HTTP on a hostname.
+  created for a bare IP address or over plain HTTP on a hostname. The control
+  plane therefore serves HTTPS by default with a self-signed certificate that
+  can be replaced under [Control-plane certificate](#control-plane-certificate);
+  a bare-IP deployment needs that IP in the certificate's SANs.
 
 ### GET /auth/passkeys
 
@@ -264,7 +280,7 @@ Build metadata.
 ```json
 {
   "name": "pingwaf-server",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "api": "/api/v1",
   "registration_open": true
 }
@@ -911,7 +927,7 @@ List registered agents.
       "site_domain": "example.com",
       "hostname": "edge-01",
       "ip_address": "10.0.1.5",
-      "version": "0.15.0",
+      "version": "0.16.0",
       "os_info": "Linux 6.1.0",
       "cpu_cores": 4,
       "memory_bytes": 8589934592,
@@ -1804,6 +1820,94 @@ Test Elasticsearch connectivity.
 
 ---
 
+## Control-plane certificate
+
+The certificate the dashboard and REST API are served with. Administrators
+only: the private key never leaves the server and no endpoint returns it.
+
+A self-signed pair (EC P-256, `CN=PingWAF Control Plane`) is generated on first
+boot when TLS is enabled and nothing has been stored yet. Replacing it takes
+effect immediately — the listener swaps the pair in place, so no restart is
+needed. Passkeys require a secure origin, which is the reason this exists.
+
+### GET /system/tls
+
+Current status, including the active certificate's metadata.
+
+**Response (200):**
+```json
+{
+  "enabled": true,
+  "has_certificate": true,
+  "certificate": {
+    "id": "uuid",
+    "source": "self_signed",
+    "subject_dn": "CN=PingWAF Control Plane",
+    "common_name": "PingWAF Control Plane",
+    "sans": ["localhost", "127.0.0.1", "waf.example.com"],
+    "serial": "1f0c…",
+    "fingerprint_sha256": "3b1a…",
+    "not_before": "2026-09-30T00:00:00Z",
+    "not_after": "2028-12-30T00:00:00Z",
+    "created_at": "2026-09-30T00:00:00Z",
+    "expires_in_days": 821
+  },
+  "default_sans": ["localhost", "127.0.0.1", "waf.example.com"],
+  "max_validity_days": 3650
+}
+```
+
+`enabled` mirrors `tls_enabled`; `has_certificate` reports whether the running
+listener holds a usable pair. `certificate` is omitted when nothing is stored.
+
+### GET /system/tls/certificate
+
+Download the certificate in use (PEM, chain included) as
+`application/x-pem-file`. Handy for pinning or for installing the self-signed
+pair into a trust store.
+
+### PUT /system/tls/certificate
+
+Upload a certificate and its private key. The pair is validated before anything
+is written: a mismatched key or an unparsable chain returns `400` and the
+running listener keeps serving the previous certificate.
+
+**Request:**
+```json
+{
+  "cert_pem": "-----BEGIN CERTIFICATE-----\n…\n-----END CERTIFICATE-----\n",
+  "key_pem": "-----BEGIN PRIVATE KEY-----\n…\n-----END PRIVATE KEY-----\n"
+}
+```
+
+`cert_pem` carries the leaf first, then intermediates when the issuer is not a
+root. `key_pem` accepts PKCS#8, PKCS#1 or SEC1 (`RSA`, `EC` and `PKCS8`
+begin-lines are all understood).
+
+**Response (200):** the same shape as `GET /system/tls`.
+
+### POST /system/tls/certificate/self-signed
+
+Generate and install a fresh self-signed certificate.
+
+**Request** (every field optional):
+```json
+{
+  "common_name": "PingWAF Control Plane",
+  "sans": ["waf.example.com", "10.0.0.5"],
+  "validity_days": 825
+}
+```
+
+Defaults: the configured console common name, the deployment's alternative
+names (configured `tls_sans` plus the host name, the passkey relying party,
+`localhost` and `127.0.0.1`, and the host the request arrived on), and 825 days
+(capped at `max_validity_days`, 3650).
+
+**Response (200):** the same shape as `GET /system/tls`.
+
+---
+
 ## Debug & Profiling
 
 Built-in pprof-style profiling of the control-plane process. All endpoints require an admin token. Sampling is process-global: while a capture is running, further requests return `409 Conflict`.
@@ -1819,7 +1923,7 @@ Capture CPU samples and return a gzip-compressed pprof protobuf consumable by `g
 **Query:** `?seconds=30&frequency=99` — capture window (1-120 s, default 30) and sampling frequency in Hz (1-1000, default 99).
 
 ```bash
-go tool pprof -http=: http://localhost:9080/api/v1/debug/pprof/profile?seconds=30
+go tool pprof -http=: -insecure https://localhost:9080/api/v1/debug/pprof/profile?seconds=30
 ```
 
 ### GET /debug/pprof/flamegraph
@@ -1827,8 +1931,8 @@ go tool pprof -http=: http://localhost:9080/api/v1/debug/pprof/profile?seconds=3
 Capture CPU samples and return an SVG flamegraph viewable directly in a browser. Same query parameters as above.
 
 ```bash
-curl -H "Authorization: Bearer $TOKEN" \
-  "http://localhost:9080/api/v1/debug/pprof/flamegraph?seconds=30" > flamegraph.svg
+curl -k -H "Authorization: Bearer $TOKEN" \
+  "https://localhost:9080/api/v1/debug/pprof/flamegraph?seconds=30" > flamegraph.svg
 ```
 
 ### GET /debug/pprof/memory

@@ -20,12 +20,18 @@ import {
   BookOpen,
   UserCircle,
   Warning,
+  Certificate,
+  DownloadSimple,
+  LockKey,
+  ShieldCheck,
+  UploadSimple,
 } from '@phosphor-icons/react'
 import { PageHeader } from '@/components/PageHeader'
 import { Card, CardBody, CardFooter, CardHeader } from '@/components/ui/Card'
 import { Switch } from '@/components/ui/Switch'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
+import { Textarea } from '@/components/ui/Textarea'
 import { Badge } from '@/components/ui/Badge'
 import { Dialog } from '@/components/ui/Dialog'
 import { Table, type Column } from '@/components/ui/Table'
@@ -43,6 +49,7 @@ import {
   stripMaskedSecrets,
   type EsConfigDraft,
 } from '@/api/settings'
+import { downloadCertificateFile, tlsApi, tlsKeys } from '@/api/tls'
 import { KEY_PERMISSIONS, keyKeys, keysApi } from '@/api/keys'
 import { passkeyKeys, passkeysApi } from '@/api/passkeys'
 import { authApi } from '@/api/auth'
@@ -85,21 +92,34 @@ export function SettingsPage() {
         <AccountCard />
         <PasskeysCard />
         {isAdmin ? (
+          <ControlPlaneTlsCard canWrite={canWrite} />
+        ) : (
+          <AdminOnlyCard title={t('pages.settings.controlPlaneTls')} />
+        )}
+        {isAdmin ? (
           <ElasticsearchCard canWrite={canWrite} />
         ) : (
-          <Card>
-            <CardHeader title={t('pages.settings.elasticsearch')} />
-            <CardBody>
-              <p className="flex items-start gap-2 text-sm text-fg-subtle">
-                <Warning weight="duotone" className="mt-0.5 h-4 w-4 shrink-0 text-fg-warning" />
-                {t('pages.settings.adminOnly')}
-              </p>
-            </CardBody>
-          </Card>
+          <AdminOnlyCard title={t('pages.settings.elasticsearch')} />
         )}
         <ApiKeysCard canWrite={canWrite} />
       </div>
     </div>
+  )
+}
+
+/** Placeholder shown in place of an administrator-only card. */
+function AdminOnlyCard({ title }: { title: string }) {
+  const { t } = useTranslation()
+  return (
+    <Card>
+      <CardHeader title={title} />
+      <CardBody>
+        <p className="flex items-start gap-2 text-sm text-fg-subtle">
+          <Warning weight="duotone" className="mt-0.5 h-4 w-4 shrink-0 text-fg-warning" />
+          {t('pages.settings.adminOnly')}
+        </p>
+      </CardBody>
+    </Card>
   )
 }
 
@@ -967,6 +987,371 @@ function ElasticsearchCard({ canWrite }: { canWrite: boolean }) {
           </>
         )}
       </CardBody>
+    </Card>
+  )
+}
+
+/* ── Control-plane HTTPS ────────────────────────────────────────────── */
+
+/**
+ * Whether a certificate's SANs cover the host the console is open on.
+ *
+ * A wildcard covers exactly one label (`*.example.com` matches
+ * `waf.example.com` but not `a.b.example.com`), mirroring how browsers match.
+ * IP addresses only match a literal SAN, so a bare-IP deployment needs an IP
+ * entry — which is why the self-signed generator adds one.
+ */
+function sanCoversHost(sans: string[], host: string): boolean {
+  const target = host.trim().toLowerCase()
+  if (!target) return true
+  return sans.some((san) => {
+    const value = san.trim().toLowerCase()
+    if (!value) return false
+    if (value === target) return true
+    if (!value.startsWith('*.')) return false
+    const suffix = value.slice(2)
+    const dot = target.indexOf('.')
+    return dot > 0 && target.slice(dot + 1) === suffix
+  })
+}
+
+function TlsDetail({
+  label,
+  value,
+  mono = false,
+  className,
+}: {
+  label: string
+  value: string
+  mono?: boolean
+  className?: string
+}) {
+  return (
+    <div className={className}>
+      <dt className="text-xs text-fg-subtle">{label}</dt>
+      <dd className={cn('mt-0.5 break-all text-fg', mono && 'pw-mono text-xs')}>{value}</dd>
+    </div>
+  )
+}
+
+/**
+ * The certificate the dashboard itself is served with.
+ *
+ * Passkeys (and the browser clipboard) require a secure origin, so this card is
+ * the only place an operator can look at — and replace — the certificate
+ * without touching the server's files. An upload takes effect immediately: the
+ * running listener swaps the pair through its reloadable resolver.
+ */
+function ControlPlaneTlsCard({ canWrite }: { canWrite: boolean }) {
+  const { t } = useTranslation()
+  const toast = useToast()
+  const queryClient = useQueryClient()
+
+  const [uploadOpen, setUploadOpen] = useState(false)
+  const [regenOpen, setRegenOpen] = useState(false)
+  const [certPem, setCertPem] = useState('')
+  const [keyPem, setKeyPem] = useState('')
+
+  const status = useQuery({
+    queryKey: tlsKeys.status(),
+    queryFn: () => tlsApi.getStatus(),
+  })
+
+  const view = status.data
+  const certificate = view?.certificate ?? null
+
+  const invalidate = () => {
+    void queryClient.invalidateQueries({ queryKey: tlsKeys.all })
+  }
+
+  const upload = useMutation({
+    mutationFn: () =>
+      tlsApi.uploadCertificate({
+        cert_pem: certPem.trim(),
+        key_pem: keyPem.trim(),
+      }),
+    onSuccess: () => {
+      invalidate()
+      setUploadOpen(false)
+      setCertPem('')
+      setKeyPem('')
+      toast.success(t('pages.settings.tlsUploaded'))
+    },
+  })
+
+  const regenerate = useMutation({
+    mutationFn: () => tlsApi.generateSelfSigned({}),
+    onSuccess: () => {
+      invalidate()
+      setRegenOpen(false)
+      toast.success(t('pages.settings.tlsGenerated'))
+    },
+  })
+
+  const download = useMutation({
+    mutationFn: () => tlsApi.downloadCertificate(),
+    onSuccess: (pem) => {
+      downloadCertificateFile(
+        certificate?.source === 'self_signed'
+          ? 'pingwaf-control-plane-self-signed.crt'
+          : 'pingwaf-control-plane.crt',
+        pem,
+      )
+      toast.success(t('pages.settings.tlsDownloaded'))
+    },
+  })
+
+  const copyFingerprint = async () => {
+    if (!certificate) return
+    try {
+      await navigator.clipboard.writeText(certificate.fingerprint_sha256)
+      toast.success(t('pages.settings.copied'))
+    } catch {
+      toast.error(t('pages.settings.copyFailed'))
+    }
+  }
+
+  const closeUpload = () => {
+    if (upload.isPending) return
+    setUploadOpen(false)
+  }
+
+  const selfSigned = certificate?.source === 'self_signed'
+  const host = window.location.hostname
+  const covered = certificate ? sanCoversHost(certificate.sans, host) : true
+  const expiringSoon =
+    certificate !== null &&
+    certificate.expires_in_days <= 30 &&
+    certificate.expires_in_days >= 0
+
+  return (
+    <Card>
+      <CardHeader
+        title={t('pages.settings.controlPlaneTls')}
+        description={t('pages.settings.controlPlaneTlsDescription')}
+        action={
+          view && (
+            <Badge tone={view.enabled ? 'success' : 'neutral'} dot>
+              {view.enabled
+                ? t('pages.settings.tlsEnabled')
+                : t('pages.settings.tlsDisabled')}
+            </Badge>
+          )
+        }
+      />
+      <CardBody className="flex flex-col gap-5">
+        {status.isError && !view ? (
+          <ErrorState
+            variant="inline"
+            error={status.error}
+            onRetry={() => status.refetch()}
+            retrying={status.isFetching}
+          />
+        ) : !view ? (
+          <SkeletonRows rows={3} columns={2} />
+        ) : (
+          <>
+            {!view.enabled && (
+              <p className="flex items-start gap-2 rounded-md border border-warning/40 bg-warning/8 px-3 py-2 text-[13px] text-fg">
+                <Warning weight="duotone" className="mt-0.5 h-4 w-4 shrink-0 text-fg-warning" />
+                {t('pages.settings.tlsDisabledHint')}
+              </p>
+            )}
+            {certificate && !covered && (
+              <p className="flex items-start gap-2 rounded-md border border-danger/40 bg-danger/8 px-3 py-2 text-[13px] text-fg">
+                <Warning weight="duotone" className="mt-0.5 h-4 w-4 shrink-0 text-fg-danger" />
+                {t('pages.settings.tlsHostMismatch', { host })}
+              </p>
+            )}
+            {selfSigned && (
+              <p className="flex items-start gap-2 rounded-md border border-warning/40 bg-warning/8 px-3 py-2 text-[13px] text-fg">
+                <ShieldCheck weight="duotone" className="mt-0.5 h-4 w-4 shrink-0 text-fg-warning" />
+                {t('pages.settings.tlsSelfSignedHint')}
+              </p>
+            )}
+            {expiringSoon && (
+              <p className="flex items-start gap-2 rounded-md border border-warning/40 bg-warning/8 px-3 py-2 text-[13px] text-fg">
+                <Warning weight="duotone" className="mt-0.5 h-4 w-4 shrink-0 text-fg-warning" />
+                {t('pages.settings.tlsExpiringSoon', {
+                  count: certificate?.expires_in_days ?? 0,
+                })}
+              </p>
+            )}
+
+            {certificate ? (
+              <div className="rounded-md border border-line bg-recessed px-4 py-3">
+                <dl className="grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-2">
+                  <TlsDetail
+                    label={t('pages.settings.tlsSource')}
+                    value={
+                      selfSigned
+                        ? t('pages.settings.tlsSourceSelfSigned')
+                        : t('pages.settings.tlsSourceUploaded')
+                    }
+                    className="sm:col-span-2"
+                  />
+                  <TlsDetail
+                    label={t('pages.settings.tlsSubject')}
+                    value={certificate.subject_dn}
+                    mono
+                    className="sm:col-span-2"
+                  />
+                  <TlsDetail
+                    label={t('pages.settings.tlsValidity')}
+                    value={`${formatDateTime(certificate.not_before)} → ${formatDateTime(certificate.not_after)}`}
+                    className="sm:col-span-2"
+                  />
+                  <TlsDetail
+                    label={t('pages.settings.tlsExpiresIn')}
+                    value={t('pages.settings.tlsDays', {
+                      count: certificate.expires_in_days,
+                    })}
+                  />
+                  <TlsDetail
+                    label={t('pages.settings.tlsSerial')}
+                    value={certificate.serial}
+                    mono
+                  />
+                  <TlsDetail
+                    label={t('pages.settings.tlsFingerprint')}
+                    value={certificate.fingerprint_sha256}
+                    mono
+                    className="sm:col-span-2"
+                  />
+                  <div className="sm:col-span-2">
+                    <dt className="text-xs text-fg-subtle">
+                      {t('pages.settings.tlsSans')}
+                    </dt>
+                    <dd className="mt-1 flex flex-wrap gap-1.5">
+                      {certificate.sans.length === 0 ? (
+                        <span className="text-[13px] text-fg-subtle">—</span>
+                      ) : (
+                        certificate.sans.map((san) => (
+                          <Badge key={san} size="sm" tone="neutral" className="pw-mono">
+                            {san}
+                          </Badge>
+                        ))
+                      )}
+                    </dd>
+                  </div>
+                </dl>
+              </div>
+            ) : (
+              <EmptyState
+                icon={<LockKey weight="duotone" />}
+                title={t('pages.settings.tlsNoCertificate')}
+                description={t('pages.settings.tlsNoCertificateDescription')}
+                className="py-8"
+              />
+            )}
+
+            <div className="flex flex-wrap gap-2">
+              <Button
+                variant="secondary"
+                disabled={!certificate}
+                loading={download.isPending}
+                icon={<DownloadSimple weight="duotone" className="h-4 w-4" />}
+                onClick={() => download.mutate()}
+              >
+                {t('pages.settings.tlsDownload')}
+              </Button>
+              <Button
+                variant="ghost"
+                disabled={!certificate}
+                icon={<Copy weight="duotone" className="h-4 w-4" />}
+                onClick={copyFingerprint}
+              >
+                {t('pages.settings.tlsCopyFingerprint')}
+              </Button>
+              <Button
+                disabled={!canWrite}
+                icon={<UploadSimple weight="duotone" className="h-4 w-4" />}
+                onClick={() => setUploadOpen(true)}
+              >
+                {t('pages.settings.tlsUpload')}
+              </Button>
+              <Button
+                variant="secondary"
+                disabled={!canWrite}
+                icon={<LockKey weight="duotone" className="h-4 w-4" />}
+                onClick={() => setRegenOpen(true)}
+              >
+                {t('pages.settings.tlsGenerate')}
+              </Button>
+            </div>
+            <p className="flex items-start gap-2 text-xs leading-relaxed text-fg-subtle">
+              <Certificate weight="duotone" className="mt-0.5 h-4 w-4 shrink-0" />
+              {t('pages.settings.tlsApplyHint')}
+            </p>
+          </>
+        )}
+      </CardBody>
+
+      <Dialog
+        open={uploadOpen}
+        onClose={closeUpload}
+        size="md"
+        title={t('pages.settings.tlsUploadTitle')}
+        description={t('pages.settings.tlsUploadDescription')}
+        footer={
+          <>
+            <Button variant="secondary" onClick={closeUpload} disabled={upload.isPending}>
+              {t('common.cancel')}
+            </Button>
+            <Button
+              loading={upload.isPending}
+              disabled={!certPem.trim() || !keyPem.trim()}
+              onClick={() => upload.mutate()}
+            >
+              {t('pages.settings.tlsUpload')}
+            </Button>
+          </>
+        }
+      >
+        <div className="flex flex-col gap-4">
+          <Textarea
+            label={t('pages.settings.tlsCertPem')}
+            hint={t('pages.settings.tlsCertPemHint')}
+            mono
+            rows={7}
+            value={certPem}
+            placeholder="-----BEGIN CERTIFICATE-----"
+            onChange={(e) => setCertPem(e.target.value)}
+          />
+          <Textarea
+            label={t('pages.settings.tlsKeyPem')}
+            hint={t('pages.settings.tlsKeyPemHint')}
+            mono
+            rows={7}
+            value={keyPem}
+            placeholder="-----BEGIN PRIVATE KEY-----"
+            onChange={(e) => setKeyPem(e.target.value)}
+          />
+          {upload.isError && (
+            <p className="text-[13px] font-medium text-fg-danger">
+              {errorMessage(upload.error)}
+            </p>
+          )}
+        </div>
+      </Dialog>
+
+      <ConfirmDialog
+        open={regenOpen}
+        onClose={() => setRegenOpen(false)}
+        onConfirm={() => regenerate.mutate()}
+        tone="primary"
+        title={t('pages.settings.tlsGenerateConfirmTitle')}
+        description={t('pages.settings.tlsGenerateConfirm')}
+        confirmLabel={t('pages.settings.tlsGenerate')}
+        loading={regenerate.isPending}
+      >
+        {(view?.default_sans.length ?? 0) > 0 && (
+          <p className="text-xs text-fg-subtle">
+            {t('pages.settings.tlsDefaultSans')}:{' '}
+            <span className="pw-mono">{view?.default_sans.join(', ')}</span>
+          </p>
+        )}
+      </ConfirmDialog>
     </Card>
   )
 }

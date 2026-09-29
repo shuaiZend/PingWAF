@@ -172,13 +172,19 @@ docker compose up -d
 
 Then open the dashboard:
 
-- **URL:** http://localhost:9080
+- **URL:** https://localhost:9080
 - **Email:** `admin@pingwaf.local`
 - **Password:** `pingwaf123`
 
 > ⚠️ **Change the default admin password and `PINGWAF_JWT_SECRET` before any production use.**
 
-Health check: `GET http://localhost:9080/healthz`.
+The dashboard is served over **HTTPS** with a self-signed certificate generated
+on first boot, so the browser warns until you either trust the downloaded
+certificate or upload a real one under **Settings → Control plane HTTPS**. Set
+`PINGWAF_TLS_SANS` to the hostname you use if it is not `localhost`.
+
+Health check: `GET http://localhost:9080/healthz` (answers on HTTP and HTTPS;
+everything else redirects to `https://`).
 
 ### Option B — Build from source
 
@@ -264,6 +270,8 @@ PingWAF is configured through **`PINGWAF_*` environment variables** and **CLI fl
 | `PINGWAF_ADMIN_PASSWORD` | `pingwaf123` | Seeded administrator password (**change in production**) |
 | `PINGWAF_ALLOW_REGISTRATION` | `true` | Whether `POST /api/v1/auth/register` accepts signups (`docker-compose.yml` and `install.sh` set this to `false`) |
 | `PINGWAF_HEARTBEAT_INTERVAL` | `15` | Heartbeat interval handed to agents (seconds) |
+| `PINGWAF_TLS_ENABLED` | `true` | Serve the REST API + dashboard over HTTPS (self-signed until replaced); `false` behind a TLS-terminating proxy |
+| `PINGWAF_TLS_SANS` | hostname, `localhost`, `127.0.0.1` | Comma-separated SANs of the generated self-signed certificate |
 | `PINGWAF_SERVER_URL` | `http://localhost:9090` | *(agent)* control-plane gRPC URL |
 | `PINGWAF_API_KEY` | *(empty)* | *(agent)* API key; empty = auto-register over loopback |
 | `PINGWAF_CACHE_DIR` | `./data/cache` | *(agent)* local rule cache directory |
@@ -274,7 +282,7 @@ PingWAF is configured through **`PINGWAF_*` environment variables** and **CLI fl
 
 | Port | Purpose |
 | --- | --- |
-| `9080` | REST API + embedded dashboard (health: `GET /healthz`) |
+| `9080` | REST API + embedded dashboard over HTTPS (health: `GET /healthz`, answered on HTTP too) |
 | `9090` | gRPC control plane (agents connect here) |
 | `80` / `443` | Proxied traffic (bound once the first site exists; `443` opens only after a certificate is issued or uploaded — until then only port `80` serves HTTP) |
 
@@ -289,7 +297,7 @@ PingWAF is configured through **`PINGWAF_*` environment variables** and **CLI fl
 | [docs/quick-start.md](./docs/quick-start.md) | From zero to your first protected site |
 | [docs/deployment.md](./docs/deployment.md) | Docker, binary + systemd, distributed topologies |
 | [docs/user-guide.md](./docs/user-guide.md) | Dashboard walkthrough, sites, rules, policies |
-| [docs/api.md](./docs/api.md) | REST API reference (`http://<host>:9080/api/v1`) |
+| [docs/api.md](./docs/api.md) | REST API reference (`https://<host>:9080/api/v1`) |
 | [docs/README.md](./docs/README.md) | Full documentation index |
 | [CONTRIBUTING.md](./CONTRIBUTING.md) | How to contribute |
 | [SECURITY.md](./SECURITY.md) | Vulnerability disclosure policy |

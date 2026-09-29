@@ -216,7 +216,7 @@ fn mtls_error(err: MtlsError) -> ApiError {
 }
 
 /// `time` (used by rcgen) to `chrono` (used by the database models).
-fn to_utc(value: time::OffsetDateTime) -> DateTime<Utc> {
+pub(crate) fn to_utc(value: time::OffsetDateTime) -> DateTime<Utc> {
     DateTime::from_timestamp(value.unix_timestamp(), 0).unwrap_or_else(Utc::now)
 }
 

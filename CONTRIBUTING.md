@@ -178,7 +178,7 @@ export POSTGRES_PASSWORD="$(openssl rand -hex 16)"
 export JWT_SECRET="$(openssl rand -hex 32)"
 export ADMIN_PASSWORD="$(openssl rand -hex 16)"
 docker compose up -d --build
-curl -sf http://localhost:9080/healthz      # {"status":"ok","database":"up"}
+curl -sf http://localhost:9080/healthz      # {"status":"ok","database":"up"} (health answers on HTTP too)
 ```
 
 Native, against a local PostgreSQL:
@@ -192,7 +192,7 @@ cargo run --bin pingwaf --features full -- all-in-one \
   --db-url "postgres://pingwaf:pingwaf@localhost:5432/pingwaf"
 ```
 
-Dashboard: <http://localhost:9080> — default credentials
+Dashboard: <https://localhost:9080> — default credentials
 `admin@pingwaf.local` / `pingwaf123` unless you overrode them.
 
 Configuration comes from CLI flags and `PINGWAF_*` environment variables; CLI
@@ -271,7 +271,8 @@ tokens; state via Zustand, data fetching via TanStack Query.
   locale files: `web/src/i18n/locales/en|zh|ja/common.json`.
 - Keep the Cloudflare-style design language: orange brand accent, semantic
   tokens, dark/light themes, responsive layout.
-- Talk to the backend through `http://<host>:9080/api/v1` with the JWT bearer
+- Talk to the backend through `https://<host>:9080/api/v1` with the JWT bearer
+  (`curl -k` until the self-signed certificate is trusted)
   token, as documented in [`docs/api.md`](./docs/api.md).
 
 ## Commit Conventions
@@ -383,7 +384,7 @@ the standard Apache-2.0 header used throughout the workspace.
    rust-embed 打进二进制），再 `cargo build --bin pingwaf --features full`。
 3. **本地运行**：`cargo run --bin pingwaf --features full -- all-in-one
    --db-url "postgres://pingwaf:pingwaf@localhost:5432/pingwaf"`，
-   控制台 <http://localhost:9080>，默认账号 `admin@pingwaf.local` / `pingwaf123`。
+   控制台 <https://localhost:9080>（自签名证书），默认账号 `admin@pingwaf.local` / `pingwaf123`。
 4. **提交前**：`make fmt`、`make lint`、`make test`，前端 `npm run lint`。
    `clippy::unwrap_used` 全局 deny，请勿在请求路径中 panic。
 5. **提交信息**：遵循 Conventional Commits（`feat/fix/perf/refactor/docs/test/chore`），

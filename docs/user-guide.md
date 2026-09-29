@@ -4,7 +4,8 @@
 
 ### First Login
 
-1. Open the dashboard at `http://your-server:9080`
+1. Open the dashboard at `https://your-server:9080` (self-signed certificate
+   until you upload a real one under Settings → Control plane HTTPS)
 2. Log in with the seeded credentials:
    - Email: `admin@pingwaf.local`
    - Password: `pingwaf123`

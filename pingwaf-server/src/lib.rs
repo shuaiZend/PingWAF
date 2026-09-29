@@ -20,6 +20,7 @@ pub mod models;
 pub mod monitoring;
 pub mod pki;
 pub mod subscription;
+pub mod tls;
 
 pub use config::ServerConfig;
 
@@ -135,20 +136,69 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
     // REST API (which serves `/api/v1/cache/status` from it).
     let cache_status = crate::grpc::CacheStatusRegistry::new();
 
+    // ── 6c. Control plane HTTPS ─────────────────────────────────────────────
+    // The dashboard is served over TLS so browsers treat it as a secure origin
+    // (WebAuthn passkeys refuse plain http outside localhost). The certificate
+    // is stored in the database and handed to the listener here, before it
+    // starts accepting; a later upload swaps it in place.
+    let control_tls =
+        Arc::new(tls::ControlPlaneTls::new(shared_config.tls_enabled));
+
     let state = AppState {
         db: db.clone(),
         config: shared_config.clone(),
         agents: agents.clone(),
         es: es_client.clone(),
         cache_status: cache_status.clone(),
+        control_tls: control_tls.clone(),
     };
+
+    if control_tls.is_enabled() {
+        match api::system_tls::load_active_certificate(&state).await {
+            Ok(Some(certificate)) => tracing::info!(
+                subject = %certificate.subject_dn,
+                expires = %certificate.not_after,
+                "control plane HTTPS enabled with the stored certificate"
+            ),
+            Ok(None) => {
+                let certificate =
+                    api::system_tls::bootstrap_self_signed(&state).await?;
+                tracing::warn!(
+                    subject = %certificate.subject_dn,
+                    "control plane HTTPS enabled with a freshly generated \
+                     self-signed certificate; upload a real one from \
+                     Settings → Control plane HTTPS"
+                );
+            },
+            Err(err) => {
+                // A stored certificate that cannot be loaded must not take the
+                // console down: generate a fresh self-signed pair (the old row
+                // is kept for inspection) and say so loudly.
+                tracing::error!(
+                    error = %err,
+                    "the stored control plane certificate could not be loaded, \
+                     falling back to a self-signed one"
+                );
+                api::system_tls::bootstrap_self_signed(&state).await?;
+            },
+        }
+    } else {
+        tracing::warn!(
+            "control plane HTTPS is disabled; passkeys require a secure origin, \
+             so terminate TLS in front of this listener"
+        );
+    }
 
     // ── 7. HTTP (Axum) ───────────────────────────────────────────────────────
     let http_listener = TcpListener::bind(http_addr).await.map_err(|err| {
         anyhow::anyhow!("failed to bind HTTP address {http_addr}: {err}")
     })?;
     let router = api::build_router(state.clone());
-    tracing::info!(%http_addr, "REST API listening");
+    if control_tls.is_enabled() {
+        tracing::info!(%http_addr, "REST API and dashboard listening (HTTPS)");
+    } else {
+        tracing::info!(%http_addr, "REST API and dashboard listening (HTTP)");
+    }
 
     // ── 8. gRPC (tonic) ──────────────────────────────────────────────────────
     let grpc_listener = TcpListener::bind(grpc_addr).await.map_err(|err| {
@@ -181,9 +231,7 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
 
     // ── 10. Spawn and wait for shutdown ─────────────────────────────────────
     tokio::select! {
-        result = axum::serve(http_listener, router)
-            .with_graceful_shutdown(shutdown_wait()) =>
-        {
+        result = serve_http(http_listener, router, control_tls.clone()) => {
             if let Err(err) = result {
                 tracing::error!(error = %err, "HTTP server error");
             }
@@ -428,4 +476,30 @@ async fn shutdown_signal() {
 /// `with_graceful_shutdown`).
 async fn shutdown_wait() {
     shutdown_signal().await;
+}
+
+/// Serves the REST API and the dashboard, over TLS when it is enabled.
+///
+/// The TLS case uses a mixed listener so cleartext probes still get an HTTP
+/// answer; connecting the listener to `ConnInfo` is what lets the redirect
+/// middleware tell the two kinds of connection apart.
+async fn serve_http(
+    listener: TcpListener,
+    router: axum::Router,
+    control_tls: Arc<tls::ControlPlaneTls>,
+) -> std::io::Result<()> {
+    if control_tls.is_enabled() {
+        let listener =
+            tls::MixedListener::new(listener, control_tls.acceptor());
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<tls::ConnInfo>(),
+        )
+        .with_graceful_shutdown(shutdown_wait())
+        .await
+    } else {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(shutdown_wait())
+            .await
+    }
 }

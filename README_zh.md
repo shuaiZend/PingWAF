@@ -172,13 +172,17 @@ docker compose up -d
 
 随后打开控制台：
 
-- **地址：** http://localhost:9080
+- **地址：** https://localhost:9080
 - **邮箱：** `admin@pingwaf.local`
 - **密码：** `pingwaf123`
 
 > ⚠️ **在任何生产环境使用前，请务必修改默认管理员密码与 `PINGWAF_JWT_SECRET`。**
 
-健康检查：`GET http://localhost:9080/healthz`。
+控制台默认以 **HTTPS** 提供服务，首次启动自动生成自签名证书，浏览器会提示不受信任；
+可在**设置 → 控制台 HTTPS** 下载该证书或上传正式证书替换。若访问使用的主机名不是
+`localhost`，请通过 `PINGWAF_TLS_SANS` 指定，使生成的证书覆盖该主机名。
+
+健康检查：`GET http://localhost:9080/healthz`（HTTP 与 HTTPS 均可访问；其余路径会 308 跳转到 `https://`）。
 
 ### 方式 B —— 源码编译
 
@@ -274,7 +278,7 @@ PingWAF 通过 **`PINGWAF_*` 环境变量**与 **CLI 参数**进行配置（CLI 
 
 | 端口 | 用途 |
 | --- | --- |
-| `9080` | REST API + 内嵌控制台（健康检查：`GET /healthz`） |
+| `9080` | REST API + 内嵌控制台（HTTPS；健康检查 `GET /healthz`，HTTP 亦可访问） |
 | `9090` | gRPC 控制面（Agent 连接此端口） |
 | `80` / `443` | 代理流量（创建首个站点后绑定；`443` 在签发或上传证书后才会开启——此前仅 `80` 端口提供 HTTP 服务） |
 
@@ -289,7 +293,7 @@ PingWAF 通过 **`PINGWAF_*` 环境变量**与 **CLI 参数**进行配置（CLI 
 | [docs/quick-start.md](./docs/quick-start.md) | 从零开始，保护你的第一个站点 |
 | [docs/deployment.md](./docs/deployment.md) | Docker、二进制 + systemd、分布式拓扑 |
 | [docs/user-guide.md](./docs/user-guide.md) | 控制台使用、站点、规则与策略 |
-| [docs/api.md](./docs/api.md) | REST API 参考（`http://<host>:9080/api/v1`） |
+| [docs/api.md](./docs/api.md) | REST API 参考（`https://<host>:9080/api/v1`） |
 | [docs/README.md](./docs/README.md) | 完整文档索引 |
 | [CONTRIBUTING.md](./CONTRIBUTING.md) | 如何参与贡献 |
 | [SECURITY.md](./SECURITY.md) | 漏洞披露政策 |

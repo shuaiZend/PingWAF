@@ -5,7 +5,9 @@
 #
 # Usage:
 #   docker compose up -d
-#   # Dashboard: http://localhost:9080
+#   # Dashboard: https://localhost:9080 (self-signed certificate — upload a real
+#   # one under Settings → Control plane HTTPS; set PINGWAF_TLS_ENABLED=false to
+#   # serve plain HTTP instead)
 #   # Default credentials: admin@pingwaf.local / pingwaf123
 
 services:
@@ -35,6 +37,10 @@ services:
       - PINGWAF_ADMIN_EMAIL=${ADMIN_EMAIL:-admin@pingwaf.local}
       - PINGWAF_ADMIN_PASSWORD=${ADMIN_PASSWORD:-pingwaf123}
       - PINGWAF_ALLOW_REGISTRATION=${ALLOW_REGISTRATION:-false}
+      # HTTPS for the dashboard (self-signed until a certificate is uploaded).
+      # Add the hostname you reach the dashboard on so the generated pair covers
+      # it: PINGWAF_TLS_SANS=waf.example.com
+      - PINGWAF_TLS_ENABLED=${TLS_ENABLED:-true}
       - PINGWAF_HEARTBEAT_INTERVAL=${HEARTBEAT_INTERVAL:-15}
       - RUST_LOG=${RUST_LOG:-info}
       # Elasticsearch (optional — uncomment to enable log shipping)

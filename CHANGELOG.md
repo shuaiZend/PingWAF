@@ -8,6 +8,49 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.16.0] — 2026-09-30
+
+### ⛰️ Features
+
+- *(api)* Serve the control plane over HTTPS by default. The REST API and
+  dashboard port (9080) now speaks TLS, which is what browsers require before
+  they will offer a passkey: a self-signed P-256 certificate is generated on
+  first boot and covers the configured `tls_sans`, the machine hostname,
+  `localhost` and `127.0.0.1`. A single listener dispatches on the first byte,
+  so cleartext requests are answered with a `308 Permanent Redirect` to the
+  `https://` URL on the same host instead of a connection reset, and the two
+  health endpoints (`/healthz`, `/api/v1/health`) stay reachable over both
+  schemes so container and load-balancer probes keep working without a
+  certificate. `tls_enabled = false` (`PINGWAF_TLS_ENABLED=false`,
+  `--tls-enabled false`) restores plain HTTP for deployments behind a
+  TLS-terminating proxy.
+- *(api)* Manage that certificate from the dashboard. New administrator-only
+  endpoints under `/system/tls` report what is being served, download the
+  certificate in use, accept an upload (chain + key validated before anything
+  is written), and regenerate the self-signed pair; the console gets a
+  **Control plane HTTPS** card in Settings that shows the subject, SANs,
+  fingerprint and expiry, warns when the hostname you opened the console on is
+  not covered, and offers the same actions. A replaced certificate takes effect
+  immediately — the listener swaps the pair through a reloadable resolver, no
+  restart — and the private key never leaves the server.
+
+### 🐛 Bug Fixes
+
+- *(auth)* Passkeys now work on a deployment that terminates TLS itself. The
+  relying-party origin was reported as `http://<host>` unless the operator set
+  `passkey_trust_forwarded_proto` **and** a proxy supplied `X-Forwarded-Proto`,
+  so a browser on the HTTPS console rejected its own credential with an origin
+  mismatch. The scheme now follows the listener — a request that reached a
+  handler on a TLS-terminating port arrived over HTTPS — while the forwarded
+  header is still only believed when the flag is explicitly set.
+
+### ⚠️ Breaking Changes
+
+- Clients that talked to `http://<host>:9080` now receive a `308` redirect;
+  use the `https://` URL (with `curl -k` until the certificate is trusted) or
+  set `tls_enabled = false`. The self-signed certificate is not trusted by any
+  browser until it is installed or replaced.
+
 ## [PingWAF 0.15.0] — 2026-09-29
 
 ### ⛰️ Features

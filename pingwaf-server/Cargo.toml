@@ -44,8 +44,23 @@ rcgen = { workspace = true }
 sha2 = { workspace = true }
 time = { workspace = true }
 x509-parser = { workspace = true }
+# TLS termination for the dashboard listener. Same provider (`ring`) as the
+# pingora rustls backend, so the two never disagree about crypto.
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "logging",
+    "std",
+    "tls12",
+] }
+rustls-pemfile = "2"
+tokio-rustls = { version = "0.26", default-features = false, features = [
+    "ring",
+    "logging",
+    "tls12",
+] }
 tokio = { workspace = true, features = [
     "fs",
+    "io-util",
     "macros",
     "net",
     "rt-multi-thread",

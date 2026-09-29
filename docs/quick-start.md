@@ -6,7 +6,7 @@ protect your first website.
 **By the end of this guide you will have:**
 
 - PingWAF running in `all-in-one` mode (control plane + data plane in one process)
-- The web dashboard reachable at `http://localhost:9080`
+- The web dashboard reachable at `https://localhost:9080` (self-signed certificate)
 - A successful login with the seeded administrator account
 - One site configured with WAF protection enabled
 - A verified block of a malicious test request
@@ -77,7 +77,7 @@ Port summary:
 
 | Port | Purpose | When it listens |
 | --- | --- | --- |
-| `9080` | REST API + embedded dashboard; `GET /healthz` | Always (server / all-in-one) |
+| `9080` | REST API + embedded dashboard over HTTPS; `GET /healthz` answers on HTTP and HTTPS | Always (server / all-in-one) |
 | `9090` | gRPC control plane (agents connect here) | Always (server / all-in-one) |
 | `80` / `443` | Proxied site traffic | **Only after at least one site is created** |
 | `5432` | PostgreSQL | Your database, internal only |
@@ -233,12 +233,18 @@ If `"database"` is not `"up"`, see
 
 ### Step 5 — Open the dashboard
 
-Browse to **<http://localhost:9080>** and log in with:
+Browse to **<https://localhost:9080>** and log in with:
 
 | Field | Value |
 | --- | --- |
 | Email | `admin@pingwaf.local` (or your `ADMIN_EMAIL`) |
 | Password | the value of `ADMIN_PASSWORD` (`pingwaf123` if you did not set one) |
+
+The certificate is self-signed on first boot, so the browser shows a warning
+until you either trust it or upload a real certificate under **Settings →
+Control plane HTTPS** (where you can also download the current one). Set
+`PINGWAF_TLS_SANS` / `tls_sans` to the hostname you use, otherwise the
+generated certificate does not cover it.
 
 The dashboard ships three languages — English, 中文, 日本語 — auto-detected from
 your browser and switchable in the header.
@@ -248,16 +254,20 @@ your browser and switchable in the header.
 ### Optional: talk to the REST API
 
 ```bash
-TOKEN=$(curl -s -X POST http://localhost:9080/api/v1/auth/login \
+TOKEN=$(curl -sk -X POST https://localhost:9080/api/v1/auth/login \
   -H 'Content-Type: application/json' \
   -d '{"email":"admin@pingwaf.local","password":"pingwaf123"}' \
   | jq -r .access_token)
 
-curl -s http://localhost:9080/api/v1/sites \
+curl -sk https://localhost:9080/api/v1/sites \
   -H "Authorization: Bearer $TOKEN" | jq .
 ```
 
-API base URL: `http://<host>:9080/api/v1` — full reference in
+`-k` skips certificate verification — required until the self-signed
+certificate is trusted (or a real one is uploaded).
+
+API base URL: `https://<host>:9080/api/v1` (plain `http://` is answered with a
+`308` redirect to the `https://` URL) — full reference in
 [`docs/api.md`](./api.md).
 
 ### Stopping and resetting
@@ -438,7 +448,10 @@ curl -sf http://localhost:9080/healthz
 # {"status":"ok","database":"up"}
 ```
 
-Then open <http://localhost:9080> and log in with `admin@pingwaf.local` /
+The health endpoint answers on both schemes, so a plain-HTTP probe keeps
+working; everything else is served over HTTPS and redirects otherwise.
+
+Then open <https://localhost:9080> and log in with `admin@pingwaf.local` /
 your `--admin-password` (`pingwaf123` if you did not override it).
 
 Stop with `Ctrl-C` in the foreground, or `kill <pid>` when backgrounded.
@@ -509,7 +522,7 @@ This is a walkthrough; every screen is documented in depth in
 
 ### 1. Log in
 
-Open `http://localhost:9080`, sign in as `admin@pingwaf.local`, then change the
+Open `https://localhost:9080`, sign in as `admin@pingwaf.local`, then change the
 password (Profile → Change Password).
 
 ### 2. Create a site
@@ -644,6 +657,8 @@ over environment variables.**
 | `--db-url` | `PINGWAF_DB_URL` | `postgres://pingwaf:pingwaf@localhost:5432/pingwaf` | PostgreSQL DSN |
 | `--admin-addr` | `PINGWAF_ADMIN_ADDR` | `0.0.0.0:9080` | REST API + dashboard listen address |
 | `--grpc-addr` | `PINGWAF_GRPC_ADDR` | `0.0.0.0:9090` | gRPC control plane listen address |
+| `--tls-enabled` | `PINGWAF_TLS_ENABLED` | `true` | Serve the REST API + dashboard over HTTPS (self-signed until a certificate is uploaded); `false` behind a TLS-terminating proxy |
+| `--tls-sans` | `PINGWAF_TLS_SANS` | hostname, `localhost`, `127.0.0.1` | Comma-separated subject alternative names for the generated certificate |
 | — | `PINGWAF_HTTP_ADDR` | — | Alias for the REST API / dashboard address read by the server config layer |
 | — | `RUST_LOG` | `info` | Tracing log filter, e.g. `debug`, `pingwaf_server=debug` |
 
@@ -754,7 +769,8 @@ privileges. Migrations run automatically on startup and need `CREATE TABLE`.
 ### Dashboard does not open (connection refused / blank page / 404)
 
 1. Check the health endpoint first — if `/healthz` fails, the server is not up:
-   `curl -sf http://localhost:9080/healthz`.
+   `curl -sf http://localhost:9080/healthz` (the health endpoint answers on both
+   schemes, so this works even with TLS on).
 2. Confirm the bind address. `--admin-addr 127.0.0.1:9080` is unreachable from
    another machine; use `0.0.0.0:9080` and open the firewall port.
 3. Building from source? The dashboard is embedded from `web/dist` **at compile
@@ -762,6 +778,19 @@ privileges. Migrations run automatically on startup and need `CREATE TABLE`.
    frontend after compiling Rust, rebuild the binary.
 4. Make sure `--serve-frontend` was not set to `false`.
 5. Cloud firewall / security group must allow `9080` (and `80`/`443` for sites).
+
+### Browser warns about the certificate / a plain-HTTP request returns 308
+
+Expected on a fresh install: the certificate is self-signed and browsers do not
+trust it yet. Either accept it once, install the downloaded certificate into
+your trust store (**Settings → Control plane HTTPS → Download certificate**), or
+upload a certificate issued for the hostname you use. Requests over plain
+`http://` are redirected to `https://` with `308` — use the `https://` URL, and
+`curl -k` until the certificate is trusted.
+
+If the warning says the name does not match, the certificate lacks your
+hostname: add it to `PINGWAF_TLS_SANS` (or `tls_sans`) and regenerate, or upload
+a certificate that includes it.
 
 ### Agent cannot connect to the server
 
@@ -807,7 +836,7 @@ from [GitHub Releases](https://github.com/shuaiZend/PingWAF/releases), so it
 works on Linux (amd64/arm64) only — on macOS,
 [build from source](#path-2-build-from-source) instead. If the script cannot
 determine the latest version, pass one explicitly:
-`./install.sh --version 0.15.0`.
+`./install.sh --version 0.16.0`.
 
 ### High memory or disk usage
 
@@ -823,7 +852,7 @@ determine the latest version, pass one explicitly:
 | Document | What you will find |
 | --- | --- |
 | [`docs/user-guide.md`](./user-guide.md) | Dashboard tour: sites, WAF rules, rate limiting, challenges, caching, SSL, logs, agents |
-| [`docs/api.md`](./api.md) | Full REST API reference (`http://<host>:9080/api/v1`) |
+| [`docs/api.md`](./api.md) | Full REST API reference (`https://<host>:9080/api/v1`) |
 | [`docs/deployment.md`](./deployment.md) | Production deployment, systemd, TLS/ACME, firewall, backups, upgrades |
 | [`CONTRIBUTING.md`](../CONTRIBUTING.md) | Development setup, code style, PR workflow |
 | [`SECURITY.md`](../SECURITY.md) | How to report a vulnerability privately |

@@ -62,6 +62,23 @@ pub struct CommonOpts {
     /// gRPC listen/connect address
     #[arg(long, env = "PINGWAF_GRPC_ADDR", default_value = "0.0.0.0:9090")]
     pub grpc_addr: String,
+
+    /// Serve the admin dashboard and REST API over TLS. A self-signed
+    /// certificate is generated on first boot; upload a real one from
+    /// Settings → Control plane HTTPS. Set to false behind a reverse proxy
+    /// that terminates TLS.
+    #[arg(
+        long,
+        env = "PINGWAF_TLS_ENABLED",
+        default_value = "true",
+        action = clap::ArgAction::Set
+    )]
+    pub tls_enabled: bool,
+
+    /// Subject alternative names of the generated self-signed certificate,
+    /// comma separated (DNS names and IP addresses)
+    #[arg(long, env = "PINGWAF_TLS_SANS", value_delimiter = ',')]
+    pub tls_sans: Vec<String>,
 }
 
 /// Control plane server options.
@@ -142,22 +159,8 @@ pub struct AgentOpts {
 /// All-in-one mode options (server + agent in one process).
 #[derive(Parser, Debug, Clone)]
 pub struct AllInOneOpts {
-    // ── Common ────────────────────────────────────────────────────────
-    /// PostgreSQL connection string
-    #[arg(
-        long,
-        env = "PINGWAF_DB_URL",
-        default_value = "postgres://pingwaf:pingwaf@localhost:5432/pingwaf"
-    )]
-    pub db_url: String,
-
-    /// HTTP admin/API listen address
-    #[arg(long, env = "PINGWAF_ADMIN_ADDR", default_value = "0.0.0.0:9080")]
-    pub admin_addr: String,
-
-    /// gRPC listen address
-    #[arg(long, env = "PINGWAF_GRPC_ADDR", default_value = "0.0.0.0:9090")]
-    pub grpc_addr: String,
+    #[command(flatten)]
+    pub common: CommonOpts,
 
     // ── Server ────────────────────────────────────────────────────────
     /// JWT signing secret (must be at least 16 characters)

@@ -9,6 +9,7 @@ use crate::config::ServerConfig;
 use crate::es::ElasticsearchClient;
 use crate::grpc::cache_status::CacheStatusRegistry;
 use crate::grpc::AgentRegistry;
+use crate::tls::ControlPlaneTls;
 
 /// Everything an HTTP handler needs.
 ///
@@ -28,6 +29,9 @@ pub struct AppState {
     /// Latest per-site edge cache usage reported by agent heartbeats, backing
     /// `/api/v1/cache/status`.
     pub cache_status: CacheStatusRegistry,
+    /// Certificate the dashboard's own HTTPS listener presents. Shared with
+    /// the listener so an upload takes effect without a restart.
+    pub control_tls: Arc<ControlPlaneTls>,
 }
 
 impl AppState {
@@ -42,6 +46,7 @@ impl AppState {
             agents,
             es: None,
             cache_status: CacheStatusRegistry::new(),
+            control_tls: Arc::new(ControlPlaneTls::new(false)),
         }
     }
 
@@ -59,6 +64,7 @@ impl AppState {
             agents,
             es: None,
             cache_status,
+            control_tls: Arc::new(ControlPlaneTls::new(false)),
         }
     }
 

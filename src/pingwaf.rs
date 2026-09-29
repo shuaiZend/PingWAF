@@ -24,7 +24,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::certificates::{new_certificate_provider, try_update_certificates};
 use crate::cli::{
-    AgentOpts, AllInOneOpts, PingWafCli, PingWafCommand, ServerOpts,
+    AgentOpts, AllInOneOpts, CommonOpts, PingWafCli, PingWafCommand, ServerOpts,
 };
 use crate::config_manager::try_init_memory_config_manager;
 use crate::locations::{new_location_provider, try_init_locations};
@@ -73,20 +73,33 @@ fn server_config_from_opts(opts: &ServerOpts) -> ServerConfig {
     config.default_admin_email = opts.admin_email.clone();
     config.default_admin_password = opts.admin_password.clone();
     config.serve_frontend = opts.serve_frontend;
+    apply_tls_opts(&mut config, &opts.common);
     config
 }
 
 /// Convert CLI all-in-one options into a `ServerConfig`.
 fn server_config_from_all_in_one(opts: &AllInOneOpts) -> ServerConfig {
     let mut config = ServerConfig::from_env();
-    config.db_url = opts.db_url.clone();
-    config.http_addr = opts.admin_addr.clone();
-    config.grpc_addr = opts.grpc_addr.clone();
+    config.db_url = opts.common.db_url.clone();
+    config.http_addr = opts.common.admin_addr.clone();
+    config.grpc_addr = opts.common.grpc_addr.clone();
     config.jwt_secret = opts.jwt_secret.clone();
     config.default_admin_email = opts.admin_email.clone();
     config.default_admin_password = opts.admin_password.clone();
     config.serve_frontend = opts.serve_frontend;
+    apply_tls_opts(&mut config, &opts.common);
     config
+}
+
+/// Layers the shared TLS options onto a server config.
+///
+/// The SAN list is only replaced when the operator actually spelled one out,
+/// so the built-in defaults survive an invocation without `--tls-sans`.
+fn apply_tls_opts(config: &mut ServerConfig, opts: &CommonOpts) {
+    config.tls_enabled = opts.tls_enabled;
+    if !opts.tls_sans.is_empty() {
+        config.tls_sans = opts.tls_sans.clone();
+    }
 }
 
 /// Convert CLI agent options into an `AgentConfig`.
@@ -114,8 +127,8 @@ fn agent_config_from_opts(opts: &AgentOpts) -> AgentConfig {
 /// In all-in-one mode the agent connects to the local server via loopback.
 fn agent_config_from_all_in_one(opts: &AllInOneOpts) -> AgentConfig {
     // Derive the loopback gRPC URL from the configured gRPC address
-    let server_url =
-        format!("http://127.0.0.1:{}", extract_port(&opts.grpc_addr));
+    let port = extract_port(&opts.common.grpc_addr);
+    let server_url = format!("http://127.0.0.1:{port}");
     AgentConfig {
         server_url,
         api_key: opts.api_key.clone(),

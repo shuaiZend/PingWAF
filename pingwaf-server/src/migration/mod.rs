@@ -24,6 +24,7 @@ pub mod m20240101_000016_access_log_response_detail;
 pub mod m20240101_000017_site_routes_ip_group;
 pub mod m20240101_000018_mtls_certificates;
 pub mod m20240101_000019_passkey_credentials;
+pub mod m20240101_000020_control_plane_tls;
 
 use sea_orm_migration::prelude::*;
 
@@ -55,6 +56,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20240101_000017_site_routes_ip_group::Migration),
             Box::new(m20240101_000018_mtls_certificates::Migration),
             Box::new(m20240101_000019_passkey_credentials::Migration),
+            Box::new(m20240101_000020_control_plane_tls::Migration),
         ]
     }
 }
@@ -66,7 +68,7 @@ mod tests {
     #[test]
     fn migrations_are_ordered_and_unique() {
         let migrations = Migrator::migrations();
-        assert_eq!(migrations.len(), 19);
+        assert_eq!(migrations.len(), 20);
         let names: Vec<String> =
             migrations.iter().map(|m| m.name().to_owned()).collect();
         let mut sorted = names.clone();
