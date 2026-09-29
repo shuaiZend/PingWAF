@@ -40,7 +40,7 @@ INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/pingwaf"
 DATA_DIR="/var/lib/pingwaf"
 SERVICE_NAME="pingwaf"
-SUPPORTED_PLATFORMS="linux/amd64 linux/arm64 darwin/amd64 darwin/arm64"
+SUPPORTED_PLATFORMS="linux/amd64 linux/arm64"
 
 # ─── Default Configuration ────────────────────────────────────────────────────
 VERSION=""
@@ -151,6 +151,10 @@ PLATFORM="${OS}/${ARCH}"
 
 info "Detected platform: ${PLATFORM}"
 
+if [[ "$OS" == "darwin" ]]; then
+    fatal "Prebuilt binaries are published for Linux only. On macOS, build from source (see README.md)."
+fi
+
 if ! echo "$SUPPORTED_PLATFORMS" | grep -q "$PLATFORM"; then
     fatal "Platform $PLATFORM is not supported. Supported: $SUPPORTED_PLATFORMS"
 fi
@@ -187,12 +191,6 @@ resolve_asset_name() {
             case "$arch" in
                 amd64) echo "pingwaf-linux-amd64.tar.gz" ;;
                 arm64) echo "pingwaf-linux-arm64.tar.gz" ;;
-            esac
-            ;;
-        darwin)
-            case "$arch" in
-                amd64) echo "pingwaf-darwin-amd64.tar.gz" ;;
-                arm64) echo "pingwaf-darwin-arm64.tar.gz" ;;
             esac
             ;;
     esac
@@ -387,7 +385,6 @@ ExecReload=/bin/kill -HUP \$MAINPID
 Restart=always
 RestartSec=5
 LimitNOFILE=65536
-Environment=PINGWAF_CONFIG=${CONFIG_DIR}/pingwaf.toml
 ${agent_env}
 Environment=RUST_LOG=info
 
@@ -513,7 +510,7 @@ if [[ "$OS" == "linux" ]]; then
         echo "  Config:    ${CONFIG_DIR}/pingwaf.toml"
         echo "  Data:      ${DATA_DIR}/"
     fi
-    echo "  Service:   systemctl ${start|stop|restart|status} ${SERVICE_NAME}"
+    echo "  Service:   systemctl {start|stop|restart|status} ${SERVICE_NAME}"
 fi
 
 if [[ "$MODE" == "agent" ]]; then

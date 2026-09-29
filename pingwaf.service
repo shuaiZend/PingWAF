@@ -21,7 +21,6 @@ ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
 RestartSec=5
 LimitNOFILE=65536
-Environment=PINGWAF_CONFIG=/etc/pingwaf/pingwaf.toml
 Environment=RUST_LOG=info
 
 # Security hardening
