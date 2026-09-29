@@ -128,7 +128,7 @@ Build metadata.
 ```json
 {
   "name": "pingwaf-server",
-  "version": "0.1.0",
+  "version": "0.14.8",
   "api": "/api/v1",
   "registration_open": true
 }
@@ -173,13 +173,16 @@ List sites (paginated).
 
 ### POST /sites
 
-Create a new site.
+Create a new site. `upstream_address` is required: a site without an origin cannot serve traffic. The site is created with a `default` origin pool containing that origin.
 
 **Request:**
 ```json
 {
   "name": "My Site",
   "domain": "example.com",
+  "upstream_address": "10.0.1.50:3000",
+  "upstream_name": "origin",
+  "upstream_tls": false,
   "status": "active",
   "plan": "free"
 }
@@ -209,7 +212,7 @@ List origin servers for a site.
 
 ### POST /sites/{site_id}/upstreams
 
-Add an upstream.
+Add an upstream (origin node). Without `pool_id` the node joins the site's default pool.
 
 **Request:**
 ```json
@@ -217,7 +220,8 @@ Add an upstream.
   "name": "app-server-1",
   "address": "10.0.1.50:3000",
   "weight": 1,
-  "tls": false
+  "tls": false,
+  "pool_id": "uuid"
 }
 ```
 
@@ -229,6 +233,91 @@ Update an upstream.
 
 Remove an upstream.
 
+### GET /sites/{site_id}/upstream-pools
+
+List origin pools for a site, default pool first. Each pool:
+
+```json
+{
+  "id": "uuid",
+  "site_id": "uuid",
+  "name": "default",
+  "lb_algorithm": "round_robin",
+  "sni": null,
+  "verify_cert": null,
+  "is_default": true,
+  "created_at": "2024-01-01T00:00:00Z"
+}
+```
+
+### POST /sites/{site_id}/upstream-pools
+
+Create an origin pool.
+
+**Request:**
+```json
+{
+  "name": "primary",
+  "lb_algorithm": "hash:cookie:session",
+  "sni": "origin.example.com",
+  "verify_cert": true
+}
+```
+
+`lb_algorithm` accepts `round_robin` or `hash:<type>[:<key>]` with type in `ip`, `url`, `path` (no key) or `header`, `cookie`, `query` (key required). A non-empty `sni` enables TLS to the origin.
+
+### PUT /sites/{site_id}/upstream-pools/{pool_id}
+
+Update an origin pool (`sni: ""` disables origin TLS).
+
+### DELETE /sites/{site_id}/upstream-pools/{pool_id}
+
+Remove an origin pool. Refused with `400` for the default pool and `409` while routes still reference it or origin nodes remain in it.
+
+### GET /sites/{site_id}/routes
+
+List path-based routes for a site, highest priority first. Each route:
+
+```json
+{
+  "id": "uuid",
+  "site_id": "uuid",
+  "name": "api-to-dedicated-pool",
+  "match_type": "prefix",
+  "path": "/api",
+  "priority": 512,
+  "enabled": true,
+  "pool_id": "uuid",
+  "created_at": "2024-01-01T00:00:00Z"
+}
+```
+
+### POST /sites/{site_id}/routes
+
+Create a route.
+
+**Request:**
+```json
+{
+  "name": "api-to-dedicated-pool",
+  "match_type": "prefix",
+  "path": "/api",
+  "priority": 512,
+  "enabled": true,
+  "pool_id": "uuid"
+}
+```
+
+`match_type` is `prefix`, `exact` or `regex`; `priority` (1-60000) is optional and defaults to the auto weight.
+
+### PUT /sites/{site_id}/routes/{route_id}
+
+Update a route (`priority: 0` resets it to the auto weight).
+
+### DELETE /sites/{site_id}/routes/{route_id}
+
+Remove a route; matching traffic falls back to the default pool.
+
 ---
 
 ## Site SSL
@@ -239,12 +328,13 @@ Get SSL configuration for a site.
 
 ### PUT /sites/{site_id}/ssl
 
-Create or update SSL settings.
+Create or update SSL settings. `domain` is required; TLS switches (https, HSTS, mTLS, TLS versions) are shared with the ssl-settings endpoint.
 
 **Request:**
 ```json
 {
-  "force_https": true,
+  "domain": "example.com",
+  "https_enabled": true,
   "min_tls_version": "1.2",
   "hsts_enabled": true,
   "hsts_max_age": 31536000
@@ -270,24 +360,28 @@ Add a certificate (manual upload or ACME request).
 **Request (manual):**
 ```json
 {
-  "name": "my-cert",
-  "certificate": "-----BEGIN CERTIFICATE-----\n...",
-  "private_key": "-----BEGIN PRIVATE KEY-----\n...",
-  "domains": ["example.com"]
+  "domain": "example.com",
+  "cert_pem": "-----BEGIN CERTIFICATE-----\n...",
+  "key_pem": "-----BEGIN PRIVATE KEY-----\n...",
+  "issuer": "Let's Encrypt",
+  "expires_at": "2025-12-31T23:59:59Z",
+  "auto_renew": false
 }
 ```
 
 **Request (ACME):**
 ```json
 {
-  "name": "letsencrypt",
-  "type": "acme",
-  "domains": ["example.com", "*.example.com"],
-  "challenge_type": "dns",
-  "dns_provider": "cloudflare",
-  "dns_config": {"api_token": "..."}
+  "domain": "example.com",
+  "acme_email": "ops@example.com",
+  "acme_challenge_type": "dns-01",
+  "acme_dns_provider": "cloudflare",
+  "acme_dns_config": {"api_token": "..."},
+  "auto_renew": true
 }
 ```
+
+`acme_challenge_type` is `http-01` or `dns-01`; `acme_dns_provider` is one of `cloudflare`, `route53`, `digitalocean`, `aliyun`, `dnspod`, `cloudxns`, `manual`.
 
 ### GET /sites/{site_id}/certificates/{cert_id}
 
@@ -303,7 +397,44 @@ Remove certificate.
 
 ### POST /sites/{site_id}/certificates/{cert_id}/renew
 
-Trigger manual certificate renewal.
+Trigger manual certificate renewal (ACME-managed certificates only).
+
+### GET /certificates/{cert_id}/events
+
+Event log for one certificate, newest first (paginated).
+
+**Query Parameters:**
+| Param | Type | Description |
+|-------|------|-------------|
+| `event_type` | string | Filter by event type (e.g., `created`, `renewal_requested`, `renewed`, `failed`, `deleted`, `acme_raw`) |
+| `page` | int | Page number |
+| `per_page` | int | Items per page |
+
+**Response (200):**
+```json
+{
+  "items": [
+    {
+      "id": "uuid",
+      "certificate_id": "uuid",
+      "site_id": "uuid",
+      "event_type": "renewal_requested",
+      "message": "Manual renewal requested for example.com",
+      "details": null,
+      "created_at": "2024-01-01T00:00:00Z",
+      "domain": "example.com",
+      "site_domain": null
+    }
+  ],
+  "total": 1,
+  "page": 1,
+  "per_page": 20
+}
+```
+
+### GET /ssl-events
+
+Cross-certificate event log for every site the caller may see (paginated). Supports the same `certificate_id` and `event_type` filters; each event additionally carries the resolved `domain` and `site_domain`.
 
 ### GET /sites/{site_id}/ssl-settings
 
@@ -376,7 +507,7 @@ List registered agents.
       "site_domain": "example.com",
       "hostname": "edge-01",
       "ip_address": "10.0.1.5",
-      "version": "0.14.3",
+      "version": "0.14.8",
       "os_info": "Linux 6.1.0",
       "cpu_cores": 4,
       "memory_bytes": 8589934592,
@@ -521,14 +652,18 @@ Create a rate limit rule.
 ```json
 {
   "name": "API Rate Limit",
+  "expression": "",
   "enabled": true,
-  "requests": 100,
-  "window_secs": 60,
+  "threshold": 100,
+  "period_seconds": 60,
   "action": "block",
+  "mitigation_timeout_seconds": 60,
   "characteristics": ["ip"],
-  "path_filter": "/api/*"
+  "priority": 100
 }
 ```
+
+`characteristics` accepts `ip`, `ip_nat`, `host`, `path`, `header`, `cookie`, `query`, `asn`, `country`, `ja3`. `expression` is an optional filter — empty means all requests.
 
 ### PUT /sites/{site_id}/rate-limit-rules/{rule_id}
 
@@ -620,9 +755,12 @@ List security events.
 | `per_page` | int | Items per page |
 | `site_id` | string | Filter by site |
 | `action` | string | Filter: `block`, `allow`, `challenge`, `log` |
-| `ip` | string | Filter by client IP |
-| `start` | string | ISO 8601 start time |
-| `end` | string | ISO 8601 end time |
+| `client_ip` | string | Filter by client IP |
+| `rule_id` | string | Filter by rule |
+| `path` | string | Filter by request path |
+| `request_id` | string | Filter by request id |
+| `from` | string | ISO 8601 start time |
+| `to` | string | ISO 8601 end time |
 
 ### GET /logs/access
 
@@ -634,10 +772,12 @@ List access logs.
 | `page` | int | Page number |
 | `per_page` | int | Items per page |
 | `site_id` | string | Filter by site |
-| `status` | int | Filter by HTTP status |
+| `status_code` | int | Filter by HTTP status |
 | `path` | string | Filter by request path |
-| `start` | string | ISO 8601 start time |
-| `end` | string | ISO 8601 end time |
+| `client_ip` | string | Filter by client IP |
+| `request_id` | string | Filter by request id |
+| `from` | string | ISO 8601 start time |
+| `to` | string | ISO 8601 end time |
 
 ### DELETE /logs/purge
 
@@ -659,16 +799,26 @@ Purge old logs.
 
 Aggregate statistics for a time range.
 
-**Query Parameters:** `site_id`, `start`, `end`
+**Query Parameters:** `site_id`, `from`, `to` (ISO 8601; default window is the last 24 hours, capped at 31 days)
 
 **Response (200):**
 ```json
 {
-  "total_requests": 125000,
-  "blocked_requests": 3200,
-  "challenged_requests": 450,
+  "from": "2024-01-01T00:00:00Z",
+  "to": "2024-01-02T00:00:00Z",
+  "site_id": null,
+  "requests": 125000,
   "unique_ips": 8900,
-  "top_country": "US"
+  "cache_hits": 98000,
+  "cache_hit_rate": 0.784,
+  "avg_latency_ms": 42,
+  "max_latency_ms": 5120,
+  "client_errors": 2100,
+  "server_errors": 130,
+  "security_events": 3650,
+  "blocked_requests": 3200,
+  "distinct_attackers": 412,
+  "rules_triggered": 1880
 }
 ```
 
@@ -676,7 +826,26 @@ Aggregate statistics for a time range.
 
 Time-series request data.
 
-**Query Parameters:** `site_id`, `start`, `end`, `interval` (e.g., `1h`, `1d`)
+**Query Parameters:** `site_id`, `from`, `to`, `interval` (`minute`, `hour` (default), `day` or `week`), `limit`
+
+### GET /analytics/sites-over-time
+
+Request volume over time for the busiest sites — one series per site, for the dashboard's multi-line chart. Without `site_id` the top 8 sites by in-window traffic are returned; non-administrators are scoped to their own sites.
+
+**Query Parameters:** `site_id`, `from`, `to`, `interval` (`minute`, `hour` (default), `day` or `week`)
+
+**Response (200):**
+```json
+[
+  {
+    "bucket": "2024-01-01T12:00:00Z",
+    "site_id": "uuid",
+    "site_domain": "example.com",
+    "site_name": "My Site",
+    "requests": 1520
+  }
+]
+```
 
 ### GET /analytics/top-rules
 
@@ -708,21 +877,25 @@ List IP access rules.
 
 ### POST /sites/{site_id}/ip-rules
 
-Create an IP rule.
+Create an IP rule. Set either `ip_ranges` (manual mode) or `group_id` (reference a global/per-site IP group) — not both.
 
 **Request:**
 ```json
 {
-  "ip": "192.168.1.0/24",
+  "name": "Known bad actor",
+  "ip_ranges": ["192.168.1.0/24"],
   "action": "block",
-  "note": "Known bad actor",
-  "expires_at": "2025-12-31T23:59:59Z"
+  "note": "Blocked subnet",
+  "enabled": true,
+  "priority": 100
 }
 ```
 
+`action` is `block`, `allow`, `challenge` or `js_challenge`. Sending `group_id` instead of `ip_ranges` makes the rule track the group's latest ranges.
+
 ### PUT /sites/{site_id}/ip-rules/{rule_id}
 
-Update an IP rule.
+Update an IP rule (sending `ip_ranges` or `group_id` switches between manual and group mode).
 
 ### DELETE /sites/{site_id}/ip-rules/{rule_id}
 
@@ -730,15 +903,119 @@ Remove an IP rule.
 
 ### POST /sites/{site_id}/ip-rules/bulk
 
-Bulk import IP rules.
+Bulk import IP rules (one IP or CIDR per entry).
 
 **Request:**
 ```json
 {
-  "rules": [
-    {"ip": "1.2.3.4", "action": "block", "note": "..."},
-    {"ip": "5.6.7.0/24", "action": "allow", "note": "..."}
-  ]
+  "ip_ranges": ["1.2.3.4", "5.6.7.0/24"],
+  "action": "block",
+  "note": "Imported blocklist",
+  "enabled": true
+}
+```
+
+---
+
+## IP Groups
+
+Named collections of IP ranges, global (`is_global`, applied to all sites) or per-site. Each group carries an `action` of `block` or `allow`, and can subscribe to an external list via `source_url` with a `sync_interval_minutes` refresh interval (`null` = manual sync only).
+
+### GET /ip-groups
+
+List IP groups (paginated), each with a `site_count`.
+
+**Query Parameters:**
+| Param | Type | Description |
+|-------|------|-------------|
+| `page` | int | Page number |
+| `per_page` | int | Items per page |
+| `action` | string | Filter: `block` or `allow` |
+| `is_global` | bool | Filter global/per-site groups |
+| `enabled` | bool | Filter enabled/disabled |
+
+**Response (200):**
+```json
+{
+  "items": [
+    {
+      "id": "uuid",
+      "name": "Cloudflare",
+      "description": "Official Cloudflare IP ranges, refreshed daily from api.cloudflare.com.",
+      "ip_ranges": ["173.245.48.0/20"],
+      "action": "block",
+      "is_global": true,
+      "source_url": "https://api.cloudflare.com/client/v4/ips",
+      "sync_interval_minutes": 1440,
+      "last_synced_at": "2024-01-01T12:00:00Z",
+      "last_sync_error": null,
+      "enabled": false,
+      "created_at": "2024-01-01T00:00:00Z",
+      "updated_at": "2024-01-01T00:00:00Z",
+      "site_count": 0
+    }
+  ],
+  "total": 1,
+  "page": 1,
+  "per_page": 20
+}
+```
+
+### POST /ip-groups
+
+Create an IP group (up to 10000 ranges).
+
+**Request:**
+```json
+{
+  "name": "Office allowlist",
+  "description": "Corporate egress IPs",
+  "ip_ranges": ["203.0.113.7", "198.51.100.0/24"],
+  "action": "allow",
+  "is_global": false,
+  "source_url": "https://example.com/ip-list.txt",
+  "sync_interval_minutes": 1440,
+  "enabled": true
+}
+```
+
+### GET /ip-groups/{group_id}
+
+Get an IP group with its `site_count`.
+
+### PUT /ip-groups/{group_id}
+
+Update an IP group (all fields optional).
+
+### DELETE /ip-groups/{group_id}
+
+Delete an IP group.
+
+### GET /ip-groups/{group_id}/sites
+
+List the sites associated with a per-site group.
+
+### PUT /ip-groups/{group_id}/sites
+
+Replace the site associations of a per-site group. Refused with `400` for global groups.
+
+**Request:**
+```json
+{
+  "site_ids": ["uuid"]
+}
+```
+
+### POST /ip-groups/{group_id}/sync
+
+Trigger an immediate subscription sync from `source_url`. On success the fetched ranges replace the stored ones; on failure the previous ranges are kept, the error is recorded in `last_sync_error`, and the API returns `502`.
+
+**Response (200):**
+```json
+{
+  "id": "uuid",
+  "synced_at": "2024-01-01T12:00:00Z",
+  "ip_count": 15
 }
 ```
 
@@ -758,10 +1035,26 @@ Update geo restrictions.
 ```json
 {
   "enabled": true,
-  "mode": "block_listed",
+  "mode": "block_list",
   "countries": ["CN", "RU", "IR"],
+  "blocked_asns": ["AS13335"],
+  "block_unknown": false,
   "action": "block"
 }
+```
+
+`mode` is `block_list` or `allow_list`; `blocked_asns` entries are ASN numbers, optionally prefixed with `AS`.
+
+### GET /sites/{site_id}/geo/stats
+
+Requests per country over the last 24 hours (up to 20 countries), for the bar chart next to the policy editor. Traffic whose country could not be resolved is skipped.
+
+**Response (200):**
+```json
+[
+  {"country_code": "CN", "requests": 5210},
+  {"country_code": "US", "requests": 1240}
+]
 ```
 
 ---
@@ -780,12 +1073,13 @@ Update bot protection.
 ```json
 {
   "enabled": true,
-  "mode": "detect",
-  "allow_known_bots": true,
-  "js_challenge": true,
-  "fingerprinting": false
+  "ua_analysis": true,
+  "action": "challenge",
+  "known_bots_whitelist": ["Googlebot", "bingbot"]
 }
 ```
+
+`action` is `block`, `challenge`, `js_challenge`, `log` or `allow` and is applied to traffic classified as a bot (non-browser user agents). `known_bots_whitelist` is a JSON array of case-insensitive User-Agent substrings that always pass.
 
 ---
 
@@ -925,7 +1219,7 @@ Capture CPU samples and return a gzip-compressed pprof protobuf consumable by `g
 **Query:** `?seconds=30&frequency=99` — capture window (1-120 s, default 30) and sampling frequency in Hz (1-1000, default 99).
 
 ```bash
-go tool pprof -http=: http://localhost:8080/api/v1/debug/pprof/profile?seconds=30
+go tool pprof -http=: http://localhost:9080/api/v1/debug/pprof/profile?seconds=30
 ```
 
 ### GET /debug/pprof/flamegraph
@@ -934,7 +1228,7 @@ Capture CPU samples and return an SVG flamegraph viewable directly in a browser.
 
 ```bash
 curl -H "Authorization: Bearer $TOKEN" \
-  "http://localhost:8080/api/v1/debug/pprof/flamegraph?seconds=30" > flamegraph.svg
+  "http://localhost:9080/api/v1/debug/pprof/flamegraph?seconds=30" > flamegraph.svg
 ```
 
 ### GET /debug/pprof/memory

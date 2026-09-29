@@ -55,8 +55,11 @@ Default credentials: `admin@pingwaf.local` / value of `$ADMIN_PASSWORD`
 curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh | bash
 
 # Or specify version and mode
-./install.sh --version 0.14.3 --mode all-in-one
+./install.sh --version 0.14.8 --mode all-in-one
 ```
+
+> Prebuilt release assets are published for **Linux** (amd64/arm64) only; on
+> macOS, [build from source](./quick-start.md#path-2-build-from-source).
 
 ### 2. Set Up PostgreSQL
 
@@ -72,24 +75,28 @@ sudo -u postgres psql -c "ALTER USER pingwaf PASSWORD 'your-secure-password';"
 
 ### 3. Configure
 
-Edit `/etc/pingwaf/pingwaf.toml`:
+PingWAF is configured through CLI flags and `PINGWAF_*` environment variables.
+Set them as `Environment=` lines in the systemd unit (e.g. via a drop-in
+override with `sudo systemctl edit pingwaf`, which survives upgrades):
 
-```toml
-[server]
-db_url = "postgres://pingwaf:your-secure-password@localhost:5432/pingwaf"
-http_addr = "0.0.0.0:9080"
-grpc_addr = "0.0.0.0:9090"
-jwt_secret = "generate-a-random-32-char-secret"
-admin_email = "admin@yourdomain.com"
-admin_password = "strong-password-here"
-allow_registration = false
-
-[agent]
-server_url = "http://127.0.0.1:9090"
-cache_dir = "/var/lib/pingwaf/cache"
-heartbeat_interval_secs = 30
-fail_open = true
+```ini
+[Service]
+Environment=PINGWAF_MODE=all-in-one
+Environment=PINGWAF_DB_URL=postgres://pingwaf:your-secure-password@localhost:5432/pingwaf
+Environment=PINGWAF_ADMIN_ADDR=0.0.0.0:9080
+Environment=PINGWAF_GRPC_ADDR=0.0.0.0:9090
+Environment=PINGWAF_JWT_SECRET=generate-a-random-32-char-secret
+Environment=PINGWAF_ADMIN_EMAIL=admin@yourdomain.com
+Environment=PINGWAF_ADMIN_PASSWORD=strong-password-here
+Environment=PINGWAF_ALLOW_REGISTRATION=false
 ```
+
+> **Note:** the `/etc/pingwaf/pingwaf.toml` file that `install.sh` writes is a
+> reference example only — v0.14.8 does not load it (the systemd unit sets
+> `PINGWAF_CONFIG`, but the binary never reads that variable), so settings
+> placed there have no effect. Configure through environment variables as
+> above; agent options (`PINGWAF_SERVER_URL`, `PINGWAF_CACHE_DIR`, …) are
+> listed in the [Configuration Reference](#configuration-reference).
 
 ### 4. Start the Service
 
@@ -115,7 +122,7 @@ sudo journalctl -u pingwaf -f
 | `refresh_token_expiration_hours` | int | `720` | Refresh token lifetime |
 | `admin_email` | string | `admin@pingwaf.local` | Seeded admin email |
 | `admin_password` | string | `pingwaf123` | Seeded admin password |
-| `allow_registration` | bool | `true` | Allow new user signups |
+| `allow_registration` | bool | `true` | Allow new user signups (code default; `docker-compose.yml` and `install.sh` set `false`) |
 | `db_max_connections` | int | `20` | Connection pool max |
 | `db_min_connections` | int | `1` | Connection pool min |
 | `heartbeat_interval_seconds` | int | `15` | Agent heartbeat interval |
