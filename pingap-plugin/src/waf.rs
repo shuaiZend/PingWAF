@@ -37,7 +37,7 @@ use bytes::{BufMut, BytesMut};
 use dashmap::DashMap;
 use pingap_config::{PluginCategory, PluginConf};
 use pingap_core::{
-    Ctx, HTTP_HEADER_NAME_X_REQUEST_ID, Plugin, PluginStep,
+    Ctx, HTTP_HEADER_NAME_X_REQUEST_ID, HttpResponse, Plugin, PluginStep,
     RequestPluginResult, ResponseBodyPluginResult, ResponsePluginResult,
     ensure_client_ip, get_host,
 };
@@ -1075,6 +1075,24 @@ impl ResponseFacts {
         }
     }
 
+    /// Facts for a response the plugin answers with, taken from the response
+    /// itself: a blocked request is then as replayable in the log as a
+    /// proxied one. The body is kept up to `limit` bytes.
+    fn from_generated(response: &HttpResponse, limit: usize) -> Self {
+        let mut facts = Self::generated(response.status.as_u16() as u32);
+        facts.headers =
+            cap_headers(response.headers.iter().flatten().filter_map(
+                |(name, value)| {
+                    value
+                        .to_str()
+                        .ok()
+                        .map(|value| (name.as_str().to_string(), value))
+                },
+            ));
+        facts.absorb(&response.body, limit);
+        facts
+    }
+
     /// Absorbs one streamed chunk, keeping at most `limit` bytes.
     fn absorb(&mut self, chunk: &[u8], limit: usize) {
         self.body_size += chunk.len() as u64;
@@ -1279,6 +1297,30 @@ fn emit_access(
         response_body_size: response.body_size,
         response_body_truncated,
     });
+}
+
+/// Emits the access entry for a response the plugin answers with itself. The
+/// entry records what the client is about to receive — status, headers and
+/// truncated body — so a blocked or challenged request is as replayable in
+/// the log as a proxied one.
+fn emit_generated_access(
+    agent: Option<&Arc<PingWafAgent>>,
+    request_id: &str,
+    response: &HttpResponse,
+) {
+    let Some(agent) = agent else {
+        return;
+    };
+    let Some((_, pending)) = PENDING_ACCESS.remove(request_id) else {
+        return;
+    };
+    let limit = pending.body_limit;
+    emit_access(
+        agent,
+        request_id,
+        pending,
+        ResponseFacts::from_generated(response, limit),
+    );
 }
 
 /// Content types whose bodies are text-like and thus worth storing.
@@ -1598,31 +1640,19 @@ impl WafPlugin {
             &verdict,
             &denial.rule_name,
         );
-        if let Some(agent) = agent
-            && let Some((_, pending)) = PENDING_ACCESS.remove(request_id)
-        {
-            let status = if denial.challenge { 503 } else { 403 };
-            emit_access(
-                agent,
-                request_id,
-                pending,
-                ResponseFacts::generated(status),
-            );
-        }
-        if denial.challenge {
-            RequestPluginResult::Respond(build_challenge_response(
+        let response = if denial.challenge {
+            build_challenge_response(
                 request_id,
                 original_url,
                 site_id,
                 pow_difficulty,
                 ChallengeKind::Js,
-            ))
+            )
         } else {
-            RequestPluginResult::Respond(block_page(
-                request_id,
-                &verdict.details,
-            ))
-        }
+            block_page(request_id, &verdict.details)
+        };
+        emit_generated_access(agent, request_id, &response);
+        RequestPluginResult::Respond(response)
     }
 }
 
@@ -1867,17 +1897,9 @@ impl Plugin for WafPlugin {
         // rule runs. TLS termination and the log pipeline stay untouched, so
         // the certificate keeps serving and the traffic remains visible. ──
         if context.as_ref().is_some_and(|site| site.paused) {
-            if let Some(agent) = agent.as_ref()
-                && let Some((_, pending)) = PENDING_ACCESS.remove(&request_id)
-            {
-                emit_access(
-                    agent,
-                    &request_id,
-                    pending,
-                    ResponseFacts::generated(503),
-                );
-            }
-            return Ok(RequestPluginResult::Respond(paused_page(&request_id)));
+            let response = paused_page(&request_id);
+            emit_generated_access(agent.as_ref(), &request_id, &response);
+            return Ok(RequestPluginResult::Respond(response));
         }
 
         // ── mTLS: a site that requires a client certificate refuses the
@@ -1888,20 +1910,9 @@ impl Plugin for WafPlugin {
         if let Some(mtls) = context.as_ref().and_then(|site| site.mtls.as_ref())
             && let Some(reason) = mtls.denial(ctx)
         {
-            if let Some(agent) = agent.as_ref()
-                && let Some((_, pending)) = PENDING_ACCESS.remove(&request_id)
-            {
-                emit_access(
-                    agent,
-                    &request_id,
-                    pending,
-                    ResponseFacts::generated(403),
-                );
-            }
-            return Ok(RequestPluginResult::Respond(block_page(
-                &request_id,
-                reason,
-            )));
+            let response = block_page(&request_id, reason);
+            emit_generated_access(agent.as_ref(), &request_id, &response);
+            return Ok(RequestPluginResult::Respond(response));
         }
 
         // ── Access restrictions: IP rules and geo stop a request before the
@@ -2028,33 +2039,23 @@ impl Plugin for WafPlugin {
                     &verdict,
                     &tripped.rule_name,
                 );
-                if let Some(agent) = &agent
-                    && let Some((_, pending)) =
-                        PENDING_ACCESS.remove(&request_id)
-                {
-                    let status = if tripped.challenge { 503 } else { 429 };
-                    emit_access(
-                        agent,
-                        &request_id,
-                        pending,
-                        ResponseFacts::generated(status),
-                    );
-                }
-                return Ok(if tripped.challenge {
-                    RequestPluginResult::Respond(build_challenge_response(
+                let response = if tripped.challenge {
+                    build_challenge_response(
                         &request_id,
                         &original_url,
                         &site_id,
                         self.pow_difficulty,
                         ChallengeKind::Js,
-                    ))
+                    )
                 } else {
-                    RequestPluginResult::Respond(rate_limit_page(
+                    rate_limit_page(
                         &request_id,
                         &tripped.detail,
                         tripped.retry_after,
-                    ))
-                });
+                    )
+                };
+                emit_generated_access(agent.as_ref(), &request_id, &response);
+                return Ok(RequestPluginResult::Respond(response));
             }
         }
 
@@ -2135,42 +2136,25 @@ impl Plugin for WafPlugin {
             &verdict,
             &rule_name,
         );
-        if let Some(agent) = &agent
-            && let Some((_, pending)) = PENDING_ACCESS.remove(&request_id)
-        {
-            let status = if verdict.action == WafAction::Block {
-                403
-            } else {
-                503
-            };
-            emit_access(
-                agent,
-                &request_id,
-                pending,
-                ResponseFacts::generated(status),
-            );
-        }
-
-        if verdict.action == WafAction::Block {
-            return Ok(RequestPluginResult::Respond(block_page(
-                &request_id,
-                &verdict.details,
-            )));
-        }
-
-        // Challenge verdict — delegate to the challenge subsystem.
-        let original_url = if query.is_empty() {
-            path
+        let response = if verdict.action == WafAction::Block {
+            block_page(&request_id, &verdict.details)
         } else {
-            format!("{path}?{query}")
+            // Challenge verdict — delegate to the challenge subsystem.
+            let original_url = if query.is_empty() {
+                path
+            } else {
+                format!("{path}?{query}")
+            };
+            build_challenge_response(
+                &request_id,
+                &original_url,
+                &site_id,
+                self.pow_difficulty,
+                ChallengeKind::Js,
+            )
         };
-        Ok(RequestPluginResult::Respond(build_challenge_response(
-            &request_id,
-            &original_url,
-            &site_id,
-            self.pow_difficulty,
-            ChallengeKind::Js,
-        )))
+        emit_generated_access(agent.as_ref(), &request_id, &response);
+        Ok(RequestPluginResult::Respond(response))
     }
 
     async fn handle_response(
@@ -2596,7 +2580,75 @@ ml_threshold = 0.75
         let entry = agent.client.pop_log().await.unwrap();
         assert_eq!(503, entry.response_status);
         assert_eq!("GET", entry.method);
+        // The page the client receives is recorded, headers and body alike.
+        assert_eq!(
+            Some("text/html; charset=utf-8"),
+            entry
+                .response_headers
+                .get("content-type")
+                .map(String::as_str)
+        );
+        assert_eq!(
+            Some("3600"),
+            entry
+                .response_headers
+                .get("retry-after")
+                .map(String::as_str)
+        );
+        let body = entry
+            .response_body
+            .as_deref()
+            .map(String::from_utf8_lossy)
+            .unwrap_or_default();
+        assert!(body.contains("temporarily paused"), "body: {body}");
+        assert_eq!(
+            entry.response_body_size,
+            body.len() as u64,
+            "the recorded size is the body that was sent"
+        );
+        assert!(!entry.response_body_truncated);
         assert!(agent.client.pop_log().await.is_none());
+    }
+
+    /// A blocked request logs the page the client received, so the dashboard
+    /// can show what a denial looked like without replaying the request.
+    #[tokio::test]
+    async fn test_blocked_response_is_logged_with_its_body() {
+        let (_guard, agent, _dir) = install_whitelist_agent().await;
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        let RequestPluginResult::Respond(resp) =
+            run_request(&plugin, "203.0.113.7").await
+        else {
+            panic!("expected the catch-all rule to answer");
+        };
+        assert_eq!(http::StatusCode::FORBIDDEN, resp.status);
+
+        // The security event ships first; the access entry follows with the
+        // page the client received.
+        let event = agent.client.pop_log().await.unwrap();
+        assert_eq!("block", event.waf_action);
+        let entry = agent.client.pop_log().await.unwrap();
+        assert_eq!(event.request_id, entry.request_id);
+        assert_eq!(403, entry.response_status);
+        assert_eq!(
+            Some("text/html; charset=utf-8"),
+            entry
+                .response_headers
+                .get("content-type")
+                .map(String::as_str)
+        );
+        let body = entry
+            .response_body
+            .as_deref()
+            .map(String::from_utf8_lossy)
+            .unwrap_or_default();
+        assert!(body.contains("403 Forbidden"), "body: {body}");
+        assert_eq!(entry.response_body_size, body.len() as u64);
+        assert!(!entry.response_body_truncated);
     }
 
     /// Installs an agent whose only site enforces mTLS, revoking `revoked`
