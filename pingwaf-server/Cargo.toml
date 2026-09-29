@@ -18,6 +18,7 @@ async-trait = { workspace = true }
 axum = { workspace = true }
 bcrypt = { workspace = true }
 chrono = { workspace = true }
+hex = { workspace = true }
 jsonwebtoken = { workspace = true }
 # Used to encode `RuleBundle`/`SiteConfig` so their bytes can be fingerprinted
 # into the `config_hash` agents compare for delta synchronisation.
@@ -33,6 +34,16 @@ sea-orm = { workspace = true }
 sea-orm-migration = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# Certificate generation and parsing for the managed mTLS CAs. `rcgen` carries
+# its own crypto backend, so no TLS stack is pulled into the control plane.
+# WebAuthn (passkey) ceremony handling. Pure Rust (p256/coset/ciborium), so the
+# control plane stays free of an OpenSSL dependency; `send` switches the store
+# trait to a `Send` future, which is what the Axum handlers need.
+passkey-server = { version = "0.1.4", features = ["send"] }
+rcgen = { workspace = true }
+sha2 = { workspace = true }
+time = { workspace = true }
+x509-parser = { workspace = true }
 tokio = { workspace = true, features = [
     "fs",
     "macros",

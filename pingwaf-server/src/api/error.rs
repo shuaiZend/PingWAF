@@ -34,6 +34,8 @@ pub enum ApiError {
     NotFound(String),
     /// Uniqueness violation, e.g. a domain that is already registered.
     Conflict(String),
+    /// A budget shared by all callers was exhausted.
+    TooManyRequests(String),
     /// Semantically invalid payload (well-formed JSON, bad values).
     Unprocessable(String),
     /// The endpoint exists but cannot run on this deployment, e.g. CPU
@@ -56,6 +58,7 @@ impl ApiError {
             ApiError::Forbidden(_) => "forbidden",
             ApiError::NotFound(_) => "not_found",
             ApiError::Conflict(_) => "conflict",
+            ApiError::TooManyRequests(_) => "too_many_requests",
             ApiError::Unprocessable(_) => "unprocessable_entity",
             ApiError::NotImplemented(_) => "not_implemented",
             ApiError::BadGateway(_) => "bad_gateway",
@@ -71,6 +74,7 @@ impl ApiError {
             ApiError::Forbidden(_) => StatusCode::FORBIDDEN,
             ApiError::NotFound(_) => StatusCode::NOT_FOUND,
             ApiError::Conflict(_) => StatusCode::CONFLICT,
+            ApiError::TooManyRequests(_) => StatusCode::TOO_MANY_REQUESTS,
             ApiError::Unprocessable(_) => StatusCode::UNPROCESSABLE_ENTITY,
             ApiError::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
             ApiError::BadGateway(_) => StatusCode::BAD_GATEWAY,
@@ -99,6 +103,7 @@ impl std::fmt::Display for ApiError {
             | ApiError::Forbidden(msg)
             | ApiError::NotFound(msg)
             | ApiError::Conflict(msg)
+            | ApiError::TooManyRequests(msg)
             | ApiError::Unprocessable(msg)
             | ApiError::NotImplemented(msg)
             | ApiError::BadGateway(msg)

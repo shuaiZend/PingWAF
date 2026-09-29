@@ -5,6 +5,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   ShieldCheck,
   EnvelopeSimple,
+  Fingerprint,
   Lock,
   Eye,
   EyeSlash,
@@ -21,7 +22,9 @@ import { useAuthStore } from '@/stores/authStore'
 import { useToast } from '@/components/ui/Toast'
 import { supportedLanguages } from '@/i18n'
 import { authApi } from '@/api/auth'
+import { passkeysApi } from '@/api/passkeys'
 import { handleApiError, errorMessage } from '@/api/errors'
+import { isPasskeyCancellation, passkeysSupported } from '@/lib/webauthn'
 import type { LoginResponse } from '@/api/types'
 
 const langLabels: Record<string, string> = { en: 'English', zh: '中文', ja: '日本語' }
@@ -100,7 +103,22 @@ export function LoginPage() {
     },
   })
 
-  const pending = signIn.isPending || signUp.isPending
+  const signInWithPasskey = useMutation({
+    mutationFn: () => passkeysApi.login(),
+    onSuccess,
+    meta: { silentToast: true },
+    onError: (err) => {
+      // Dismissing the browser's prompt is a normal outcome, not an error.
+      if (isPasskeyCancellation(err)) return
+      setFormError(errorMessage(err) || t('auth.passkeyFailed'))
+      handleApiError(err, { silent: true })
+    },
+  })
+
+  const showPasskeys =
+    mode === 'login' && !needsSetup && (status?.passkey_enabled ?? false) && passkeysSupported()
+
+  const pending = signIn.isPending || signUp.isPending || signInWithPasskey.isPending
 
   const onSubmit = (e: FormEvent) => {
     e.preventDefault()
@@ -260,6 +278,36 @@ export function LoginPage() {
               {mode === 'register' ? t('auth.createAccount') : t('auth.signIn')}
             </Button>
           </form>
+
+          {showPasskeys && (
+            <div className="mt-4 flex flex-col gap-4">
+              <div className="flex items-center gap-3">
+                <span className="h-px flex-1 bg-line" />
+                <span className="text-xs uppercase tracking-wide text-fg-subtle">
+                  {t('auth.passkeyDivider')}
+                </span>
+                <span className="h-px flex-1 bg-line" />
+              </div>
+              <Button
+                type="button"
+                variant="secondary"
+                size="lg"
+                fullWidth
+                loading={signInWithPasskey.isPending}
+                icon={
+                  !signInWithPasskey.isPending ? (
+                    <Fingerprint weight="bold" className="h-4 w-4" />
+                  ) : undefined
+                }
+                onClick={() => {
+                  setFormError(null)
+                  signInWithPasskey.mutate()
+                }}
+              >
+                {t('auth.signInWithPasskey')}
+              </Button>
+            </div>
+          )}
 
           {!needsSetup && canRegister && (
             <div className="mt-5 text-center text-[13px] text-fg-subtle">

@@ -19,6 +19,8 @@ pub mod ip_groups;
 pub mod ip_rules;
 pub mod keys;
 pub mod logs;
+pub mod mtls;
+pub mod passkeys;
 pub mod rate_limiting;
 pub mod rewrite;
 pub mod rules;
@@ -61,6 +63,8 @@ pub fn build_router(state: AppState) -> Router {
         .merge(analytics::routes())
         .merge(settings::routes())
         .merge(ssl::routes())
+        .merge(mtls::routes())
+        .merge(passkeys::routes())
         .merge(ip_rules::routes())
         .merge(ip_groups::routes())
         .merge(geo::routes())

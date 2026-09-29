@@ -970,15 +970,20 @@ function HeaderList({ headers }: { headers: Record<string, string> }) {
   )
 }
 
-/** Raw request captured for a security event, plus a curl replay button. */
+/** Raw request/response captured for a security event, plus a curl replay button. */
 function RawRequestPanel({ log, onCopy }: { log: AccessLog; onCopy: () => void }) {
   const { t } = useTranslation()
   return (
     <div className="flex flex-col gap-3 rounded-md border border-line px-3 py-3">
       <div className="flex items-center justify-between gap-2">
-        <span className="pw-mono text-xs text-fg-subtle">
-          {log.method} {log.path ?? '/'}
-          {log.scheme ? ` · ${log.scheme}` : ''}
+        <span className="pw-mono flex min-w-0 items-center gap-2 text-xs text-fg-subtle">
+          {log.status_code != null && (
+            <Badge tone={statusTone(log.status_code)}>{log.status_code}</Badge>
+          )}
+          <span className="truncate">
+            {log.method} {log.path ?? '/'}
+            {log.scheme ? ` · ${log.scheme}` : ''}
+          </span>
         </span>
         <Button
           size="sm"
@@ -999,6 +1004,29 @@ function RawRequestPanel({ log, onCopy }: { log: AccessLog; onCopy: () => void }
       ) : (
         <p className="text-xs text-fg-subtle">{t('pages.logs.noRequestBody')}</p>
       )}
+      <div className="border-t border-line/60 pt-3">
+        <p className="mb-1.5 flex flex-wrap items-center gap-2 text-[13px] font-medium text-fg">
+          {t('pages.logs.response')}
+          {log.response_body_size != null && (
+            <span className="text-xs font-normal text-fg-subtle">
+              {formatSize(log.response_body_size)}
+            </span>
+          )}
+          {log.response_body_truncated && (
+            <Badge tone="warning">{t('pages.logs.bodyTruncated')}</Badge>
+          )}
+        </p>
+        {log.response_headers && Object.keys(log.response_headers).length > 0 && (
+          <HeaderList headers={log.response_headers} />
+        )}
+        {log.response_body ? (
+          <pre className="pw-mono mt-3 max-h-40 overflow-auto whitespace-pre-wrap break-all text-xs text-fg-subtle">
+            {log.response_body}
+          </pre>
+        ) : (
+          <p className="text-xs text-fg-subtle">{t('pages.logs.noResponseBody')}</p>
+        )}
+      </div>
     </div>
   )
 }

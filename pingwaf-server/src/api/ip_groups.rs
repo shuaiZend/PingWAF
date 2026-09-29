@@ -21,7 +21,9 @@ use crate::api::sites::touch_site;
 use crate::api::state::AppState;
 use crate::auth::AuthUser;
 use crate::grpc::notify_config_changed;
-use crate::models::{ip_access_rules, ip_group_sites, ip_groups, site};
+use crate::models::{
+    ip_access_rules, ip_group_sites, ip_groups, site, site_routes,
+};
 
 /// Valid IP group actions.
 pub mod ip_group_action {
@@ -364,6 +366,18 @@ async fn remove(
     let target = parse_uuid(&group_id, "IP group id")?;
     find_group(&state, target).await?;
 
+    // The foreign key would reject the delete as well; checking first turns
+    // the raw constraint error into something the operator can act on.
+    let gating_routes = site_routes::Entity::find()
+        .filter(site_routes::Column::IpGroupId.eq(target))
+        .count(&state.db)
+        .await?;
+    if gating_routes > 0 {
+        return Err(ApiError::BadRequest(format!(
+            "IP group still gates {gating_routes} route(s); clear those route gates first"
+        )));
+    }
+
     ip_groups::Entity::delete_by_id(target)
         .exec(&state.db)
         .await?;
@@ -375,8 +389,8 @@ async fn remove(
 }
 
 /// Sites whose agent configuration embeds this group: explicitly associated
-/// sites plus any site whose access rules reference it. Used to push config
-/// updates after a group mutation.
+/// sites, sites whose access rules reference it, and sites whose routes are
+/// gated on it. Used to push config updates after a group mutation.
 async fn affected_sites(
     db: &sea_orm::DatabaseConnection,
     group_id: Uuid,
@@ -391,12 +405,18 @@ async fn affected_sites(
         .select_only()
         .column(ip_access_rules::Column::SiteId)
         .into_query();
+    let gating = site_routes::Entity::find()
+        .filter(site_routes::Column::IpGroupId.eq(group_id))
+        .select_only()
+        .column(site_routes::Column::SiteId)
+        .into_query();
 
     let mut ids: Vec<Uuid> = site::Entity::find()
         .filter(
             site::Column::Id
                 .in_subquery(associated)
-                .or(site::Column::Id.in_subquery(referencing)),
+                .or(site::Column::Id.in_subquery(referencing))
+                .or(site::Column::Id.in_subquery(gating)),
         )
         .select_only()
         .column(site::Column::Id)

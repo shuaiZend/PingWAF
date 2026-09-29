@@ -219,6 +219,60 @@ const ERROR_PAGE_PLUGIN_NAME: &str = "pingwaf:error_page";
 /// additional location carrying the pingap path marker for its match
 /// type. All sites share a single server listening on ports 80 and 443
 /// with TLS enabled via the global certificate store.
+/// Builds the per-site plugins that enforce TLS postures outside the WAF
+/// plugin, and returns their names in the order they should run.
+///
+/// Both postures are per-site settings, so each site gets its own plugin
+/// instance; the instance name carries the site id to keep them apart.
+fn site_posture_plugins(
+    site_id: &str,
+    ssl: Option<&SslConfig>,
+    plugins: &mut HashMap<String, PluginConf>,
+) -> Vec<String> {
+    let mut names = Vec::new();
+    let Some(ssl) = ssl.filter(|ssl| ssl.enabled) else {
+        return names;
+    };
+
+    // `max-age=0` would tell browsers to stop honouring HSTS, which is the
+    // opposite of what the switch means — treat it as "not configured".
+    if ssl.hsts_enabled && ssl.hsts_max_age > 0 {
+        let name = format!("{site_id}_hsts");
+        let mut conf = PluginConf::new();
+        conf.insert(
+            "category".to_string(),
+            toml::Value::String("response_headers".to_string()),
+        );
+        conf.insert(
+            "add_headers".to_string(),
+            toml::Value::Array(vec![toml::Value::String(format!(
+                "Strict-Transport-Security: max-age={}",
+                ssl.hsts_max_age
+            ))]),
+        );
+        plugins.insert(name.clone(), conf);
+        names.push(name);
+    }
+
+    // The redirect plugin compares the request's TLS state against the
+    // desired one, so sharing a location between :80 and :443 is safe — only
+    // the plaintext listener redirects.
+    if ssl.always_use_https {
+        let name = format!("{site_id}_https");
+        let mut conf = PluginConf::new();
+        conf.insert(
+            "category".to_string(),
+            toml::Value::String("redirect".to_string()),
+        );
+        conf.insert("http_to_https".to_string(), toml::Value::Boolean(true));
+        conf.insert("status".to_string(), toml::Value::Integer(301));
+        plugins.insert(name.clone(), conf);
+        names.push(name);
+    }
+
+    names
+}
+
 fn cached_rules_to_pingap_config(
     cached: &CachedRules,
     cache_dir: &Path,
@@ -240,6 +294,11 @@ fn cached_rules_to_pingap_config(
     let mut locations: HashMap<String, LocationConf> = HashMap::new();
     let mut certificates: HashMap<String, CertificateConf> = HashMap::new();
     let mut location_names: Vec<String> = Vec::new();
+    // PEM bundle of the CAs every mTLS-enabled site trusts. The listener
+    // verifies client certificates as a whole, so the anchor is the union
+    // across sites; pinning a certificate to its site is left to the WAF
+    // plugin, which sees the request's SNI.
+    let mut mtls_ca_bundle = String::new();
     // The WAF plugin is referenced from every location: this is what makes
     // the data plane enforce rules and emit access/security events.
     let mut plugins: HashMap<String, PluginConf> = HashMap::new();
@@ -382,6 +441,13 @@ fn cached_rules_to_pingap_config(
             hosts.join(",")
         };
 
+        let mut site_plugins = location_plugins.clone();
+        site_plugins.extend(site_posture_plugins(
+            site_id,
+            site.ssl_config.as_ref(),
+            &mut plugins,
+        ));
+
         if let Some(key) = fallback_key {
             let loc_name = format!("{site_id}_loc");
             locations.insert(
@@ -390,7 +456,7 @@ fn cached_rules_to_pingap_config(
                     upstream: Some(key),
                     host: Some(host.clone()),
                     path: Some("/".to_string()),
-                    plugins: Some(location_plugins.clone()),
+                    plugins: Some(site_plugins.clone()),
                     ..Default::default()
                 },
             );
@@ -443,7 +509,11 @@ fn cached_rules_to_pingap_config(
                     weight: route
                         .priority
                         .map(|p| p.clamp(1, u16::MAX as i32) as u16),
-                    plugins: Some(location_plugins.clone()),
+                    // A route may be gated on an IP group; the location only
+                    // matches clients inside those ranges.
+                    match_ip_ranges: (!route.ip_ranges.is_empty())
+                        .then(|| route.ip_ranges.clone()),
+                    plugins: Some(site_plugins.clone()),
                     ..Default::default()
                 },
             );
@@ -480,6 +550,16 @@ fn cached_rules_to_pingap_config(
                 certificates.insert(format!("{site_id}_cert"), cert);
             }
         }
+
+        // A site that turns mTLS on contributes its trust anchor to the
+        // shared listener.
+        if let Some(ssl) = site.ssl_config.as_ref()
+            && ssl.mtls_enabled
+            && !ssl.mtls_client_ca.trim().is_empty()
+        {
+            mtls_ca_bundle.push_str(ssl.mtls_client_ca.trim());
+            mtls_ca_bundle.push('\n');
+        }
     }
 
     if location_names.is_empty() {
@@ -508,6 +588,8 @@ fn cached_rules_to_pingap_config(
                 addr: "0.0.0.0:443".to_string(),
                 locations: Some(location_names),
                 global_certificates: Some(true),
+                client_ca_pem: (!mtls_ca_bundle.is_empty())
+                    .then_some(mtls_ca_bundle),
                 ..Default::default()
             },
         );
@@ -1722,6 +1804,67 @@ mod tests {
     }
 
     #[test]
+    fn mtls_sites_contribute_their_ca_to_the_tls_listener() {
+        let mut site = site_rules("site1", "a.example.com");
+        let mut default_pool = pool("pool1", vec![peer("10.0.0.1:8080")]);
+        default_pool.is_default = true;
+        site.upstreams = vec![default_pool];
+        let mut ssl = acme_ssl();
+        ssl.mtls_enabled = true;
+        ssl.mtls_client_ca = "-----BEGIN CERTIFICATE-----\nCA1\n".to_string();
+        site.ssl_config = Some(ssl);
+        let mut second = site_rules("site2", "b.example.com");
+        second.upstreams = vec![pool("pool2", vec![peer("10.0.0.2:8080")])];
+        let mut second_ssl = acme_ssl();
+        second_ssl.mtls_enabled = true;
+        second_ssl.mtls_client_ca =
+            "-----BEGIN CERTIFICATE-----\nCA2".to_string();
+        second.ssl_config = Some(second_ssl);
+        // A site with the plain TLS posture must not add an anchor.
+        let mut plain = site_rules("site3", "c.example.com");
+        plain.upstreams = vec![pool("pool3", vec![peer("10.0.0.3:8080")])];
+        plain.ssl_config = Some(acme_ssl());
+
+        let mut cache = one_site_cache(site);
+        cache.sites.insert("site2".to_string(), Arc::new(second));
+        cache.sites.insert("site3".to_string(), Arc::new(plain));
+        let config = cached_rules_to_pingap_config(
+            &cache,
+            Path::new("/tmp/pingwaf-test-cache"),
+        )
+        .expect("config should build");
+
+        let tls = config.servers.get("pingwaf_tls").expect("tls server");
+        let bundle = tls.client_ca_pem.as_deref().expect("client ca bundle");
+        assert!(bundle.contains("CA1"), "{bundle}");
+        assert!(bundle.contains("CA2"), "{bundle}");
+        // The plaintext listener never verifies client certificates.
+        let http = config.servers.get("pingwaf").expect("http server");
+        assert_eq!(http.client_ca_pem, None);
+    }
+
+    #[test]
+    fn sites_without_mtls_leave_client_verification_off() {
+        let mut site = site_rules("site1", "a.example.com");
+        let mut default_pool = pool("pool1", vec![peer("10.0.0.1:8080")]);
+        default_pool.is_default = true;
+        site.upstreams = vec![default_pool];
+        // mTLS disabled even though an anchor is on file.
+        let mut ssl = acme_ssl();
+        ssl.mtls_client_ca = "-----BEGIN CERTIFICATE-----\nCA1".to_string();
+        site.ssl_config = Some(ssl);
+
+        let config = cached_rules_to_pingap_config(
+            &one_site_cache(site),
+            Path::new("/tmp/pingwaf-test-cache"),
+        )
+        .expect("config should build");
+
+        let tls = config.servers.get("pingwaf_tls").expect("tls server");
+        assert_eq!(tls.client_ca_pem, None);
+    }
+
+    #[test]
     fn sites_without_certificates_bind_only_http() {
         let mut site = site_rules("site1", "a.example.com");
         let mut default_pool = pool("pool1", vec![peer("10.0.0.1:8080")]);
@@ -1762,6 +1905,92 @@ mod tests {
         assert_eq!(location.upstream.as_deref(), Some("pool1"));
     }
 
+    #[test]
+    fn hsts_and_https_redirect_are_wired_per_site() {
+        let mut site = site_rules("site1", "a.example.com");
+        site.upstreams = vec![pool("pool1", vec![peer("10.0.0.1:8080")])];
+        let mut ssl = acme_ssl();
+        ssl.hsts_enabled = true;
+        ssl.hsts_max_age = 15_552_000;
+        ssl.always_use_https = true;
+        site.ssl_config = Some(ssl);
+
+        let config = cached_rules_to_pingap_config(
+            &one_site_cache(site),
+            Path::new("/tmp/pingwaf-test-cache"),
+        )
+        .expect("config should build");
+
+        let hsts = config.plugins.get("site1_hsts").expect("hsts plugin");
+        assert_eq!(
+            hsts.get("category").and_then(|v| v.as_str()),
+            Some("response_headers")
+        );
+        let add_headers = hsts
+            .get("add_headers")
+            .and_then(|v| v.as_array())
+            .expect("add_headers list");
+        assert_eq!(
+            add_headers[0].as_str(),
+            Some("Strict-Transport-Security: max-age=15552000")
+        );
+
+        let redirect =
+            config.plugins.get("site1_https").expect("redirect plugin");
+        assert_eq!(
+            redirect.get("category").and_then(|v| v.as_str()),
+            Some("redirect")
+        );
+        assert_eq!(
+            redirect.get("http_to_https").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            redirect.get("status").and_then(|v| v.as_integer()),
+            Some(301)
+        );
+
+        let names = config
+            .locations
+            .get("site1_loc")
+            .and_then(|loc| loc.plugins.clone())
+            .unwrap_or_default();
+        assert!(names.contains(&"site1_hsts".to_string()), "{names:?}");
+        assert!(names.contains(&"site1_https".to_string()), "{names:?}");
+    }
+
+    #[test]
+    fn hsts_and_redirect_plugins_are_absent_when_not_configured() {
+        let mut site = site_rules("site1", "a.example.com");
+        site.upstreams = vec![pool("pool1", vec![peer("10.0.0.1:8080")])];
+        let mut ssl = acme_ssl();
+        ssl.hsts_enabled = true;
+        // A zero window means "send no header", not "pin max-age=0".
+        ssl.hsts_max_age = 0;
+        ssl.always_use_https = false;
+        site.ssl_config = Some(ssl);
+
+        let config = cached_rules_to_pingap_config(
+            &one_site_cache(site),
+            Path::new("/tmp/pingwaf-test-cache"),
+        )
+        .expect("config should build");
+
+        assert!(!config.plugins.contains_key("site1_hsts"));
+        assert!(!config.plugins.contains_key("site1_https"));
+        let names = config
+            .locations
+            .get("site1_loc")
+            .and_then(|loc| loc.plugins.clone())
+            .unwrap_or_default();
+        assert!(
+            !names
+                .iter()
+                .any(|name| name.contains("_hsts") || name.contains("_https")),
+            "{names:?}"
+        );
+    }
+
     fn acme_ssl() -> SslConfig {
         SslConfig {
             cert_pem: String::new(),
@@ -1783,7 +2012,7 @@ mod tests {
             certificate_id: String::new(),
             mtls_revoked_fingerprints: vec![],
             mtls_organization: String::new(),
-            mtls_require_client_cert: false,
+            mtls_require_client_cert: Some(false),
         }
     }
 

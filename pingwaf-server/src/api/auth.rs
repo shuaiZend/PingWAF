@@ -100,6 +100,8 @@ pub struct AuthStatus {
     pub needs_setup: bool,
     /// Whether `POST /auth/register` will accept new accounts.
     pub registration_open: bool,
+    /// Whether the login form should offer a passkey.
+    pub passkey_enabled: bool,
 }
 
 /// Routes contributed to `/api/v1`.
@@ -121,6 +123,7 @@ async fn status(
     Ok(Json(AuthStatus {
         needs_setup: count == 0,
         registration_open: state.config.allow_registration || count == 0,
+        passkey_enabled: state.config.passkey_enabled,
     }))
 }
 
@@ -289,6 +292,25 @@ async fn update_profile(
     Ok(Json(updated.into()))
 }
 
+/// Checks a supplied current password against the stored hash.
+///
+/// A mismatch is a validation failure, not an authentication one: the caller is
+/// already authenticated, and answering 401 makes the console treat the session
+/// as dead and log the user out mid-form.
+fn require_current_password(
+    supplied: &str,
+    stored_hash: &str,
+) -> Result<(), ApiError> {
+    let valid = verify_password(supplied, stored_hash)
+        .map_err(|err| ApiError::Internal(err.to_string()))?;
+    if !valid {
+        return Err(ApiError::BadRequest(
+            "current password is incorrect".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// `PUT /api/v1/auth/password`
 async fn change_password(
     State(state): State<AppState>,
@@ -300,14 +322,10 @@ async fn change_password(
         .await?
         .ok_or_else(|| ApiError::NotFound("account not found".to_string()))?;
 
-    let valid =
-        verify_password(&payload.current_password, &account.password_hash)
-            .map_err(|err| ApiError::Internal(err.to_string()))?;
-    if !valid {
-        return Err(ApiError::Unauthorized(
-            "current password is incorrect".to_string(),
-        ));
-    }
+    require_current_password(
+        &payload.current_password,
+        &account.password_hash,
+    )?;
     validate_password(&payload.new_password)
         .map_err(|err| ApiError::BadRequest(err.to_string()))?;
 
@@ -377,7 +395,10 @@ pub async fn create_user(
 }
 
 /// Mints an access/refresh pair for `account`.
-fn issue_tokens(
+///
+/// Shared with the passkey login ceremony, which ends in the same session the
+/// password flow issues.
+pub(crate) fn issue_tokens(
     state: &AppState,
     account: user::Model,
 ) -> Result<TokenResponse, ApiError> {
@@ -441,5 +462,18 @@ mod tests {
         let json = serde_json::to_string(&UserResponse::from(model)).unwrap();
         assert!(!json.contains("secret"));
         assert!(json.contains("ops@example.com"));
+    }
+
+    #[test]
+    fn a_wrong_current_password_is_rejected_as_a_bad_request() {
+        let hash = hash_password("correct horse battery").unwrap();
+        assert!(
+            require_current_password("correct horse battery", &hash).is_ok()
+        );
+
+        let err = require_current_password("staple", &hash).unwrap_err();
+        // 401 would make the web client drop the session and log the user out.
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(err.code(), "bad_request");
     }
 }

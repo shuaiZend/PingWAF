@@ -80,6 +80,10 @@ pub struct ServerConf {
     // False means the server is using http protocol
     pub global_certificates: bool,
 
+    // PEM bundle of CAs trusted for downstream client certificates. None
+    // leaves client certificate verification off.
+    pub client_ca_pem: Option<String>,
+
     // Whether HTTP/2 protocol support is enabled for this server
     // The http protocol is using h2c
     pub enabled_h2: bool,
@@ -174,6 +178,15 @@ impl fmt::Display for ServerConf {
         // --- TLS ---
         writeln!(f, "  - TLS Settings:")?;
         writeln!(f, "    Global Certificates: {}", self.global_certificates)?;
+        writeln!(
+            f,
+            "    Client Certificate Verification: {}",
+            if self.client_ca_pem.is_some() {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        )?;
         writeln!(
             f,
             "    Min Version: {}",
@@ -276,6 +289,7 @@ pub fn parse_from_conf(conf: PingapConfig) -> Vec<ServerConf> {
             locations: item.locations.unwrap_or_default(),
             threads: item.threads,
             global_certificates: item.global_certificates.unwrap_or_default(),
+            client_ca_pem: item.client_ca_pem.clone(),
             enabled_h2: item.enabled_h2.unwrap_or_default(),
             h2_max_concurrent_streams: item.h2_max_concurrent_streams,
             // Validated to fit u32 by pingap-config; the fallback only
@@ -353,6 +367,7 @@ mod tests {
     Downstream Write Timeout: default
   - TLS Settings:
     Global Certificates: false
+    Client Certificate Verification: disabled
     Min Version: 
     Max Version: 
     Cipher List (TLS <1.3): 
@@ -385,6 +400,7 @@ mod tests {
     Downstream Write Timeout: default
   - TLS Settings:
     Global Certificates: false
+    Client Certificate Verification: disabled
     Min Version: 
     Max Version: 
     Cipher List (TLS <1.3): 

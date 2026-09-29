@@ -18,6 +18,7 @@ pub mod grpc;
 pub mod migration;
 pub mod models;
 pub mod monitoring;
+pub mod pki;
 pub mod subscription;
 
 pub use config::ServerConfig;

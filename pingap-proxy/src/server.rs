@@ -179,6 +179,9 @@ pub struct Server {
     /// Whether to use global certificate store for TLS
     global_certificates: bool,
 
+    /// PEM bundle of CAs trusted for downstream client certificates
+    client_ca_pem: Option<String>,
+
     /// TCP socket configuration options (keepalive, TCP fastopen etc)
     tcp_socket_options: Option<TcpSocketOptions>,
 
@@ -410,6 +413,7 @@ impl Server {
             threads: conf.threads,
             lets_encrypt_enabled: false,
             global_certificates: conf.global_certificates,
+            client_ca_pem: conf.client_ca_pem.clone(),
             enabled_h2: conf.enabled_h2,
             h2_max_concurrent_streams: conf.h2_max_concurrent_streams,
             h2_max_header_list_size: conf.h2_max_header_list_size,
@@ -557,6 +561,7 @@ impl Server {
         let cipher_suites = self.tls_ciphersuites.clone();
         let tls_min_version = self.tls_min_version.clone();
         let tls_max_version = self.tls_max_version.clone();
+        let client_ca_pem = self.client_ca_pem.clone();
         let h2_options = self.new_h2_options();
         let h2_idle_timeout = self.h2_idle_timeout;
         #[cfg(feature = "tracing")]
@@ -601,6 +606,7 @@ impl Server {
                         cipher_suites: cipher_suites.clone(),
                         tls_min_version: tls_min_version.clone(),
                         tls_max_version: tls_max_version.clone(),
+                        client_ca_pem: client_ca_pem.clone(),
                     })
                     .map_err(|e| Error::Common {
                         category: "tls".to_string(),
@@ -682,6 +688,10 @@ impl Server {
             }
             ctx.conn.tls_cipher = digest_detail.tls_cipher;
             ctx.conn.tls_version = digest_detail.tls_version;
+            ctx.conn.tls_peer_organization =
+                digest_detail.tls_peer_organization;
+            ctx.conn.tls_peer_serial = digest_detail.tls_peer_serial;
+            ctx.conn.tls_peer_cert_digest = digest_detail.tls_peer_cert_digest;
         };
         accept_request();
 
@@ -718,6 +728,13 @@ impl Server {
             return Ok(());
         };
 
+        // Read once: every candidate shares the same peer address, and IP
+        // gating needs it in parsed form.
+        let client_ip = session
+            .client_addr()
+            .and_then(|addr| addr.as_inet())
+            .map(|addr| addr.ip());
+
         // Host-bucket index shrinks candidates; weight order is preserved so
         // the first full match equals a linear scan of `route.ordered`.
         let matched_info = route
@@ -728,7 +745,7 @@ impl Server {
                 let name = route.ordered.get(idx)?;
                 let location = self.location_provider.get(name)?;
                 let (matched, captures) = location.match_host_path(host, path);
-                if matched && location.match_conditions(header) {
+                if matched && location.match_conditions(header, client_ip) {
                     Some((location, captures))
                 } else {
                     None

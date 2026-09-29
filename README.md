@@ -104,23 +104,28 @@ The control plane and the data plane talk over the `ControlPlane` gRPC service (
 - **Multi-dimensional rate limiting** — by IP, host, path, ASN, country, or a request header, cookie or query parameter.
 
 ### 🌊 Traffic Management
-- **Origin pools & routes** — group upstreams into pools with load balancing (round-robin, least connections, random or consistent hashing by IP/URL/path/header/cookie/query) and route requests by prefix, exact match or regex.
+- **Origin pools & routes** — group upstreams into pools with load balancing (round-robin, least connections, random or consistent hashing by IP/URL/path/header/cookie/query) and route requests by prefix, exact match or regex — optionally restricted to an IP group, so a path can be served differently to office or partner addresses.
 - **Edge caching** with per-site disk quotas and LRU eviction, stale-while-revalidate and browser TTL control.
 - **Request / response rewriting** — headers, paths, query strings, status codes and body search/replace.
-- **Custom error pages** rendered with Tera templates.
+- **Custom error pages** rendered with Tera templates — including edge-generated responses such as WAF blocks and paused sites.
+- **Pause a site** from the console: every request gets a `503` maintenance page while the certificate keeps serving and traffic stays logged.
 
 ### 🔐 TLS & Certificates
 - **Automatic ACME / Let's Encrypt** issuance and renewal on the edge (HTTP-01 and DNS-01).
 - **Multiple DNS providers** for DNS-01 (Cloudflare, Route 53, DigitalOcean, Aliyun, DNSPod, CloudXNS, manual).
 - **Per-site certificate status** (`valid` / `expiring soon` / `expired`) reported to the control plane over heartbeats, with a searchable ACME event log.
+- **HSTS and forced HTTPS** applied at the edge, with a 180-day default `max-age`.
+- **Mutual TLS (mTLS)** — generate or import a CA, issue client certificates from the console, and revoke a single certificate with immediate effect at the edge; a certificate is refused when it is revoked or was issued for another site.
 
 ### 📊 Observability
-- **Full request logging to Elasticsearch** with body truncation and a WAL buffer for reliability — plus request headers/body previews stored in PostgreSQL for log inspection without Elasticsearch.
+- **Full request logging to Elasticsearch** with body truncation and a WAL buffer for reliability.
+- **Raw request and response capture** — headers, body prefixes, real sizes and truncation flags in PostgreSQL, so a log entry can be replayed as a `curl` command from the console. Headers are stored verbatim (cookies included) to make an attack reproducible.
 - **Analytics** dashboards for traffic and attack trends.
 - Agent health, traffic stats and cache hit/eviction metrics reported to the control plane over heartbeats.
 
 ### 🎛️ Management Console
 - **JWT + bcrypt authentication** and **multi-tenant** isolation.
+- **Passkey sign-in** (WebAuthn) alongside passwords — bind a platform authenticator or security key from Settings and sign in without a password.
 - **Embedded i18n dashboard** (English / 简体中文 / 日本語), compiled into the binary via `rust-embed`.
 - **Everything is off by default** — enable protections explicitly, per site.
 

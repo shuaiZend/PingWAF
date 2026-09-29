@@ -129,6 +129,9 @@ pub struct TlsSettingParams {
     pub cipher_suites: Option<String>, // Modern cipher suites
     pub tls_min_version: Option<String>, // Minimum TLS version
     pub tls_max_version: Option<String>, // Maximum TLS version
+    /// PEM bundle of CAs trusted for downstream client certificates. `None`
+    /// leaves client certificate verification off.
+    pub client_ca_pem: Option<String>,
 }
 
 /// The OpenSSL protocol version named by a `tls_min_version` /
@@ -264,9 +267,59 @@ impl GlobalCertificate {
                 "tls proto"
             );
         }
+        if let Some(ca_pem) = params
+            .client_ca_pem
+            .as_deref()
+            .filter(|pem| !pem.trim().is_empty())
+        {
+            apply_client_ca(&mut tls_settings, ca_pem)
+                .map_err(|e| invalid("set client ca", &e))?;
+        }
 
         Ok(tls_settings)
     }
+}
+
+/// Trusts `ca_pem` for downstream client certificates.
+///
+/// Verification is set to `PEER` only: a client that presents no certificate
+/// still completes the handshake, which is what lets a non-mTLS location
+/// share the port. Requiring a certificate happens per request in the WAF
+/// plugin, where the failure can be logged and answered with a 403.
+#[cfg(feature = "openssl")]
+fn apply_client_ca(
+    tls_settings: &mut TlsSettings,
+    ca_pem: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use pingora::tls::ssl::SslVerifyMode;
+    use pingora::tls::x509::{X509, store::X509StoreBuilder};
+
+    const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
+    const END: &str = "-----END CERTIFICATE-----";
+
+    let mut builder = X509StoreBuilder::new()?;
+    let mut count = 0usize;
+    // A PEM bundle may hold several certificates; X509::from_pem only reads
+    // the first block of the bytes it is handed, so walk the bundle.
+    let mut rest = ca_pem;
+    while let Some(start) = rest.find(BEGIN) {
+        let body = &rest[start..];
+        let Some(end) = body.find(END) else {
+            break;
+        };
+        let block = &body[..end + END.len()];
+        if let Ok(cert) = X509::from_pem(block.as_bytes()) {
+            builder.add_cert(cert)?;
+            count += 1;
+        }
+        rest = &body[end + END.len()..];
+    }
+    if count == 0 {
+        return Err("the client CA bundle holds no certificate".into());
+    }
+    tls_settings.set_verify_cert_store(builder.build())?;
+    tls_settings.set_verify(SslVerifyMode::PEER);
+    Ok(())
 }
 
 #[cfg(feature = "tls-rustls")]
@@ -303,8 +356,61 @@ impl GlobalCertificate {
                 );
             }
         }
+        if let Some(ca_pem) = params
+            .client_ca_pem
+            .as_deref()
+            .filter(|pem| !pem.trim().is_empty())
+        {
+            apply_client_ca(&mut tls_settings, ca_pem).map_err(|e| {
+                Error::Invalid {
+                    category: "new_tls_settings".to_string(),
+                    message: format!("server {name}: set client ca fail: {e}"),
+                }
+            })?;
+        }
         Ok(tls_settings)
     }
+}
+
+/// Trusts `ca_pem` for downstream client certificates, without requiring one:
+/// a client that presents no certificate still completes the handshake, which
+/// is what lets a non-mTLS location share the port. Requiring a certificate
+/// happens per request in the WAF plugin, where the failure can be logged and
+/// answered with a 403.
+#[cfg(feature = "tls-rustls")]
+fn apply_client_ca(
+    tls_settings: &mut TlsSettings,
+    ca_pem: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use pingora::tls::{CertificateDer, RootCertStore, WebPkiClientVerifier};
+
+    const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
+    const END: &str = "-----END CERTIFICATE-----";
+
+    let mut roots = RootCertStore::empty();
+    let mut count = 0usize;
+    let mut rest = ca_pem;
+    while let Some(start) = rest.find(BEGIN) {
+        let body = &rest[start..];
+        let Some(end) = body.find(END) else {
+            break;
+        };
+        let block = &body[..end + END.len()];
+        if let Ok((_, pem)) = x509_parser::pem::parse_x509_pem(block.as_bytes())
+        {
+            roots.add(CertificateDer::from(pem.contents))?;
+            count += 1;
+        }
+        rest = &body[end + END.len()..];
+    }
+    if count == 0 {
+        return Err("the client CA bundle holds no certificate".into());
+    }
+    let verifier = WebPkiClientVerifier::builder(Arc::new(roots))
+        .allow_unauthenticated()
+        .build()?;
+    tls_settings.set_client_cert_verifier(verifier);
+    Ok(())
 }
 
 #[cfg(feature = "openssl")]

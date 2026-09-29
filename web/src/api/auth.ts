@@ -28,8 +28,9 @@ export const authApi = {
 
   updateProfile: (data: UpdateProfileRequest) => apiClient.put<User>('/auth/me', data),
 
+  // Answers 204; a wrong current password is a 400 the form renders inline.
   changePassword: (data: ChangePasswordRequest) =>
-    apiClient.put<{ ok: boolean }>('/auth/password', data),
+    apiClient.put<void>('/auth/password', data),
 }
 
 /**

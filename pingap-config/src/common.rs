@@ -766,6 +766,11 @@ pub struct LocationConf {
     pub match_query: Option<Vec<String>>,
     pub match_cookies: Option<Vec<String>>,
 
+    /// Client addresses the location serves, as IPs or CIDR networks. Empty
+    /// (or absent) matches every client; entries that are neither an address
+    /// nor a network fail configuration validation.
+    pub match_ip_ranges: Option<Vec<String>>,
+
     /// Headers to set on proxied requests (overwrites existing)
     pub proxy_set_headers: Option<Vec<String>>,
 
@@ -946,6 +951,14 @@ pub struct ServerConf {
 
     /// Whether to use global certificates instead of per-server certs
     pub global_certificates: Option<bool>,
+
+    /// PEM bundle of CA certificates the listener trusts for downstream
+    /// client certificates. When set, the listener asks every client for a
+    /// certificate and rejects those that do not chain to one of these CAs;
+    /// a client that presents none still completes the handshake, so
+    /// locations that do not require a certificate keep working on a shared
+    /// port. Unset disables client certificate verification entirely.
+    pub client_ca_pem: Option<String>,
 
     /// Whether to enable HTTP/2 protocol support
     pub enabled_h2: Option<bool>,
