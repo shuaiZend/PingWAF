@@ -1260,7 +1260,10 @@
       "eventType": "事件",
       "eventMessage": "消息",
       "eventTime": "时间",
-      "eventDetails": "详情"
+      "eventDetails": "详情",
+      "dnsConfigLabel": "DNS 服务商凭据",
+      "dnsConfigHint": "以键值对形式传给服务商 API（如 token、access_key_id、access_key_secret）；填写 `endpoint` 可覆盖默认 API 地址。",
+      "dnsConfigRegionRequired": "华为云需要填写 `region`（如 cn-north-4），将生成 dns.<region>.myhuaweicloud.com 端点。"
     },
     "ipGroups": {
       "title": "IP 黑白名单",

@@ -1260,7 +1260,10 @@
       "eventType": "Event",
       "eventMessage": "Message",
       "eventTime": "Time",
-      "eventDetails": "Details"
+      "eventDetails": "Details",
+      "dnsConfigLabel": "DNS provider credentials",
+      "dnsConfigHint": "Key–value pairs passed to the provider API (e.g. token, access_key_id, access_key_secret). An `endpoint` entry overrides the API host.",
+      "dnsConfigRegionRequired": "Huawei Cloud needs a `region` entry (e.g. cn-north-4); it builds the dns.<region>.myhuaweicloud.com endpoint."
     },
     "ipGroups": {
       "title": "IP Groups",

@@ -1260,7 +1260,10 @@
       "eventType": "イベント",
       "eventMessage": "メッセージ",
       "eventTime": "日時",
-      "eventDetails": "詳細"
+      "eventDetails": "詳細",
+      "dnsConfigLabel": "DNS プロバイダー認証情報",
+      "dnsConfigHint": "プロバイダー API に渡すキーと値のペア（例: token、access_key_id、access_key_secret）。`endpoint` を指定すると API ホストを上書きします。",
+      "dnsConfigRegionRequired": "Huawei Cloud は `region`（例: cn-north-4）が必要です。dns.<region>.myhuaweicloud.com エンドポイントを生成します。"
     },
     "ipGroups": {
       "title": "IP グループ",
