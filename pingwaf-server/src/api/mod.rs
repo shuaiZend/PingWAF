@@ -32,6 +32,7 @@ pub mod system_tls;
 
 use crate::frontend::serve_frontend;
 use crate::tls::ConnInfo;
+use axum::extract::connect_info::ConnectInfo;
 use axum::extract::{Request, State};
 use axum::http::{HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
@@ -90,8 +91,11 @@ pub fn build_router(state: AppState) -> Router {
         root = root.fallback(serve_frontend);
     }
 
+    let redirect = RedirectState {
+        tls_enabled: state.control_tls.is_enabled(),
+    };
     root.layer(middleware::from_fn_with_state(
-        state.clone(),
+        redirect,
         redirect_cleartext_to_https,
     ))
     .layer(build_cors(&config.cors_origins))
@@ -147,6 +151,15 @@ fn build_cors(origins: &[String]) -> CorsLayer {
     }
 }
 
+/// State of the redirect middleware: whether this process terminates TLS.
+///
+/// Deliberately smaller than [`AppState`] — the middleware needs no database,
+/// which is what lets its connection handling be tested over real sockets.
+#[derive(Clone, Copy, Debug)]
+pub struct RedirectState {
+    pub tls_enabled: bool,
+}
+
 /// Sends cleartext requests to the HTTPS listener.
 ///
 /// Only meaningful when this process terminates TLS: the mixed listener keeps
@@ -157,18 +170,19 @@ fn build_cors(origins: &[String]) -> CorsLayer {
 /// is made from the connection, not from `X-Forwarded-Proto`: a caller talking
 /// plaintext to this port must not be able to talk its way past the redirect.
 async fn redirect_cleartext_to_https(
-    State(state): State<AppState>,
+    State(state): State<RedirectState>,
     request: Request,
     next: Next,
 ) -> Response {
+    // The extension is `ConnectInfo<ConnInfo>`, not `ConnInfo`: axum inserts
+    // the newtype its connect-info service builds. Reading the inner type
+    // directly always misses, which silently redirects every TLS request to
+    // itself — a loop the browser reports as too many redirects.
     let secured = request
         .extensions()
-        .get::<ConnInfo>()
-        .is_some_and(|info| info.tls);
-    if !state.control_tls.is_enabled()
-        || secured
-        || is_health_probe(request.uri().path())
-    {
+        .get::<ConnectInfo<ConnInfo>>()
+        .is_some_and(|info| info.0.tls);
+    if !state.tls_enabled || secured || is_health_probe(request.uri().path()) {
         return next.run(request).await;
     }
 
@@ -297,5 +311,97 @@ mod tests {
         assert!(is_health_probe("/api/v1/health"));
         assert!(!is_health_probe("/api/v1/sites"));
         assert!(!is_health_probe("/healthz/extra"));
+    }
+
+    /// Drives the middleware over real sockets, with the same listener wiring
+    /// `serve_http` uses: what matters here is that a TLS connection is seen as
+    /// secured, since reading the wrong connect-info type redirects it to
+    /// itself and makes the dashboard unreachable over HTTPS.
+    #[tokio::test]
+    async fn the_redirect_only_fires_on_cleartext_connections() {
+        use crate::pki::tls::{
+            crypto_provider, generate_self_signed, parse_chain,
+        };
+        use crate::tls::{ControlPlaneTls, MixedListener};
+        use rustls::pki_types::ServerName;
+        use rustls::RootCertStore;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::{TcpListener, TcpStream};
+        use tokio_rustls::TlsConnector;
+
+        let material =
+            generate_self_signed("PingWAF", &["localhost".to_string()], 30)
+                .unwrap();
+        let tls = ControlPlaneTls::new(true);
+        tls.activate(&material.cert_pem, material.key_pem.as_deref().unwrap())
+            .unwrap();
+
+        let router = Router::new()
+            .route("/dashboard", get(|| async { "ok" }))
+            .route("/healthz", get(|| async { "ok" }))
+            .layer(middleware::from_fn_with_state(
+                RedirectState { tls_enabled: true },
+                redirect_cleartext_to_https,
+            ));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let listener = MixedListener::new(listener, tls.acceptor());
+        tokio::spawn(async move {
+            let _ = axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<ConnInfo>(),
+            )
+            .await;
+        });
+
+        const REQUEST: &str =
+            "GET /dashboard HTTP/1.1\r\nHost: waf.example.com\r\nConnection: close\r\n\r\n";
+
+        // Cleartext: a real HTTP answer, pointing at the TLS address.
+        let mut plain = TcpStream::connect(addr).await.unwrap();
+        plain.write_all(REQUEST.as_bytes()).await.unwrap();
+        let mut reply = String::new();
+        plain.read_to_string(&mut reply).await.unwrap();
+        assert!(reply.starts_with("HTTP/1.1 308"), "{reply}");
+        assert!(
+            reply.contains("location: https://waf.example.com/dashboard"),
+            "{reply}"
+        );
+
+        // Cleartext probe: answered without a certificate.
+        let mut probe = TcpStream::connect(addr).await.unwrap();
+        probe
+            .write_all(
+                b"GET /healthz HTTP/1.1\r\nHost: waf.example.com\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let mut reply = String::new();
+        probe.read_to_string(&mut reply).await.unwrap();
+        assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+
+        // TLS: served as-is.
+        let mut roots = RootCertStore::empty();
+        roots
+            .add(parse_chain(&material.cert_pem).unwrap().remove(0))
+            .unwrap();
+        let client_config = rustls::ClientConfig::builder_with_provider(
+            crypto_provider().clone(),
+        )
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+        let connector = TlsConnector::from(std::sync::Arc::new(client_config));
+        let name = ServerName::try_from("localhost").unwrap();
+        let mut secure = connector
+            .connect(name, TcpStream::connect(addr).await.unwrap())
+            .await
+            .unwrap();
+        secure.write_all(REQUEST.as_bytes()).await.unwrap();
+        let mut reply = String::new();
+        secure.read_to_string(&mut reply).await.unwrap();
+        assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
     }
 }
