@@ -83,6 +83,14 @@ pub struct AccessLogEntry {
     pub request_body: Option<Vec<u8>>,
     pub request_body_size: u64,
     pub request_body_truncated: bool,
+    /// Response header snapshot, capped like the request one.
+    pub response_headers: Vec<(String, String)>,
+    /// Prefix of the response body kept for the log; `None` when it was not
+    /// captured (binary payload, compressed, or capture disabled).
+    pub response_body: Option<Vec<u8>>,
+    /// Full response body size as counted while streaming, kept or not.
+    pub response_body_size: u64,
+    pub response_body_truncated: bool,
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -217,6 +225,9 @@ impl PingWafAgent {
             request_body_truncated: false,
             response_status: event.response_status,
             response_headers: std::collections::HashMap::new(),
+            response_body: None,
+            response_body_size: 0,
+            response_body_truncated: false,
             upstream_addr: String::new(),
             upstream_latency_ms: 0,
             waf_score: event.score,
@@ -242,23 +253,28 @@ impl PingWafAgent {
     pub fn log_access(&self, entry: AccessLogEntry) {
         // The wire format is a header map, so repeated names are combined the
         // way HTTP semantics prescribe instead of silently dropping values.
-        let mut request_headers: std::collections::HashMap<String, String> =
-            std::collections::HashMap::with_capacity(
-                entry.request_headers.len(),
-            );
-        for (name, value) in entry.request_headers {
-            match request_headers.entry(name) {
-                std::collections::hash_map::Entry::Occupied(mut existing) => {
-                    let combined = existing.get_mut();
-                    combined.reserve(value.len() + 2);
-                    combined.push_str(", ");
-                    combined.push_str(&value);
-                },
-                std::collections::hash_map::Entry::Vacant(slot) => {
-                    slot.insert(value);
-                },
+        let combine = |headers: Vec<(String, String)>| {
+            let mut map: std::collections::HashMap<String, String> =
+                std::collections::HashMap::with_capacity(headers.len());
+            for (name, value) in headers {
+                match map.entry(name) {
+                    std::collections::hash_map::Entry::Occupied(
+                        mut existing,
+                    ) => {
+                        let combined = existing.get_mut();
+                        combined.reserve(value.len() + 2);
+                        combined.push_str(", ");
+                        combined.push_str(&value);
+                    },
+                    std::collections::hash_map::Entry::Vacant(slot) => {
+                        slot.insert(value);
+                    },
+                }
             }
-        }
+            map
+        };
+        let request_headers = combine(entry.request_headers);
+        let response_headers = combine(entry.response_headers);
         let log_entry = client::LogEntry {
             site_id: entry.site_id,
             request_id: entry.request_id,
@@ -274,7 +290,10 @@ impl PingWafAgent {
             request_body_size: entry.request_body_size,
             request_body_truncated: entry.request_body_truncated,
             response_status: entry.status_code,
-            response_headers: std::collections::HashMap::new(),
+            response_headers,
+            response_body: entry.response_body,
+            response_body_size: entry.response_body_size,
+            response_body_truncated: entry.response_body_truncated,
             upstream_addr: entry.upstream_addr,
             upstream_latency_ms: entry.upstream_latency_ms,
             waf_score: 0,

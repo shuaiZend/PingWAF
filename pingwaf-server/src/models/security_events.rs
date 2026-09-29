@@ -84,6 +84,16 @@ pub mod access_logs {
         pub request_body: Option<String>,
         pub request_body_size: Option<i64>,
         pub request_body_truncated: Option<bool>,
+        pub scheme: Option<String>,
+        pub protocol: Option<String>,
+        /// Snapshot of the response headers (capped by the agent).
+        #[sea_orm(column_type = "JsonBinary")]
+        pub response_headers: Option<Json>,
+        /// Body prefix as sent by the agent (capped by the agent config).
+        #[sea_orm(column_type = "Text")]
+        pub response_body: Option<String>,
+        pub response_body_size: Option<i64>,
+        pub response_body_truncated: Option<bool>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

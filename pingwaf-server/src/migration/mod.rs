@@ -20,6 +20,7 @@ pub mod m20240101_000012_acme_events_and_ip_rule_groups;
 pub mod m20240101_000013_access_log_request_detail;
 pub mod m20240101_000014_ip_group_sync_error;
 pub mod m20240101_000015_create_agent_metrics;
+pub mod m20240101_000016_access_log_response_detail;
 
 use sea_orm_migration::prelude::*;
 
@@ -47,6 +48,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20240101_000013_access_log_request_detail::Migration),
             Box::new(m20240101_000014_ip_group_sync_error::Migration),
             Box::new(m20240101_000015_create_agent_metrics::Migration),
+            Box::new(m20240101_000016_access_log_response_detail::Migration),
         ]
     }
 }
@@ -58,7 +60,7 @@ mod tests {
     #[test]
     fn migrations_are_ordered_and_unique() {
         let migrations = Migrator::migrations();
-        assert_eq!(migrations.len(), 15);
+        assert_eq!(migrations.len(), 16);
         let names: Vec<String> =
             migrations.iter().map(|m| m.name().to_owned()).collect();
         let mut sorted = names.clone();

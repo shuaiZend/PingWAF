@@ -51,6 +51,10 @@ pub struct SiteRules {
     pub site_id: String,
     pub domain: String,
     pub alternate_domains: Vec<String>,
+    /// Lifecycle status (`active`/`paused`/`pending`); caches written before
+    /// the edge consumed it default to `active`.
+    #[serde(default = "default_site_status")]
+    pub status: String,
     pub waf_config: Option<WafConfig>,
     pub rate_limit_rules: Vec<RateLimitRule>,
     pub ip_access_rules: Vec<IpAccessRule>,
@@ -75,6 +79,35 @@ impl SiteRules {
         std::iter::once(self.domain.as_str())
             .chain(self.alternate_domains.iter().map(|s| s.as_str()))
     }
+
+    /// Whether the control plane has paused the site.
+    pub fn is_paused(&self) -> bool {
+        self.status == site_status::PAUSED
+    }
+}
+
+/// Persisted site status values, matching `models::sites::site_status` on the
+/// control plane.
+pub mod site_status {
+    pub const ACTIVE: &str = "active";
+    pub const PAUSED: &str = "paused";
+    pub const PENDING: &str = "pending";
+}
+
+fn default_site_status() -> String {
+    site_status::ACTIVE.to_string()
+}
+
+/// Maps a `pingwaf.SiteStatusEnum` value onto the persisted string form; the
+/// control-plane counterpart is `grpc::config::site_status_proto`, which must
+/// stay in sync.
+pub fn site_status_str(value: i32) -> String {
+    match value {
+        1 => site_status::PAUSED,  // SITE_STATUS_PAUSED
+        2 => site_status::PENDING, // SITE_STATUS_PENDING
+        _ => site_status::ACTIVE,
+    }
+    .to_string()
 }
 
 // ─── WAF ────────────────────────────────────────────────────
@@ -365,6 +398,27 @@ pub struct SslConfig {
     pub mtls_client_ca: String,
     /// Id of the `site_certificates` row this posture selects, when any.
     pub certificate_id: String,
+    /// Lowercase-hex SHA-256 fingerprints of revoked client certificates.
+    #[serde(default)]
+    pub mtls_revoked_fingerprints: Vec<String>,
+    /// Organization every client certificate must carry; empty skips the
+    /// check.
+    #[serde(default)]
+    pub mtls_organization: String,
+    /// Whether a client certificate is required; defaults to
+    /// `mtls_enabled` for caches written before the field existed. Read this
+    /// instead of the raw flag.
+    #[serde(default)]
+    pub mtls_require_client_cert: bool,
+}
+
+impl SslConfig {
+    /// Whether clients must present a certificate. Caches written before the
+    /// dedicated flag existed only stored `mtls_enabled`, which always meant
+    /// enforcement.
+    pub fn mtls_requires_cert(&self) -> bool {
+        self.mtls_require_client_cert || self.mtls_enabled
+    }
 }
 
 // ─── Upstream ───────────────────────────────────────────────
@@ -415,6 +469,9 @@ pub struct RouteConfig {
     pub priority: Option<i32>,
     pub enabled: bool,
     pub pool_id: String,
+    /// CIDR ranges the client IP must fall into; empty matches every client.
+    #[serde(default)]
+    pub ip_ranges: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -765,6 +822,7 @@ impl RuleCache {
                     site_rules.site_id = site.id.clone();
                     site_rules.alternate_domains =
                         site.alternate_domains.clone();
+                    site_rules.status = site_status_str(site.status);
 
                     // Update domain index
                     updated
@@ -1002,6 +1060,8 @@ impl RuleCache {
             site_id: bundle.site_id.clone(),
             domain: String::new(), // Will be set from Site if available
             alternate_domains: Vec::new(),
+            // Set from the owning `Site` in `update_from_site_config`.
+            status: default_site_status(),
             waf_config: bundle.waf.as_ref().map(Self::convert_waf_config),
             rate_limit_rules: bundle
                 .rate_limit_rules
@@ -1238,6 +1298,13 @@ impl RuleCache {
             mtls_enabled: s.mtls_enabled,
             mtls_client_ca: s.mtls_client_ca.clone(),
             certificate_id: s.certificate_id.clone(),
+            mtls_revoked_fingerprints: s
+                .mtls_revoked_fingerprints
+                .iter()
+                .map(|f| f.to_lowercase())
+                .collect(),
+            mtls_organization: s.mtls_organization.clone(),
+            mtls_require_client_cert: s.mtls_require_client_cert,
         }
     }
 
@@ -1297,6 +1364,7 @@ impl RuleCache {
             priority: r.priority,
             enabled: r.enabled,
             pool_id: r.pool_id.clone(),
+            ip_ranges: r.ip_ranges.clone(),
         }
     }
 }
@@ -1354,6 +1422,7 @@ mod tests {
                     site_id: "site-1".to_string(),
                     domain: "example.com".to_string(),
                     alternate_domains: Vec::new(),
+                    status: site_status::PAUSED.to_string(),
                     waf_config: None,
                     rate_limit_rules: Vec::new(),
                     ip_access_rules: Vec::new(),
@@ -1385,6 +1454,7 @@ mod tests {
                         priority: Some(10),
                         enabled: true,
                         pool_id: "pool-1".to_string(),
+                        ip_ranges: vec!["10.0.0.0/8".to_string()],
                     }],
                     bot_protection: None,
                 }),
@@ -1401,8 +1471,108 @@ mod tests {
         let site = back.sites.get("site-1").expect("site present");
         assert_eq!(site.routes.len(), 1);
         assert_eq!(site.routes[0].path, "/api");
+        assert_eq!(site.routes[0].ip_ranges, vec!["10.0.0.0/8"]);
+        assert!(site.is_paused());
+        assert_eq!(site.status, site_status::PAUSED);
         assert_eq!(site.upstreams[0].algo, "hash:header:x-user");
         assert_eq!(site.upstreams[0].sni, "origin.example.com");
+    }
+
+    #[test]
+    fn old_cache_defaults_new_fields() {
+        // A cache persisted before `status`/`ip_ranges`/mTLS extras existed.
+        let old = serde_json::json!({
+            "sites": {
+                "site-1": {
+                    "site_id": "site-1",
+                    "domain": "example.com",
+                    "alternate_domains": [],
+                    "rate_limit_rules": [],
+                    "ip_access_rules": [],
+                    "cache_rules": [],
+                    "rewrite_rules": [],
+                    "error_pages": [],
+                    "upstreams": [],
+                    "routes": [{
+                        "id": "route-1",
+                        "name": "api",
+                        "match_type": "prefix",
+                        "path": "/api",
+                        "priority": null,
+                        "enabled": true,
+                        "pool_id": "pool-1"
+                    }],
+                    "ssl_config": {
+                        "cert_pem": "",
+                        "key_pem": "",
+                        "acme_enabled": false,
+                        "acme_email": "",
+                        "acme_challenge_type": "AcmeHttp01",
+                        "acme_dns_provider": "",
+                        "acme_dns_config": {},
+                        "min_tls_version": "",
+                        "hsts_enabled": false,
+                        "hsts_max_age": 0,
+                        "always_use_https": false,
+                        "enabled": true,
+                        "max_tls_version": "",
+                        "self_signed": false,
+                        "mtls_enabled": true,
+                        "mtls_client_ca": "PEM",
+                        "certificate_id": ""
+                    }
+                }
+            },
+            "domain_index": {"example.com": "site-1"},
+            "updated_at": "2026-01-01T00:00:00Z",
+            "config_hash": "abc"
+        });
+        let cached: CachedRules =
+            serde_json::from_str(&old.to_string()).expect("old format loads");
+        let site = cached.sites.get("site-1").expect("site present");
+        assert_eq!(site.status, site_status::ACTIVE);
+        assert!(!site.is_paused());
+        assert!(site.routes[0].ip_ranges.is_empty());
+        let ssl = site.ssl_config.as_ref().expect("ssl config");
+        assert!(ssl.mtls_revoked_fingerprints.is_empty());
+        assert!(ssl.mtls_organization.is_empty());
+        assert!(ssl.mtls_requires_cert());
+    }
+
+    #[test]
+    fn proto_conversion_carries_status_and_new_fields() {
+        let site = proto::Site {
+            id: "site-1".to_string(),
+            name: "Example".to_string(),
+            domain: "example.com".to_string(),
+            alternate_domains: Vec::new(),
+            status: 1, // SITE_STATUS_PAUSED
+            rules: Some(proto::RuleBundle {
+                ssl: Some(proto::SslConfig {
+                    mtls_enabled: true,
+                    mtls_revoked_fingerprints: vec!["AB".to_string()],
+                    mtls_organization: "acme".to_string(),
+                    mtls_require_client_cert: true,
+                    ..Default::default()
+                }),
+                routes: vec![proto::RouteConfig {
+                    ip_ranges: vec!["10.0.0.0/8".to_string()],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+        };
+        assert_eq!(site_status_str(site.status), site_status::PAUSED);
+        let rules =
+            RuleCache::convert_bundle(site.rules.as_ref().expect("bundle"));
+        let ssl = rules.ssl_config.as_ref().expect("ssl config");
+        assert_eq!(ssl.mtls_revoked_fingerprints, vec!["ab".to_string()]);
+        assert_eq!(ssl.mtls_organization, "acme");
+        assert!(ssl.mtls_requires_cert());
+        assert_eq!(rules.routes[0].ip_ranges, vec!["10.0.0.0/8"]);
+        assert_eq!(site_status_str(0), site_status::ACTIVE);
+        assert_eq!(site_status_str(2), site_status::PENDING);
+        assert_eq!(site_status_str(7), site_status::ACTIVE);
     }
 
     #[test]

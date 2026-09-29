@@ -974,6 +974,26 @@ pub async fn start_data_plane(
         my_server.run_forever();
     });
 
+    // Access log entries are held until the response body completes so the
+    // log can carry the response payload. A client that disconnects mid-body
+    // never fires the end-of-stream callback, so stale entries are swept
+    // periodically: they are still emitted (flagged truncated) so the request
+    // never vanishes from the log, and the map cannot grow without bound.
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let swept = pingap_plugin::sweep_stale_access(
+                pingap_plugin::PENDING_ACCESS_SWEEP_TTL,
+            );
+            if swept > 0 {
+                info!(
+                    count = swept,
+                    "data plane: swept stale pending access entries"
+                );
+            }
+        }
+    });
+
     // Hot-reload watcher: poll the rule cache config hash and re-init the
     // ArcSwap providers when the control plane pushes new rules. The proxy
     // reads these providers per request, so no restart is needed. The config
@@ -1257,6 +1277,7 @@ mod tests {
             site_id: site_id.to_string(),
             domain: domain.to_string(),
             alternate_domains: vec![],
+            status: "active".to_string(),
             waf_config: None,
             rate_limit_rules: vec![],
             ip_access_rules: vec![],
@@ -1311,6 +1332,7 @@ mod tests {
             priority: None,
             enabled: true,
             pool_id: pool_id.to_string(),
+            ip_ranges: vec![],
         }
     }
 
@@ -1759,6 +1781,9 @@ mod tests {
             mtls_enabled: false,
             mtls_client_ca: String::new(),
             certificate_id: String::new(),
+            mtls_revoked_fingerprints: vec![],
+            mtls_organization: String::new(),
+            mtls_require_client_cert: false,
         }
     }
 

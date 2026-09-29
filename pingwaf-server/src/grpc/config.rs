@@ -466,6 +466,12 @@ fn ssl_to_proto(
         mtls_enabled: row.mtls_enabled,
         mtls_client_ca: row.mtls_client_ca.clone().unwrap_or_default(),
         certificate_id,
+        // Revocations and the expected organization come from the managed-CA
+        // tables loaded by the caller.
+        mtls_revoked_fingerprints: Vec::new(),
+        mtls_organization: String::new(),
+        // Turning mTLS on means clients must present a certificate.
+        mtls_require_client_cert: row.mtls_enabled,
     }
 }
 
@@ -535,6 +541,8 @@ fn routes_to_proto(
             priority: route.priority,
             enabled: route.enabled,
             pool_id: route.pool_id.to_string(),
+            // Filled from the route's IP group by the caller.
+            ip_ranges: Vec::new(),
         })
         .collect()
 }

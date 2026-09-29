@@ -1111,17 +1111,24 @@ fn access_log_row(
         country_code: Set(truncate(&entry.country_code, MAX_COUNTRY)),
         tls_version: Set(truncate(&entry.tls_version, MAX_TLS_VERSION)),
         request_headers: Set(headers_json(&entry.request_headers)),
-        request_body: Set(request_body_text(&entry.request_body)),
+        request_body: Set(body_text(&entry.request_body)),
         request_body_size: Set(positive_i64(entry.request_body_size as i64)),
         request_body_truncated: Set(Some(entry.request_body_truncated)),
+        scheme: Set(optional(&entry.scheme)),
+        protocol: Set(optional(&entry.protocol)),
+        response_headers: Set(headers_json(&entry.response_headers)),
+        response_body: Set(body_text(&entry.response_body)),
+        response_body_size: Set(positive_i64(entry.response_body_size as i64)),
+        response_body_truncated: Set(Some(entry.response_body_truncated)),
         ..Default::default()
     }
 }
 
-/// Lossily decodes the request body kept for the PostgreSQL row. The agent
-/// already caps the payload at 1 KiB; this is a defensive second cap.
-fn request_body_text(body: &[u8]) -> Option<String> {
-    const MAX_STORED_BODY: usize = 4096;
+/// Lossily decodes a body prefix kept for the PostgreSQL row. The agent
+/// already caps the payload at its configured limit; this is a defensive
+/// second cap for older or misconfigured agents.
+fn body_text(body: &[u8]) -> Option<String> {
+    const MAX_STORED_BODY: usize = 65536;
     if body.is_empty() {
         return None;
     }

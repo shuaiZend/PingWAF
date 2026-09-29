@@ -44,6 +44,8 @@ pub struct SecurityQuery {
     pub country_code: Option<String>,
     /// Exact request id, e.g. when correlating with an `X-Request-ID` header.
     pub request_id: Option<String>,
+    /// Free-text search over the request target and host (OR).
+    pub q: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -64,6 +66,8 @@ pub struct AccessQuery {
     pub min_latency_ms: Option<i64>,
     /// Exact request id, e.g. when correlating with an `X-Request-ID` header.
     pub request_id: Option<String>,
+    /// Free-text search over the request target and host (OR).
+    pub q: Option<String>,
 }
 
 /// Retention endpoint payload.
@@ -143,6 +147,69 @@ fn apply_scope(
     }
 }
 
+/// Splits a comma-separated filter value (`a,b`) into its trimmed, non-empty
+/// parts; the value is used verbatim when it holds no comma.
+fn split_multi(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Escapes LIKE metacharacters so a user-supplied value matches literally.
+fn escape_like(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if matches!(ch, '\\' | '%' | '_') {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped
+}
+
+/// Renders a value that may carry `*` wildcards as a LIKE pattern; `None` when
+/// no wildcard is present, so the caller can match exactly instead.
+fn like_pattern(value: &str) -> Option<String> {
+    if !value.contains('*') {
+        return None;
+    }
+    Some(escape_like(value).replace('*', "%"))
+}
+
+/// Builds the condition for one text filter: comma-separated values become an
+/// IN list, `*` turns the match into a LIKE, and everything else is exact.
+fn text_filter(column: impl ColumnTrait, raw: &str) -> Condition {
+    let parts = split_multi(raw);
+    if parts.is_empty() {
+        // "`,`" and friends: match nothing rather than silently dropping the
+        // filter, which would return rows the caller excluded.
+        return Condition::all().add(column.eq("").and(column.ne("")));
+    }
+    let mut condition = Condition::any();
+    for part in &parts {
+        condition = match like_pattern(part) {
+            Some(pattern) => condition.add(column.clone().like(pattern)),
+            None => condition.add(column.clone().eq(part.clone())),
+        };
+    }
+    condition
+}
+
+/// Free-text search: the needle must appear in the request target or host.
+fn free_text_filter(
+    path_column: impl ColumnTrait,
+    host_column: impl ColumnTrait,
+    needle: &str,
+) -> Condition {
+    let pattern = format!("%{}%", escape_like(needle));
+    Condition::any()
+        .add(path_column.like(pattern.clone()))
+        .add(host_column.like(pattern))
+}
+
 /// Resolves and validates the `from`/`to` window.
 fn resolve_window(
     from: &Option<String>,
@@ -186,28 +253,40 @@ async fn list_security(
     condition = apply_scope(condition, &scope, security_event::Column::SiteId);
 
     if let Some(ip) = non_empty(&query.client_ip) {
-        condition = condition.add(security_event::Column::ClientIp.eq(ip));
+        condition =
+            condition.add(text_filter(security_event::Column::ClientIp, &ip));
     }
     if let Some(action) = non_empty(&query.action) {
-        condition = condition.add(security_event::Column::Action.eq(action));
+        condition =
+            condition.add(text_filter(security_event::Column::Action, &action));
     }
     if let Some(rule_id) = non_empty(&query.rule_id) {
-        condition = condition.add(security_event::Column::RuleId.eq(rule_id));
+        condition = condition
+            .add(text_filter(security_event::Column::RuleId, &rule_id));
     }
     if let Some(host) = non_empty(&query.host) {
-        condition = condition.add(security_event::Column::Host.eq(host));
+        condition =
+            condition.add(text_filter(security_event::Column::Host, &host));
     }
     if let Some(path) = non_empty(&query.path) {
         condition = condition.add(security_event::Column::Path.contains(path));
     }
     if let Some(country) = non_empty(&query.country_code) {
-        condition = condition.add(
-            security_event::Column::CountryCode.eq(country.to_uppercase()),
-        );
+        condition = condition.add(text_filter(
+            security_event::Column::CountryCode,
+            &country.to_uppercase(),
+        ));
     }
     if let Some(request_id) = non_empty(&query.request_id) {
         condition =
             condition.add(security_event::Column::RequestId.eq(request_id));
+    }
+    if let Some(q) = non_empty(&query.q) {
+        condition = condition.add(free_text_filter(
+            security_event::Column::Path,
+            security_event::Column::Host,
+            &q,
+        ));
     }
 
     let paginator = security_event::Entity::find()
@@ -236,11 +315,14 @@ async fn list_access(
     condition = apply_scope(condition, &scope, access_log::Column::SiteId);
 
     if let Some(ip) = non_empty(&query.client_ip) {
-        condition = condition.add(access_log::Column::ClientIp.eq(ip));
+        condition =
+            condition.add(text_filter(access_log::Column::ClientIp, &ip));
     }
     if let Some(method) = non_empty(&query.method) {
-        condition =
-            condition.add(access_log::Column::Method.eq(method.to_uppercase()));
+        condition = condition.add(text_filter(
+            access_log::Column::Method,
+            &method.to_uppercase(),
+        ));
     }
     if let Some(status) = query.status_code {
         if !(100..=599).contains(&status) {
@@ -261,19 +343,22 @@ async fn list_access(
             .add(access_log::Column::StatusCode.lt((class + 1) * 100));
     }
     if let Some(host) = non_empty(&query.host) {
-        condition = condition.add(access_log::Column::Host.eq(host));
+        condition = condition.add(text_filter(access_log::Column::Host, &host));
     }
     if let Some(path) = non_empty(&query.path) {
         condition = condition.add(access_log::Column::Path.contains(path));
     }
     if let Some(cache_status) = non_empty(&query.cache_status) {
-        condition = condition.add(
-            access_log::Column::CacheStatus.eq(cache_status.to_lowercase()),
-        );
+        condition = condition.add(text_filter(
+            access_log::Column::CacheStatus,
+            &cache_status.to_lowercase(),
+        ));
     }
     if let Some(country) = non_empty(&query.country_code) {
-        condition = condition
-            .add(access_log::Column::CountryCode.eq(country.to_uppercase()));
+        condition = condition.add(text_filter(
+            access_log::Column::CountryCode,
+            &country.to_uppercase(),
+        ));
     }
     if let Some(min_latency) = query.min_latency_ms {
         condition =
@@ -281,6 +366,13 @@ async fn list_access(
     }
     if let Some(request_id) = non_empty(&query.request_id) {
         condition = condition.add(access_log::Column::RequestId.eq(request_id));
+    }
+    if let Some(q) = non_empty(&query.q) {
+        condition = condition.add(free_text_filter(
+            access_log::Column::Path,
+            access_log::Column::Host,
+            &q,
+        ));
     }
 
     let paginator = access_log::Entity::find()
@@ -382,5 +474,26 @@ mod tests {
     #[test]
     fn retention_defaults_are_sane() {
         assert_eq!(default_retention_days(), 30);
+    }
+
+    #[test]
+    fn multi_value_filters_split_on_commas() {
+        assert_eq!(
+            vec!["10.0.0.1", "10.0.0.2"],
+            split_multi("10.0.0.1, 10.0.0.2")
+        );
+        assert_eq!(vec!["xss"], split_multi(" xss "));
+        // Blank parts are dropped; an all-blank value has none left.
+        assert!(split_multi(" , ").is_empty());
+    }
+
+    #[test]
+    fn wildcards_become_like_patterns() {
+        assert_eq!(None, like_pattern("exact"));
+        assert_eq!(Some("10.0.%"), like_pattern("10.0.*").as_deref());
+        // LIKE metacharacters in user input stay literal.
+        assert_eq!(Some(r"100\%\_x%"), like_pattern("100%_x*").as_deref());
+        assert_eq!(r"50\%", escape_like("50%"));
+        assert_eq!(r"%a\_b%", format!("%{}%", escape_like("a_b")));
     }
 }
