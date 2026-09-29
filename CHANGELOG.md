@@ -8,6 +8,51 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.17.0] — 2026-09-30
+
+### ⛰️ Features
+
+- *(config)* Load settings from a TOML file with `--config <path>` (or
+  `PINGWAF_CONFIG`). The `[server]` and `[agent]` tables take the same names as
+  the long flags, with dashes written as underscores (`--admin-addr` →
+  `admin_addr`) and lists as TOML arrays; `all-in-one` reads both tables, while
+  `server` and `agent` read only their own. Precedence is file, then
+  environment, then command line, unknown keys are reported and skipped instead
+  of silently ignored, and the effective count is logged at startup. The
+  shipped [`pingwaf.toml`](./pingwaf.toml) and `pingwaf.service` are now real,
+  loadable configuration, and `install.sh` points the unit at
+  `/etc/pingwaf/pingwaf.toml`.
+- *(config)* Boolean flags can be turned off again. `--serve-frontend` and
+  `--fail-open` were declared as value-less flags, so neither the command line
+  nor the environment could set them to `false`; they now take an optional
+  value (`--fail-open=false`, `PINGWAF_FAIL_OPEN=false`), and the same fix
+  makes the documented `--tls-enabled false` work.
+- *(logging)* `RUST_LOG` now defaults to `info,sqlx=warn`. Every SQL statement
+  was logged at `info`, burying the control plane's own messages under the
+  query log; naming `sqlx` in `RUST_LOG` still gets exactly what was asked for.
+
+### 🐛 Bug Fixes
+
+- *(api)* Fix the HTTPS redirect loop that made the dashboard unreachable over
+  TLS. The redirect middleware read the connection info as `ConnInfo`, but axum
+  stores it as `ConnectInfo<ConnInfo>`, so the lookup always missed: a request
+  that had arrived over TLS looked like cleartext and was redirected to the URL
+  it was already on — a `308` loop the browser reports as too many redirects.
+  The middleware now reads the newtype, and a socket-level regression test
+  covers cleartext, TLS and health-probe requests.
+- *(deploy)* Drop the `ExecReload=/bin/kill -HUP` line from the shipped unit
+  and the one `install.sh` writes. There is no reload signal, so
+  `systemctl reload pingwaf` silently did nothing; the units and the docs now
+  say to edit the configuration and restart.
+
+### ⚠️ Breaking Changes
+
+- The configuration file is no longer inert. A deployment that kept unrelated
+  content in `/etc/pingwaf/pingwaf.toml` will now see its `[server]` /
+  `[agent]` tables applied (unrecognised keys are only warned about), and a
+  path named by `--config`/`PINGWAF_CONFIG` that cannot be read stops startup
+  instead of being ignored.
+
 ## [PingWAF 0.16.0] — 2026-09-30
 
 ### ⛰️ Features
