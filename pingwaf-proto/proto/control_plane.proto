@@ -458,6 +458,15 @@ message SslConfig {
   string mtls_client_ca = 16;
   // Id of the `site_certificates` row this posture selects, when any.
   string certificate_id = 17;
+  // SHA-256 fingerprints (lowercase hex) of revoked client certificates; the
+  // data plane rejects a handshake identity found here.
+  repeated string mtls_revoked_fingerprints = 18;
+  // Organization every client certificate must carry, so a certificate issued
+  // for another site cannot be replayed here. Empty skips the check.
+  string mtls_organization = 19;
+  // Whether a client certificate is required at all; defaults to
+  // `mtls_enabled` when unset for backward compatibility.
+  bool mtls_require_client_cert = 20;
 }
 
 enum AcmeChallengeType {
@@ -503,6 +512,9 @@ message RouteConfig {
   optional int32 priority = 5;
   bool enabled = 6;
   string pool_id = 7;
+  // CIDR ranges the client IP must fall into for this route to match; empty
+  // matches every client, entries come from the route's IP group.
+  repeated string ip_ranges = 9;
 }
 
 enum LoadBalanceAlgorithm {

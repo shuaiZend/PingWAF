@@ -277,6 +277,9 @@ mod waf;
 mod plugin;
 
 pub use plugin::get_plugin_factory;
+// The data plane drives the WAF plugin's access-log sweep timer from its
+// own runtime, so these two items are re-exported.
+pub use waf::{PENDING_ACCESS_SWEEP_TTL, sweep_stale_access};
 
 #[cfg(test)]
 pub(crate) mod test_support {

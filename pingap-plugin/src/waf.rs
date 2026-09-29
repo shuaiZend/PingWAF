@@ -38,7 +38,8 @@ use dashmap::DashMap;
 use pingap_config::{PluginCategory, PluginConf};
 use pingap_core::{
     Ctx, HTTP_HEADER_NAME_X_REQUEST_ID, Plugin, PluginStep,
-    RequestPluginResult, ResponsePluginResult, ensure_client_ip, get_host,
+    RequestPluginResult, ResponseBodyPluginResult, ResponsePluginResult,
+    ensure_client_ip, get_host,
 };
 use pingap_util::IpRules;
 use pingora::http::ResponseHeader;
@@ -955,8 +956,8 @@ fn clearance_valid(value: Option<String>) -> bool {
 // Pending access log store
 // ─────────────────────────────────────────────────────────────
 
-/// Request facts captured before inspection and held until the upstream
-/// response allows the access log to be emitted.
+/// Request facts captured before inspection and held until the response
+/// (and, when captured, its body) allows the access log to be emitted.
 struct PendingAccess {
     site_id: String,
     client_ip: String,
@@ -972,90 +973,164 @@ struct PendingAccess {
     country_code: String,
     request_headers: Vec<(String, String)>,
     request_body: Option<Vec<u8>>,
+    request_body_size: u64,
     request_body_truncated: bool,
+    /// Body bytes the log keeps per direction, resolved from the agent
+    /// config when the request arrived. 0 disables body capture.
+    body_limit: usize,
+    /// Response facts, present once `handle_response` held the entry back
+    /// for body capture.
+    response: Option<ResponseFacts>,
     start: Instant,
 }
 
-/// Body bytes kept per access log entry. The full request is not stored —
-/// logs are for forensics, not for mirroring uploads.
-const MAX_LOG_BODY: usize = 1024;
+/// Response facts gathered before the access entry is emitted.
+struct ResponseFacts {
+    status_code: u32,
+    upstream_addr: String,
+    upstream_latency_ms: u64,
+    headers: Vec<(String, String)>,
+    /// Prefix kept for the log; `None` when body capture was skipped.
+    body: Option<Vec<u8>>,
+    /// Body bytes seen while streaming, or the announced content length when
+    /// capture was skipped.
+    body_size: u64,
+    /// The stream never finished; whatever arrived is all there was to log.
+    abandoned: bool,
+}
+
+impl ResponseFacts {
+    /// Facts for a response the plugin generated itself (block page,
+    /// challenge, rate limit); no upstream and no captured body.
+    fn generated(status_code: u32) -> Self {
+        Self {
+            status_code,
+            upstream_addr: String::new(),
+            upstream_latency_ms: 0,
+            headers: Vec::new(),
+            body: None,
+            body_size: 0,
+            abandoned: false,
+        }
+    }
+
+    /// Absorbs one streamed chunk, keeping at most `limit` bytes.
+    fn absorb(&mut self, chunk: &[u8], limit: usize) {
+        self.body_size += chunk.len() as u64;
+        if limit == 0 {
+            return;
+        }
+        let buf = self
+            .body
+            .get_or_insert_with(|| Vec::with_capacity(chunk.len().min(limit)));
+        if buf.len() < limit {
+            let room = limit - buf.len();
+            buf.extend_from_slice(&chunk[..chunk.len().min(room)]);
+        }
+    }
+
+    /// Whether the kept prefix is shorter than the body it came from.
+    fn truncated(&self) -> bool {
+        self.abandoned
+            || self
+                .body
+                .as_ref()
+                .is_some_and(|body| (body.len() as u64) < self.body_size)
+    }
+}
+
+/// Hard ceiling for the configured per-entry body capture, so a bad value
+/// cannot turn the log store into a bandwidth sink.
+const MAX_LOG_BODY_LIMIT: usize = 64 * 1024;
 
 /// Upper bounds for the header snapshot kept per access log entry.
 const MAX_LOG_HEADERS: usize = 64;
 const MAX_LOG_HEADERS_BYTES: usize = 8 * 1024;
 
-/// Headers whose values never reach the log store: they carry credentials
-/// (session cookies, bearer tokens, basic auth) and logging them would turn
-/// every access-log row into a secret. Compared case-insensitively.
-const REDACTED_HEADERS: &[&str] =
-    &["authorization", "proxy-authorization", "cookie"];
-
-/// Value stored in place of a redacted header's contents.
-const REDACTED_VALUE: &str = "[redacted]";
-
-/// Caps the header snapshot kept for logging so a pathological request cannot
-/// bloat the log store: at most [`MAX_LOG_HEADERS`] entries totalling at most
-/// [`MAX_LOG_HEADERS_BYTES`] bytes, with credential headers ([`REDACTED_HEADERS`])
-/// replaced by [`REDACTED_VALUE`].
-fn cap_request_headers(headers: &[(String, String)]) -> Vec<(String, String)> {
+/// Caps the header snapshot kept for logging so a pathological exchange
+/// cannot bloat the log store: at most [`MAX_LOG_HEADERS`] entries totalling
+/// at most [`MAX_LOG_HEADERS_BYTES`] bytes. Values are stored verbatim —
+/// including cookies and credentials — because incident response needs to
+/// replay traffic (see the security note in `docs/api.md`).
+fn cap_headers<'a>(
+    headers: impl Iterator<Item = (String, &'a str)>,
+) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let mut total = 0usize;
-    for (name, value) in headers.iter().take(MAX_LOG_HEADERS) {
-        let sensitive = REDACTED_HEADERS
-            .iter()
-            .any(|h| name.eq_ignore_ascii_case(h));
-        let stored = if sensitive {
-            REDACTED_VALUE
-        } else {
-            value.as_str()
-        };
-        total += name.len() + stored.len();
+    for (name, value) in headers.take(MAX_LOG_HEADERS) {
+        total += name.len() + value.len();
         if total > MAX_LOG_HEADERS_BYTES {
             break;
         }
-        out.push((name.clone(), stored.to_string()));
+        out.push((name, value.to_string()));
     }
     out
 }
 
-/// Accumulates the request-body prefix kept for logging: at most
-/// [`MAX_LOG_BODY`] bytes plus a flag telling whether the kept prefix is
-/// shorter than the full body.
-#[derive(Default)]
+/// Accumulates the request-body prefix kept for logging: at most `limit`
+/// bytes plus a flag telling whether the kept prefix is shorter than the
+/// body the data plane read. The full byte count is tracked regardless of
+/// the limit, so the log can report the real size even when truncated.
 struct LogBodyPrefix {
+    limit: usize,
     body: Option<Vec<u8>>,
+    size: u64,
     truncated: bool,
 }
 
 impl LogBodyPrefix {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            body: None,
+            size: 0,
+            truncated: false,
+        }
+    }
+
     fn absorb(&mut self, chunk: &[u8]) {
+        self.size += chunk.len() as u64;
+        if self.limit == 0 {
+            return;
+        }
         let buf = self.body.get_or_insert_with(|| {
-            Vec::with_capacity(chunk.len().min(MAX_LOG_BODY))
+            Vec::with_capacity(chunk.len().min(self.limit))
         });
-        // Overshoot is allowed here so a body of exactly MAX_LOG_BODY bytes
-        // stays untruncated; `finish` trims and flags afterwards.
-        if buf.len() <= MAX_LOG_BODY {
+        // Overshoot is allowed here so a body of exactly `limit` bytes stays
+        // untruncated; `finish` trims and flags afterwards.
+        if buf.len() <= self.limit {
             buf.extend_from_slice(chunk);
         }
     }
 
+    /// Whether the prefix has everything it will ever keep; the read loop
+    /// stops once this holds.
+    fn limit_hit(&self) -> bool {
+        self.limit > 0
+            && self.body.as_ref().is_some_and(|buf| buf.len() > self.limit)
+    }
+
     /// Marks the capture as interrupted (the read loop stopped before the body
     /// signalled completion), so the kept prefix may be shorter than the real
-    /// body even though it fits within [`MAX_LOG_BODY`].
+    /// body even though it fits within the limit.
     fn interrupted(&mut self) {
         self.truncated = true;
     }
 
-    fn finish(mut self) -> (Option<Vec<u8>>, bool) {
+    fn finish(mut self) -> (Option<Vec<u8>>, u64, bool) {
         if let Some(buf) = self.body.as_mut()
-            && buf.len() > MAX_LOG_BODY
+            && buf.len() > self.limit
         {
-            buf.truncate(MAX_LOG_BODY);
+            buf.truncate(self.limit);
             self.truncated = true;
         }
-        (self.body, self.truncated)
+        (self.body, self.size, self.truncated)
     }
 }
+
+/// How long a request may sit between `handle_request` and the end of its
+/// response body before the pending entry counts as abandoned.
+pub const PENDING_ACCESS_SWEEP_TTL: Duration = Duration::from_secs(45);
 
 /// Orphaned entries (e.g. upstream connect failures that bypass
 /// `handle_response`) are evicted once they outlive this window.
@@ -1074,19 +1149,46 @@ fn register_pending_access(request_id: &str, pending: PendingAccess) {
     PENDING_ACCESS.insert(request_id.to_string(), pending);
 }
 
-/// Emit an access log entry, either at response time or immediately for
-/// plugin-generated responses (which never reach `handle_response`).
+/// Ships, or drops, entries whose exchange never completed: a client that
+/// vanished mid-body (or an upstream that died before responding) would
+/// otherwise leave its entry behind forever. Entries that already hold
+/// response facts are logged with what arrived; the rest are dropped. Runs
+/// off the data plane's periodic task.
+pub fn sweep_stale_access(ttl: Duration) -> usize {
+    let expired: Vec<String> = PENDING_ACCESS
+        .iter()
+        .filter(|entry| entry.value().start.elapsed() >= ttl)
+        .map(|entry| entry.key().clone())
+        .collect();
+    let agent = PingWafAgent::instance();
+    let mut swept = 0;
+    for request_id in expired {
+        let Some((_, mut pending)) = PENDING_ACCESS.remove(&request_id) else {
+            continue;
+        };
+        swept += 1;
+        let Some(agent) = agent.as_ref() else {
+            continue;
+        };
+        if let Some(mut facts) = pending.response.take() {
+            facts.abandoned = true;
+            emit_access(agent, &request_id, pending, facts);
+        }
+    }
+    swept
+}
+
+/// Emit an access log entry, either when the response is complete or
+/// immediately for plugin-generated responses (which never reach
+/// `handle_response`).
 fn emit_access(
     agent: &PingWafAgent,
     request_id: &str,
     pending: PendingAccess,
-    status_code: u32,
-    upstream_addr: String,
-    upstream_latency_ms: u64,
+    response: ResponseFacts,
 ) {
     let total_latency_ms = pending.start.elapsed().as_millis() as u64;
-    let request_body_size =
-        pending.request_body.as_ref().map_or(0, |b| b.len() as u64);
+    let response_body_truncated = response.truncated();
     agent.log_access(AccessLogEntry {
         site_id: pending.site_id,
         request_id: request_id.to_string(),
@@ -1097,10 +1199,10 @@ fn emit_access(
         path: pending.path,
         query_string: pending.query,
         protocol: pending.protocol,
-        status_code,
-        response_size: 0,
-        upstream_addr,
-        upstream_latency_ms,
+        status_code: response.status_code,
+        response_size: response.body_size,
+        upstream_addr: response.upstream_addr,
+        upstream_latency_ms: response.upstream_latency_ms,
         total_latency_ms,
         cache_status: String::new(),
         user_agent: pending.user_agent,
@@ -1109,9 +1211,93 @@ fn emit_access(
         country_code: pending.country_code,
         request_headers: pending.request_headers,
         request_body: pending.request_body,
-        request_body_size,
+        request_body_size: pending.request_body_size,
         request_body_truncated: pending.request_body_truncated,
+        response_headers: response.headers,
+        response_body: response.body,
+        response_body_size: response.body_size,
+        response_body_truncated,
     });
+}
+
+/// Content types whose bodies are text-like and thus worth storing.
+fn is_textual_content_type(value: &str) -> bool {
+    let mime = value
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    mime.starts_with("text/")
+        || matches!(
+            mime.as_str(),
+            "application/json"
+                | "application/xml"
+                | "application/javascript"
+                | "application/x-www-form-urlencoded"
+        )
+        || mime.ends_with("+json")
+        || mime.ends_with("+xml")
+}
+
+/// Whether the response body should be captured for the access log. Capture
+/// is skipped when the outcome is knowable from the headers alone (HEAD,
+/// bodyless statuses) or the bytes would not be replayable text (compressed
+/// or binary payloads).
+fn should_capture_response_body(
+    method: &str,
+    status: u16,
+    response: &pingora::http::ResponseHeader,
+) -> bool {
+    if method == "HEAD" || status < 200 || status == 204 || status == 304 {
+        return false;
+    }
+    if let Some(encoding) = response
+        .headers
+        .get("content-encoding")
+        .and_then(|value| value.to_str().ok())
+        && !encoding.is_empty()
+        && !encoding.eq_ignore_ascii_case("identity")
+    {
+        return false;
+    }
+    if let Some(length) = response
+        .headers
+        .get("content-length")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        && length == 0
+    {
+        return false;
+    }
+    match response
+        .headers
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+    {
+        Some(value) => is_textual_content_type(value),
+        // Unknown payload: capture, best effort.
+        None => true,
+    }
+}
+
+/// The response's announced body size, used when the body itself was not
+/// captured.
+fn announced_body_size(response: &pingora::http::ResponseHeader) -> u64 {
+    response
+        .headers
+        .get("content-length")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+/// Body bytes kept per access log entry per direction, resolved from the
+/// agent config; capped so a misconfiguration cannot bloat the log store.
+fn log_body_limit() -> usize {
+    PingWafAgent::instance()
+        .map(|agent| agent.config.max_body_log_size.min(MAX_LOG_BODY_LIMIT))
+        .unwrap_or(0)
 }
 
 /// Web Application Firewall plugin.
@@ -1355,7 +1541,12 @@ impl WafPlugin {
             && let Some((_, pending)) = PENDING_ACCESS.remove(request_id)
         {
             let status = if denial.challenge { 503 } else { 403 };
-            emit_access(agent, request_id, pending, status, String::new(), 0);
+            emit_access(
+                agent,
+                request_id,
+                pending,
+                ResponseFacts::generated(status),
+            );
         }
         if denial.challenge {
             RequestPluginResult::Respond(build_challenge_response(
@@ -1518,15 +1709,24 @@ impl Plugin for WafPlugin {
             None
         };
 
-        // ── Full-request log capture: snapshot headers and keep at most 1 KiB
-        // of body. Pingora's retry buffer replays bytes consumed here to the
-        // upstream, so reading does not interfere with forwarding. Skipped for
-        // the challenge verify endpoint, whose handler consumes the body
-        // itself. WAF body inspection reuses the same read pass. ──
-        let log_headers = cap_request_headers(&headers);
-        let mut log_body_prefix = LogBodyPrefix::default();
+        // ── Full-request log capture: snapshot headers (capped) and keep the
+        // configured body prefix. Pingora's retry buffer replays bytes
+        // consumed here to the upstream, so reading does not interfere with
+        // forwarding. Skipped for the challenge verify endpoint, whose
+        // handler consumes the body itself. WAF body inspection reuses the
+        // same read pass. ──
+        let body_limit = log_body_limit();
+        let log_headers = cap_headers(
+            headers
+                .iter()
+                .map(|(name, value)| (name.clone(), value.as_str())),
+        );
+        let mut log_body_prefix = LogBodyPrefix::new(body_limit);
         let mut inspect_buf = BytesMut::new();
-        if agent.is_some() && !(method == "POST" && path == VERIFY_ENDPOINT) {
+        if agent.is_some()
+            && (body_limit > 0 || self.inspect_body)
+            && !(method == "POST" && path == VERIFY_ENDPOINT)
+        {
             let mut interrupted = false;
             loop {
                 let Some(chunk) = session.read_request_body().await? else {
@@ -1536,15 +1736,15 @@ impl Plugin for WafPlugin {
                 log_body_prefix.absorb(chunk);
                 if self.inspect_body {
                     inspect_buf.put(chunk);
-                    if inspect_buf.len() >= self.max_body_size {
-                        interrupted = true;
-                        break;
-                    }
-                } else if log_body_prefix
-                    .body
-                    .as_ref()
-                    .is_some_and(|buf| buf.len() > MAX_LOG_BODY)
+                }
+                // Inspection needs the prefix; the log needs its own. Stop
+                // once neither can learn anything from more bytes.
+                if self.inspect_body && inspect_buf.len() >= self.max_body_size
                 {
+                    interrupted = true;
+                    break;
+                }
+                if !self.inspect_body && log_body_prefix.limit_hit() {
                     interrupted = true;
                     break;
                 }
@@ -1553,7 +1753,8 @@ impl Plugin for WafPlugin {
                 log_body_prefix.interrupted();
             }
         }
-        let (log_body, log_body_truncated) = log_body_prefix.finish();
+        let (log_body, log_body_size, log_body_truncated) =
+            log_body_prefix.finish();
 
         // Track the request for access logging until the response phase —
         // including WAF-disabled sites, so traffic data stays complete.
@@ -1580,7 +1781,10 @@ impl Plugin for WafPlugin {
                     country_code: country.clone().unwrap_or_default(),
                     request_headers: log_headers,
                     request_body: log_body,
+                    request_body_size: log_body_size,
                     request_body_truncated: log_body_truncated,
+                    body_limit,
+                    response: None,
                     start: Instant::now(),
                 },
             );
@@ -1731,9 +1935,7 @@ impl Plugin for WafPlugin {
                         agent,
                         &request_id,
                         pending,
-                        status,
-                        String::new(),
-                        0,
+                        ResponseFacts::generated(status),
                     );
                 }
                 return Ok(if tripped.challenge {
@@ -1839,7 +2041,12 @@ impl Plugin for WafPlugin {
             } else {
                 503
             };
-            emit_access(agent, &request_id, pending, status, String::new(), 0);
+            emit_access(
+                agent,
+                &request_id,
+                pending,
+                ResponseFacts::generated(status),
+            );
         }
 
         if verdict.action == WafAction::Block {
@@ -1877,20 +2084,103 @@ impl Plugin for WafPlugin {
         let Some(agent) = PingWafAgent::instance() else {
             return Ok(ResponsePluginResult::Unchanged);
         };
+        let status = upstream_response.status.as_u16();
+        let upstream_latency_ms =
+            ctx.timing.upstream_processing.unwrap_or(0).max(0) as u64;
+        let headers = cap_headers(upstream_response.headers.iter().filter_map(
+            |(name, value)| {
+                value
+                    .to_str()
+                    .ok()
+                    .map(|value| (name.as_str().to_string(), value))
+            },
+        ));
+
+        // Hold the entry back for body capture when the payload is worth
+        // keeping; otherwise the entry is complete now.
+        {
+            let Some(mut entry) = PENDING_ACCESS.get_mut(&request_id) else {
+                return Ok(ResponsePluginResult::Unchanged);
+            };
+            if entry.body_limit > 0
+                && should_capture_response_body(
+                    &entry.method,
+                    status,
+                    upstream_response,
+                )
+            {
+                entry.response = Some(ResponseFacts {
+                    status_code: status as u32,
+                    upstream_addr: ctx.upstream.address.clone(),
+                    upstream_latency_ms,
+                    headers,
+                    body: None,
+                    body_size: 0,
+                    abandoned: false,
+                });
+                return Ok(ResponsePluginResult::Unchanged);
+            }
+        }
         let Some((_, pending)) = PENDING_ACCESS.remove(&request_id) else {
             return Ok(ResponsePluginResult::Unchanged);
         };
-        let upstream_latency_ms =
-            ctx.timing.upstream_processing.unwrap_or(0).max(0) as u64;
         emit_access(
             &agent,
             &request_id,
             pending,
-            upstream_response.status.as_u16() as u32,
-            ctx.upstream.address.clone(),
-            upstream_latency_ms,
+            ResponseFacts {
+                status_code: status as u32,
+                upstream_addr: ctx.upstream.address.clone(),
+                upstream_latency_ms,
+                headers,
+                body: None,
+                body_size: announced_body_size(upstream_response),
+                abandoned: false,
+            },
         );
         Ok(ResponsePluginResult::Unchanged)
+    }
+
+    fn handle_response_body(
+        &self,
+        _session: &mut Session,
+        ctx: &mut Ctx,
+        body: &mut Option<bytes::Bytes>,
+        end_of_stream: bool,
+    ) -> pingora::Result<ResponseBodyPluginResult> {
+        let Some(request_id) = ctx.state.request_id.clone() else {
+            return Ok(ResponseBodyPluginResult::Unchanged);
+        };
+        if end_of_stream {
+            // The response is complete: take the entry and ship it.
+            let Some((_, mut pending)) = PENDING_ACCESS.remove(&request_id)
+            else {
+                return Ok(ResponseBodyPluginResult::Unchanged);
+            };
+            let Some(agent) = PingWafAgent::instance() else {
+                return Ok(ResponseBodyPluginResult::Unchanged);
+            };
+            let Some(mut facts) = pending.response.take() else {
+                return Ok(ResponseBodyPluginResult::Unchanged);
+            };
+            let limit = pending.body_limit;
+            if let Some(chunk) = body.as_ref() {
+                facts.absorb(chunk, limit);
+            }
+            emit_access(&agent, &request_id, pending, facts);
+            return Ok(ResponseBodyPluginResult::Unchanged);
+        }
+        let Some(mut entry) = PENDING_ACCESS.get_mut(&request_id) else {
+            return Ok(ResponseBodyPluginResult::Unchanged);
+        };
+        let limit = entry.body_limit;
+        let Some(facts) = entry.response.as_mut() else {
+            return Ok(ResponseBodyPluginResult::Unchanged);
+        };
+        if let Some(chunk) = body.as_ref() {
+            facts.absorb(chunk, limit);
+        }
+        Ok(ResponseBodyPluginResult::Unchanged)
     }
 }
 
@@ -2356,43 +2646,58 @@ ml_threshold = 0.75
             .handle_response(&mut session, &mut ctx, &mut resp)
             .await
             .unwrap();
+        // A capturable payload holds the entry back until the body ends.
+        assert!(agent.client.pop_log().await.is_none());
+        plugin
+            .handle_response_body(
+                &mut session,
+                &mut ctx,
+                &mut Some(bytes::Bytes::from_static(b"page one")),
+                true,
+            )
+            .unwrap();
         let entry = agent.client.pop_log().await.unwrap();
         assert_eq!(request_id, entry.request_id);
         assert_eq!(200, entry.response_status);
         assert_eq!("page=1", entry.query_string);
+        assert_eq!(Some(b"page one".to_vec()), entry.response_body);
         // Consumed exactly once.
         assert!(agent.client.pop_log().await.is_none());
     }
 
     #[test]
-    fn cap_request_headers_limits_size_and_count() {
+    fn cap_headers_limits_size_and_count() {
         let headers: Vec<(String, String)> = (0..100)
             .map(|i| (format!("x-header-{i:03}"), format!("value-{i}")))
             .collect();
-        let capped = cap_request_headers(&headers);
+        let capped =
+            cap_headers(headers.iter().map(|(n, v)| (n.clone(), v.as_str())));
         assert_eq!(MAX_LOG_HEADERS, capped.len());
 
         let huge: Vec<(String, String)> =
             vec![("x-big".to_string(), "a".repeat(MAX_LOG_HEADERS_BYTES))];
-        let capped = cap_request_headers(&huge);
+        let capped =
+            cap_headers(huge.iter().map(|(n, v)| (n.clone(), v.as_str())));
         assert!(capped.is_empty());
 
         let mut big = vec![("x-ok".to_string(), "v".to_string())];
         big.push(("x-big".to_string(), "b".repeat(MAX_LOG_HEADERS_BYTES)));
-        let capped = cap_request_headers(&big);
+        let capped =
+            cap_headers(big.iter().map(|(n, v)| (n.clone(), v.as_str())));
         assert_eq!(1, capped.len());
     }
 
     #[test]
-    fn cap_request_headers_redacts_credentials() {
-        // Name case must not matter: HTTP headers are case-insensitive.
+    fn cap_headers_keeps_credentials_verbatim() {
+        // Cookies and authorization values must survive: incident response
+        // replays the captured request, so the log keeps them.
         let headers = vec![
             ("Authorization".to_string(), "Bearer tok".to_string()),
             ("cookie".to_string(), "sid=secret".to_string()),
             ("Proxy-Authorization".to_string(), "Basic xyz".to_string()),
-            ("X-Custom".to_string(), "kept".to_string()),
         ];
-        let capped = cap_request_headers(&headers);
+        let capped =
+            cap_headers(headers.iter().map(|(n, v)| (n.clone(), v.as_str())));
         let value = |name: &str| {
             capped
                 .iter()
@@ -2400,55 +2705,106 @@ ml_threshold = 0.75
                 .map(|(_, v)| v.as_str())
                 .unwrap()
         };
-        assert_eq!(REDACTED_VALUE, value("Authorization"));
-        assert_eq!(REDACTED_VALUE, value("cookie"));
-        assert_eq!(REDACTED_VALUE, value("Proxy-Authorization"));
-        assert_eq!("kept", value("X-Custom"));
-
-        // The redacted snapshot's budget is charged with the short marker,
-        // so a header bag that is all credentials still fits.
-        let creds: Vec<(String, String)> = (0..MAX_LOG_HEADERS)
-            .map(|i| {
-                let name = if i % 2 == 0 {
-                    "authorization"
-                } else {
-                    "cookie"
-                };
-                (name.to_string(), "s".repeat(500))
-            })
-            .collect();
-        assert_eq!(MAX_LOG_HEADERS, cap_request_headers(&creds).len());
+        assert_eq!("Bearer tok", value("Authorization"));
+        assert_eq!("sid=secret", value("cookie"));
+        assert_eq!("Basic xyz", value("Proxy-Authorization"));
     }
 
     #[test]
-    fn log_body_prefix_keeps_1kib_prefix() {
+    fn log_body_prefix_keeps_configured_prefix() {
         // A body of exactly the cap arrives complete.
-        let mut prefix = LogBodyPrefix::default();
-        prefix.absorb(&[b'a'; MAX_LOG_BODY]);
-        let (body, truncated) = prefix.finish();
-        assert_eq!(MAX_LOG_BODY, body.unwrap().len());
+        let mut prefix = LogBodyPrefix::new(1024);
+        prefix.absorb(&[b'a'; 1024]);
+        let (body, size, truncated) = prefix.finish();
+        assert_eq!(1024, body.unwrap().len());
+        assert_eq!(1024, size);
         assert!(!truncated);
 
-        // Anything longer is cut to the cap and flagged.
-        let mut prefix = LogBodyPrefix::default();
-        prefix.absorb(&[b'a'; MAX_LOG_BODY]);
+        // Anything longer is cut to the cap and flagged; the reported size
+        // still counts every byte read.
+        let mut prefix = LogBodyPrefix::new(1024);
+        prefix.absorb(&[b'a'; 1024]);
         prefix.absorb(b"overflow");
-        let (body, truncated) = prefix.finish();
-        assert_eq!(MAX_LOG_BODY, body.unwrap().len());
+        let (body, size, truncated) = prefix.finish();
+        assert_eq!(1024, body.unwrap().len());
+        assert_eq!(1024 + 8, size);
         assert!(truncated);
 
         // An interrupted read marks even a small prefix as partial.
-        let mut prefix = LogBodyPrefix::default();
+        let mut prefix = LogBodyPrefix::new(1024);
         prefix.absorb(b"partial");
         prefix.interrupted();
-        let (body, truncated) = prefix.finish();
+        let (body, _, truncated) = prefix.finish();
         assert_eq!(b"partial".to_vec(), body.unwrap());
         assert!(truncated);
 
         // No body at all.
-        let (body, truncated) = LogBodyPrefix::default().finish();
+        let (body, size, truncated) = LogBodyPrefix::new(1024).finish();
         assert!(body.is_none());
+        assert_eq!(0, size);
         assert!(!truncated);
+
+        // Capture disabled: nothing kept, size still counted when the bytes
+        // were read for another reason.
+        let mut prefix = LogBodyPrefix::new(0);
+        prefix.absorb(b"ignored");
+        let (body, size, truncated) = prefix.finish();
+        assert!(body.is_none());
+        assert_eq!(7, size);
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn response_capture_skips_bodiless_and_binary_payloads() {
+        let build = |status: u16, headers: &[(&str, &str)]| {
+            let mut response = ResponseHeader::build(status, None).unwrap();
+            for (name, value) in headers {
+                response.insert_header(name.to_string(), *value).unwrap();
+            }
+            response
+        };
+
+        // Textual payloads are captured.
+        assert!(should_capture_response_body(
+            "GET",
+            200,
+            &build(200, &[("content-type", "text/html; charset=utf-8")])
+        ));
+        // Unknown payload: best effort.
+        assert!(should_capture_response_body("GET", 200, &build(200, &[])));
+
+        // HEAD and bodyless statuses never stream a body.
+        assert!(!should_capture_response_body(
+            "HEAD",
+            200,
+            &build(200, &[("content-type", "text/html")])
+        ));
+        assert!(!should_capture_response_body("GET", 204, &build(204, &[])));
+        assert!(!should_capture_response_body("GET", 304, &build(304, &[])));
+
+        // Compressed payloads are not replayable text.
+        assert!(!should_capture_response_body(
+            "GET",
+            200,
+            &build(200, &[("content-encoding", "gzip")])
+        ));
+        // Binary payloads are not worth keeping.
+        assert!(!should_capture_response_body(
+            "GET",
+            200,
+            &build(200, &[("content-type", "image/png")])
+        ));
+        assert!(!should_capture_response_body(
+            "GET",
+            200,
+            &build(200, &[("content-type", "application/octet-stream")])
+        ));
+        // An explicitly empty body needs no capture.
+        assert!(!should_capture_response_body(
+            "GET",
+            200,
+            &build(200, &[("content-length", "0")])
+        ));
     }
 
     #[tokio::test]
@@ -2479,9 +2835,20 @@ ml_threshold = 0.75
         // The access entry only ships once the response arrives.
         assert!(agent.client.pop_log().await.is_none());
         let mut resp = ResponseHeader::build(200, None).unwrap();
+        resp.insert_header("content-type", "text/plain; charset=utf-8")
+            .unwrap();
         plugin
             .handle_response(&mut session, &mut ctx, &mut resp)
             .await
+            .unwrap();
+        assert!(agent.client.pop_log().await.is_none());
+        plugin
+            .handle_response_body(
+                &mut session,
+                &mut ctx,
+                &mut Some(bytes::Bytes::from_static(b"welcome back")),
+                true,
+            )
             .unwrap();
         let entry = agent.client.pop_log().await.unwrap();
 
@@ -2501,6 +2868,18 @@ ml_threshold = 0.75
                 .request_headers
                 .get("content-type")
                 .map(String::as_str)
+        );
+        // The response side is captured alongside the request.
+        assert_eq!(Some(b"welcome back".to_vec()), entry.response_body);
+        assert_eq!(12, entry.response_body_size);
+        assert!(!entry.response_body_truncated);
+        assert_eq!(
+            Some("text/plain; charset=utf-8"),
+            entry
+                .response_headers
+                .iter()
+                .find(|(name, _)| *name == "content-type")
+                .map(|(_, value)| value.as_str())
         );
     }
 

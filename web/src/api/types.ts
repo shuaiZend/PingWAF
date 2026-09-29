@@ -534,6 +534,12 @@ export interface AccessLog {
   request_body: string | null
   request_body_size: number | null
   request_body_truncated: boolean | null
+  scheme: string | null
+  protocol: string | null
+  response_headers: Record<string, string> | null
+  response_body: string | null
+  response_body_size: number | null
+  response_body_truncated: boolean | null
 }
 
 /** `api::logs::SecurityQuery` */
@@ -548,6 +554,7 @@ export interface SecurityLogQuery extends PaginationQuery {
   path?: string
   country_code?: string
   request_id?: string
+  q?: string
 }
 
 /** `api::logs::AccessQuery` */
@@ -565,6 +572,7 @@ export interface AccessLogQuery extends PaginationQuery {
   country_code?: string
   min_latency_ms?: number
   request_id?: string
+  q?: string
 }
 
 /** Convenience alias used by the logs page. */

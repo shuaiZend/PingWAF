@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import {
   ShieldWarning,
@@ -9,6 +10,7 @@ import {
   ArrowClockwise,
   Trash,
   Funnel,
+  Terminal,
 } from '@phosphor-icons/react'
 import { PageHeader } from '@/components/PageHeader'
 import { Card, CardBody } from '@/components/ui/Card'
@@ -25,8 +27,10 @@ import { SkeletonRows } from '@/components/ui/Skeleton'
 import { useToast } from '@/components/ui/Toast'
 import { ErrorState } from '@/components/ErrorState'
 import { downloadJson, fileTimestamp, logKeys, logsApi } from '@/api/logs'
-import { useCanWrite, useDebouncedValue, useSitesList } from '@/hooks'
+import { useCanWrite, useSitesList } from '@/hooks'
 import { cn } from '@/lib/utils'
+import { buildCurlCommand } from '@/lib/curl'
+import { parseLogQuery } from '@/lib/logQuery'
 import {
   formatDateTime,
   formatLatency,
@@ -50,7 +54,6 @@ const RANGE_PRESETS = [
   { value: 'custom', label: '…' },
 ]
 
-const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']
 const PAGE_SIZES = [25, 50, 100, 200]
 
 const ACTION_TONE: Record<string, 'danger' | 'warning' | 'info' | 'success' | 'neutral'> = {
@@ -64,43 +67,33 @@ const ACTION_TONE: Record<string, 'danger' | 'warning' | 'info' | 'success' | 'n
   pass: 'success',
 }
 
-interface Filters {
-  preset: string
-  from: string
-  to: string
-  siteId: string
-  clientIp: string
-  path: string
-  requestId: string
-  action: string
-  method: string
-  statusClass: string
-}
-
-function defaultFilters(): Filters {
+/** Time window used when the URL carries none: the trailing 24 hours. */
+function defaultWindow(): { from: string; to: string } {
   const to = new Date()
   const from = new Date(to.getTime() - 24 * 3600_000)
-  return {
-    preset: '24',
-    from: toLocalInputValue(from),
-    to: toLocalInputValue(to),
-    siteId: '',
-    clientIp: '',
-    path: '',
-    requestId: '',
-    action: '',
-    method: '',
-    statusClass: '',
-  }
+  return { from: toLocalInputValue(from), to: toLocalInputValue(to) }
 }
 
 export function LogsPage() {
   const { t } = useTranslation()
   const toast = useToast()
   const canWrite = useCanWrite()
+  const [searchParams, setSearchParams] = useSearchParams()
 
-  const [tab, setTab] = useState<Tab>('security')
-  const [filters, setFilters] = useState<Filters>(defaultFilters)
+  // The URL is the source of truth for the query (tab/q/site/from/to), so a
+  // drill-down link or a browser reload restores the exact result set. The
+  // text box keeps a local draft until Enter commits it.
+  const [window] = useState(defaultWindow)
+  const tab: Tab = searchParams.get('tab') === 'access' ? 'access' : 'security'
+  const searchText = searchParams.get('q') ?? ''
+  const siteId = searchParams.get('site_id') ?? ''
+  const fromValue = searchParams.get('from') ?? window.from
+  const toValue = searchParams.get('to') ?? window.to
+  const preset =
+    searchParams.get('preset') ??
+    (searchParams.has('from') || searchParams.has('to') ? 'custom' : '24')
+
+  const [draft, setDraft] = useState(searchText)
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(50)
   const [selectedEvent, setSelectedEvent] = useState<SecurityEvent | null>(null)
@@ -108,37 +101,36 @@ export function LogsPage() {
   const [purgeOpen, setPurgeOpen] = useState(false)
   const [purgeDays, setPurgeDays] = useState(30)
 
-  const debouncedIp = useDebouncedValue(filters.clientIp.trim(), 400)
-  const debouncedPath = useDebouncedValue(filters.path.trim(), 400)
-  const debouncedRequestId = useDebouncedValue(filters.requestId.trim(), 400)
+  // Adopt the URL text when it changes without the box (drill-down, history).
+  useEffect(() => {
+    setDraft(searchText)
+  }, [searchText])
 
   const { data: sites } = useSitesList()
 
-  // Any filter change must drop back to the first page, otherwise the request
+  // Any query change must drop back to the first page, otherwise the request
   // asks for page 5 of a completely different result set.
   useEffect(() => {
     setPage(1)
-  }, [tab, filters.preset, filters.siteId, filters.action, filters.method, filters.statusClass, debouncedIp, debouncedPath, debouncedRequestId, pageSize])
+  }, [tab, searchText, siteId, fromValue, toValue, pageSize])
+
+  const parsedQuery = useMemo(
+    () => parseLogQuery(searchText, tab),
+    [searchText, tab],
+  )
 
   const params = useMemo<LogQueryParams>(() => {
     const base: LogQueryParams = {
+      ...parsedQuery.params,
       page,
       page_size: pageSize,
-      from: fromLocalInputValue(filters.from),
-      to: fromLocalInputValue(filters.to),
+      from: fromLocalInputValue(fromValue),
+      to: fromLocalInputValue(toValue),
     }
-    if (filters.siteId) base.site_id = filters.siteId
-    if (debouncedIp) base.client_ip = debouncedIp
-    if (debouncedPath) base.path = debouncedPath
-    if (debouncedRequestId) base.request_id = debouncedRequestId
-    if (tab === 'security') {
-      if (filters.action) base.action = filters.action
-    } else {
-      if (filters.method) base.method = filters.method
-      if (filters.statusClass) base.status_class = Number(filters.statusClass)
-    }
+    if (siteId) base.site_id = siteId
     return base
-  }, [tab, page, pageSize, filters.from, filters.to, filters.siteId, filters.action, filters.method, filters.statusClass, debouncedIp, debouncedPath, debouncedRequestId])
+  }, [parsedQuery, page, pageSize, fromValue, toValue, siteId])
+
 
   const securityQuery = useQuery({
     queryKey: logKeys.security(params),
@@ -162,7 +154,7 @@ export function LogsPage() {
     mutationFn: () =>
       logsApi.purge({
         older_than_days: purgeDays,
-        ...(filters.siteId ? { site_id: filters.siteId } : {}),
+        ...(siteId ? { site_id: siteId } : {}),
       }),
     onSuccess: (result) => {
       toast.success(
@@ -178,23 +170,78 @@ export function LogsPage() {
     },
   })
 
-  const setFilter = <K extends keyof Filters>(key: K, value: Filters[K]) => {
-    setFilters((f) => {
-      if (key === 'preset' && value !== 'custom') {
-        const hours = Number(value)
-        if (Number.isFinite(hours)) {
-          const to = new Date()
-          return {
-            ...f,
-            preset: value,
-            to: toLocalInputValue(to),
-            from: toLocalInputValue(new Date(to.getTime() - hours * 3600_000)),
-          }
-        }
-      }
-      return { ...f, [key]: value }
+  /** Rewrites the query string; empty values drop their key. */
+  const updateQuery = (patch: Record<string, string | null>) => {
+    const next = new URLSearchParams(searchParams)
+    for (const [key, value] of Object.entries(patch)) {
+      if (value === null || value === '') next.delete(key)
+      else next.set(key, value)
+    }
+    setSearchParams(next, { replace: true })
+  }
+
+  const setPreset = (value: string) => {
+    if (value === 'custom') {
+      updateQuery({ preset: 'custom' })
+      return
+    }
+    const hours = Number(value)
+    if (!Number.isFinite(hours)) return
+    const to = new Date()
+    updateQuery({
+      preset: value,
+      to: toLocalInputValue(to),
+      from: toLocalInputValue(new Date(to.getTime() - hours * 3600_000)),
     })
   }
+
+  /** Enter in the search box: commit the draft and fold in any date filters. */
+  const commitSearch = () => {
+    const parsed = parseLogQuery(draft, tab)
+    const patch: Record<string, string | null> = { q: draft.trim() }
+    if (parsed.params.from) {
+      patch.from = toLocalInputValue(new Date(parsed.params.from))
+    }
+    if (parsed.params.to) {
+      patch.to = toLocalInputValue(new Date(parsed.params.to))
+    }
+    if (parsed.params.from || parsed.params.to) patch.preset = 'custom'
+    if (parsed.params.site_id) patch.site_id = parsed.params.site_id
+    updateQuery(patch)
+  }
+
+  const resetQuery = () => {
+    updateQuery({ q: null, site_id: null, from: null, to: null, preset: null })
+  }
+
+  const copyCurl = async (log: AccessLog) => {
+    try {
+      await navigator.clipboard.writeText(buildCurlCommand(log))
+      toast.success(t('pages.logs.copied'))
+    } catch {
+      toast.error(t('pages.logs.copyFailed'))
+    }
+  }
+
+  // The security dialog replays the raw request captured by the matching
+  // access row, so one capture (headers, cookies, body) serves both views.
+  const rawRequestQuery = useQuery({
+    queryKey: logKeys.access({
+      request_id: selectedEvent?.request_id ?? undefined,
+      from: params.from,
+      to: params.to,
+      page_size: 1,
+    }),
+    queryFn: () =>
+      logsApi.accessLogs({
+        request_id: selectedEvent?.request_id ?? undefined,
+        from: params.from,
+        to: params.to,
+        page_size: 1,
+      }),
+    enabled: Boolean(selectedEvent?.request_id),
+  })
+  const rawRequest = rawRequestQuery.data?.items[0] ?? null
 
   const exportJson = () => {
     if (rows.length === 0) {
@@ -468,7 +515,11 @@ export function LogsPage() {
             <button
               key={entry.value}
               type="button"
-              onClick={() => setTab(entry.value)}
+              onClick={() =>
+                updateQuery({
+                  tab: entry.value === 'security' ? null : entry.value,
+                })
+              }
               className={cn(
                 '-mb-px inline-flex items-center gap-2 border-b-2 px-3 py-2.5 text-sm font-medium transition-colors',
                 tab === entry.value
@@ -487,9 +538,43 @@ export function LogsPage() {
       <Card className="mb-4">
         <CardBody>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="sm:col-span-2 lg:col-span-4">
+              <label
+                htmlFor="log-search"
+                className="mb-1.5 block text-[13px] font-medium text-fg-subtle"
+              >
+                {t('pages.logs.search')}
+              </label>
+              <div className="flex items-center gap-2">
+                <Input
+                  id="log-search"
+                  containerClassName="flex-1"
+                  value={draft}
+                  placeholder={t('pages.logs.searchPlaceholder')}
+                  prefixIcon={<MagnifyingGlass weight="duotone" />}
+                  onChange={(e) => setDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') commitSearch()
+                  }}
+                />
+                <Button variant="secondary" onClick={commitSearch}>
+                  {t('common.search')}
+                </Button>
+              </div>
+              {parsedQuery.unknown.length > 0 && (
+                <p className="mt-1.5 text-xs text-fg-warning">
+                  {t('pages.logs.searchUnknown', {
+                    tokens: parsedQuery.unknown.join(' '),
+                  })}
+                </p>
+              )}
+              <p className="mt-1.5 text-xs text-fg-subtle">
+                {t('pages.logs.searchHint')}
+              </p>
+            </div>
             <Select
               label={t('pages.logs.timeRange')}
-              value={filters.preset}
+              value={preset}
               options={RANGE_PRESETS.map((p) => ({
                 value: p.value,
                 label:
@@ -497,87 +582,32 @@ export function LogsPage() {
                     ? t('pages.logs.customRange')
                     : t('pages.logs.lastN', { range: p.label }),
               }))}
-              onChange={(e) => setFilter('preset', e.target.value)}
+              onChange={(e) => setPreset(e.target.value)}
             />
             <Input
               type="datetime-local"
               label={t('pages.logs.from')}
-              value={filters.from}
-              max={filters.to}
-              onChange={(e) => setFilter('from', e.target.value)}
+              value={fromValue}
+              max={toValue}
+              onChange={(e) =>
+                updateQuery({ from: e.target.value, preset: 'custom' })
+              }
             />
             <Input
               type="datetime-local"
               label={t('pages.logs.to')}
-              value={filters.to}
-              min={filters.from}
-              onChange={(e) => setFilter('to', e.target.value)}
+              value={toValue}
+              min={fromValue}
+              onChange={(e) =>
+                updateQuery({ to: e.target.value, preset: 'custom' })
+              }
             />
             <Select
               label={t('pages.logs.site')}
-              value={filters.siteId}
+              value={siteId}
               options={siteOptions}
-              onChange={(e) => setFilter('siteId', e.target.value)}
+              onChange={(e) => updateQuery({ site_id: e.target.value })}
             />
-            <Input
-              label={t('pages.logs.clientIp')}
-              value={filters.clientIp}
-              placeholder="203.0.113.44"
-              prefixIcon={<MagnifyingGlass weight="duotone" />}
-              onChange={(e) => setFilter('clientIp', e.target.value)}
-            />
-            <Input
-              label={t('pages.logs.path')}
-              value={filters.path}
-              placeholder="/api/v1/users"
-              onChange={(e) => setFilter('path', e.target.value)}
-            />
-            <Input
-              label={t('pages.logs.requestIdFilter')}
-              value={filters.requestId}
-              placeholder="01J9F3…"
-              hint={t('pages.logs.requestIdFilterHint')}
-              prefixIcon={<MagnifyingGlass weight="duotone" />}
-              onChange={(e) => setFilter('requestId', e.target.value)}
-            />
-            {tab === 'security' ? (
-              <Select
-                label={t('pages.logs.action')}
-                value={filters.action}
-                options={[
-                  { value: '', label: t('pages.logs.anyAction') },
-                  ...['block', 'challenge', 'js_challenge', 'log', 'allow'].map((a) => ({
-                    value: a,
-                    label: t(`actions.${a}`, a),
-                  })),
-                ]}
-                onChange={(e) => setFilter('action', e.target.value)}
-              />
-            ) : (
-              <>
-                <Select
-                  label={t('pages.logs.method')}
-                  value={filters.method}
-                  options={[
-                    { value: '', label: t('pages.logs.anyMethod') },
-                    ...METHODS.map((m) => ({ value: m, label: m })),
-                  ]}
-                  onChange={(e) => setFilter('method', e.target.value)}
-                />
-                <Select
-                  label={t('pages.logs.statusClass')}
-                  value={filters.statusClass}
-                  options={[
-                    { value: '', label: t('pages.logs.anyStatus') },
-                    { value: '2', label: '2xx' },
-                    { value: '3', label: '3xx' },
-                    { value: '4', label: '4xx' },
-                    { value: '5', label: '5xx' },
-                  ]}
-                  onChange={(e) => setFilter('statusClass', e.target.value)}
-                />
-              </>
-            )}
           </div>
 
           <div className="mt-3 flex items-center justify-between gap-3 border-t border-line pt-3">
@@ -585,7 +615,7 @@ export function LogsPage() {
               <Funnel weight="duotone" className="h-3.5 w-3.5" />
               {t('pages.logs.resultCount', { total: formatNumber(total) })}
             </span>
-            <Button size="sm" variant="ghost" onClick={() => setFilters(defaultFilters())}>
+            <Button size="sm" variant="ghost" onClick={resetQuery}>
               {t('common.reset')}
             </Button>
           </div>
@@ -617,7 +647,7 @@ export function LogsPage() {
                 title={t('pages.logs.empty')}
                 description={t('pages.logs.emptyDescription')}
                 action={
-                  <Button variant="secondary" onClick={() => setFilters(defaultFilters())}>
+                  <Button variant="secondary" onClick={resetQuery}>
                     {t('common.reset')}
                   </Button>
                 }
@@ -719,6 +749,23 @@ export function LogsPage() {
                 </p>
               </div>
             )}
+            <div>
+              <p className="mb-1.5 text-[13px] font-medium text-fg">
+                {t('pages.logs.rawRequest')}
+              </p>
+              {rawRequestQuery.isPending ? (
+                <p className="text-xs text-fg-subtle">{t('common.loading')}</p>
+              ) : rawRequest ? (
+                <RawRequestPanel
+                  log={rawRequest}
+                  onCopy={() => copyCurl(rawRequest)}
+                />
+              ) : (
+                <p className="text-xs text-fg-subtle">
+                  {t('pages.logs.rawRequestMissing')}
+                </p>
+              )}
+            </div>
           </div>
         )}
       </Dialog>
@@ -731,9 +778,18 @@ export function LogsPage() {
         title={t('pages.logs.accessDetail')}
         description={selectedLog ? `${selectedLog.method} ${selectedLog.path ?? ''}`.trim() : undefined}
         footer={
-          <Button variant="ghost" onClick={() => setSelectedLog(null)}>
-            {t('common.close')}
-          </Button>
+          <div className="flex items-center justify-end gap-2">
+            <Button variant="ghost" onClick={() => setSelectedLog(null)}>
+              {t('common.close')}
+            </Button>
+            <Button
+              variant="secondary"
+              icon={<Terminal weight="duotone" className="h-4 w-4" />}
+              onClick={() => selectedLog && copyCurl(selectedLog)}
+            >
+              {t('pages.logs.copyCurl')}
+            </Button>
+          </div>
         }
       >
         {selectedLog && (
@@ -795,20 +851,7 @@ export function LogsPage() {
                   <p className="mb-1.5 text-[13px] font-medium text-fg">
                     {t('pages.logs.requestHeaders')}
                   </p>
-                  <div className="max-h-56 overflow-auto rounded-md border border-line bg-recessed px-3 py-2">
-                    <dl className="flex flex-col gap-1">
-                      {Object.entries(selectedLog.request_headers).map(([name, value]) => (
-                        <div key={name} className="flex min-w-0 items-baseline gap-2">
-                          <dt className="pw-mono shrink-0 text-xs font-medium text-fg">
-                            {name}:
-                          </dt>
-                          <dd className="pw-mono min-w-0 break-all text-xs text-fg-subtle">
-                            {value}
-                          </dd>
-                        </div>
-                      ))}
-                    </dl>
-                  </div>
+                  <HeaderList headers={selectedLog.request_headers} />
                 </div>
               )}
             <div>
@@ -824,6 +867,37 @@ export function LogsPage() {
                 </pre>
               ) : (
                 <p className="text-xs text-fg-subtle">{t('pages.logs.noRequestBody')}</p>
+              )}
+            </div>
+            {selectedLog.response_headers &&
+              Object.keys(selectedLog.response_headers).length > 0 && (
+                <div>
+                  <p className="mb-1.5 text-[13px] font-medium text-fg">
+                    {t('pages.logs.responseHeaders')}
+                  </p>
+                  <HeaderList headers={selectedLog.response_headers} />
+                </div>
+              )}
+            <div>
+              <p className="mb-1.5 flex flex-wrap items-center gap-2 text-[13px] font-medium text-fg">
+                {t('pages.logs.responseBody')}
+                {selectedLog.response_body_size != null && (
+                  <span className="text-xs font-normal text-fg-subtle">
+                    {formatSize(selectedLog.response_body_size)}
+                  </span>
+                )}
+                {selectedLog.response_body_truncated && (
+                  <Badge tone="warning">{t('pages.logs.bodyTruncated')}</Badge>
+                )}
+              </p>
+              {selectedLog.response_body ? (
+                <pre className="pw-mono max-h-56 overflow-auto whitespace-pre-wrap break-all rounded-md border border-line bg-recessed px-3 py-2 text-xs text-fg-subtle">
+                  {selectedLog.response_body}
+                </pre>
+              ) : (
+                <p className="text-xs text-fg-subtle">
+                  {t('pages.logs.noResponseBody')}
+                </p>
               )}
             </div>
           </div>
@@ -848,8 +922,8 @@ export function LogsPage() {
             min={1}
             max={3650}
             hint={t('pages.logs.purgeScope', {
-              scope: filters.siteId
-                ? (sites ?? []).find((s) => s.id === filters.siteId)?.domain ?? filters.siteId
+              scope: siteId
+                ? (sites ?? []).find((s) => s.id === siteId)?.domain ?? siteId
                 : t('pages.logs.allSites'),
             })}
             onChange={(e) => setPurgeDays(Number(e.target.value))}
@@ -873,6 +947,59 @@ function DefinitionGrid({ rows }: { rows: [string, string | null | undefined][] 
         </div>
       ))}
     </dl>
+  )
+}
+
+/** Verbatim header list; cookies and authorization stay readable for replay. */
+function HeaderList({ headers }: { headers: Record<string, string> }) {
+  return (
+    <div className="max-h-56 overflow-auto rounded-md border border-line bg-recessed px-3 py-2">
+      <dl className="flex flex-col gap-1">
+        {Object.entries(headers).map(([name, value]) => (
+          <div key={name} className="flex min-w-0 items-baseline gap-2">
+            <dt className="pw-mono shrink-0 text-xs font-medium text-fg">
+              {name}:
+            </dt>
+            <dd className="pw-mono min-w-0 break-all text-xs text-fg-subtle">
+              {value}
+            </dd>
+          </div>
+        ))}
+      </dl>
+    </div>
+  )
+}
+
+/** Raw request captured for a security event, plus a curl replay button. */
+function RawRequestPanel({ log, onCopy }: { log: AccessLog; onCopy: () => void }) {
+  const { t } = useTranslation()
+  return (
+    <div className="flex flex-col gap-3 rounded-md border border-line px-3 py-3">
+      <div className="flex items-center justify-between gap-2">
+        <span className="pw-mono text-xs text-fg-subtle">
+          {log.method} {log.path ?? '/'}
+          {log.scheme ? ` · ${log.scheme}` : ''}
+        </span>
+        <Button
+          size="sm"
+          variant="ghost"
+          icon={<Terminal weight="duotone" className="h-4 w-4" />}
+          onClick={onCopy}
+        >
+          {t('pages.logs.copyCurl')}
+        </Button>
+      </div>
+      {log.request_headers && Object.keys(log.request_headers).length > 0 && (
+        <HeaderList headers={log.request_headers} />
+      )}
+      {log.request_body ? (
+        <pre className="pw-mono max-h-40 overflow-auto whitespace-pre-wrap break-all text-xs text-fg-subtle">
+          {log.request_body}
+        </pre>
+      ) : (
+        <p className="text-xs text-fg-subtle">{t('pages.logs.noRequestBody')}</p>
+      )}
+    </div>
   )
 }
 

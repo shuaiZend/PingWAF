@@ -1164,6 +1164,7 @@ purge_ip_list = ["192.168.1.1"]
             site_id: "site-1".to_string(),
             domain: "example.com".to_string(),
             alternate_domains: vec![],
+            status: "active".to_string(),
             waf_config: None,
             rate_limit_rules: vec![],
             ip_access_rules: vec![],
