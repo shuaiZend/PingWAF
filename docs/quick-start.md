@@ -499,9 +499,12 @@ Environment=PINGWAF_ALLOW_REGISTRATION=false
 Environment=RUST_LOG=info,sqlx=warn
 ```
 
-`install.sh` writes a starting point to `/etc/pingwaf/pingwaf.toml`; its
-`[server]` and `[agent]` tables take the flag names with underscores
-(`admin_addr`, `max_body_log_size`, …) as described in the
+The file is optional: without it, the `Environment=` lines below are the whole
+configuration. If you point `PINGWAF_CONFIG` at a path, start from the example —
+`sudo cp pingwaf.toml /etc/pingwaf/pingwaf.toml` (an `install.sh` run writes one
+for you) — and remember that an unreadable path stops startup rather than being
+ignored. Its `[server]` and `[agent]` tables take the flag names with
+underscores (`admin_addr`, `max_body_log_size`, …) as described in the
 [configuration cheat sheet](#configuration-cheat-sheet).
 
 ```bash
