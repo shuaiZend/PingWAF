@@ -75,6 +75,8 @@ Load-balancing algorithms:
 | Algorithm | Spec | Behavior |
 |-----------|------|----------|
 | Round robin | `round_robin` | Spreads requests by node weight |
+| Least connections | `least_connections` | Picks the node with the fewest in-flight requests |
+| Random | `random` | Picks a node at random (weight-aware) |
 | IP hash | `hash:ip` | Pins the same client IP to one node |
 | URL hash | `hash:url` | Pins by request URL |
 | Path hash | `hash:path` | Pins by request path |
@@ -171,13 +173,13 @@ Sites → [site] → Rate Limiting → Add Rule
 | Threshold | Max requests allowed in the period |
 | Period (seconds) | Time window for counting (1–86400) |
 | Action | `block`, `log`, `challenge`, `js_challenge`, or `allow` |
-| Characteristics | How to group traffic: `ip`, `ip_nat`, `host`, `path`, `header`, `cookie`, `query`, `asn`, `country`, `ja3` |
+| Characteristics | How to group traffic: `ip`, `ip_nat`, `host`, `path`, `asn`, `country`, plus parameterized forms `header:<name>`, `cookie:<name>`, `query:<name>` |
 | Filter expression | Optional match condition (empty = all requests) |
 | Mitigation timeout | How long the action applies once triggered (0–86400 seconds) |
 
 Example: Limit to 100 requests per 60 seconds per IP on `/api/*`.
 
-The edge currently enforces `ip`, `ip_nat`, `host`, `path`, `asn` and `country`; rules that only use `header`, `cookie`, `query` or `ja3` are stored but not enforced yet.
+Requests missing the header, cookie or query parameter bucket together, so they still count against the limit. Header names match case-insensitively; cookie and query names are case-sensitive. The `ja3` characteristic is reserved for future use and is not yet accepted by the API.
 
 ## CC Protection & Challenges
 

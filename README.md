@@ -101,10 +101,10 @@ The control plane and the data plane talk over the `ControlPlane` gRPC service (
 - **IP access rules** — `block` / `allow` / `challenge` / `js_challenge`, with CIDR ranges, CSV bulk import and named rules.
 - **Global IP groups** — subscription-backed CIDR lists (plain text, JSON or the Cloudflare IP ranges API) synced to every site on a schedule, with sync-error reporting.
 - **Geo restriction** — allow or block by country and by autonomous system number (ASN), with an optional "block unknown countries" policy.
-- **Multi-dimensional rate limiting** — by IP, host, path, ASN, country and more (header/cookie/query/JA3 keys are on the roadmap).
+- **Multi-dimensional rate limiting** — by IP, host, path, ASN, country, or a request header, cookie or query parameter.
 
 ### 🌊 Traffic Management
-- **Origin pools & routes** — group upstreams into pools with load balancing (round-robin or consistent hashing by IP/URL/path/header/cookie/query) and route requests by prefix, exact match or regex.
+- **Origin pools & routes** — group upstreams into pools with load balancing (round-robin, least connections, random or consistent hashing by IP/URL/path/header/cookie/query) and route requests by prefix, exact match or regex.
 - **Edge caching** with per-site disk quotas and LRU eviction, stale-while-revalidate and browser TTL control.
 - **Request / response rewriting** — headers, paths, query strings, status codes and body search/replace.
 - **Custom error pages** rendered with Tera templates.

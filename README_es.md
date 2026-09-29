@@ -38,8 +38,8 @@ Un único **plano de control** define sitios, reglas y políticas; uno o varios 
 - **Protección contra bots** — lista blanca de bots verificados, paso para navegadores conocidos y una acción configurable para el resto.
 - **Reglas de acceso IP** — `block` / `allow` / `challenge` / `js_challenge`, con rangos CIDR, importación CSV y **grupos IP globales** sincronizados por suscripción (p. ej. los rangos de Cloudflare).
 - **Restricción geográfica** — permitir o bloquear por país y por número de sistema autónomo (ASN).
-- **Limitación de tasa multidimensional** — por IP, host, ruta, ASN, país y más.
-- **Pools de origen y rutas** — balanceo de carga round-robin o por hash consistente, con rutas por prefijo, coincidencia exacta o regex.
+- **Limitación de tasa multidimensional** — por IP, host, ruta, ASN, país, o según una cabecera, cookie o parámetro de consulta.
+- **Pools de origen y rutas** — balanceo de carga round-robin, mínimas conexiones, aleatorio o por hash consistente, con rutas por prefijo, coincidencia exacta o regex.
 - **Caché en el borde** — cuotas de disco por sitio, `stale-while-revalidate` y control del TTL del navegador.
 - **Reescritura de peticiones/respuestas** y **páginas de error personalizadas** con plantillas Tera.
 - **TLS automático** — emisión y renovación ACME / Let's Encrypt en el borde (HTTP-01 y DNS-01 con Cloudflare, Route 53, DigitalOcean, Aliyun, DNSPod, CloudXNS o manual), con estado de certificado por sitio informado al plano de control.
