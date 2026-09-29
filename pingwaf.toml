@@ -4,14 +4,17 @@
 # Usage:
 #   pingwaf all-in-one --config pingwaf.toml
 #
-# All values can also be set via environment variables (PINGWAF_*)
-# or CLI flags. CLI flags take highest precedence.
+# Keys are the command-line flags with dashes replaced by underscores
+# (`--admin-addr` is `admin_addr`), in the table of the mode they belong to.
+# All of them can also be set through PINGWAF_* environment variables or CLI
+# flags; precedence is this file, then the environment, then the command line.
+# Unknown keys are reported at startup and ignored.
 
 [server]
 # PostgreSQL connection string
 db_url = "postgres://pingwaf:pingwaf@localhost:5432/pingwaf"
 # REST API + dashboard listen address (served over HTTPS when tls_enabled)
-http_addr = "0.0.0.0:9080"
+admin_addr = "0.0.0.0:9080"
 # Serve the REST API and dashboard over TLS (required by passkeys).
 # A self-signed certificate is generated on first boot; replace it from
 # Settings → Control plane HTTPS once a real certificate is available.
@@ -26,20 +29,18 @@ jwt_secret = "change-me-in-production"
 # Default admin account seeded on first boot
 admin_email = "admin@pingwaf.local"
 admin_password = "pingwaf123"
-# Token lifetimes
-jwt_expiration_hours = 12
-refresh_token_expiration_hours = 720
-# Database pool
-db_max_connections = 20
-db_min_connections = 1
-# Whether new user registration is allowed
-allow_registration = true
-# CORS origins (empty = allow all, for development)
-cors_origins = []
+# Serve the embedded dashboard (SPA) from this process
+serve_frontend = true
+# Settings with no command-line flag stay in the environment, e.g.
+#   PINGWAF_ALLOW_REGISTRATION=true       PINGWAF_JWT_EXPIRATION_HOURS=12
+#   PINGWAF_CORS_ORIGINS=https://ui...    PINGWAF_DB_MAX_CONNECTIONS=20
+#   PINGWAF_METRIC_RETENTION_DAYS=30      PINGWAF_WEBHOOK_URL=https://...
+#   PINGWAF_PASSKEY_ENABLED=true          PINGWAF_ES_ENABLED=true
 
 [agent]
-# Control plane gRPC URL (loopback in all-in-one mode)
-server_url = "http://127.0.0.1:9090"
+# Control plane gRPC URL — set by the `agent` mode; the all-in-one mode talks
+# to its own loopback gRPC address (`grpc_addr` above) instead.
+# server_url = "http://127.0.0.1:9090"
 # API key for agent authentication (generated on first registration)
 api_key = ""
 # Local rule cache directory (persisted across restarts)
@@ -52,13 +53,13 @@ log_flush_interval_secs = 5
 max_body_log_size = 8192
 # Whether to allow traffic when disconnected from control plane
 fail_open = true
-# Reconnection backoff
-reconnect_initial_delay_ms = 1000
-reconnect_max_delay_ms = 60000
+# Metrics shipping interval in seconds (0 disables metric shipping)
+metrics_ship_interval_secs = 30
 
-# ─── Proxy configuration (inherited from pingap) ─────────────────────────
-# Uncomment and configure to also run the pingap reverse proxy alongside
-# the WAF control/data plane.
+# ─── Proxy configuration (pingap mode) ───────────────────────────────────
+# The sections below are read by the same binary when it runs as pingap —
+# `pingwaf -c pingwaf.toml`, with no PingWAF subcommand — not by the
+# `server`/`agent`/`all-in-one` modes above.
 #
 # [basic]
 # log_level = "INFO"

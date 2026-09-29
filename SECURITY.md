@@ -64,7 +64,8 @@ from which it inherits the proxy data plane.
 | Version | Status | Receives security fixes |
 | --- | --- | --- |
 | `main` | Active development | Yes — but expect breaking changes |
-| `0.16.x` (current release line, 0.16.0) | Supported | **Yes** |
+| `0.17.x` (current release line, 0.17.0) | Supported | **Yes** |
+| `0.16.x` | Security fixes only | No |
 | `0.15.x` | Security fixes only | No |
 | `0.14.x` | Security fixes only | No |
 | `0.13.x` and older (pingap lineage) | Legacy | Best effort, case by case |
@@ -201,8 +202,8 @@ control.**
       [`docs/deployment.md` → Backup & Recovery](./docs/deployment.md#backup--recovery).
 - [ ] Monitor **Logs → Security**, **Agents** (offline/degraded state) and the
       health endpoint `GET /healthz`.
-- [ ] Set `RUST_LOG=info` in production; use `debug` only while investigating,
-      since debug output is far more verbose.
+- [ ] Set `RUST_LOG=info,sqlx=warn` in production; use `debug` only while
+      investigating, since debug output is far more verbose.
 - [ ] Keep the host patched and verify system clocks are NTP-synchronised —
       skewed clocks weaken token validation.
 

@@ -170,7 +170,7 @@ JWT_SECRET=$(openssl rand -hex 32)
 ADMIN_EMAIL=admin@pingwaf.local
 ADMIN_PASSWORD=$(openssl rand -hex 16)
 ALLOW_REGISTRATION=false
-RUST_LOG=info
+RUST_LOG=info,sqlx=warn
 EOF
 ```
 
@@ -187,7 +187,7 @@ Compose variables you can set:
 | `ADMIN_PASSWORD` | `pingwaf123` | Seeded administrator password |
 | `ALLOW_REGISTRATION` | `false` | Allow new user signups |
 | `HEARTBEAT_INTERVAL` | `15` | Agent heartbeat interval (seconds) |
-| `RUST_LOG` | `info` | Tracing log level filter |
+| `RUST_LOG` | `info,sqlx=warn` | Tracing log level filter |
 | `POSTGRES_PORT` | `5432` | Host port mapped to PostgreSQL |
 
 ### Step 3 — Start the stack
@@ -428,14 +428,14 @@ export PINGWAF_MODE=all-in-one
 export PINGWAF_DB_URL="postgres://pingwaf:pingwaf@localhost:5432/pingwaf"
 export PINGWAF_JWT_SECRET="$(openssl rand -hex 32)"
 export PINGWAF_ADMIN_PASSWORD="$(openssl rand -hex 16)"
-export RUST_LOG=info
+export RUST_LOG=info,sqlx=warn
 ./target/release/pingwaf
 ```
 
 Run it in the background and tail the log:
 
 ```bash
-RUST_LOG=info ./target/release/pingwaf all-in-one \
+RUST_LOG=info,sqlx=warn ./target/release/pingwaf all-in-one \
   --db-url "postgres://pingwaf:pingwaf@localhost:5432/pingwaf" \
   > pingwaf.log 2>&1 &
 tail -f pingwaf.log
@@ -483,22 +483,26 @@ sudo chown -R pingwaf:pingwaf /var/lib/pingwaf /etc/pingwaf
 sudo cp pingwaf.service /etc/systemd/system/pingwaf.service
 sudo systemctl daemon-reload
 
-# 4. Provide the configuration through the unit's environment
+# 4. Provide the configuration (a file, environment, or both)
 sudo systemctl edit pingwaf   # drop-in override
 ```
 
-In the drop-in, set the environment the process needs:
+In the drop-in, point the process at a configuration file and/or set the
+environment it needs — the environment wins over the file, and a flag on the
+command line wins over both:
 
 ```ini
 [Service]
-Environment=PINGWAF_MODE=all-in-one
-Environment=PINGWAF_DB_URL=postgres://pingwaf:STRONG_PASSWORD@localhost:5432/pingwaf
+Environment=PINGWAF_CONFIG=/etc/pingwaf/pingwaf.toml
 Environment=PINGWAF_JWT_SECRET=RANDOM_32_BYTE_HEX
-Environment=PINGWAF_ADMIN_EMAIL=admin@yourdomain.com
-Environment=PINGWAF_ADMIN_PASSWORD=STRONG_PASSWORD
 Environment=PINGWAF_ALLOW_REGISTRATION=false
-Environment=RUST_LOG=info
+Environment=RUST_LOG=info,sqlx=warn
 ```
+
+`install.sh` writes a starting point to `/etc/pingwaf/pingwaf.toml`; its
+`[server]` and `[agent]` tables take the flag names with underscores
+(`admin_addr`, `max_body_log_size`, …) as described in the
+[configuration cheat sheet](#configuration-cheat-sheet).
 
 ```bash
 # 5. Start and enable
@@ -642,17 +646,28 @@ agents to the control plane.
 
 ## Configuration cheat sheet
 
-Configuration comes from CLI flags and environment variables. **CLI flags win
-over environment variables.**
+Configuration comes from three channels, and a later one overrides an earlier
+one:
 
-> 📌 `pingwaf.toml` is currently **not** loaded by the `pingwaf` binary —
-> configure through flags or `PINGWAF_*` environment variables. (See
-> [Troubleshooting](#i-set-pingwaftoml-but-nothing-changed).)
+1. **A TOML file** — `--config /etc/pingwaf/pingwaf.toml` or `PINGWAF_CONFIG`.
+   Its `[server]` and `[agent]` tables take the keys below with dashes written
+   as underscores (`--max-body-log-size` → `max_body_log_size`), and lists are
+   TOML arrays. The `all-in-one` mode reads both tables, `server` and `agent`
+   only their own. Unknown keys are reported and ignored at startup.
+2. **Environment variables** — the `Environment` column.
+3. **CLI flags** — always win.
+
+> 📌 The [`pingwaf.toml`](../pingwaf.toml) in the repository root is a
+> reference example: pass it with `--config pingwaf.toml` to use it. Its
+> `[[upstreams]]` / `[[locations]]` pingap sections belong to the plain
+> `pingwaf -c pingwaf.toml` proxy mode (no subcommand) and are ignored by the
+> PingWAF modes.
 
 ### Common / mode selection
 
 | Flag | Environment | Default | Description |
 | --- | --- | --- | --- |
+| `--config` | `PINGWAF_CONFIG` | — | TOML configuration file; lowest-precedence channel |
 | — | `PINGWAF_MODE` | — | `all-in-one`, `server` or `agent`; lets you run bare `pingwaf` |
 | `--db-url` | `PINGWAF_DB_URL` | `postgres://pingwaf:pingwaf@localhost:5432/pingwaf` | PostgreSQL DSN |
 | `--admin-addr` | `PINGWAF_ADMIN_ADDR` | `0.0.0.0:9080` | REST API + dashboard listen address |
@@ -660,7 +675,7 @@ over environment variables.**
 | `--tls-enabled` | `PINGWAF_TLS_ENABLED` | `true` | Serve the REST API + dashboard over HTTPS (self-signed until a certificate is uploaded); `false` behind a TLS-terminating proxy |
 | `--tls-sans` | `PINGWAF_TLS_SANS` | hostname, `localhost`, `127.0.0.1` | Comma-separated subject alternative names for the generated certificate |
 | — | `PINGWAF_HTTP_ADDR` | — | Alias for the REST API / dashboard address read by the server config layer |
-| — | `RUST_LOG` | `info` | Tracing log filter, e.g. `debug`, `pingwaf_server=debug` |
+| — | `RUST_LOG` | `info,sqlx=warn` | Tracing log filter, e.g. `debug`, `pingwaf_server=debug` |
 
 ### Server (`server` / `all-in-one`)
 
@@ -669,11 +684,19 @@ over environment variables.**
 | `--jwt-secret` | `PINGWAF_JWT_SECRET` | `change-me-in-production` | JWT signing secret, **≥ 16 characters** |
 | `--admin-email` | `PINGWAF_ADMIN_EMAIL` | `admin@pingwaf.local` | Seeded administrator email |
 | `--admin-password` | `PINGWAF_ADMIN_PASSWORD` | `pingwaf123` | Seeded administrator password |
-| `--serve-frontend` | — | `true` | Serve the embedded dashboard SPA |
+| `--serve-frontend` | `PINGWAF_SERVE_FRONTEND` | `true` | Serve the embedded dashboard SPA |
+| — | `PINGWAF_JWT_EXPIRATION_HOURS` | `12` | Access-token lifetime |
 | — | `PINGWAF_ALLOW_REGISTRATION` | `true` (code); compose/install.sh set `false` | Allow new user signups |
-| — | `PINGWAF_HEARTBEAT_INTERVAL` | `15` | Agent heartbeat interval (seconds) |
+| — | `PINGWAF_HEARTBEAT_INTERVAL` | `15` | Heartbeat interval handed to agents |
 | — | `PINGWAF_DB_MAX_CONNECTIONS` | `20` | Connection pool maximum |
+| — | `PINGWAF_METRIC_RETENTION_DAYS` | `7` | Days of edge-metric samples kept |
 | — | `PINGWAF_CORS_ORIGINS` | `[]` (all) | Allowed CORS origins, comma-separated |
+| — | `PINGWAF_PASSKEY_ENABLED` / `_RP_NAME` / `_RP_ID` / `_ORIGIN` / `_TRUST_FORWARDED_PROTO` | see [deployment guide](./deployment.md#server-configuration-server) | Passkey (WebAuthn) settings |
+
+A dash means the setting has no counterpart in that column: the server rows
+with a dash are **environment-only** (no flag, so no file key either), while
+the agent log settings with a dash in the `Environment` column are
+**flag-only** — they can still be written in the `[agent]` table of the file.
 
 ### Agent (`agent` / `all-in-one`)
 
@@ -682,16 +705,21 @@ over environment variables.**
 | `--server-url` | `PINGWAF_SERVER_URL` | `http://localhost:9090` | Control plane gRPC URL |
 | `--api-key` | `PINGWAF_API_KEY` | `""` | Agent authentication key (empty = auto-register over loopback in all-in-one) |
 | `--cache-dir` | `PINGWAF_CACHE_DIR` | `./data/cache` | Local rule cache directory |
-| `--fail-open` | — | `true` | Keep proxying when the control plane is unreachable |
-| `--heartbeat-interval-secs` | — | `30` | Heartbeat frequency |
+| `--fail-open` | `PINGWAF_FAIL_OPEN` | `true` | Keep proxying when the control plane is unreachable |
+| `--heartbeat-interval-secs` | `PINGWAF_HEARTBEAT_INTERVAL` | `30` | Heartbeat frequency |
+| `--metrics-ship-interval-secs` | `PINGWAF_METRICS_SHIP_INTERVAL` | `30` | Edge-metrics ship interval; `0` disables shipping |
 | `--log-batch-size` | — | `100` | Log entries per flush |
 | `--log-flush-interval-secs` | — | `5` | Maximum time between log flushes |
 | `--max-body-log-size` | — | `8192` | Maximum request body bytes to log |
 
+Flags that default to true (`--fail-open`, `--serve-frontend`,
+`--tls-enabled`) take an optional value, so they are turned off with
+`--fail-open=false` or `PINGWAF_FAIL_OPEN=false` — not by omitting them.
+
 ### Elasticsearch log shipping (optional)
 
-Set these on the control plane to ship logs to Elasticsearch in addition to
-PostgreSQL:
+Environment-only — set these on the control plane to ship logs to
+Elasticsearch in addition to PostgreSQL:
 
 | Environment | Description |
 | --- | --- |
@@ -823,11 +851,19 @@ Binding ports below 1024 as an unprivileged user additionally requires
 
 ### I set `pingwaf.toml` but nothing changed
 
-The `pingwaf` binary is configured through CLI flags and `PINGWAF_*`
-environment variables; the TOML file in the repository root is the upstream
-pingap proxy configuration and is not loaded by PingWAF's control plane today.
-Move the settings into flags or environment variables (see
-[`pingwaf.service`](../pingwaf.service) for a systemd example).
+Check, in order:
+
+1. **Was the file loaded?** The process prints
+   `pingwaf: loaded N setting(s) from <path>` at startup. No such line means the
+   path never reached it — pass `--config /path/pingwaf.toml` or set
+   `PINGWAF_CONFIG`.
+2. **Are the keys in `[server]` / `[agent]`?** Only those two tables are read
+   by the PingWAF modes; the `[[upstreams]]` / `[[locations]]` pingap sections
+   belong to the plain `pingwaf -c` proxy mode. Unknown keys come with a
+   `warning: unknown key …` line.
+3. **Is the environment overriding it?** The environment wins over the file and
+   a flag wins over both. Startup also logs the effective addresses and any
+   conflicting value at `info` level.
 
 ### The install script does not work
 
@@ -836,7 +872,7 @@ from [GitHub Releases](https://github.com/shuaiZend/PingWAF/releases), so it
 works on Linux (amd64/arm64) only — on macOS,
 [build from source](#path-2-build-from-source) instead. If the script cannot
 determine the latest version, pass one explicitly:
-`./install.sh --version 0.16.0`.
+`./install.sh --version 0.17.0`.
 
 ### High memory or disk usage
 

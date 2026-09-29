@@ -71,6 +71,8 @@ pub struct CommonOpts {
         long,
         env = "PINGWAF_TLS_ENABLED",
         default_value = "true",
+        num_args = 0..=1,
+        default_missing_value = "true",
         action = clap::ArgAction::Set
     )]
     pub tls_enabled: bool,
@@ -83,9 +85,16 @@ pub struct CommonOpts {
 
 /// Control plane server options.
 #[derive(Parser, Debug, Clone)]
+#[command(args_override_self = true)]
 pub struct ServerOpts {
     #[command(flatten)]
     pub common: CommonOpts,
+
+    /// TOML configuration file; its `[server]` and `[agent]` tables hold
+    /// these same settings. Precedence is this file, then the `PINGWAF_*`
+    /// environment variables, then the command line.
+    #[arg(long, env = "PINGWAF_CONFIG")]
+    pub config: Option<String>,
 
     /// JWT signing secret (must be at least 16 characters)
     #[arg(
@@ -108,13 +117,27 @@ pub struct ServerOpts {
     pub admin_password: String,
 
     /// Whether to serve the embedded frontend (SPA)
-    #[arg(long, default_value = "true")]
+    #[arg(
+        long,
+        env = "PINGWAF_SERVE_FRONTEND",
+        default_value = "true",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set
+    )]
     pub serve_frontend: bool,
 }
 
 /// Data plane agent options.
 #[derive(Parser, Debug, Clone)]
+#[command(args_override_self = true)]
 pub struct AgentOpts {
+    /// TOML configuration file; its `[server]` and `[agent]` tables hold
+    /// these same settings. Precedence is this file, then the `PINGWAF_*`
+    /// environment variables, then the command line.
+    #[arg(long, env = "PINGWAF_CONFIG")]
+    pub config: Option<String>,
+
     /// Control plane gRPC URL to connect to
     #[arg(
         long,
@@ -132,11 +155,18 @@ pub struct AgentOpts {
     pub cache_dir: String,
 
     /// Allow traffic when disconnected from control plane
-    #[arg(long, default_value = "true")]
+    #[arg(
+        long,
+        env = "PINGWAF_FAIL_OPEN",
+        default_value = "true",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set
+    )]
     pub fail_open: bool,
 
     /// Heartbeat interval in seconds
-    #[arg(long, default_value = "30")]
+    #[arg(long, env = "PINGWAF_HEARTBEAT_INTERVAL", default_value = "30")]
     pub heartbeat_interval_secs: u64,
 
     /// Maximum log batch size before flush
@@ -158,9 +188,16 @@ pub struct AgentOpts {
 
 /// All-in-one mode options (server + agent in one process).
 #[derive(Parser, Debug, Clone)]
+#[command(args_override_self = true)]
 pub struct AllInOneOpts {
     #[command(flatten)]
     pub common: CommonOpts,
+
+    /// TOML configuration file; its `[server]` and `[agent]` tables hold
+    /// these same settings. Precedence is this file, then the `PINGWAF_*`
+    /// environment variables, then the command line.
+    #[arg(long, env = "PINGWAF_CONFIG")]
+    pub config: Option<String>,
 
     // ── Server ────────────────────────────────────────────────────────
     /// JWT signing secret (must be at least 16 characters)
@@ -184,7 +221,14 @@ pub struct AllInOneOpts {
     pub admin_password: String,
 
     /// Whether to serve the embedded frontend (SPA)
-    #[arg(long, default_value = "true")]
+    #[arg(
+        long,
+        env = "PINGWAF_SERVE_FRONTEND",
+        default_value = "true",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set
+    )]
     pub serve_frontend: bool,
 
     // ── Agent ─────────────────────────────────────────────────────────
@@ -197,11 +241,18 @@ pub struct AllInOneOpts {
     pub cache_dir: String,
 
     /// Allow traffic when disconnected from control plane
-    #[arg(long, default_value = "true")]
+    #[arg(
+        long,
+        env = "PINGWAF_FAIL_OPEN",
+        default_value = "true",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set
+    )]
     pub fail_open: bool,
 
     /// Heartbeat interval in seconds
-    #[arg(long, default_value = "30")]
+    #[arg(long, env = "PINGWAF_HEARTBEAT_INTERVAL", default_value = "30")]
     pub heartbeat_interval_secs: u64,
 
     /// Maximum log batch size before flush
@@ -221,53 +272,146 @@ pub struct AllInOneOpts {
     pub metrics_ship_interval_secs: u64,
 }
 
+/// The PingWAF subcommand names.
+const MODES: [&str; 3] = ["server", "agent", "all-in-one"];
+
+/// Whether `value` names a PingWAF subcommand.
+fn is_mode(value: &str) -> bool {
+    MODES.contains(&value)
+}
+
+/// The mode named by `PINGWAF_MODE`, when it names one.
+fn mode_from_env() -> Option<String> {
+    let mode = std::env::var("PINGWAF_MODE").ok()?;
+    let mode = mode.trim().to_lowercase();
+    is_mode(&mode).then_some(mode)
+}
+
 /// Check whether the command line invokes a PingWAF subcommand.
 ///
 /// Returns `true` if the first non-binary argument is one of the PingWAF
 /// subcommand names, or if `PINGWAF_MODE` environment variable is set.
 pub fn is_pingwaf_mode() -> bool {
-    // Check env var first
-    if let Ok(mode) = std::env::var("PINGWAF_MODE") {
-        let mode = mode.trim().to_lowercase();
-        if matches!(mode.as_str(), "server" | "agent" | "all-in-one") {
-            return true;
-        }
-    }
-
-    // Check argv
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() > 1 {
-        matches!(args[1].as_str(), "server" | "agent" | "all-in-one")
-    } else {
-        false
-    }
+    let from_argv = std::env::args().nth(1).is_some_and(|arg| is_mode(&arg));
+    from_argv || mode_from_env().is_some()
 }
 
 /// Parse the PingWAF CLI from command line arguments.
 ///
 /// If `PINGWAF_MODE` is set but no subcommand is given on the command line,
-/// injects the mode as a subcommand so that env-only invocation works.
+/// injects the mode as a subcommand so that env-only invocation works. The
+/// settings of a `--config` file are added last, underneath the command line.
 pub fn parse_pingwaf_cli() -> PingWafCli {
     let args: Vec<String> = std::env::args().collect();
 
-    // If a subcommand is already present, parse directly
-    if args.len() > 1
-        && matches!(args[1].as_str(), "server" | "agent" | "all-in-one")
-    {
-        return PingWafCli::parse();
+    let mode = args
+        .get(1)
+        .filter(|arg| is_mode(arg))
+        .cloned()
+        .or_else(mode_from_env);
+    let Some(mode) = mode else {
+        eprintln!("error: no PingWAF subcommand or PINGWAF_MODE specified");
+        std::process::exit(1);
+    };
+
+    let mut argv = if args.get(1).map(String::as_str) == Some(mode.as_str()) {
+        args.clone()
+    } else {
+        let mut injected = args.clone();
+        injected.insert(1, mode.clone());
+        injected
+    };
+
+    // The file's arguments go next to the subcommand so that the command line,
+    // parsed after them, still wins.
+    match crate::config_file::injections(&mode, &argv) {
+        Ok(extra) => {
+            argv.splice(2..2, extra);
+        },
+        Err(err) => {
+            eprintln!("pingwaf: {err}");
+            std::process::exit(1);
+        },
     }
 
-    // Otherwise, inject the mode from the environment variable
-    if let Ok(mode) = std::env::var("PINGWAF_MODE") {
-        let mode = mode.trim().to_lowercase();
-        if matches!(mode.as_str(), "server" | "agent" | "all-in-one") {
-            let mut injected = args.clone();
-            injected.insert(1, mode);
-            return PingWafCli::parse_from(injected);
+    PingWafCli::parse_from(argv)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> PingWafCommand {
+        PingWafCli::try_parse_from(args).unwrap().command
+    }
+
+    #[test]
+    fn flags_that_default_to_true_can_be_turned_off() {
+        // Bare flag and no flag both mean the default; only an explicit value
+        // (or environment variable) turns it off.
+        let PingWafCommand::Agent(opts) = parse(&["pingwaf", "agent"]) else {
+            panic!("expected the agent mode");
+        };
+        assert!(opts.fail_open);
+        assert!(opts.config.is_none());
+
+        let PingWafCommand::Agent(opts) =
+            parse(&["pingwaf", "agent", "--fail-open"])
+        else {
+            panic!("expected the agent mode");
+        };
+        assert!(opts.fail_open);
+
+        let PingWafCommand::Agent(opts) =
+            parse(&["pingwaf", "agent", "--fail-open=false"])
+        else {
+            panic!("expected the agent mode");
+        };
+        assert!(!opts.fail_open);
+    }
+
+    #[test]
+    fn the_last_spelling_of_an_argument_wins() {
+        // The configuration file is layered in as earlier arguments, so an
+        // argument repeated on the command line has to override it.
+        let PingWafCommand::Server(opts) = parse(&[
+            "pingwaf",
+            "server",
+            "--config=/etc/pingwaf/pingwaf.toml",
+            "--jwt-secret=from-file-16-chars",
+            "--jwt-secret=from-cli-16-chars",
+        ]) else {
+            panic!("expected the server mode");
+        };
+        assert_eq!(opts.jwt_secret, "from-cli-16-chars");
+        assert_eq!(opts.config.as_deref(), Some("/etc/pingwaf/pingwaf.toml"));
+
+        let PingWafCommand::AllInOne(opts) = parse(&[
+            "pingwaf",
+            "all-in-one",
+            "--serve-frontend=false",
+            "--serve-frontend",
+        ]) else {
+            panic!("expected the all-in-one mode");
+        };
+        assert!(opts.serve_frontend);
+    }
+
+    #[test]
+    fn every_mode_accepts_a_config_file() {
+        for mode in MODES {
+            let path = format!("--config=/{mode}.toml");
+            let args = ["pingwaf", mode, path.as_str()];
+            let cli = PingWafCli::try_parse_from(args).unwrap();
+            let config = match cli.command {
+                PingWafCommand::Server(opts) => opts.config,
+                PingWafCommand::Agent(opts) => opts.config,
+                PingWafCommand::AllInOne(opts) => opts.config,
+            };
+            assert_eq!(
+                config.as_deref(),
+                Some(format!("/{mode}.toml").as_str())
+            );
         }
     }
-
-    // Shouldn't reach here if is_pingwaf_mode() was checked first
-    eprintln!("error: no PingWAF subcommand or PINGWAF_MODE specified");
-    std::process::exit(1);
 }

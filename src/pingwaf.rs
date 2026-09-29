@@ -1346,10 +1346,9 @@ pub fn main() {
 
 /// Initialize tracing subscriber for PingWAF modes.
 fn init_tracing() {
-    use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+    use tracing_subscriber::{fmt, prelude::*};
 
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = log_filter();
 
     // Siphons pingap's raw ACME events into the buffer the agent ships to the
     // control plane, so certificate-issuance logs show up on the admin panel.
@@ -1360,12 +1359,54 @@ fn init_tracing() {
         .init();
 }
 
+/// The log filter for PingWAF modes.
+///
+/// `RUST_LOG` wins whenever it is set. The default asks for `info` while
+/// keeping sqlx at `warn`, because sqlx logs the text and parameters of every
+/// query at `INFO` and that buries the control plane's own messages. An
+/// operator who names `sqlx` in `RUST_LOG` gets exactly what they asked for.
+fn log_filter() -> tracing_subscriber::EnvFilter {
+    tracing_subscriber::EnvFilter::new(log_directives(
+        std::env::var("RUST_LOG").ok().as_deref(),
+    ))
+}
+
+/// The directives [`log_filter`] builds its filter from.
+fn log_directives(rust_log: Option<&str>) -> String {
+    let value = rust_log.unwrap_or_default().trim();
+    if value.is_empty() {
+        "info,sqlx=warn".to_string()
+    } else if value.contains("sqlx") {
+        value.to_string()
+    } else {
+        format!("{value},sqlx=warn")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use pingwaf_agent::cache::{
         CachedRules, RouteConfig, SiteRules, UpstreamConfig, UpstreamPeer,
     };
+
+    #[test]
+    fn log_directives_keep_sqlx_quiet_unless_named() {
+        // Nothing set: the default, with sqlx kept out of the way.
+        assert_eq!(log_directives(None), "info,sqlx=warn");
+        assert_eq!(log_directives(Some("  ")), "info,sqlx=warn");
+
+        // An operator level applies, but statements stay quiet.
+        assert_eq!(log_directives(Some("debug")), "debug,sqlx=warn");
+        assert_eq!(
+            log_directives(Some("pingwaf=debug")),
+            "pingwaf=debug,sqlx=warn"
+        );
+
+        // Naming sqlx is an explicit request for its logs.
+        assert_eq!(log_directives(Some("sqlx=debug")), "sqlx=debug");
+        assert_eq!(log_directives(Some("info,sqlx=trace")), "info,sqlx=trace");
+    }
 
     fn site_rules(site_id: &str, domain: &str) -> SiteRules {
         SiteRules {

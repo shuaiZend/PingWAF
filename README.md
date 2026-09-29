@@ -253,14 +253,25 @@ PINGWAF_MODE=all-in-one ./pingwaf
 
 ## ⚙️ Configuration
 
-PingWAF is configured through **`PINGWAF_*` environment variables** and **CLI flags** (flags take precedence over the environment).
+PingWAF is configured through a **TOML file**, **`PINGWAF_*` environment variables**, and **CLI flags**, in that order of precedence (a later channel overrides an earlier one).
 
-> ℹ️ The [`pingwaf.toml`](./pingwaf.toml) file in the repository root is a **reference example only** — it is not loaded by the process at runtime. Use environment variables or CLI flags.
+```bash
+pingwaf all-in-one --config /etc/pingwaf/pingwaf.toml
+
+PINGWAF_CONFIG=/etc/pingwaf/pingwaf.toml pingwaf all-in-one   # equivalent
+```
+
+> ℹ️ The [`pingwaf.toml`](./pingwaf.toml) in the repository root is a working
+> example — pass it with `--config` and its `[server]` / `[agent]` tables are
+> applied (the process logs `pingwaf: loaded N setting(s)`). Keys are the flag
+> names with underscores (`admin_addr`, `max_body_log_size`); unknown keys are
+> reported and skipped.
 
 ### Key environment variables
 
 | Variable | Default | Description |
 | --- | --- | --- |
+| `PINGWAF_CONFIG` | — | Path to the TOML configuration file |
 | `PINGWAF_MODE` | — | `server`, `agent` or `all-in-one` |
 | `PINGWAF_DB_URL` | `postgres://pingwaf:pingwaf@localhost:5432/pingwaf` | PostgreSQL DSN |
 | `PINGWAF_ADMIN_ADDR` | `0.0.0.0:9080` | REST API + dashboard listen address |
