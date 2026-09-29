@@ -526,6 +526,45 @@ List registered agents.
 
 Get agent details.
 
+### GET /agents/{agent_id}/samples
+
+Host probe history (CPU, memory, network, disk), newest first. Cumulative counters (network and disk totals) are returned raw; difference consecutive rows to obtain rates.
+
+**Query params:** `from`, `to` (RFC 3339), `page`, `page_size`.
+
+### GET /agents/{agent_id}/metrics
+
+Aggregated edge-metric history shipped by the agent (`pingwaf_requests_total`, `pingwaf_blocked_requests_total`, `pingwaf_active_connections`, `pingwaf_site_cache_used_bytes`). Rows are grouped by their label set and bucketed into `step`-second windows.
+
+**Query params:**
+| Param | Description |
+|-------|-------------|
+| `name` | Required. Metric name, e.g. `pingwaf_requests_total`. |
+| `from` | Inclusive lower bound, RFC 3339. Defaults to one hour before `to`. |
+| `to` | Exclusive upper bound, RFC 3339. Defaults to now. |
+| `step` | Bucket width in seconds, minimum 10. Defaults to 60. |
+
+**Response:**
+```json
+{
+  "name": "pingwaf_site_cache_used_bytes",
+  "from": "2024-01-01T11:00:00Z",
+  "to": "2024-01-01T12:00:00Z",
+  "step": 60,
+  "series": [
+    {
+      "labels": { "site": "example.com" },
+      "metric_type": 0,
+      "points": [
+        { "t": "2024-01-01T11:00:00Z", "avg": 1048576.0, "min": 1048576.0, "max": 1048576.0, "count": 2 }
+      ]
+    }
+  ]
+}
+```
+
+`metric_type`: `0` gauge, `1` counter. Metric samples are retained for 7 days by default (`PINGWAF_METRIC_RETENTION_DAYS`).
+
 ### DELETE /agents/{agent_id}
 
 Deregister an agent.

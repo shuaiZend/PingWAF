@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 use pingwaf_proto::control_plane::{
     control_plane_server::ControlPlane as ControlPlaneTrait, AgentHeartbeat,
     CertEventAck, CertEventEntry, GetSiteConfigRequest, HostSample, LogAck,
-    LogEntry, MetricAck, MetricBatch, RegisterAgentRequest,
+    LogEntry, Metric, MetricAck, MetricBatch, RegisterAgentRequest,
     RegisterAgentResponse, RuleBundle, ServerCommand, SiteConfig, SiteStatus,
     SyncRulesRequest,
 };
@@ -39,8 +39,8 @@ use crate::grpc::config::{
 };
 use crate::grpc::registry::{AgentRegistry, COMMAND_CHANNEL_CAPACITY};
 use crate::models::{
-    access_log, action, agent, agent_status, api_key, certificate_events,
-    host_sample, security_event, site, site_certificates,
+    access_log, action, agent, agent_metric, agent_status, api_key,
+    certificate_events, host_sample, security_event, site, site_certificates,
 };
 
 /// Stream type returned by the server-streaming RPCs.
@@ -64,6 +64,7 @@ const MAX_COUNTRY: usize = 2;
 const MAX_CACHE_STATUS: usize = 20;
 const MAX_TLS_VERSION: usize = 10;
 const MAX_UPSTREAM: usize = 255;
+const MAX_METRIC_NAME: usize = 200;
 
 /// Probe samples are kept for a day: at a 5-second cadence a single agent
 /// writes roughly 17k rows a day, so expired rows are pruned while ingesting.
@@ -80,6 +81,9 @@ static LAST_SAMPLE_SWEEP: AtomicI64 = AtomicI64::new(0);
 
 /// Epoch seconds of the last offline-agent sweep, throttled the same way.
 static LAST_AGENT_SWEEP: AtomicI64 = AtomicI64::new(0);
+
+/// Epoch seconds of the last metric-retention sweep, throttled the same way.
+static LAST_METRIC_SWEEP: AtomicI64 = AtomicI64::new(0);
 
 /// The gRPC control plane service.
 pub struct ControlPlaneService {
@@ -587,36 +591,60 @@ impl ControlPlaneTrait for ControlPlaneService {
         request: Request<Streaming<MetricBatch>>,
     ) -> Result<Response<MetricAck>, Status> {
         let mut inbound = request.into_inner();
-        let mut batches: u64 = 0;
+        let batch_size = self.config.log_batch_size.max(1);
+
+        let mut received: u64 = 0;
         let mut metrics: u64 = 0;
+        let mut rows: Vec<agent_metric::ActiveModel> =
+            Vec::with_capacity(batch_size);
 
         while let Some(batch) = inbound.message().await? {
-            batches += 1;
+            received += 1;
             metrics += batch.metrics.len() as u64;
+            let Some(agent_id) = parse_optional_uuid(&batch.agent_id) else {
+                continue;
+            };
 
             // Metrics double as liveness proof: touching the heartbeat keeps an
-            // agent that only ships metrics from being marked offline. Server
-            // time, not the agent-reported timestamp: liveness thresholds
-            // compare against Utc::now(), so trusting a skewed client clock
-            // would mark healthy agents offline.
-            if let Some(agent_id) = parse_optional_uuid(&batch.agent_id) {
-                agent::Entity::update_many()
-                    .col_expr(
-                        agent::Column::LastHeartbeat,
-                        sea_orm::sea_query::Expr::value(Utc::now()),
-                    )
-                    .filter(agent::Column::Id.eq(agent_id))
-                    .exec(&self.db)
-                    .await
-                    .map_err(db_status)?;
+            // agent that only ships metrics from being marked offline, and the
+            // rows-affected check drops batches for unknown agents before they
+            // reach the foreign key. Server time, not the agent-reported
+            // timestamp: liveness thresholds compare against Utc::now(), so
+            // trusting a skewed client clock would mark healthy agents offline.
+            let known = agent::Entity::update_many()
+                .col_expr(
+                    agent::Column::LastHeartbeat,
+                    sea_orm::sea_query::Expr::value(Utc::now()),
+                )
+                .filter(agent::Column::Id.eq(agent_id))
+                .exec(&self.db)
+                .await
+                .map_err(db_status)?;
+            if known.rows_affected == 0 {
+                continue;
+            }
+
+            let now = Utc::now();
+            let reported = from_timestamp(batch.timestamp.as_ref());
+            let in_window = reported <= now
+                && reported
+                    > now - chrono::Duration::days(
+                        self.config.metric_retention_days,
+                    );
+            let recorded_at = if in_window { reported } else { now };
+
+            for metric in &batch.metrics {
+                rows.push(metric_row(agent_id, metric, recorded_at));
+            }
+            if rows.len() >= batch_size {
+                flush_metrics(&self.db, &mut rows).await?;
             }
         }
 
-        tracing::trace!(
-            batches,
-            metrics,
-            "metrics received (not persisted yet)"
-        );
+        flush_metrics(&self.db, &mut rows).await?;
+        sweep_agent_metrics(&self.db, self.config.metric_retention_days).await;
+
+        tracing::trace!(batches = received, metrics, "metrics persisted");
         Ok(Response::new(MetricAck {
             received_count: metrics,
             success: true,
@@ -851,6 +879,78 @@ async fn sweep_host_samples(db: &DatabaseConnection) {
         Ok(_) => {},
         Err(err) => {
             tracing::warn!(error = %err, "could not prune host samples");
+        },
+    }
+}
+
+/// Builds one `agent_metrics` row from a streamed metric point.
+fn metric_row(
+    agent_id: Uuid,
+    metric: &Metric,
+    recorded_at: DateTime<Utc>,
+) -> agent_metric::ActiveModel {
+    agent_metric::ActiveModel {
+        agent_id: Set(agent_id),
+        name: Set(metric.name.trim().chars().take(MAX_METRIC_NAME).collect()),
+        labels: Set(serde_json::Value::Object(
+            metric
+                .labels
+                .iter()
+                .map(|(key, value)| {
+                    (key.clone(), serde_json::Value::String(value.clone()))
+                })
+                .collect(),
+        )),
+        value: Set(metric.value),
+        metric_type: Set(metric.r#type),
+        recorded_at: Set(recorded_at),
+        created_at: Set(Utc::now()),
+        ..Default::default()
+    }
+}
+
+/// Writes the accumulated metric rows.
+async fn flush_metrics(
+    db: &DatabaseConnection,
+    rows: &mut Vec<agent_metric::ActiveModel>,
+) -> Result<(), Status> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let rows = std::mem::take(rows);
+    if let Err(err) = agent_metric::Entity::insert_many(rows).exec(db).await {
+        tracing::error!(error = %err, "failed to persist agent metrics");
+        return Err(db_status(err));
+    }
+    Ok(())
+}
+
+/// Ages out metric points past the retention window, at most once an hour.
+async fn sweep_agent_metrics(db: &DatabaseConnection, retention_days: i64) {
+    let now = Utc::now();
+    let previous = LAST_METRIC_SWEEP.swap(now.timestamp(), Ordering::Relaxed);
+    let swept_recently = DateTime::from_timestamp(previous, 0)
+        .is_some_and(|at| at > now - chrono::Duration::hours(1));
+    if swept_recently {
+        return;
+    }
+
+    let cutoff = now - chrono::Duration::days(retention_days);
+    match agent_metric::Entity::delete_many()
+        .filter(agent_metric::Column::RecordedAt.lt(cutoff))
+        .exec(db)
+        .await
+    {
+        Ok(result) if result.rows_affected > 0 => {
+            tracing::info!(
+                deleted = result.rows_affected,
+                %cutoff,
+                "pruned expired agent metrics"
+            );
+        },
+        Ok(_) => {},
+        Err(err) => {
+            tracing::warn!(error = %err, "could not prune agent metrics");
         },
     }
 }

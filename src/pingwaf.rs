@@ -105,6 +105,7 @@ fn agent_config_from_opts(opts: &AgentOpts) -> AgentConfig {
         fail_open: opts.fail_open,
         probe_interval_secs: pingwaf_agent::probe::DEFAULT_INTERVAL_SECS,
         probe_disk_path: "/".to_string(),
+        metrics_ship_interval_secs: opts.metrics_ship_interval_secs,
     }
 }
 
@@ -129,6 +130,7 @@ fn agent_config_from_all_in_one(opts: &AllInOneOpts) -> AgentConfig {
         fail_open: opts.fail_open,
         probe_interval_secs: pingwaf_agent::probe::DEFAULT_INTERVAL_SECS,
         probe_disk_path: "/".to_string(),
+        metrics_ship_interval_secs: opts.metrics_ship_interval_secs,
     }
 }
 
