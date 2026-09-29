@@ -8,6 +8,28 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.17.1] — 2026-09-30
+
+### 🐛 Bug Fixes
+
+- *(logs)* Record the response of a request the WAF answered itself. A block,
+  challenge, rate limit or paused-site response never reaches the proxy's
+  response hook, so its access row carried no response headers, no body and a
+  zero size — the one response an operator most wants to replay was the one the
+  log could not show. The plugin now logs the page it is about to send, headers
+  and truncated body included, exactly as it does for proxied traffic.
+- *(cli)* `pingwaf --version` works in every mode. With `PINGWAF_MODE` set (the
+  value `docker-compose.yml` ships), the mode is injected as a subcommand and
+  the version flag was rejected as an unknown argument, leaving no way to ask a
+  running deployment which build it runs. The flag is now answered before the
+  subcommand is spliced in, `-V` keeps printing the bare number and
+  `--version` the full banner.
+- *(cli)* The `pingwaf` binary no longer introduces itself as `pingap`. The
+  version banner and help were taken from the Cargo package name, which the
+  fork keeps for upstream compatibility; they are now taken from the binary
+  name, so `pingwaf --version` says `pingwaf 0.17.1 (…, tls=openssl)` while the
+  legacy `pingap` binary still says `pingap`.
+
 ## [PingWAF 0.17.0] — 2026-09-30
 
 ### ⛰️ Features
