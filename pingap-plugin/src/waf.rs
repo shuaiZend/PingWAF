@@ -448,16 +448,24 @@ fn is_browser_ua(ua_lower: &str) -> bool {
 // Rate limiting (per-site rules over fixed-window counters)
 // ─────────────────────────────────────────────────────────────
 
-/// Counter key dimension of a rate limit rule. Characteristics that cannot be
-/// keyed at the edge (header/cookie/query/ja3) cause the rule to be ignored at
-/// build time rather than enforced with a degraded key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Counter key dimension of a rate limit rule. Rules that reference a
+/// characteristic that cannot be keyed at the edge (e.g. ja3), or a
+/// parameterized one without a name, are ignored at build time rather than
+/// enforced with a degraded key.
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum RateChar {
     Ip,
     Host,
     Path,
     Asn,
     Country,
+    /// Named request header, matched case-insensitively.
+    Header(String),
+    /// Named cookie from the `Cookie` header(s), matched case-sensitively.
+    Cookie(String),
+    /// Named query-string parameter, matched case-sensitively against the raw
+    /// (undecoded) query.
+    Query(String),
 }
 
 /// What an exhausted rate limit rule does to matching requests.
@@ -496,8 +504,14 @@ impl CompiledRateRule {
             return None;
         }
         let mut chars = Vec::with_capacity(rule.characteristics.len());
-        for raw in &rule.characteristics {
+        for (idx, raw) in rule.characteristics.iter().enumerate() {
             let lower = raw.trim().to_lowercase();
+            let param = || {
+                rule.characteristic_params
+                    .get(idx)
+                    .map(|p| p.trim())
+                    .unwrap_or("")
+            };
             let kind = match lower
                 .strip_prefix("ratelimitchar")
                 .unwrap_or(&lower)
@@ -507,6 +521,42 @@ impl CompiledRateRule {
                 "path" => RateChar::Path,
                 "asn" => RateChar::Asn,
                 "country" => RateChar::Country,
+                "header" => {
+                    let name = param().to_lowercase();
+                    if name.is_empty() {
+                        debug!(
+                            rule = %rule.id,
+                            characteristic = %raw,
+                            "header characteristic without a parameter name; rule ignored"
+                        );
+                        return None;
+                    }
+                    RateChar::Header(name)
+                },
+                "cookie" => {
+                    let name = param().to_string();
+                    if name.is_empty() {
+                        debug!(
+                            rule = %rule.id,
+                            characteristic = %raw,
+                            "cookie characteristic without a parameter name; rule ignored"
+                        );
+                        return None;
+                    }
+                    RateChar::Cookie(name)
+                },
+                "query" => {
+                    let name = param().to_string();
+                    if name.is_empty() {
+                        debug!(
+                            rule = %rule.id,
+                            characteristic = %raw,
+                            "query characteristic without a parameter name; rule ignored"
+                        );
+                        return None;
+                    }
+                    RateChar::Query(name)
+                },
                 _ => {
                     debug!(
                         rule = %rule.id,
@@ -555,7 +605,9 @@ impl CompiledRateRule {
     }
 
     /// Counter key for this rule and request: the rule id (a UUID, unique
-    /// across sites) plus the value of every tracked characteristic.
+    /// across sites) plus the value of every tracked characteristic. Requests
+    /// missing a parameterized value (absent header/cookie/query) share the
+    /// `-` bucket instead of bypassing the counter.
     fn counter_key(
         &self,
         request_data: &RequestData,
@@ -577,6 +629,36 @@ impl CompiledRateRule {
                     Some(n) => key.push_str(&n.to_string()),
                     None => key.push('-'),
                 },
+                RateChar::Header(name) => key.push_str(
+                    request_data
+                        .headers
+                        .iter()
+                        .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                        .map(|(_, v)| v.trim())
+                        .unwrap_or("-"),
+                ),
+                RateChar::Cookie(name) => key.push_str(
+                    request_data
+                        .headers
+                        .iter()
+                        .filter(|(k, _)| k.eq_ignore_ascii_case("cookie"))
+                        .flat_map(|(_, v)| v.split(';'))
+                        .find_map(|pair| {
+                            let (n, v) = pair.trim().split_once('=')?;
+                            (n == name.as_str()).then(|| v.trim())
+                        })
+                        .unwrap_or("-"),
+                ),
+                RateChar::Query(name) => key.push_str(
+                    request_data
+                        .query
+                        .split('&')
+                        .find_map(|pair| {
+                            let (n, v) = pair.split_once('=')?;
+                            (n == name.as_str()).then_some(v)
+                        })
+                        .unwrap_or("-"),
+                ),
             }
         }
         key
@@ -2602,6 +2684,7 @@ ml_threshold = 0.75
             name: format!("rule-{id}"),
             expression: expression.to_string(),
             characteristics: chars.into_iter().map(|c| c as i32).collect(),
+            characteristic_params: Vec::new(),
             period_seconds: 60,
             threshold,
             action: action as i32,
@@ -2693,6 +2776,7 @@ ml_threshold = 0.75
                         )
                     })
                     .collect(),
+                characteristic_params: Vec::new(),
                 period_seconds: rule.period_seconds,
                 threshold: rule.threshold,
                 action: CacheWafAction::from(rule.action),
@@ -2775,6 +2859,112 @@ ml_threshold = 0.75
         ))
         .unwrap();
         assert_eq!(vec![RateChar::Ip], nat.chars);
+    }
+
+    #[test]
+    fn rate_rule_build_accepts_parameterized_characteristics() {
+        let build = |characteristics: &[&str], params: &[&str]| {
+            CompiledRateRule::build(&CacheRateLimitRule {
+                id: "p".to_string(),
+                name: "rule-p".to_string(),
+                expression: String::new(),
+                characteristics: characteristics
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+                characteristic_params: params
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+                period_seconds: 60,
+                threshold: 10,
+                action: CacheWafAction::Block,
+                mitigation_timeout_seconds: 0,
+                enabled: true,
+                priority: 0,
+            })
+        };
+
+        // Header names are matched case-insensitively, so the stored name is
+        // lowercased; cookie and query names stay as configured.
+        let header = build(&["RateLimitCharHeader"], &["X-Api-Key"]).unwrap();
+        assert_eq!(
+            vec![RateChar::Header("x-api-key".to_string())],
+            header.chars
+        );
+        let cookie_query = build(
+            &["RateLimitCharCookie", "RateLimitCharQuery"],
+            &["Session", "lang"],
+        )
+        .unwrap();
+        assert_eq!(
+            vec![
+                RateChar::Cookie("Session".to_string()),
+                RateChar::Query("lang".to_string())
+            ],
+            cookie_query.chars
+        );
+        // A parameterized kind without a name cannot key a counter.
+        assert!(build(&["RateLimitCharHeader"], &[]).is_none());
+        assert!(build(&["RateLimitCharQuery"], &["  "]).is_none());
+    }
+
+    #[test]
+    fn rate_limit_keys_parameterized_characteristics() {
+        let rule = CompiledRateRule {
+            id: "rl-h".to_string(),
+            name: "per-key".to_string(),
+            expression: None,
+            chars: vec![
+                RateChar::Header("X-Api-Key".to_string()),
+                RateChar::Cookie("Session".to_string()),
+                RateChar::Query("lang".to_string()),
+            ],
+            period_secs: 60,
+            threshold: 1,
+            mitigation_secs: 0,
+            action: RateAction::Block,
+        };
+        let request = |headers: Vec<(&str, &str)>, query: &str| RequestData {
+            method: "GET".to_string(),
+            path: "/".to_string(),
+            query: query.to_string(),
+            headers: headers
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            body: None,
+            client_ip: "1.1.1.1".to_string(),
+            country_code: None,
+            scheme: "http".to_string(),
+            protocol: "HTTP/1.1".to_string(),
+        };
+        let sep = '\u{1f}';
+
+        let full = request(
+            vec![("x-api-key", "v1"), ("Cookie", "a=1; Session=abc; b=2")],
+            "lang=en&page=2",
+        );
+        assert_eq!(
+            format!("rl-h{sep}v1{sep}abc{sep}en"),
+            rule.counter_key(&full, "s.test", None)
+        );
+
+        // Header matching is case-insensitive; a present-but-empty query
+        // value keys as "" rather than the missing bucket.
+        let mixed = request(vec![("X-API-KEY", "v1")], "lang=");
+        assert_eq!(
+            format!("rl-h{sep}v1{sep}-{sep}"),
+            rule.counter_key(&mixed, "s.test", None)
+        );
+
+        // Requests missing every parameterized value share the '-' bucket
+        // instead of bypassing the counter.
+        let empty = request(Vec::new(), "page=2");
+        assert_eq!(
+            format!("rl-h{sep}-{sep}-{sep}-"),
+            rule.counter_key(&empty, "s.test", None)
+        );
     }
 
     #[test]

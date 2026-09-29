@@ -124,7 +124,8 @@ pub mod rate_limit_rules {
         pub site_id: Uuid,
         pub name: String,
         pub expression: String,
-        /// Values of `pingwaf::RateLimitCharacteristics`, e.g. `ip`, `path`.
+        /// Counter keys to group requests by, e.g. `ip`, `path`, or the
+        /// parameterized `header:<name>` / `cookie:<name>` / `query:<name>`.
         pub characteristics: Vec<String>,
         pub period_seconds: i32,
         pub threshold: i32,
@@ -172,6 +173,10 @@ pub mod cache_rules {
 }
 
 /// Counter keys accepted in `rate_limit_rules.characteristics`.
+///
+/// Bare `header` / `cookie` / `query` are not accepted any more — they carry no
+/// key to count on. Use the parameterized forms `header:<name>`,
+/// `cookie:<name>` and `query:<name>` instead.
 pub mod characteristic {
     pub const IP: &str = "ip";
     pub const IP_NAT: &str = "ip_nat";
@@ -184,19 +189,31 @@ pub mod characteristic {
     pub const COUNTRY: &str = "country";
     pub const JA3: &str = "ja3";
 
+    /// Splits `header:<name>` / `cookie:<name>` / `query:<name>` into its kind
+    /// and parameter name. The parameter must be non-empty, whitespace-free
+    /// and at most 128 characters.
+    fn split_parameterized(value: &str) -> Option<(&'static str, &str)> {
+        let (kind, param) = value.split_once(':')?;
+        let kind = match kind {
+            HEADER => HEADER,
+            COOKIE => COOKIE,
+            QUERY => QUERY,
+            _ => return None,
+        };
+        if param.is_empty()
+            || param.len() > 128
+            || param.chars().any(char::is_whitespace)
+        {
+            return None;
+        }
+        Some((kind, param))
+    }
+
     pub fn is_valid(value: &str) -> bool {
-        matches!(
-            value,
-            IP | IP_NAT
-                | HOST
-                | PATH
-                | HEADER
-                | COOKIE
-                | QUERY
-                | ASN
-                | COUNTRY
-                | JA3
-        )
+        if matches!(value, IP | IP_NAT | HOST | PATH | ASN | COUNTRY | JA3) {
+            return true;
+        }
+        split_parameterized(value).is_some()
     }
 
     /// `pingwaf::RateLimitCharacteristics` values from control_plane.proto.
@@ -210,13 +227,28 @@ pub mod characteristic {
             IP_NAT => 1,
             HOST => 2,
             PATH => 3,
+            // Bare parameterized kinds come from rows stored before the
+            // parameter was required; the edge drops rules that carry them.
             HEADER => 4,
             COOKIE => 5,
             QUERY => 6,
             ASN => 7,
             COUNTRY => 8,
             JA3 => 9,
-            _ => 0,
+            _ => split_parameterized(value).map_or(0, |(kind, _)| match kind {
+                HEADER => 4,
+                COOKIE => 5,
+                QUERY => 6,
+                _ => 0,
+            }),
         }
+    }
+
+    /// Parameter name for a parameterized characteristic (empty otherwise);
+    /// shipped alongside `to_proto` in `RateLimitRule.characteristic_params`.
+    pub fn to_param(value: &str) -> String {
+        split_parameterized(value)
+            .map(|(_, param)| param.to_string())
+            .unwrap_or_default()
     }
 }

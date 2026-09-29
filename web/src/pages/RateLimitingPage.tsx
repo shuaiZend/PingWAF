@@ -33,6 +33,7 @@ import {
   RATE_LIMIT_CHARACTERISTICS,
   RATE_LIMIT_CHARACTERISTICS_PENDING,
   RULE_ACTIONS,
+  isValidRateLimitCharacteristic,
   type CreateRateLimitRequest,
   type RateLimitRule,
 } from '@/api/types'
@@ -96,6 +97,7 @@ export function RateLimitingPage() {
   const [dialogOpen, setDialogOpen] = useState(false)
   const [editing, setEditing] = useState<RateLimitRule | null>(null)
   const [form, setForm] = useState<FormState>(emptyForm())
+  const [charDraft, setCharDraft] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [pendingDelete, setPendingDelete] = useState<RateLimitRule | null>(null)
 
@@ -116,6 +118,7 @@ export function RateLimitingPage() {
   useEffect(() => {
     if (!dialogOpen) return
     setError(null)
+    setCharDraft('')
     setForm(editing ? formFromRule(editing) : emptyForm())
   }, [dialogOpen, editing])
 
@@ -158,7 +161,24 @@ export function RateLimitingPage() {
     setDialogOpen(false)
     setEditing(null)
     setForm(emptyForm())
+    setCharDraft('')
     setError(null)
+  }
+
+  const addCharacteristic = () => {
+    const value = charDraft.trim()
+    if (!value) return
+    if (!isValidRateLimitCharacteristic(value)) {
+      setError(t('pages.rateLimiting.characteristicFormatInvalid'))
+      return
+    }
+    setError(null)
+    setForm((f) =>
+      f.characteristics.includes(value)
+        ? f
+        : { ...f, characteristics: [...f.characteristics, value] },
+    )
+    setCharDraft('')
   }
 
   const submit = () => {
@@ -170,6 +190,10 @@ export function RateLimitingPage() {
     }
     if (form.characteristics.length === 0) {
       setError(t('pages.rateLimiting.characteristicsRequired'))
+      return
+    }
+    if (!form.characteristics.every(isValidRateLimitCharacteristic)) {
+      setError(t('pages.rateLimiting.characteristicFormatInvalid'))
       return
     }
     if (!Number.isFinite(form.threshold) || form.threshold < 1 || form.threshold > 10_000_000) {
@@ -478,17 +502,44 @@ export function RateLimitingPage() {
             min={1}
             value={form.characteristics}
             onChange={(characteristics) => setForm((f) => ({ ...f, characteristics }))}
-            options={RATE_LIMIT_CHARACTERISTICS.map((c) => {
-              const pending = RATE_LIMIT_CHARACTERISTICS_PENDING.includes(c)
-              return {
-                value: c,
-                label: pending
-                  ? `${t(`characteristics.${c}`, c)} (${t('common.comingSoon')})`
-                  : t(`characteristics.${c}`, c),
-                disabled: pending,
-              }
-            })}
+            options={[
+              ...RATE_LIMIT_CHARACTERISTICS.map((c) => {
+                const pending = RATE_LIMIT_CHARACTERISTICS_PENDING.includes(c)
+                return {
+                  value: c,
+                  label: pending
+                    ? `${t(`characteristics.${c}`, c)} (${t('common.comingSoon')})`
+                    : t(`characteristics.${c}`, c),
+                  disabled: pending,
+                }
+              }),
+              // Parameterized (and legacy) values arrive from the API rather
+              // than the fixed pill list.
+              ...form.characteristics
+                .filter((c) => !(RATE_LIMIT_CHARACTERISTICS as string[]).includes(c))
+                .map((c) => ({ value: c, label: c })),
+            ]}
           />
+
+          <div className="flex items-end gap-2">
+            <Input
+              className="pw-mono flex-1 text-[13px]"
+              aria-label={t('pages.rateLimiting.characteristicsCustomLabel')}
+              placeholder="header:X-Api-Key"
+              value={charDraft}
+              hint={t('pages.rateLimiting.characteristicsCustomHint')}
+              onChange={(e) => setCharDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault()
+                  addCharacteristic()
+                }
+              }}
+            />
+            <Button variant="ghost" onClick={addCharacteristic} disabled={!charDraft.trim()}>
+              {t('common.add')}
+            </Button>
+          </div>
 
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <Input
