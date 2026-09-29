@@ -8,6 +8,69 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.15.0] — 2026-09-29
+
+### ⛰️ Features
+
+- *(sites)* Pause a site and have the edge honour it. The lifecycle flag only
+  lived in the control-plane database, so a paused site kept serving traffic;
+  it now reaches agents and every request is answered with a 503 maintenance
+  page (`Retry-After: 3600`) while TLS, WAF logging and traffic counters keep
+  running. Pause/Resume sits behind a confirmation in the site header and the
+  sites list, whose status column is now read-only.
+- *(ssl)* Enforce HSTS and HTTPS redirection at the edge. `hsts_enabled` and
+  `always_use_https` were stored but never applied; responses now carry
+  `Strict-Transport-Security: max-age=<n>` and plain-HTTP requests are
+  redirected with 301. The console defaults the max-age field to 15552000
+  (180 days) when HSTS is switched on.
+- *(ssl)* Manage mTLS end to end. Sites can generate or import a client CA,
+  issue client certificates (P-256, ClientAuth EKU, validity capped by the CA)
+  and revoke them; the private key is returned once at creation time. The
+  hosting process requires a client certificate for mTLS sites — there is no
+  `FAIL_IF_NO_PEER_CERT`, so a shared :443 still handshakes for non-mTLS sites —
+  and the WAF rejects missing certificates, revoked fingerprints and
+  certificates issued under a different organization with 403.
+- *(routes)* Route by client IP group. A route can be gated to an IP group;
+  the group's CIDRs are expanded into the agent's route config and matched
+  against the connection address in the data plane, ANDed with the path and
+  header conditions. Other clients fall through to the next route.
+- *(logs)* Capture the full request *and* response. Response headers, a
+  truncated body, its real size and a truncation flag are stored alongside the
+  request side, `scheme`/`protocol` are persisted, and the response body cap is
+  configurable via `max_body_log_size` (up to 64 KiB). Cookies and the
+  authorization header are no longer redacted — the log detail is meant for
+  replaying an attack, so treat the log store as sensitive.
+- *(logs)* Kibana-style search in the console. One box parses
+  `field:value` tokens (`status:4xx`, `client_ip:203.0.113.*`, `rule:942100`,
+  free text over path/host) into the existing API filters, the URL stays in
+  sync so a query can be shared, and the traffic panels drill into the matching
+  log rows. Log detail dialogs gain a response section, a raw-request panel and
+  a "copy as curl" button.
+- *(auth)* Passkey (WebAuthn) registration and passwordless sign-in, on top of
+  `passkey-server`. Challenges are persisted in the control plane so a ceremony
+  survives a restart or a second replica, and the login endpoint is rate
+  limited.
+
+### 🐛 Bug Fixes
+
+- *(auth)* Answer a wrong current password with 400 instead of 401. The 401 made
+  the console treat the session as dead and log the user out mid-form; the
+  message is now shown inline and localized.
+- *(web)* Validate and document the origin address format. A scheme in the
+  address field was silently stripped — the placeholder now shows a full URL
+  and the API rejects a path, query or fragment.
+- *(web)* Rename the "Custom Error Pages" tab to "Error Pages" so the label no
+  longer wraps out of the tab bar.
+
+### ⚠️ Breaking Changes
+
+- Agent caches and control-plane payloads grow new fields (`status`,
+  `mtls_*`, `ip_ranges` on routes, access-log response columns); older agents
+  ignore them silently, so upgrade agents alongside the control plane.
+- Crate-level API changes for embedders: `LocationConf.match_ip_ranges`,
+  the wider `match_conditions` signature, and the new `DigestDetail` /
+  `Ctx.conn` TLS-peer fields.
+
 ## [PingWAF 0.14.8] — 2026-09-29
 
 ### ⛰️ Features

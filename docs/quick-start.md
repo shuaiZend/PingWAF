@@ -807,7 +807,7 @@ from [GitHub Releases](https://github.com/shuaiZend/PingWAF/releases), so it
 works on Linux (amd64/arm64) only — on macOS,
 [build from source](#path-2-build-from-source) instead. If the script cannot
 determine the latest version, pass one explicitly:
-`./install.sh --version 0.14.8`.
+`./install.sh --version 0.15.0`.
 
 ### High memory or disk usage
 

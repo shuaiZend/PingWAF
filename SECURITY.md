@@ -64,7 +64,8 @@ from which it inherits the proxy data plane.
 | Version | Status | Receives security fixes |
 | --- | --- | --- |
 | `main` | Active development | Yes — but expect breaking changes |
-| `0.14.x` (current release line, 0.14.8) | Supported | **Yes** |
+| `0.15.x` (current release line, 0.15.0) | Supported | **Yes** |
+| `0.14.x` | Security fixes only | No |
 | `0.13.x` and older (pingap lineage) | Legacy | Best effort, case by case |
 
 Only the latest release line is guaranteed to receive security patches. If you

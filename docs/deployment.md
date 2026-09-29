@@ -55,7 +55,7 @@ Default credentials: `admin@pingwaf.local` / value of `$ADMIN_PASSWORD`
 curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh | bash
 
 # Or specify version and mode
-./install.sh --version 0.14.8 --mode all-in-one
+./install.sh --version 0.15.0 --mode all-in-one
 ```
 
 > Prebuilt release assets are published for **Linux** (amd64/arm64) only; on
@@ -92,7 +92,7 @@ Environment=PINGWAF_ALLOW_REGISTRATION=false
 ```
 
 > **Note:** the `/etc/pingwaf/pingwaf.toml` file that `install.sh` writes is a
-> reference example only — v0.14.8 does not load it (the systemd unit sets
+> reference example only — v0.15.0 does not load it (the systemd unit sets
 > `PINGWAF_CONFIG`, but the binary never reads that variable), so settings
 > placed there have no effect. Configure through environment variables as
 > above; agent options (`PINGWAF_SERVER_URL`, `PINGWAF_CACHE_DIR`, …) are
