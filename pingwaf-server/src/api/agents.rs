@@ -27,7 +27,9 @@ use crate::api::keys::mint_key;
 use crate::api::state::AppState;
 use crate::auth::AuthUser;
 use crate::grpc::config::now_timestamp;
-use crate::models::{agent, agent_status, host_sample, permission, site};
+use crate::models::{
+    agent, agent_metric, agent_status, host_sample, permission, site,
+};
 
 /// `pingwaf.CommandType` values, spelled out so the control plane does not depend
 /// on prost's enum variant naming.
@@ -86,6 +88,19 @@ pub struct SamplesQuery {
     pub from: Option<String>,
     /// Exclusive upper bound, RFC 3339.
     pub to: Option<String>,
+}
+
+/// Window and aggregation for the edge-metrics endpoint.
+#[derive(Debug, Deserialize)]
+pub struct MetricsQuery {
+    /// Metric name, e.g. `pingwaf_requests_total`.
+    pub name: Option<String>,
+    /// Inclusive lower bound, RFC 3339. Defaults to one hour before `to`.
+    pub from: Option<String>,
+    /// Exclusive upper bound, RFC 3339. Defaults to now.
+    pub to: Option<String>,
+    /// Bucket width in seconds, minimum 10. Defaults to 60.
+    pub step: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -148,6 +163,7 @@ pub fn routes() -> Router<AppState> {
         .route("/agents/enroll", post(enroll))
         .route("/agents/{agent_id}", get(show).delete(remove))
         .route("/agents/{agent_id}/samples", get(samples))
+        .route("/agents/{agent_id}/metrics", get(metrics))
         .route("/agents/{agent_id}/commands", post(send_command))
 }
 
@@ -347,6 +363,142 @@ async fn samples(
     let items = paginator.fetch_page(pagination.index()).await?;
 
     Ok(Json(Page::new(items, total, pagination)))
+}
+
+/// One aggregated bucket of a metric time series.
+#[derive(Debug, Serialize)]
+pub struct MetricPoint {
+    /// Bucket start, RFC 3339.
+    pub t: DateTime<Utc>,
+    pub avg: f64,
+    pub min: f64,
+    pub max: f64,
+    pub count: u64,
+}
+
+/// One label-set's bucketed series.
+#[derive(Debug, Serialize)]
+pub struct MetricsSeries {
+    pub labels: serde_json::Value,
+    pub metric_type: i32,
+    pub points: Vec<MetricPoint>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MetricsResponse {
+    pub name: String,
+    pub from: DateTime<Utc>,
+    pub to: DateTime<Utc>,
+    pub step: i64,
+    pub series: Vec<MetricsSeries>,
+}
+
+/// `GET /api/v1/agents/{agent_id}/metrics` — aggregated edge-metric history.
+///
+/// Rows shipped through `ShipMetrics` are grouped by their label set and
+/// bucketed into `step`-second windows with `avg`/`min`/`max` per bucket, so a
+/// chart can render a month of data from a bounded number of points.
+async fn metrics(
+    State(state): State<AppState>,
+    current: AuthUser,
+    Path(agent_id): Path<String>,
+    Query(query): Query<MetricsQuery>,
+) -> Result<Json<MetricsResponse>, ApiError> {
+    let id = parse_uuid(&agent_id, "agent id")?;
+    load_agent(&state, id, &current).await?;
+
+    let name = non_empty(&query.name)
+        .ok_or_else(|| ApiError::BadRequest("name is required".to_string()))?
+        .to_string();
+
+    let to = parse_optional_datetime(&query.to, "to")?.unwrap_or_else(Utc::now);
+    let from = parse_optional_datetime(&query.from, "from")?
+        .unwrap_or(to - chrono::Duration::hours(1));
+    if from >= to {
+        return Err(ApiError::BadRequest(
+            "'from' must be before 'to'".to_string(),
+        ));
+    }
+    let step = query.step.unwrap_or(60).max(10);
+
+    let rows = agent_metric::Entity::find()
+        .filter(agent_metric::Column::AgentId.eq(id))
+        .filter(agent_metric::Column::Name.eq(&name))
+        .filter(agent_metric::Column::RecordedAt.gte(from))
+        .filter(agent_metric::Column::RecordedAt.lt(to))
+        .order_by_asc(agent_metric::Column::RecordedAt)
+        .all(&state.db)
+        .await?;
+
+    Ok(Json(aggregate_metrics(&name, from, to, step, rows)))
+}
+
+/// Groups metric rows by their label set and buckets them by `step` seconds.
+fn aggregate_metrics(
+    name: &str,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+    step: i64,
+    rows: Vec<agent_metric::Model>,
+) -> MetricsResponse {
+    struct Bucket {
+        sum: f64,
+        min: f64,
+        max: f64,
+        count: u64,
+    }
+
+    // BTreeMap keeps the series order stable across identical requests.
+    let mut groups: std::collections::BTreeMap<
+        String,
+        (i32, std::collections::BTreeMap<i64, Bucket>),
+    > = std::collections::BTreeMap::new();
+
+    for row in rows {
+        let key = serde_json::to_string(&row.labels).unwrap_or_default();
+        let bucket_index = (row.recorded_at - from).num_seconds() / step;
+        let group = groups
+            .entry(key)
+            .or_insert_with(|| (row.metric_type, Default::default()));
+        let buckets = &mut group.1;
+        let bucket = buckets.entry(bucket_index).or_insert_with(|| Bucket {
+            sum: 0.0,
+            min: row.value,
+            max: row.value,
+            count: 0,
+        });
+        bucket.sum += row.value;
+        bucket.min = bucket.min.min(row.value);
+        bucket.max = bucket.max.max(row.value);
+        bucket.count += 1;
+    }
+
+    let series = groups
+        .into_iter()
+        .map(|(key, (metric_type, buckets))| MetricsSeries {
+            labels: serde_json::from_str(&key)
+                .unwrap_or(serde_json::Value::Null),
+            metric_type,
+            points: buckets
+                .into_iter()
+                .map(|(index, bucket)| MetricPoint {
+                    t: from + chrono::Duration::seconds(index * step),
+                    avg: bucket.sum / bucket.count as f64,
+                    min: bucket.min,
+                    max: bucket.max,
+                    count: bucket.count,
+                })
+                .collect(),
+        })
+        .collect();
+
+    MetricsResponse {
+        name: name.to_string(),
+        from,
+        to,
+        step,
+        series,
+    }
 }
 
 /// `DELETE /api/v1/agents/{agent_id}` — de-registers an agent.
@@ -614,5 +766,88 @@ mod tests {
     #[test]
     fn unknown_commands_are_rejected() {
         assert!(build_command(&request("self-destruct"), None).is_err());
+    }
+
+    fn metric_row(
+        labels: serde_json::Value,
+        value: f64,
+        recorded_at: DateTime<Utc>,
+    ) -> agent_metric::Model {
+        agent_metric::Model {
+            id: 0,
+            agent_id: Uuid::nil(),
+            name: "pingwaf_requests_total".to_string(),
+            labels,
+            value,
+            metric_type: 1,
+            recorded_at,
+            created_at: recorded_at,
+        }
+    }
+
+    #[test]
+    fn aggregation_buckets_by_labels_and_step() {
+        let from = Utc::now();
+        let step = 60;
+        let in_first = from + chrono::Duration::seconds(10);
+        let in_second = from + chrono::Duration::seconds(70);
+
+        let rows = vec![
+            metric_row(serde_json::json!({}), 10.0, in_first),
+            metric_row(serde_json::json!({}), 30.0, in_first),
+            metric_row(serde_json::json!({}), 50.0, in_second),
+            metric_row(
+                serde_json::json!({"site": "a.example.com"}),
+                7.0,
+                in_first,
+            ),
+            // Window filtering is the query's job (RecordedAt bounds); the
+            // aggregator only buckets whatever it is handed.
+        ];
+
+        let response = aggregate_metrics(
+            "pingwaf_requests_total",
+            from,
+            in_second,
+            step,
+            rows,
+        );
+
+        assert_eq!(response.series.len(), 2, "label sets are separate series");
+        let plain = response
+            .series
+            .iter()
+            .find(|s| s.labels == serde_json::json!({}))
+            .unwrap();
+        assert_eq!(plain.points.len(), 2);
+        assert_eq!(plain.points[0].t, from);
+        assert_eq!(plain.points[0].avg, 20.0);
+        assert_eq!(plain.points[0].min, 10.0);
+        assert_eq!(plain.points[0].max, 30.0);
+        assert_eq!(plain.points[0].count, 2);
+        assert_eq!(plain.points[1].t, from + chrono::Duration::seconds(60));
+        assert_eq!(plain.points[1].avg, 50.0);
+
+        let labelled = response
+            .series
+            .iter()
+            .find(|s| s.labels != serde_json::json!({}))
+            .unwrap();
+        assert_eq!(labelled.points.len(), 1);
+        assert_eq!(labelled.points[0].avg, 7.0);
+    }
+
+    #[test]
+    fn aggregation_of_empty_window_is_empty() {
+        let from = Utc::now();
+        let response = aggregate_metrics(
+            "pingwaf_requests_total",
+            from,
+            from + chrono::Duration::hours(1),
+            60,
+            Vec::new(),
+        );
+        assert!(response.series.is_empty());
+        assert_eq!(response.step, 60);
     }
 }

@@ -10,6 +10,7 @@
 //! `DeriveEntityModel` shape), so `module_inception` is expected here.
 #![allow(clippy::module_inception)]
 
+pub mod agent_metrics;
 pub mod agents;
 pub mod bot_protection;
 pub mod certificate_events;
@@ -28,6 +29,7 @@ pub mod security_events;
 pub mod sites;
 pub mod users;
 
+pub use agent_metrics::agent_metrics as agent_metric;
 pub use agents::{agent_status, agents as agent};
 pub use certificates::site_certificates;
 pub use host_samples::host_samples as host_sample;

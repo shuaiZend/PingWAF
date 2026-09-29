@@ -133,6 +133,10 @@ pub struct AgentOpts {
     /// Maximum request body size to log (bytes)
     #[arg(long, default_value = "8192")]
     pub max_body_log_size: usize,
+
+    /// Metrics shipping interval in seconds (0 disables metric shipping)
+    #[arg(long, env = "PINGWAF_METRICS_SHIP_INTERVAL", default_value = "30")]
+    pub metrics_ship_interval_secs: u64,
 }
 
 /// All-in-one mode options (server + agent in one process).
@@ -208,6 +212,10 @@ pub struct AllInOneOpts {
     /// Maximum request body size to log (bytes)
     #[arg(long, default_value = "8192")]
     pub max_body_log_size: usize,
+
+    /// Metrics shipping interval in seconds (0 disables metric shipping)
+    #[arg(long, env = "PINGWAF_METRICS_SHIP_INTERVAL", default_value = "30")]
+    pub metrics_ship_interval_secs: u64,
 }
 
 /// Check whether the command line invokes a PingWAF subcommand.

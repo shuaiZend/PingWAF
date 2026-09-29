@@ -42,6 +42,10 @@ pub struct AgentConfig {
     /// Filesystem to report disk usage for ("/" by default)
     #[serde(default = "default_probe_disk_path")]
     pub probe_disk_path: String,
+    /// Interval for shipping edge metrics to the control plane (seconds);
+    /// 0 disables metric shipping
+    #[serde(default = "default_metrics_ship_interval")]
+    pub metrics_ship_interval_secs: u64,
 }
 
 fn default_heartbeat_interval() -> u64 {
@@ -74,6 +78,9 @@ fn default_probe_interval() -> u64 {
 fn default_probe_disk_path() -> String {
     "/".to_string()
 }
+fn default_metrics_ship_interval() -> u64 {
+    30
+}
 
 impl Default for AgentConfig {
     fn default() -> Self {
@@ -91,6 +98,7 @@ impl Default for AgentConfig {
             fail_open: default_fail_open(),
             probe_interval_secs: default_probe_interval(),
             probe_disk_path: default_probe_disk_path(),
+            metrics_ship_interval_secs: default_metrics_ship_interval(),
         }
     }
 }

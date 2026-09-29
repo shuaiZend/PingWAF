@@ -143,6 +143,7 @@ sudo journalctl -u pingwaf -f
 | `fail_open` | bool | `true` | Allow traffic when disconnected |
 | `reconnect_initial_delay_ms` | int | `1000` | Initial reconnect backoff |
 | `reconnect_max_delay_ms` | int | `60000` | Maximum reconnect backoff |
+| `metrics_ship_interval_secs` | int | `30` | Edge-metrics ship interval; `0` disables shipping |
 
 ### Environment Variables
 
@@ -160,11 +161,13 @@ All config values can be set via environment variables with the `PINGWAF_` prefi
 | `PINGWAF_ALLOW_REGISTRATION` | `server.allow_registration` |
 | `PINGWAF_HEARTBEAT_INTERVAL` | `server.heartbeat_interval_seconds` |
 | `PINGWAF_DB_MAX_CONNECTIONS` | `server.db_max_connections` |
+| `PINGWAF_METRIC_RETENTION_DAYS` | `server.metric_retention_days` |
 | `PINGWAF_CORS_ORIGINS` | `server.cors_origins` (comma-separated) |
 | `PINGWAF_MODE` | CLI mode (`all-in-one`, `server`, `agent`) |
 | `PINGWAF_SERVER_URL` | `agent.server_url` |
 | `PINGWAF_API_KEY` | `agent.api_key` |
 | `PINGWAF_CACHE_DIR` | `agent.cache_dir` |
+| `PINGWAF_METRICS_SHIP_INTERVAL` | `agent.metrics_ship_interval_secs` |
 | `PINGWAF_ES_ENABLED` | Elasticsearch shipper toggle |
 | `PINGWAF_ES_URLS` | Elasticsearch URLs (comma-separated) |
 | `PINGWAF_ES_INDEX_PREFIX` | ES index prefix |

@@ -39,6 +39,8 @@ const DEFAULT_DB_MAX_CONNECTIONS: u32 = 20;
 const DEFAULT_DB_MIN_CONNECTIONS: u32 = 1;
 /// Batch size used when writing streamed agent logs to PostgreSQL.
 const DEFAULT_LOG_BATCH_SIZE: usize = 500;
+/// Days of edge-metric samples kept before the hourly sweep prunes them.
+const DEFAULT_METRIC_RETENTION_DAYS: i64 = 7;
 
 fn default_db_url() -> String {
     DEFAULT_DB_URL.to_string()
@@ -88,6 +90,10 @@ fn default_log_batch_size() -> usize {
     DEFAULT_LOG_BATCH_SIZE
 }
 
+fn default_metric_retention_days() -> i64 {
+    DEFAULT_METRIC_RETENTION_DAYS
+}
+
 fn default_true() -> bool {
     true
 }
@@ -135,6 +141,9 @@ pub struct ServerConfig {
     /// Number of streamed log entries buffered before a batch insert.
     #[serde(default = "default_log_batch_size")]
     pub log_batch_size: usize,
+    /// Days of edge-metric samples kept in `agent_metrics` before pruning.
+    #[serde(default = "default_metric_retention_days")]
+    pub metric_retention_days: i64,
     /// Elasticsearch log shipping. `None` (or a disabled config) keeps logs in
     /// PostgreSQL only.
     #[serde(default)]
@@ -163,6 +172,7 @@ impl Default for ServerConfig {
             db_max_connections: DEFAULT_DB_MAX_CONNECTIONS,
             db_min_connections: DEFAULT_DB_MIN_CONNECTIONS,
             log_batch_size: DEFAULT_LOG_BATCH_SIZE,
+            metric_retention_days: DEFAULT_METRIC_RETENTION_DAYS,
             elasticsearch: None,
             cors_origins: Vec::new(),
             serve_frontend: true,
@@ -222,6 +232,11 @@ impl ServerConfig {
                 config.db_max_connections = max;
             }
         }
+        if let Ok(value) = std::env::var("PINGWAF_METRIC_RETENTION_DAYS") {
+            if let Ok(days) = value.parse::<i64>() {
+                config.metric_retention_days = days;
+            }
+        }
         if let Ok(value) = std::env::var("PINGWAF_CORS_ORIGINS") {
             config.cors_origins = value
                 .split(',')
@@ -276,6 +291,10 @@ impl ServerConfig {
         anyhow::ensure!(
             self.log_batch_size > 0,
             "log_batch_size must be positive"
+        );
+        anyhow::ensure!(
+            self.metric_retention_days > 0,
+            "metric_retention_days must be positive"
         );
         // Only an enabled Elasticsearch shipper has to be valid; a stored-but-
         // disabled config may be incomplete while an operator finishes setting
@@ -422,6 +441,7 @@ mod tests {
         )
         .expect("missing fields fall back to defaults");
         assert_eq!(config.http_addr, DEFAULT_HTTP_ADDR);
+        assert_eq!(config.metric_retention_days, DEFAULT_METRIC_RETENTION_DAYS);
         assert!(config.allow_registration);
         assert_eq!(config.heartbeat_interval_seconds, 15);
     }

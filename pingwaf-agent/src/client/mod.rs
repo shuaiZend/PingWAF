@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -358,7 +359,9 @@ impl ControlPlaneClient {
         // Run heartbeat and log shipping concurrently
         let heartbeat_fut = self.run_heartbeat(channel.clone(), &reg_response);
         let log_shipper_fut = self.run_log_shipper(channel.clone(), &agent_id);
-        let cert_shipper_fut = self.run_cert_event_shipper(channel, &agent_id);
+        let cert_shipper_fut =
+            self.run_cert_event_shipper(channel.clone(), &agent_id);
+        let metric_shipper_fut = self.run_metric_shipper(channel, &agent_id);
 
         // Wait for either to complete (usually means disconnection)
         tokio::select! {
@@ -380,12 +383,116 @@ impl ControlPlaneClient {
                     return Err(e);
                 }
             }
+            result = metric_shipper_fut => {
+                if let Err(e) = result {
+                    error!(error = %e, "Metric shipper ended");
+                    return Err(e);
+                }
+            }
             _ = self.wait_for_shutdown() => {
                 info!("Shutdown signal received");
             }
         }
 
         Ok(())
+    }
+
+    /// Run the periodic edge-metrics shipper.
+    ///
+    /// Samples the agent's process-wide counters and per-site cache gauges
+    /// every `metrics_ship_interval_secs` (0 disables shipping) and pushes
+    /// one `MetricBatch` per tick over the client-streaming `ShipMetrics`
+    /// RPC. The control plane persists these for the analytics queries.
+    async fn run_metric_shipper(
+        &self,
+        channel: Channel,
+        agent_id: &str,
+    ) -> anyhow::Result<()> {
+        let interval_secs = self.config.metrics_ship_interval_secs;
+        if interval_secs == 0 {
+            debug!("Metric shipping disabled");
+            return Ok(());
+        }
+        let mut client = ProtoClient::new(channel);
+
+        let mut interval =
+            tokio::time::interval(Duration::from_secs(interval_secs.max(1)));
+        interval
+            .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {},
+                _ = self.wait_for_shutdown() => break,
+            }
+            if self.shutdown_signal.load(Ordering::Relaxed) {
+                break;
+            }
+
+            let batch = self.build_metric_batch(agent_id);
+            let count = batch.metrics.len();
+            match client.ship_metrics(tokio_stream::once(batch)).await {
+                Ok(response) => {
+                    let ack = response.into_inner();
+                    debug!(
+                        count,
+                        received = ack.received_count,
+                        "Shipped metrics to server"
+                    );
+                },
+                Err(e) => {
+                    // Transient failures are expected across reconnects; the
+                    // next tick simply retries with fresh samples.
+                    debug!(error = %e, "Metric ship failed");
+                },
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Samples the current counters into one batch.
+    fn build_metric_batch(&self, agent_id: &str) -> proto::MetricBatch {
+        let metrics = &self.metrics;
+        let mut metrics_list = vec![
+            proto::Metric {
+                name: "pingwaf_requests_total".to_string(),
+                labels: HashMap::new(),
+                value: metrics.requests_total() as f64,
+                r#type: proto::MetricType::MetricCounter as i32,
+            },
+            proto::Metric {
+                name: "pingwaf_blocked_requests_total".to_string(),
+                labels: HashMap::new(),
+                value: metrics.blocked_requests_total() as f64,
+                r#type: proto::MetricType::MetricCounter as i32,
+            },
+            proto::Metric {
+                name: "pingwaf_active_connections".to_string(),
+                labels: HashMap::new(),
+                value: metrics.active_connections() as f64,
+                r#type: proto::MetricType::MetricGauge as i32,
+            },
+        ];
+        for status in self.rule_cache.cache_statuses() {
+            metrics_list.push(proto::Metric {
+                name: "pingwaf_site_cache_used_bytes".to_string(),
+                labels: HashMap::from([(
+                    "site".to_string(),
+                    status.domain.clone(),
+                )]),
+                value: status.cache_disk_bytes as f64,
+                r#type: proto::MetricType::MetricGauge as i32,
+            });
+        }
+        proto::MetricBatch {
+            agent_id: agent_id.to_string(),
+            timestamp: Some(prost_types::Timestamp {
+                seconds: chrono::Utc::now().timestamp(),
+                nanos: 0,
+            }),
+            metrics: metrics_list,
+        }
     }
 
     /// Run the bidirectional heartbeat stream.
@@ -1025,6 +1132,27 @@ mod tests {
             1_000,
             "a successful registration must retire accumulated backoff"
         );
+    }
+
+    #[test]
+    fn metric_batch_carries_global_counters() {
+        let client = test_client(1_000, 60_000);
+        let batch = client.build_metric_batch("agent-1");
+        assert_eq!(batch.agent_id, "agent-1");
+        assert!(batch.timestamp.is_some());
+
+        let names: Vec<&str> =
+            batch.metrics.iter().map(|m| m.name.as_str()).collect();
+        assert!(names.contains(&"pingwaf_requests_total"));
+        assert!(names.contains(&"pingwaf_blocked_requests_total"));
+        assert!(names.contains(&"pingwaf_active_connections"));
+        for metric in &batch.metrics {
+            assert!(
+                metric.labels.is_empty(),
+                "global counters carry no labels"
+            );
+            assert!(metric.value.is_finite());
+        }
     }
 
     #[tokio::test]
