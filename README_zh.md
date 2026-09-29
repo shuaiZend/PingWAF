@@ -11,7 +11,7 @@
 [![Build](https://github.com/shuaiZend/PingWAF/actions/workflows/test.yml/badge.svg)](https://github.com/shuaiZend/PingWAF/actions/workflows/test.yml)
 [![Docker](https://img.shields.io/badge/docker-compose%20ready-2496ED?logo=docker&logoColor=white)](./docker-compose.yml)
 
-**[English](./README.md) | [简体中文](./README_zh.md)**
+**[English](./README.md) | [简体中文](./README_zh.md) | [Español](./README_es.md) | [Français](./README_fr.md)**
 
 [快速开始](#-快速开始) · [架构概览](#-架构概览) · [核心特性](#-核心特性) · [文档导航](#-文档导航) · [参与贡献](./CONTRIBUTING.md)
 
@@ -65,14 +65,15 @@ graph TB
     AgentB -->|安全流量| Origin
 ```
 
-控制面与数据面通过 `ControlPlane` gRPC 服务通信（定义于 [`control_plane.proto`](./pingwaf-proto/proto/control_plane.proto)），共包含 6 个 RPC：
+控制面与数据面通过 `ControlPlane` gRPC 服务通信（定义于 [`control_plane.proto`](./pingwaf-proto/proto/control_plane.proto)），共包含 7 个 RPC：
 
 | RPC | 类型 | 用途 |
 | --- | --- | --- |
 | `RegisterAgent` | 一元调用 | Agent 加入集群，获取 ID 与心跳间隔 |
-| `Heartbeat` | 双向流 | 上行存活/统计，下行实时命令 |
+| `Heartbeat` | 双向流 | 上行存活/统计/每站点证书状态，下行实时命令 |
 | `SyncRules` | 服务端流 | 策略变更时将规则包推送到 Agent |
 | `ShipLogs` | 客户端流 | 批量请求/攻击日志流式上报控制面 |
+| `ShipCertEvents` | 客户端流 | Agent 捕获的 ACME 签发事件流式上报控制面 |
 | `ShipMetrics` | 客户端流 | 批量流量指标流式上报控制面 |
 | `GetSiteConfig` | 一元调用 | Agent 拉取单个站点的完整配置 |
 
@@ -93,28 +94,30 @@ graph TB
 - **托管规则集**——可按站点开关的精选签名。
 
 ### 🤖 CC 与 Bot 防护
-- **CC 防护 / 5 秒盾**——JavaScript 挑战、PoW（工作量证明）与交互式挑战。
-- **浏览器指纹**与 **HMAC 签名 clearance cookie**，用于区分真人与机器人。
-- 针对自动化流量的 **Bot 防护**规则。
+- **CC 防护 / 5 秒盾**——JavaScript 挑战、PoW（工作量证明）与交互式挑战，配合 HMAC 签名 clearance cookie。
+- **Bot 防护**——验证 Bot 白名单直接放行、已知浏览器 UA 放行，其余流量按配置动作处置；TLS 指纹与行为分析在路线图中。
 
 ### 🚦 访问控制
-- **IP 访问规则**——`block` / `allow` / `challenge` / `rate_limit`，支持 CIDR 网段与 CSV 批量导入。
-- **Geo 地域限制**——按国家/地区放行或拦截。
-- **多维限流**——按 IP、路径、请求头等多个维度。
+- **IP 访问规则**——`block` / `allow` / `challenge` / `js_challenge`，支持 CIDR 网段、CSV 批量导入与命名规则。
+- **全局 IP 分组**——可订阅的 CIDR 列表（纯文本、JSON 或 Cloudflare IP 段 API），按周期自动同步到所有站点，并记录同步错误。
+- **Geo 地域限制**——按国家与 ASN（自治系统号）放行或拦截，支持"拦截未知国家"策略。
+- **多维限流**——按 IP、主机、路径、ASN、国家等维度（header/cookie/query/JA3 维度在路线图中）。
 
 ### 🌊 流量管理
-- **边缘缓存**，支持按域名的磁盘配额与 LRU 驱逐。
-- **请求 / 响应改写**——头部、路径与响应体。
+- **源站池与路由**——将上游节点组成源站池，支持负载均衡（轮询或按 IP/URL/路径/头部/Cookie/查询参数一致性哈希），并按前缀、精确匹配或正则路由请求。
+- **边缘缓存**——按站点磁盘配额与 LRU 驱逐，支持 stale-while-revalidate 与浏览器 TTL 控制。
+- **请求 / 响应改写**——头部、路径、查询参数、状态码与响应体查找替换。
 - **自定义错误页**，基于 Tera 模板渲染。
 
 ### 🔐 TLS 与证书
-- **ACME / Let's Encrypt 自动签发与续期**（HTTP-01 与 DNS-01）。
-- **多 DNS 提供商**支持 DNS-01（阿里云、Cloudflare、华为云、腾讯云、手动）。
+- **ACME / Let's Encrypt 自动签发与续期**，直接在边缘完成（HTTP-01 与 DNS-01）。
+- **多 DNS 提供商**支持 DNS-01（Cloudflare、Route 53、DigitalOcean、阿里云、DNSPod、CloudXNS、手动）。
+- **每站点证书状态**（`valid` / `即将过期` / `expired`）通过心跳上报控制面，并提供可检索的 ACME 事件日志。
 
 ### 📊 可观测性
-- **全量请求日志写入 Elasticsearch**，支持响应体截断与 WAL 缓冲以保证可靠性。
+- **全量请求日志写入 Elasticsearch**，支持响应体截断与 WAL 缓冲以保证可靠性——同时 PostgreSQL 中会保存请求头/请求体预览，未启用 ES 也能在控制台查看日志详情。
 - **Analytics 分析**面板，呈现流量与攻击趋势。
-- 每个 Agent 上报 Prometheus 风格指标。
+- Agent 健康、流量统计与缓存命中/驱逐指标通过心跳上报控制面。
 
 ### 🎛️ 管理控制台
 - **JWT + bcrypt 认证**与**多租户**隔离。
@@ -148,11 +151,11 @@ graph TB
 
 ## 🚀 快速开始
 
-> **注意：** 预编译 Release 二进制**尚未发布**。当前推荐路径为 **Docker Compose** 与**源码编译**。一键安装脚本（`install.sh`）将在 Release 资产发布后可用。
+> **注意：** 预编译二进制目前仅提供 **Linux（amd64 / arm64）** 版本——见 [Releases 页面](https://github.com/shuaiZend/PingWAF/releases)。macOS 请使用源码编译（方式 B）。Docker 镜像支持两种架构。
 
 ### 方式 A —— Docker Compose（推荐）
 
-仓库内置的 [`docker-compose.yml`](./docker-compose.yml) 会以 `all-in-one` 模式连同 PostgreSQL 一起启动 PingWAF：
+仓库内置的 [`docker-compose.yml`](./docker-compose.yml) 会以 `all-in-one` 模式连同 PostgreSQL 一起启动 PingWAF，默认拉取 GHCR 预构建镜像（`ghcr.io/shuaizend/pingwaf:latest`）：
 
 ```bash
 git clone https://github.com/shuaiZend/PingWAF.git
@@ -178,7 +181,7 @@ docker compose up -d
 
 | 工具 | 版本 | 说明 |
 | --- | --- | --- |
-| Rust | 1.96+（MSRV） | CI/Docker 使用 1.98.0 构建 |
+| Rust | 1.96+（MSRV） | CI/Docker 使用 1.98.1 构建 |
 | Node.js | 22 | 构建控制台所需 |
 | `protoc` | 任意较新版本 | **必需**——用于 gRPC 代码生成 |
 | `cmake` | 任意较新版本 | 构建 TLS 后端（OpenSSL）所需 |
@@ -209,6 +212,14 @@ cargo build --release --bin pingwaf --features full
 ```
 
 👉 完整流程（数据库准备、首个站点、分布式 Agent、systemd）请见 **[docs/quick-start.md](./docs/quick-start.md)**。
+
+### 方式 C —— 安装脚本（Linux）
+
+在 Linux 服务器上，一键脚本会下载预编译二进制并安装，可选配置 systemd 服务：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh | sudo bash -s -- --mode all-in-one
+```
 
 ---
 
@@ -246,7 +257,7 @@ PingWAF 通过 **`PINGWAF_*` 环境变量**与 **CLI 参数**进行配置（CLI 
 | `PINGWAF_JWT_SECRET` | `change-me-in-production` | JWT 签名密钥（**≥ 16 字符**，生产必改） |
 | `PINGWAF_ADMIN_EMAIL` | `admin@pingwaf.local` | 初始管理员邮箱 |
 | `PINGWAF_ADMIN_PASSWORD` | `pingwaf123` | 初始管理员密码（**生产必改**） |
-| `PINGWAF_ALLOW_REGISTRATION` | `false` | `POST /api/v1/auth/register` 是否接受注册 |
+| `PINGWAF_ALLOW_REGISTRATION` | `true` | `POST /api/v1/auth/register` 是否接受注册（`docker-compose.yml` 与 `install.sh` 已将其设为 `false`） |
 | `PINGWAF_HEARTBEAT_INTERVAL` | `15` | 下发给 Agent 的心跳间隔（秒） |
 | `PINGWAF_SERVER_URL` | `http://localhost:9090` | *（agent）* 控制面 gRPC 地址 |
 | `PINGWAF_API_KEY` | *（空）* | *（agent）* API Key；为空则通过本地回环自动注册 |
@@ -260,7 +271,7 @@ PingWAF 通过 **`PINGWAF_*` 环境变量**与 **CLI 参数**进行配置（CLI 
 | --- | --- |
 | `9080` | REST API + 内嵌控制台（健康检查：`GET /healthz`） |
 | `9090` | gRPC 控制面（Agent 连接此端口） |
-| `80` / `443` | 代理流量（创建站点后绑定） |
+| `80` / `443` | 代理流量（创建首个站点后绑定；签发或上传证书前，两个端口均以明文 HTTP 提供服务） |
 
 👉 完整配置参考：**[docs/deployment.md](./docs/deployment.md)** 与 **[docs/api.md](./docs/api.md)**。
 

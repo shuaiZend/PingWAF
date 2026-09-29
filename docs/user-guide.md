@@ -13,7 +13,7 @@
 ### Dashboard Overview
 
 The dashboard provides:
-- **Analytics**: Request trends, top rules triggered, status codes
+- **Analytics**: Request trends, per-site traffic over time, top rules triggered, status codes
 - **Sites**: Manage protected websites
 - **Agents**: Monitor connected data-plane agents
 - **Logs**: Security events and access logs
@@ -33,15 +33,17 @@ Navigate to **Sites → Add Site**:
 Each site needs at least one origin server:
 
 ```
-Sites → [your site] → Upstreams → Add
+Sites → [your site] → Origin → Add node
 ```
+
+The **Origin** tab is a site's default view. Every site starts with a `default` origin pool, and the first node you add goes into it — see [Origin Pools & Routes](#origin-pools--routes) for pools, load balancing and path-based dispatch.
 
 | Field | Description |
 |-------|-------------|
-| Name | Label for this origin (e.g., "app-server-1") |
-| Address | Origin `host:port` (e.g., `10.0.1.50:3000`) |
-| Weight | Load-balancing weight (default: 1) |
-| TLS | Enable if the origin uses HTTPS |
+| Node name | Label for this origin (e.g., "origin-1") |
+| Origin address | Origin `host:port` (e.g., `10.0.0.1:8080`) |
+| Weight | 1–10000; round robin splits traffic by weight (default: 1) |
+| Pool | Origin pool the node belongs to |
 
 ### Step 3: DNS Setup
 
@@ -52,6 +54,50 @@ Point your domain's DNS to the PingWAF server:
 ### Step 4: SSL Certificate
 
 See [SSL Certificate Management](#ssl-certificate-management) below.
+
+## Origin Pools & Routes
+
+Open **Sites → [your site] → Origin** to manage origin pools, load balancing and route dispatch.
+
+### Origin Pools
+
+An origin pool is a set of origin nodes sharing one load-balancing algorithm and origin protocol.
+
+| Field | Description |
+|-------|-------------|
+| Pool name | Label for the pool (e.g., "primary") |
+| Load balancing | `Round robin` or a hash algorithm (see below) |
+| SNI hostname | Non-empty enables **HTTPS to origin**; must be a bare hostname covered by the origin certificate (`$host` is not supported) |
+| Verify origin certificate | Turning this off skips certificate validation (not recommended) |
+
+Load-balancing algorithms:
+
+| Algorithm | Spec | Behavior |
+|-----------|------|----------|
+| Round robin | `round_robin` | Spreads requests by node weight |
+| IP hash | `hash:ip` | Pins the same client IP to one node |
+| URL hash | `hash:url` | Pins by request URL |
+| Path hash | `hash:path` | Pins by request path |
+| Header hash | `hash:header:<name>` | Pins by a request header value |
+| Cookie hash | `hash:cookie:<name>` | Pins by a cookie value |
+| Query hash | `hash:query:<name>` | Pins by a query-string parameter |
+
+The site's default pool (marked **Default**) cannot be deleted, and a pool can only be deleted once no origin nodes and no routes reference it.
+
+### Routes
+
+Routes dispatch requests to different pools by path; unmatched traffic goes to the default pool.
+
+| Field | Description |
+|-------|-------------|
+| Rule name | Label for the route (e.g., "api-to-dedicated-pool") |
+| Match | `Prefix`, `Exact`, or `Regex` |
+| Path | Starts with `/` (e.g., `/api`), or a regular expression (e.g., `^/static/.*`) |
+| Priority weight | 1–60000; empty uses the auto weight (exact 1024 / prefix 512 / regex 256) |
+| Target pool | Pool that receives matching traffic |
+| Enabled | Toggle a route without deleting it |
+
+A prefix route on `/` is rejected: it would conflict with the default-pool fallback.
 
 ## WAF Configuration
 
@@ -122,13 +168,16 @@ Sites → [site] → Rate Limiting → Add Rule
 | Field | Description |
 |-------|-------------|
 | Name | Rule label |
-| Requests | Max requests in the window |
-| Window (seconds) | Time window for counting |
-| Action | `block`, `challenge`, or `log` |
-| Characteristics | How to group traffic: `ip`, `headers:x-api-key`, `cookie:session` |
-| Path filter | URI pattern to apply the rule (empty = all) |
+| Threshold | Max requests allowed in the period |
+| Period (seconds) | Time window for counting (1–86400) |
+| Action | `block`, `log`, `challenge`, `js_challenge`, or `allow` |
+| Characteristics | How to group traffic: `ip`, `ip_nat`, `host`, `path`, `header`, `cookie`, `query`, `asn`, `country`, `ja3` |
+| Filter expression | Optional match condition (empty = all requests) |
+| Mitigation timeout | How long the action applies once triggered (0–86400 seconds) |
 
 Example: Limit to 100 requests per 60 seconds per IP on `/api/*`.
+
+The edge currently enforces `ip`, `ip_nat`, `host`, `path`, `asn` and `country`; rules that only use `header`, `cookie`, `query` or `ja3` are stored but not enforced yet.
 
 ## CC Protection & Challenges
 
@@ -198,10 +247,12 @@ Sites → [site] → Certificates → Add → Let's Encrypt
 - **HTTP-01**: Requires port 80 reachable. Best for most setups.
 - **DNS-01**: Supports wildcard certificates. Providers:
   - Cloudflare
-  - AliDNS (Alibaba Cloud)
-  - Huawei DNS
-  - Tencent DNS
-  - Manual (CNAME delegation)
+  - Route 53
+  - DigitalOcean
+  - Aliyun (Alibaba Cloud)
+  - DNSPod (Tencent Cloud)
+  - CloudXNS
+  - Manual
 
 Certificates auto-renew 30 days before expiry.
 
@@ -226,6 +277,16 @@ Sites → [site] → SSL Settings
 - Force HTTPS redirect
 - HSTS configuration
 - OCSP stapling
+
+### Certificate Status and Events
+
+Agents report each site's certificate status in every heartbeat, shown on the SSL/TLS page:
+
+- **Valid**
+- **Expiring soon** — the certificate lapses within 48 hours
+- **Expired**
+
+The SSL/TLS page also keeps an event log per certificate — created, renewal requested, renewed, failed, deleted, plus raw ACME output — so issuance attempts can be followed from the console.
 
 ## Request/Response Rewriting
 
@@ -270,6 +331,7 @@ Sites → [site] → Error Pages → Add
 **Access Logs**: `Logs → Access`
 - All proxied requests with timing information
 - Filter by status code, path, client IP
+- Request headers and a body preview (first 1 KiB) are stored in PostgreSQL, so requests can be inspected from the dashboard without Elasticsearch
 
 ### Elasticsearch Integration
 
@@ -329,30 +391,57 @@ Push commands to connected agents:
 - **Purge Cache**: Clear local cache
 - **Restart Agent**: Graceful agent restart
 
-## Geo Restrictions
+## Access Control
+
+Per-site IP rules and geo restrictions live on one page:
 
 ```
-Sites → [site] → Geo
+Sites → [site] → Access control
 ```
 
-Block or allow traffic by country:
-- **Mode**: `block_listed` or `allow_listed`
-- **Countries**: ISO 3166-1 alpha-2 codes (e.g., US, CN, DE)
+Switch between the **IP rules** and **Geo restrictions** tabs with `?tab=ip` / `?tab=geo`; links to the former separate IP-rules and geo pages redirect here automatically.
 
-## IP Access Rules
-
-```
-Sites → [site] → IP Rules
-```
+### IP Rules
 
 | Field | Description |
 |-------|-------------|
-| IP/CIDR | Address or range (e.g., `192.168.1.0/24`) |
-| Action | `block`, `allow`, `challenge`, `rate_limit` |
-| Note | Description for audit |
-| Expiry | Optional auto-removal time |
+| Rule name | Label for the rule (e.g., "Block scraper subnet") |
+| Target | A manual **IP / CIDR** list, or an **IP group reference** whose ranges always follow the group's latest contents |
+| IP/CIDR | Address or range (e.g., `192.168.1.0/24`) — manual mode only |
+| Action | `block`, `allow`, `challenge`, or `js_challenge` |
+| Note | Why this rule exists (audit) |
+| Priority | Lower values are matched first |
 
-Bulk import supported via CSV upload.
+IP rules are evaluated before the WAF. Bulk import accepts one IP or CIDR per line.
+
+### Geo Restrictions
+
+Block or allow traffic by country and ASN:
+
+- **Mode**: `block_list` (block specific countries) or `allow_list` (allow only specific countries)
+- **Countries**: ISO 3166-1 alpha-2 codes (e.g., US, CN, DE)
+- **Blocked ASNs**: deny entire autonomous systems (e.g., `AS13335`)
+- **Block unknown locations**: deny traffic whose location cannot be determined
+- **Action**: how matched traffic is handled
+
+A "Requests by country" chart (last 24 hours) sits next to the policy editor.
+
+### Global IP Groups
+
+**IP Groups** (in the sidebar) manages named collections of IP ranges, either **global** (applied to all sites) or **per-site** (assigned to selected sites). Each group has an action: `block` or `allow`.
+
+Groups can subscribe to an external list instead of (or in addition to) manually entered ranges:
+
+| Field | Description |
+|-------|-------------|
+| Subscription Source URL | URL of the list to fetch (e.g., `https://example.com/ip-list.txt`) |
+| Refresh interval | Manual only, hourly, every 6 hours, daily, or weekly |
+
+A background scheduler refreshes enabled subscriptions when their interval elapses; use **Sync now** to refresh immediately. A failed sync keeps the previous ranges and records the error, which is shown on the group's row as the last sync error.
+
+One group, **Cloudflare**, is seeded on first boot: the official Cloudflare IP ranges from `https://api.cloudflare.com/client/v4/ips`, refreshed daily. It starts disabled — enable it once you know how it fits your traffic.
+
+Site IP rules can reference a group instead of enumerating ranges; see [IP Rules](#ip-rules) above.
 
 ## Bot Protection
 
@@ -362,10 +451,20 @@ Sites → [site] → Bot Protection
 
 | Setting | Description |
 |---------|-------------|
-| Mode | `off`, `detect`, `block` |
-| Known bots | Allow verified crawlers (Google, Bing, etc.) |
-| JS challenge | Require JavaScript execution |
-| Fingerprinting | Browser fingerprint validation |
+| Enable bot protection | Turn classification on or off |
+| User-Agent analysis | Inspect the User-Agent header to classify traffic |
+| Bot action | `block`, `challenge`, or `log` — applied to traffic classified as a bot (non-browser user agents) |
+| Known bots | Whitelist of good crawlers that always pass |
+
+How a request is classified:
+
+1. Verified bots whose User-Agent matches a **known bots** entry pass.
+2. Real browsers (known browser user agents) pass.
+3. Everything else receives the configured **bot action**.
+
+Known-bot entries are case-insensitive substrings matched against the User-Agent header (e.g., `Googlebot`); the console offers quick-add suggestions for common crawlers.
+
+JavaScript detection, TLS fingerprinting and behavioral analysis appear in the console as *Coming soon* — they are roadmap items, not implemented yet.
 
 ## Internationalization (i18n)
 

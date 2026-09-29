@@ -19,9 +19,11 @@ protect your first website.
 > | [2. Build from source](#path-2-build-from-source) | Contributors, custom builds, no Docker | ~20 min | Rust 1.96+, Node 22, protoc, cmake, clang |
 > | [3. Binary + systemd](#path-3-binary--systemd-production) | Production Linux servers | ~10 min | Prebuilt binary (see note) |
 >
-> **Prebuilt release binaries are not published yet.** `install.sh` and
-> `curl … | bash` style installs will not work until the first GitHub Release is
-> cut. Until then, use **Docker Compose** or **build from source**.
+> `install.sh` works on **Linux** (amd64/arm64) with prebuilt binaries from
+> [GitHub Releases](https://github.com/shuaiZend/PingWAF/releases). There are no
+> macOS release binaries — macOS users must
+> [build from source](#path-2-build-from-source). **Docker Compose** pulls a
+> pre-built image, so it works wherever Docker does.
 
 ---
 
@@ -191,15 +193,18 @@ Compose variables you can set:
 ### Step 3 — Start the stack
 
 ```bash
-docker compose up -d --build
+docker compose up -d
 ```
 
-The image is built locally from the multi-stage [`Dockerfile`](../Dockerfile)
+By default Compose pulls the pre-built image
+`ghcr.io/shuaizend/pingwaf:latest`. To build from source instead, uncomment the
+`build:` section in [`docker-compose.yml`](../docker-compose.yml) and run
+`docker compose up -d --build` — the multi-stage [`Dockerfile`](../Dockerfile)
 (Node 22 frontend build → Rust 1.98 builder with protoc/cmake/nasm → minimal
-runtime). The **first** build compiles the whole Rust workspace and can take
-10–20 minutes; later builds reuse the layer cache.
+runtime) compiles the whole Rust workspace, so the **first** source build can
+take 10–20 minutes; later builds reuse the layer cache.
 
-Follow the build or the logs:
+Follow the logs:
 
 ```bash
 docker compose logs -f pingwaf
@@ -446,9 +451,11 @@ Full details live in [`docs/deployment.md`](./deployment.md); the repository
 also ships a hardened unit file, [`pingwaf.service`](../pingwaf.service).
 
 > **Note:** the one-command installer (`install.sh` /
-> `curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh | bash`) downloads a release asset, and
-> **no release assets have been published yet**. Use Path 1 or Path 2 to obtain
-> a binary, then follow the steps below.
+> `curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh | bash`) downloads a prebuilt
+> `pingwaf-linux-{amd64,arm64}.tar.gz` asset from
+> [GitHub Releases](https://github.com/shuaiZend/PingWAF/releases) and works on
+> Linux. On macOS there are no release binaries — build via
+> [Path 2](#path-2-build-from-source), then follow the steps below.
 
 ```bash
 # 1. Copy the binary into place (built via Path 2)
@@ -562,7 +569,9 @@ request trends and top triggered rules.
 
 Rate limiting, CC protection and challenges, caching, rewrites, custom error
 pages, Geo/IP rules, bot protection and ACME certificates are all covered in
-[`docs/user-guide.md`](./user-guide.md).
+[`docs/user-guide.md`](./user-guide.md). Recent releases also add per-site
+origin pools with load balancing and routing (the **Origin** tab on a site's
+detail page) and global IP groups with subscription sync.
 
 ---
 
@@ -646,7 +655,7 @@ over environment variables.**
 | `--admin-email` | `PINGWAF_ADMIN_EMAIL` | `admin@pingwaf.local` | Seeded administrator email |
 | `--admin-password` | `PINGWAF_ADMIN_PASSWORD` | `pingwaf123` | Seeded administrator password |
 | `--serve-frontend` | — | `true` | Serve the embedded dashboard SPA |
-| — | `PINGWAF_ALLOW_REGISTRATION` | `false` (compose) | Allow new user signups |
+| — | `PINGWAF_ALLOW_REGISTRATION` | `true` (code); compose/install.sh set `false` | Allow new user signups |
 | — | `PINGWAF_HEARTBEAT_INTERVAL` | `15` | Agent heartbeat interval (seconds) |
 | — | `PINGWAF_DB_MAX_CONNECTIONS` | `20` | Connection pool maximum |
 | — | `PINGWAF_CORS_ORIGINS` | `[]` (all) | Allowed CORS origins, comma-separated |
@@ -793,10 +802,12 @@ Move the settings into flags or environment variables (see
 
 ### The install script does not work
 
-No prebuilt release assets have been published yet, so `install.sh` (and
-`https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh`) cannot download a binary. Use
-[Docker Compose](#path-1-docker-compose-recommended) or
-[build from source](#path-2-build-from-source).
+`install.sh` downloads prebuilt `pingwaf-linux-{amd64,arm64}.tar.gz` assets
+from [GitHub Releases](https://github.com/shuaiZend/PingWAF/releases), so it
+works on Linux (amd64/arm64) only — on macOS,
+[build from source](#path-2-build-from-source) instead. If the script cannot
+determine the latest version, pass one explicitly:
+`./install.sh --version 0.14.8`.
 
 ### High memory or disk usage
 

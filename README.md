@@ -11,7 +11,7 @@ Semantic-grade attack detection · Cloudflare-style rules · CC & Bot defense ·
 [![Build](https://github.com/shuaiZend/PingWAF/actions/workflows/test.yml/badge.svg)](https://github.com/shuaiZend/PingWAF/actions/workflows/test.yml)
 [![Docker](https://img.shields.io/badge/docker-compose%20ready-2496ED?logo=docker&logoColor=white)](./docker-compose.yml)
 
-**[English](./README.md) | [简体中文](./README_zh.md)**
+**[English](./README.md) | [简体中文](./README_zh.md) | [Español](./README_es.md) | [Français](./README_fr.md)**
 
 [Quick Start](#-quick-start) · [Architecture](#-architecture) · [Features](#-features) · [Documentation](#-documentation) · [Contributing](./CONTRIBUTING.md)
 
@@ -65,14 +65,15 @@ graph TB
     AgentB -->|safe traffic| Origin
 ```
 
-The control plane and the data plane talk over the `ControlPlane` gRPC service (defined in [`control_plane.proto`](./pingwaf-proto/proto/control_plane.proto)) with six RPCs:
+The control plane and the data plane talk over the `ControlPlane` gRPC service (defined in [`control_plane.proto`](./pingwaf-proto/proto/control_plane.proto)) with seven RPCs:
 
 | RPC | Kind | Purpose |
 | --- | --- | --- |
 | `RegisterAgent` | Unary | An agent joins the fleet and receives its ID + heartbeat interval |
-| `Heartbeat` | Bidirectional stream | Liveness, stats upstream and live commands downstream |
+| `Heartbeat` | Bidirectional stream | Liveness, stats and per-site certificate status upstream; live commands downstream |
 | `SyncRules` | Server stream | Rule bundles pushed to agents whenever policy changes |
 | `ShipLogs` | Client stream | Batched request/attack logs streamed to the control plane |
+| `ShipCertEvents` | Client stream | ACME issuance events captured on the agent, streamed to the control plane |
 | `ShipMetrics` | Client stream | Batched traffic metrics streamed to the control plane |
 | `GetSiteConfig` | Unary | An agent pulls the full config for a single site |
 
@@ -93,28 +94,30 @@ The control plane and the data plane talk over the `ControlPlane` gRPC service (
 - **Managed rule sets** — curated signatures you can toggle per site.
 
 ### 🤖 CC & Bot Defense
-- **CC protection / 5-second shield** — JavaScript challenge, Proof-of-Work and interactive challenges.
-- **Browser fingerprinting** and **HMAC-signed clearance cookies** to distinguish humans from bots.
-- **Bot protection** rules for automated traffic.
+- **CC protection / 5-second shield** — JavaScript challenge, Proof-of-Work and interactive challenges, with HMAC-signed clearance cookies.
+- **Bot protection** — verified-bot whitelist, known-browser pass-through and a configurable action for everything else; TLS fingerprinting and behavioral analysis are on the roadmap.
 
 ### 🚦 Access Control
-- **IP access rules** — `block` / `allow` / `challenge` / `rate_limit`, with CIDR ranges and CSV bulk import.
-- **Geo restriction** — allow or block by country/region.
-- **Multi-dimensional rate limiting** — by IP, path, headers and more.
+- **IP access rules** — `block` / `allow` / `challenge` / `js_challenge`, with CIDR ranges, CSV bulk import and named rules.
+- **Global IP groups** — subscription-backed CIDR lists (plain text, JSON or the Cloudflare IP ranges API) synced to every site on a schedule, with sync-error reporting.
+- **Geo restriction** — allow or block by country and by autonomous system number (ASN), with an optional "block unknown countries" policy.
+- **Multi-dimensional rate limiting** — by IP, host, path, ASN, country and more (header/cookie/query/JA3 keys are on the roadmap).
 
 ### 🌊 Traffic Management
-- **Edge caching** with per-domain disk quotas and LRU eviction.
-- **Request / response rewriting** — headers, paths and bodies.
+- **Origin pools & routes** — group upstreams into pools with load balancing (round-robin or consistent hashing by IP/URL/path/header/cookie/query) and route requests by prefix, exact match or regex.
+- **Edge caching** with per-site disk quotas and LRU eviction, stale-while-revalidate and browser TTL control.
+- **Request / response rewriting** — headers, paths, query strings, status codes and body search/replace.
 - **Custom error pages** rendered with Tera templates.
 
 ### 🔐 TLS & Certificates
-- **Automatic ACME / Let's Encrypt** issuance and renewal (HTTP-01 and DNS-01).
-- **Multiple DNS providers** for DNS-01 (Aliyun, Cloudflare, Huawei, Tencent, manual).
+- **Automatic ACME / Let's Encrypt** issuance and renewal on the edge (HTTP-01 and DNS-01).
+- **Multiple DNS providers** for DNS-01 (Cloudflare, Route 53, DigitalOcean, Aliyun, DNSPod, CloudXNS, manual).
+- **Per-site certificate status** (`valid` / `expiring soon` / `expired`) reported to the control plane over heartbeats, with a searchable ACME event log.
 
 ### 📊 Observability
-- **Full request logging to Elasticsearch** with body truncation and a WAL buffer for reliability.
+- **Full request logging to Elasticsearch** with body truncation and a WAL buffer for reliability — plus request headers/body previews stored in PostgreSQL for log inspection without Elasticsearch.
 - **Analytics** dashboards for traffic and attack trends.
-- Prometheus-style metrics shipped from every agent.
+- Agent health, traffic stats and cache hit/eviction metrics reported to the control plane over heartbeats.
 
 ### 🎛️ Management Console
 - **JWT + bcrypt authentication** and **multi-tenant** isolation.
@@ -148,11 +151,11 @@ The control plane and the data plane talk over the `ControlPlane` gRPC service (
 
 ## 🚀 Quick Start
 
-> **Note:** Prebuilt release binaries are **not published yet**. The recommended paths today are **Docker Compose** and **building from source**. The one-line install script (`install.sh`) will work once release assets are available.
+> **Note:** Prebuilt binaries are currently published for **Linux (amd64 / arm64)** only — see the [releases page](https://github.com/shuaiZend/PingWAF/releases). On macOS, build from source (Option B). The Docker image supports both architectures.
 
 ### Option A — Docker Compose (recommended)
 
-The bundled [`docker-compose.yml`](./docker-compose.yml) starts PingWAF in `all-in-one` mode together with PostgreSQL:
+The bundled [`docker-compose.yml`](./docker-compose.yml) starts PingWAF in `all-in-one` mode together with PostgreSQL, pulling the pre-built image from GHCR (`ghcr.io/shuaizend/pingwaf:latest`):
 
 ```bash
 git clone https://github.com/shuaiZend/PingWAF.git
@@ -178,7 +181,7 @@ Health check: `GET http://localhost:9080/healthz`.
 
 | Tool | Version | Notes |
 | --- | --- | --- |
-| Rust | 1.96+ (MSRV) | CI/Docker build with 1.98.0 |
+| Rust | 1.96+ (MSRV) | CI/Docker build with 1.98.1 |
 | Node.js | 22 | Required to build the dashboard |
 | `protoc` | any recent | **Required** — gRPC code generation |
 | `cmake` | any recent | Required to build the TLS backend (OpenSSL) |
@@ -206,6 +209,14 @@ cargo build --release --bin pingwaf --features full
 # 3. Run in all-in-one mode
 ./target/release/pingwaf all-in-one \
   --db-url "postgres://pingwaf:pingwaf@localhost:5432/pingwaf"
+```
+
+### Option C — Install script (Linux)
+
+On a Linux server, the one-line script downloads the prebuilt binary, installs it and (optionally) sets up a systemd service:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh | sudo bash -s -- --mode all-in-one
 ```
 
 👉 For a full walkthrough (database setup, first site, distributed agents, systemd), see **[docs/quick-start.md](./docs/quick-start.md)**.
@@ -246,7 +257,7 @@ PingWAF is configured through **`PINGWAF_*` environment variables** and **CLI fl
 | `PINGWAF_JWT_SECRET` | `change-me-in-production` | JWT signing secret (**≥ 16 chars**, change in production) |
 | `PINGWAF_ADMIN_EMAIL` | `admin@pingwaf.local` | Seeded administrator email |
 | `PINGWAF_ADMIN_PASSWORD` | `pingwaf123` | Seeded administrator password (**change in production**) |
-| `PINGWAF_ALLOW_REGISTRATION` | `false` | Whether `POST /api/v1/auth/register` accepts signups |
+| `PINGWAF_ALLOW_REGISTRATION` | `true` | Whether `POST /api/v1/auth/register` accepts signups (`docker-compose.yml` and `install.sh` set this to `false`) |
 | `PINGWAF_HEARTBEAT_INTERVAL` | `15` | Heartbeat interval handed to agents (seconds) |
 | `PINGWAF_SERVER_URL` | `http://localhost:9090` | *(agent)* control-plane gRPC URL |
 | `PINGWAF_API_KEY` | *(empty)* | *(agent)* API key; empty = auto-register over loopback |
@@ -260,7 +271,7 @@ PingWAF is configured through **`PINGWAF_*` environment variables** and **CLI fl
 | --- | --- |
 | `9080` | REST API + embedded dashboard (health: `GET /healthz`) |
 | `9090` | gRPC control plane (agents connect here) |
-| `80` / `443` | Proxied traffic (bound once you create a site) |
+| `80` / `443` | Proxied traffic (bound once the first site exists; until a certificate is issued or uploaded, both ports serve plaintext HTTP) |
 
 👉 Full configuration reference: **[docs/deployment.md](./docs/deployment.md)** and **[docs/api.md](./docs/api.md)**.
 
