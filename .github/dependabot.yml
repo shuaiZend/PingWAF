@@ -20,6 +20,21 @@ updates:
         update-types:
           - minor
           - patch
+    ignore:
+      # sea-orm 2.0 needs a dedicated migration (~80 files) and must land
+      # together with sea-orm-migration; revisit as planned work.
+      - dependency-name: "sea-orm"
+        update-types:
+          - version-update:semver-major
+      - dependency-name: "sea-orm-migration"
+        update-types:
+          - version-update:semver-major
+      # pingora-core 0.9 pins sentry 0.36, so a newer sentry-core cannot be
+      # handed to pingora's set_sentry_config; lift this after pingora ships
+      # a newer sentry.
+      - dependency-name: "sentry-core"
+        update-types:
+          - version-update:semver-major
 
   - package-ecosystem: npm
     directory: /web
@@ -35,6 +50,19 @@ updates:
         update-types:
           - minor
           - patch
+    ignore:
+      # TypeScript 7 is the native-port compiler; adopt it as planned work.
+      - dependency-name: "typescript"
+        update-types:
+          - version-update:semver-major
+      # i18next 26 and react-i18next 17 need a coordinated upgrade with
+      # code changes; revisit together.
+      - dependency-name: "i18next"
+        update-types:
+          - version-update:semver-major
+      - dependency-name: "react-i18next"
+        update-types:
+          - version-update:semver-major
 
   - package-ecosystem: github-actions
     directory: /
