@@ -8,6 +8,41 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.18.0] — 2026-09-30
+
+### ⛰️ Features
+
+- *(sites)* A site now serves several hostnames. The primary domain keeps its
+  role (display, validation anchor), and `alternate_domains` adds as many more
+  as needed — each one routed to the same site, its certificates extended to
+  cover them, and settable from the dashboard's domain editor. Wildcards
+  (`*.example.com`) are supported and never cover their bare domain. The API
+  refuses a name another site already claims, including a hostname covered by
+  a different site's wildcard, where the data plane's host matching would be
+  ambiguous; wildcard certificates additionally require the `dns-01` ACME
+  challenge, enforced both when saving the certificate and on the data plane.
+- *(logs)* Log retention is configurable in Settings. Administrators pick how
+  long access logs and security events are kept — 180 days each by default,
+  1 to 3650 — and a background sweep on the control plane deletes older rows
+  in batches every six hours. The Elasticsearch ILM policy keeps its own,
+  independent 360-day window for shipped logs; the manually triggered purge
+  endpoint is unchanged.
+- *(dashboard)* Custom error pages are global now. They moved from each site's
+  tab to a single Settings card, one page per status code for the whole
+  deployment, pushed to every site as before (and falling back to the built-in
+  page when a code has no override).
+- *(security)* Basic auth joins access control, in two shapes. A site-wide gate
+  (Access Control → Basic Auth: realm, credentials, optional failure delay and
+  credential stripping) protects every request of a site, and a `basic_auth`
+  action on IP and Geo rules protects just the clients a rule matches.
+  Unauthenticated requests answer `401` with a `WWW-Authenticate` challenge;
+  after the credentials pass, a rule-gated request continues through the
+  remaining checks (bot protection, rate limits, WAF rule sets), while an
+  `allow` rule exempts a client from the site-wide gate. The check lives in
+  the WAF plugin ahead of the cache, so a cached response can never bypass it.
+  Credentials are stored with the site configuration and masked in API
+  responses.
+
 ## [PingWAF 0.17.1] — 2026-09-30
 
 ### 🐛 Bug Fixes
