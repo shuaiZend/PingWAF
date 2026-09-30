@@ -16,6 +16,9 @@ pingwaf-pprof = { path = "../pingwaf-pprof" }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }
+# Encodes the stored basic-auth passwords into the `Authorization` payload the
+# data plane compares against.
+base64 = { workspace = true }
 bcrypt = { workspace = true }
 chrono = { workspace = true }
 hex = { workspace = true }

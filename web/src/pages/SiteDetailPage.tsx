@@ -16,7 +16,6 @@ import {
   Robot,
   Cloud,
   IdentificationCard,
-  FileHtml,
   Network,
   Warning,
 } from '@phosphor-icons/react'
@@ -89,7 +88,6 @@ export function SiteDetailPage() {
     { to: `${base}/ssl`, label: t('nav.ssl'), icon: Lock },
     { to: `${base}/traffic`, label: t('nav.traffic'), icon: ChartLine },
     { to: `${base}/rules/rewrite`, label: t('pages.rewrite.title'), icon: Sliders },
-    { to: `${base}/rules/error-pages`, label: t('nav.errorPages'), icon: FileHtml },
   ]
 
   // The server answers 404 for sites the caller may not see — surface that
@@ -148,6 +146,14 @@ export function SiteDetailPage() {
                 t('pages.siteDetail.overview')
               )}
             </p>
+            {site && (site.alternate_domains?.length ?? 0) > 0 && (
+              <p
+                className="pw-mono truncate text-xs text-fg-subtle"
+                title={site.alternate_domains.join(', ')}
+              >
+                + {site.alternate_domains.join(', ')}
+              </p>
+            )}
           </div>
         </div>
 

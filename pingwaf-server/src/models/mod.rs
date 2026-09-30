@@ -23,12 +23,14 @@ pub mod host_samples;
 pub mod ip_access_rules;
 pub mod ip_group_sites;
 pub mod ip_groups;
+pub mod log_retention;
 pub mod mtls;
 pub mod passkeys;
 pub mod rate_limit_stats;
 pub mod rewrite_rules;
 pub mod rules;
 pub mod security_events;
+pub mod site_basic_auth;
 pub mod sites;
 pub mod users;
 

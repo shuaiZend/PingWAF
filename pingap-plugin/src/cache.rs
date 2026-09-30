@@ -1177,6 +1177,7 @@ purge_ip_list = ["192.168.1.1"]
             upstreams: vec![],
             routes: vec![],
             bot_protection: None,
+            basic_auth: None,
         }
     }
 

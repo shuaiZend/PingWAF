@@ -7,24 +7,23 @@ import type {
 } from './types'
 
 /**
- * Custom error pages — `/api/v1/sites/{siteId}/error-pages`.
+ * Custom error pages — `/api/v1/error-pages` (administrators only).
  *
- * One template per status code. The template is rendered with a small set of
- * variables (see {@link ERROR_PAGE_VARIABLES}) before being returned to the
- * client, so operators can brand 403/429/5xx responses.
+ * One global template per status code: the list applies to every site, so the
+ * settings page is the only place to edit it. The template is rendered with a
+ * small set of variables (see {@link ERROR_PAGE_VARIABLES}) before being
+ * returned to the client, so operators can brand 403/429/5xx responses.
  */
 export const errorPagesApi = {
-  list: (siteId: string) =>
-    apiClient.get<Page<ErrorPage>>(`/sites/${siteId}/error-pages`),
+  list: () => apiClient.get<Page<ErrorPage>>('/error-pages'),
 
-  upsert: (siteId: string, data: UpsertErrorPageRequest) =>
-    apiClient.post<ErrorPage>(`/sites/${siteId}/error-pages`, data),
+  upsert: (data: UpsertErrorPageRequest) =>
+    apiClient.post<ErrorPage>('/error-pages', data),
 
-  update: (siteId: string, id: string, data: Partial<UpsertErrorPageRequest>) =>
-    apiClient.put<ErrorPage>(`/sites/${siteId}/error-pages/${id}`, data),
+  update: (id: string, data: Partial<UpsertErrorPageRequest>) =>
+    apiClient.put<ErrorPage>(`/error-pages/${id}`, data),
 
-  delete: (siteId: string, id: string) =>
-    apiClient.delete<void>(`/sites/${siteId}/error-pages/${id}`),
+  delete: (id: string) => apiClient.delete<void>(`/error-pages/${id}`),
 }
 
 /** Variables the template engine substitutes. Rendered in the editor sidebar. */
@@ -134,8 +133,8 @@ export function renderErrorPageTemplate(
 }
 
 export const errorPageKeys = {
-  all: (siteId: string) => ['sites', siteId, 'error-pages'] as const,
-  list: (siteId: string) => ['sites', siteId, 'error-pages', 'list'] as const,
+  all: ['error-pages'] as const,
+  list: () => ['error-pages', 'list'] as const,
 }
 
 export default errorPagesApi

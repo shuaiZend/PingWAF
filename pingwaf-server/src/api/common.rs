@@ -2,13 +2,16 @@
 //! the multi-tenancy checks that every handler performs before touching data.
 
 use chrono::{DateTime, Utc};
-use sea_orm::{ConnectionTrait, DatabaseConnection, EntityTrait, Statement};
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, QueryFilter,
+    Statement,
+};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::api::error::ApiError;
 use crate::auth::AuthUser;
-use crate::models::{role, site};
+use crate::models::{acme_challenge, role, site};
 
 /// Default number of rows returned by a list endpoint.
 pub const DEFAULT_PAGE_SIZE: u64 = 50;
@@ -292,7 +295,11 @@ pub fn trim_trailing_slash(value: &str) -> &str {
     value.trim_end_matches('/')
 }
 
-/// Lower-cases and validates a domain name.
+/// Lower-cases and validates a hostname.
+///
+/// A wildcard is only accepted as the whole left-most label (`*.example.com`)
+/// and its base needs at least two labels, so `*` and `*.com` are rejected:
+/// pingap's host selector would otherwise swallow every name under a TLD.
 pub fn normalise_domain(value: &str) -> Result<String, ApiError> {
     let domain = value.trim().trim_start_matches('.').to_lowercase();
     let domain = trim_trailing_slash(&domain)
@@ -303,20 +310,151 @@ pub fn normalise_domain(value: &str) -> Result<String, ApiError> {
             "invalid domain '{value}': must be 1-253 characters"
         )));
     }
-    if !domain.split('.').all(|label| {
-        !label.is_empty()
-            && label.len() <= 63
-            && label.chars().all(is_domain_char)
+
+    let labels: Vec<&str> = domain.split('.').collect();
+    let wildcard = labels.first() == Some(&"*");
+    if !wildcard && labels.iter().any(|label| label.contains('*')) {
+        return Err(ApiError::BadRequest(format!(
+            "invalid domain '{value}': a wildcard must be the leading label and look like '*.example.com'"
+        )));
+    }
+    if wildcard && labels.len() < 3 {
+        return Err(ApiError::BadRequest(format!(
+            "invalid domain '{value}': a wildcard needs at least two labels after '*.'"
+        )));
+    }
+    let rest = if wildcard { &labels[1..] } else { &labels[..] };
+    if rest.iter().any(|label| {
+        label.is_empty()
+            || label.len() > 63
+            || !label.chars().all(is_domain_char)
     }) {
         return Err(ApiError::BadRequest(format!(
-            "invalid domain '{value}': labels may only contain letters, digits and '-'"
+            "invalid domain '{value}': labels may only contain letters, digits, '-' and '_'"
         )));
     }
     Ok(domain)
 }
 
 fn is_domain_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '*'
+    c.is_ascii_alphanumeric() || c == '-' || c == '_'
+}
+
+/// Normalises the hostnames of one site and rejects duplicates inside it.
+///
+/// `primary` is the site's own domain; alternates come from the caller. The
+/// first repeated hostname (against the primary or another alternate) is an
+/// error rather than something to silently swallow.
+pub fn normalise_domain_list(
+    primary: &str,
+    alternates: &[String],
+) -> Result<Vec<String>, ApiError> {
+    let mut seen = std::collections::HashSet::new();
+    seen.insert(primary.to_string());
+    let mut result = Vec::with_capacity(alternates.len());
+    for raw in alternates {
+        let domain = normalise_domain(raw)?;
+        if !seen.insert(domain.clone()) {
+            return Err(ApiError::BadRequest(format!(
+                "domain '{domain}' appears twice: the primary domain and alternate_domains must be distinct"
+            )));
+        }
+        result.push(domain);
+    }
+    Ok(result)
+}
+
+/// Rejects two sites whose hostname sets would make request routing ambiguous.
+///
+/// pingap routes a Host header by suffix match with a flat weight, so two sites
+/// may not lay claim to overlapping names: identical hostnames, a wildcard of
+/// one site covering a hostname of the other, or two nested wildcards all make
+/// the winner depend on configuration order. An apex and its wildcard
+/// (`example.com` plus `*.example.com`) are fine — a wildcard never matches the
+/// apex itself.
+pub fn ensure_no_domain_conflict(
+    site_a: &[String],
+    site_b: &[String],
+) -> Result<(), ApiError> {
+    for left in site_a {
+        for right in site_b {
+            if left == right {
+                return Err(ApiError::BadRequest(format!(
+                    "domain '{left}' is already served by another site"
+                )));
+            }
+            for (wildcard, exact) in [(left, right), (right, left)] {
+                if let Some(base) = wildcard.strip_prefix("*.") {
+                    if exact.ends_with(&format!(".{base}")) {
+                        return Err(ApiError::BadRequest(format!(
+                            "domain '{exact}' falls under the wildcard '{wildcard}' of another site"
+                        )));
+                    }
+                }
+            }
+            if let (Some(base_a), Some(base_b)) =
+                (left.strip_prefix("*."), right.strip_prefix("*."))
+            {
+                let nested_in_a = base_a.ends_with(&format!(".{base_b}"));
+                let nested_in_b = base_b.ends_with(&format!(".{base_a}"));
+                if nested_in_a || nested_in_b {
+                    return Err(ApiError::BadRequest(format!(
+                        "wildcard '{left}' overlaps wildcard '{right}' of another site"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Refuses an ACME order a wildcard hostname can never satisfy.
+///
+/// `http-01` proves control of one hostname at a time, so a certificate for
+/// `*.example.com` can only come from `dns-01`. Rejecting the combination at
+/// the API keeps the agent from retrying an order that can never succeed;
+/// the data plane keeps its own copy of this guard for rows written before
+/// the check existed.
+pub fn ensure_acme_wildcard_supported(
+    site: &site::Model,
+    extra_domains: &[String],
+    challenge: Option<&str>,
+) -> Result<(), ApiError> {
+    let wildcard = site.domain.starts_with("*.")
+        || site.alternate_domains.iter().any(|d| d.starts_with("*."))
+        || extra_domains.iter().any(|d| d.starts_with("*."));
+    if !wildcard {
+        return Ok(());
+    }
+    if challenge.unwrap_or(acme_challenge::HTTP_01) != acme_challenge::DNS_01 {
+        return Err(ApiError::BadRequest(
+            "a wildcard domain requires the dns-01 ACME challenge — http-01 cannot validate '*.example.com'; switch the challenge type to dns-01 and configure a DNS provider"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Checks a site's hostname set against every other site in the database.
+///
+/// `exclude` is the site being edited, so that a site does not conflict with
+/// itself. New sites pass `None`.
+pub async fn ensure_domains_available(
+    db: &DatabaseConnection,
+    domains: &[String],
+    exclude: Option<Uuid>,
+) -> Result<(), ApiError> {
+    let mut query = site::Entity::find();
+    if let Some(id) = exclude {
+        query = query.filter(site::Column::Id.ne(id));
+    }
+    let others = query.all(db).await?;
+    for other in others {
+        let mut existing = vec![other.domain.clone()];
+        existing.extend(other.alternate_domains.clone());
+        ensure_no_domain_conflict(domains, &existing)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -378,9 +516,168 @@ mod tests {
     #[test]
     fn domains_are_normalised_and_validated() {
         assert_eq!(normalise_domain(" Example.COM ").unwrap(), "example.com");
+        assert_eq!(normalise_domain(".Example.com.").unwrap(), "example.com");
+        assert_eq!(normalise_domain("*.Example.COM").unwrap(), "*.example.com");
         assert!(normalise_domain("").is_err());
         assert!(normalise_domain("bad domain.com").is_err());
         assert!(normalise_domain("a..b.com").is_err());
+    }
+
+    #[test]
+    fn wildcards_need_a_real_base_domain() {
+        // Legitimate wildcards: base is at least two labels.
+        assert_eq!(normalise_domain("*.example.com").unwrap(), "*.example.com");
+        assert_eq!(normalise_domain("*.co.uk").unwrap(), "*.co.uk");
+        assert_eq!(
+            normalise_domain("*.api.example.com").unwrap(),
+            "*.api.example.com"
+        );
+
+        // `*` may only stand as the whole leading label.
+        assert!(normalise_domain("*").is_err());
+        assert!(normalise_domain("*.com").is_err());
+        assert!(normalise_domain("foo*bar.com").is_err());
+        assert!(normalise_domain("foo.*.com").is_err());
+        assert!(normalise_domain("*.*.example.com").is_err());
+        assert!(normalise_domain("**.example.com").is_err());
+    }
+
+    #[test]
+    fn domain_lists_reject_duplicates() {
+        let alternates = vec!["api.example.com".to_string()];
+        assert_eq!(
+            normalise_domain_list("example.com", &alternates).unwrap(),
+            vec!["api.example.com".to_string()]
+        );
+
+        // A repeat of the primary domain or of another alternate is an error,
+        // even when the spelling differs in case.
+        assert!(
+            normalise_domain_list("example.com", &["Example.com".into()])
+                .is_err()
+        );
+        assert!(normalise_domain_list(
+            "example.com",
+            &["a.example.com".into(), "A.example.com".into()]
+        )
+        .is_err());
+        // A wildcard inside the same site may coexist with its apex.
+        assert!(normalise_domain_list(
+            "example.com",
+            &["*.example.com".into()]
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn wildcard_acme_orders_need_dns01() {
+        let timestamp = Utc::now();
+        let mut site = site::Model {
+            id: Uuid::nil(),
+            user_id: Uuid::nil(),
+            name: "shop".to_string(),
+            domain: "*.example.com".to_string(),
+            alternate_domains: Vec::new(),
+            status: "active".to_string(),
+            plan: "free".to_string(),
+            cache_quota_mb: 1024,
+            created_at: timestamp,
+            updated_at: timestamp,
+        };
+        // The default challenge is http-01, which a wildcard cannot pass.
+        assert!(ensure_acme_wildcard_supported(&site, &[], None).is_err());
+        assert!(ensure_acme_wildcard_supported(&site, &[], Some("http-01"))
+            .is_err());
+        assert!(
+            ensure_acme_wildcard_supported(&site, &[], Some("dns-01")).is_ok()
+        );
+
+        // A wildcard among the alternates (or in the certificate's own
+        // hostname list) counts too.
+        site.domain = "example.com".to_string();
+        site.alternate_domains = vec!["*.shop.example.com".to_string()];
+        assert!(ensure_acme_wildcard_supported(&site, &[], Some("http-01"))
+            .is_err());
+        site.alternate_domains.clear();
+        assert!(ensure_acme_wildcard_supported(
+            &site,
+            &["*.other.com".to_string()],
+            Some("http-01")
+        )
+        .is_err());
+
+        // Plain hostnames are unaffected.
+        assert!(
+            ensure_acme_wildcard_supported(&site, &[], Some("http-01")).is_ok()
+        );
+    }
+
+    #[test]
+    fn cross_site_domains_must_not_overlap() {
+        let set = |items: &[&str]| -> Vec<String> {
+            items.iter().map(|item| item.to_string()).collect()
+        };
+
+        // Exact collisions are refused, in every position.
+        assert!(ensure_no_domain_conflict(
+            &set(&["example.com"]),
+            &set(&["example.com"])
+        )
+        .is_err());
+        assert!(ensure_no_domain_conflict(
+            &set(&["example.com", "api.example.com"]),
+            &set(&["api.example.com"])
+        )
+        .is_err());
+        assert!(ensure_no_domain_conflict(
+            &set(&["*.example.com"]),
+            &set(&["*.example.com"])
+        )
+        .is_err());
+
+        // A wildcard of one site must not cover a hostname of the other.
+        assert!(ensure_no_domain_conflict(
+            &set(&["*.example.com"]),
+            &set(&["app.example.com"])
+        )
+        .is_err());
+        assert!(ensure_no_domain_conflict(
+            &set(&["app.example.com"]),
+            &set(&["*.example.com"])
+        )
+        .is_err());
+        assert!(ensure_no_domain_conflict(
+            &set(&["*.example.com"]),
+            &set(&["foo.bar.example.com"])
+        )
+        .is_err());
+
+        // Nested wildcards are ambiguous too.
+        assert!(ensure_no_domain_conflict(
+            &set(&["*.example.com"]),
+            &set(&["*.api.example.com"])
+        )
+        .is_err());
+
+        // The apex and its own wildcard live together; a wildcard never
+        // matches the bare apex.
+        assert!(ensure_no_domain_conflict(
+            &set(&["example.com"]),
+            &set(&["*.example.com"])
+        )
+        .is_ok());
+        assert!(ensure_no_domain_conflict(
+            &set(&["example.com"]),
+            &set(&["*.other.example.com"])
+        )
+        .is_ok());
+
+        // Unrelated names never conflict.
+        assert!(ensure_no_domain_conflict(
+            &set(&["shop.example.com", "*.shop.example.com"]),
+            &set(&["blog.example.net"])
+        )
+        .is_ok());
     }
 
     #[test]

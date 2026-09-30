@@ -1,24 +1,31 @@
 import { Navigate, useLocation, useParams, useSearchParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
-import { FunnelSimple, GlobeHemisphereWest } from '@phosphor-icons/react'
+import { FunnelSimple, GlobeHemisphereWest, Key } from '@phosphor-icons/react'
 import { PageHeader } from '@/components/PageHeader'
 import { Tabs } from '@/components/ui/Tabs'
 import { IpRulesPanel } from './IpRulesPanel'
 import { GeoPanel } from './GeoPanel'
+import { BasicAuthPanel } from './BasicAuthPanel'
 
-type AccessTab = 'ip' | 'geo'
+type AccessTab = 'ip' | 'geo' | 'basic-auth'
+
+const ACCESS_TABS: AccessTab[] = ['ip', 'geo', 'basic-auth']
+
+function parseTab(value: string | null): AccessTab {
+  return ACCESS_TABS.includes(value as AccessTab) ? (value as AccessTab) : 'ip'
+}
 
 /**
  * Access restrictions for one site, as one tab with a module per mechanism.
  *
- * IP rules and geo restrictions are the first two modules; credential-based
- * restrictions (basic auth, OAuth) will land here as further tabs rather than
- * as new top-level site tabs.
+ * IP rules, geo restrictions and basic auth are the modules; credential-based
+ * restrictions land here as further tabs rather than as new top-level site
+ * tabs.
  */
 export function AccessControlPage() {
   const { t } = useTranslation()
   const [searchParams, setSearchParams] = useSearchParams()
-  const tab: AccessTab = searchParams.get('tab') === 'geo' ? 'geo' : 'ip'
+  const tab = parseTab(searchParams.get('tab'))
 
   const setTab = (next: string) => {
     const params = new URLSearchParams(searchParams)
@@ -49,10 +56,17 @@ export function AccessControlPage() {
             label: t('pages.accessControl.tabGeo'),
             icon: <GlobeHemisphereWest weight="duotone" className="h-4 w-4" />,
           },
+          {
+            value: 'basic-auth',
+            label: t('pages.accessControl.tabBasicAuth'),
+            icon: <Key weight="duotone" className="h-4 w-4" />,
+          },
         ]}
       />
 
-      {tab === 'ip' ? <IpRulesPanel /> : <GeoPanel />}
+      {tab === 'ip' && <IpRulesPanel />}
+      {tab === 'geo' && <GeoPanel />}
+      {tab === 'basic-auth' && <BasicAuthPanel />}
     </div>
   )
 }

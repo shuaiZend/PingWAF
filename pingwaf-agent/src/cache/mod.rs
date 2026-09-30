@@ -71,6 +71,9 @@ pub struct SiteRules {
     pub routes: Vec<RouteConfig>,
     #[serde(default)]
     pub bot_protection: Option<BotProtectionConfig>,
+    /// Site-wide basic auth gate; `None` when the site has none configured.
+    #[serde(default)]
+    pub basic_auth: Option<BasicAuthConfig>,
 }
 
 impl SiteRules {
@@ -171,6 +174,9 @@ pub enum WafAction {
     Challenge,
     JsChallenge,
     Allow,
+    /// Only meaningful where the protocol allows it (the geo policy and the
+    /// IP access rules); a WAF engine verdict never carries it.
+    BasicAuth,
 }
 
 impl From<i32> for WafAction {
@@ -180,7 +186,19 @@ impl From<i32> for WafAction {
             2 => Self::Challenge,
             3 => Self::JsChallenge,
             4 => Self::Allow,
-            _ => Self::Block,
+            5 => Self::BasicAuth,
+            // 0 is the enum's own block value. Anything else comes from a
+            // control plane newer than this data plane: warn instead of
+            // enforcing an action we do not understand as a block.
+            unknown => {
+                if unknown != 0 {
+                    warn!(
+                        value = unknown,
+                        "unknown waf action; enforcing as block"
+                    );
+                }
+                Self::Block
+            },
         }
     }
 }
@@ -233,6 +251,8 @@ pub enum IpAccessAction {
     Challenge,
     JsChallenge,
     Allow,
+    /// The matching client must pass the site's basic auth gate.
+    BasicAuth,
 }
 
 impl From<i32> for IpAccessAction {
@@ -241,7 +261,19 @@ impl From<i32> for IpAccessAction {
             1 => Self::Challenge,
             2 => Self::JsChallenge,
             3 => Self::Allow,
-            _ => Self::Block,
+            4 => Self::BasicAuth,
+            // 0 is the enum's own block value. Anything else comes from a
+            // control plane newer than this data plane: warn instead of
+            // enforcing an action we do not understand as a block.
+            unknown => {
+                if unknown != 0 {
+                    warn!(
+                        value = unknown,
+                        "unknown ip access action; enforcing as block"
+                    );
+                }
+                Self::Block
+            },
         }
     }
 }
@@ -316,6 +348,31 @@ pub struct BotProtectionConfig {
     pub enabled: bool,
     pub action: WafAction,
     pub known_bots_whitelist: Vec<String>,
+}
+
+// ─── Basic Auth ─────────────────────────────────────────────
+
+/// Site-wide HTTP basic authentication, enforced by the WAF plugin before the
+/// cache plugin can answer from a stored response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BasicAuthConfig {
+    pub enabled: bool,
+    /// Realm advertised in `WWW-Authenticate`.
+    pub realm: String,
+    pub credentials: Vec<BasicAuthCredential>,
+    /// Seconds a failed attempt is delayed before the 401 goes out.
+    pub delay_seconds: u32,
+    /// Strip the `Authorization` header once the request is authenticated.
+    pub hide_credentials: bool,
+}
+
+/// One accepted credential, pre-encoded by the control plane.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BasicAuthCredential {
+    pub username: String,
+    /// Base64 of `username:password`, the payload a client sends in the
+    /// `Authorization: Basic …` header.
+    pub authorization: String,
 }
 
 // ─── Rewrite ────────────────────────────────────────────────
@@ -1110,6 +1167,10 @@ impl RuleCache {
                 .bot_protection
                 .as_ref()
                 .map(Self::convert_bot_protection),
+            basic_auth: bundle
+                .basic_auth
+                .as_ref()
+                .map(Self::convert_basic_auth),
         }
     }
 
@@ -1243,6 +1304,23 @@ impl RuleCache {
             enabled: b.enabled,
             action: WafAction::from(b.action),
             known_bots_whitelist: b.known_bots_whitelist.clone(),
+        }
+    }
+
+    fn convert_basic_auth(b: &proto::BasicAuthConfig) -> BasicAuthConfig {
+        BasicAuthConfig {
+            enabled: b.enabled,
+            realm: b.realm.clone(),
+            credentials: b
+                .credentials
+                .iter()
+                .map(|credential| BasicAuthCredential {
+                    username: credential.username.clone(),
+                    authorization: credential.authorization.clone(),
+                })
+                .collect(),
+            delay_seconds: b.delay_seconds,
+            hide_credentials: b.hide_credentials,
         }
     }
 
@@ -1433,6 +1511,7 @@ mod tests {
                     challenge_config: None,
                     rewrite_rules: Vec::new(),
                     error_pages: Vec::new(),
+                    basic_auth: None,
                     ssl_config: None,
                     upstreams: vec![UpstreamConfig {
                         name: "default".to_string(),

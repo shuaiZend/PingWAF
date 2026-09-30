@@ -161,9 +161,9 @@ async fn update_geo(
         active.block_unknown = Set(block_unknown);
     }
     if let Some(action_str) = payload.action {
-        if !action::is_valid(&action_str) {
+        if !action::is_valid_geo(&action_str) {
             return Err(ApiError::BadRequest(format!(
-                "unknown action '{action_str}'"
+                "invalid geo action '{action_str}'; expected block, challenge, js_challenge or basic_auth"
             )));
         }
         active.action = Set(action_str);

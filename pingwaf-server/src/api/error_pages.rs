@@ -1,4 +1,9 @@
-//! Custom error pages management per site.
+//! Global custom error page management.
+//!
+//! The templates are deployment-wide: every site's bundle carries the same
+//! list and the data plane answers with the page matching the status code it
+//! is about to return. Writes therefore push to every registered agent through
+//! [`notify_all_config_changed`], not just to one site's nodes.
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -6,21 +11,15 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Json;
 use axum::Router;
-use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter,
-    QueryOrder, Set,
-};
+use sea_orm::{ActiveModelTrait, EntityTrait, PaginatorTrait, QueryOrder, Set};
 use serde::Deserialize;
 use uuid::Uuid;
 
-use crate::api::common::{
-    load_site_read, load_site_write, non_empty, parse_uuid, Page, Pagination,
-};
+use crate::api::common::{non_empty, parse_uuid, Page, Pagination};
 use crate::api::error::ApiError;
-use crate::api::sites::touch_site;
 use crate::api::state::AppState;
 use crate::auth::AuthUser;
-use crate::grpc::notify_config_changed;
+use crate::grpc::notify_all_config_changed;
 use crate::models::error_pages;
 
 fn default_content_type() -> String {
@@ -65,9 +64,9 @@ pub struct UpdateRequest {
 /// Routes contributed to `/api/v1`.
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/sites/{site_id}/error-pages", get(list).post(create))
+        .route("/error-pages", get(list).post(create))
         .route(
-            "/sites/{site_id}/error-pages/{page_id}",
+            "/error-pages/{page_id}",
             axum::routing::put(update).delete(remove),
         )
 }
@@ -81,19 +80,16 @@ fn validate_status_code(code: i32) -> Result<(), ApiError> {
     Ok(())
 }
 
-/// `GET /api/v1/sites/{site_id}/error-pages`
+/// `GET /api/v1/error-pages` — administrators only.
 async fn list(
     State(state): State<AppState>,
     current: AuthUser,
-    Path(site_id): Path<String>,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<Page<error_pages::Model>>, ApiError> {
-    let id = parse_uuid(&site_id, "site id")?;
-    load_site_read(&state.db, id, &current).await?;
+    current.require_admin().map_err(ApiError::from)?;
     let pagination = query.pagination.normalise();
 
     let paginator = error_pages::Entity::find()
-        .filter(error_pages::Column::SiteId.eq(id))
         .order_by_asc(error_pages::Column::StatusCode)
         .paginate(&state.db, pagination.limit());
 
@@ -102,15 +98,13 @@ async fn list(
     Ok(Json(Page::new(rows, total, pagination)))
 }
 
-/// `POST /api/v1/sites/{site_id}/error-pages`
+/// `POST /api/v1/error-pages` — administrators only.
 async fn create(
     State(state): State<AppState>,
     current: AuthUser,
-    Path(site_id): Path<String>,
     Json(payload): Json<CreateRequest>,
 ) -> Result<Response, ApiError> {
-    let id = parse_uuid(&site_id, "site id")?;
-    load_site_write(&state.db, id, &current).await?;
+    current.require_admin().map_err(ApiError::from)?;
 
     validate_status_code(payload.status_code)?;
     if payload.name.trim().is_empty() || payload.name.len() > 200 {
@@ -127,7 +121,6 @@ async fn create(
     let timestamp = chrono::Utc::now();
     let model = error_pages::ActiveModel {
         id: Set(Uuid::new_v4()),
-        site_id: Set(id),
         status_code: Set(payload.status_code),
         name: Set(payload.name.trim().to_string()),
         content_type: Set(payload.content_type),
@@ -139,25 +132,23 @@ async fn create(
     .insert(&state.db)
     .await?;
 
-    tracing::info!(site_id = %id, page_id = %model.id, "error page created");
-    touch_site(&state, id).await?;
-    notify_config_changed(&state, id).await;
+    tracing::info!(page_id = %model.id, status_code = model.status_code, "error page created");
+    notify_all_config_changed(&state).await;
 
     Ok((StatusCode::CREATED, Json(model)).into_response())
 }
 
-/// `PUT /api/v1/sites/{site_id}/error-pages/{page_id}`
+/// `PUT /api/v1/error-pages/{page_id}` — administrators only.
 async fn update(
     State(state): State<AppState>,
     current: AuthUser,
-    Path((site_id, page_id)): Path<(String, String)>,
+    Path(page_id): Path<String>,
     Json(payload): Json<UpdateRequest>,
 ) -> Result<Json<error_pages::Model>, ApiError> {
-    let id = parse_uuid(&site_id, "site id")?;
+    current.require_admin().map_err(ApiError::from)?;
     let target = parse_uuid(&page_id, "error page id")?;
-    load_site_write(&state.db, id, &current).await?;
 
-    let row = find(&state, id, target).await?;
+    let row = find(&state, target).await?;
     let mut active: error_pages::ActiveModel = row.into();
 
     if let Some(code) = payload.status_code {
@@ -189,42 +180,37 @@ async fn update(
     active.updated_at = Set(chrono::Utc::now());
 
     let updated = active.update(&state.db).await?;
-    tracing::info!(site_id = %id, page_id = %target, "error page updated");
-    touch_site(&state, id).await?;
-    notify_config_changed(&state, id).await;
+    tracing::info!(page_id = %target, "error page updated");
+    notify_all_config_changed(&state).await;
 
     Ok(Json(updated))
 }
 
-/// `DELETE /api/v1/sites/{site_id}/error-pages/{page_id}`
+/// `DELETE /api/v1/error-pages/{page_id}` — administrators only.
 async fn remove(
     State(state): State<AppState>,
     current: AuthUser,
-    Path((site_id, page_id)): Path<(String, String)>,
+    Path(page_id): Path<String>,
 ) -> Result<Response, ApiError> {
-    let id = parse_uuid(&site_id, "site id")?;
+    current.require_admin().map_err(ApiError::from)?;
     let target = parse_uuid(&page_id, "error page id")?;
-    load_site_write(&state.db, id, &current).await?;
-    find(&state, id, target).await?;
+    find(&state, target).await?;
 
     error_pages::Entity::delete_by_id(target)
         .exec(&state.db)
         .await?;
 
-    tracing::info!(site_id = %id, page_id = %target, "error page deleted");
-    touch_site(&state, id).await?;
-    notify_config_changed(&state, id).await;
+    tracing::info!(page_id = %target, "error page deleted");
+    notify_all_config_changed(&state).await;
 
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 async fn find(
     state: &AppState,
-    site_id: Uuid,
     page_id: Uuid,
 ) -> Result<error_pages::Model, ApiError> {
     error_pages::Entity::find_by_id(page_id)
-        .filter(error_pages::Column::SiteId.eq(site_id))
         .one(&state.db)
         .await?
         .ok_or_else(|| {

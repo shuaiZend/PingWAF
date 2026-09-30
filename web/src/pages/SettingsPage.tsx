@@ -17,7 +17,11 @@ import {
   Copy,
   PlugsConnected,
   ArrowClockwise,
+  ArrowsCounterClockwise,
   BookOpen,
+  BracketsCurly,
+  Code,
+  FileHtml,
   UserCircle,
   Warning,
   Certificate,
@@ -31,13 +35,14 @@ import { Card, CardBody, CardFooter, CardHeader } from '@/components/ui/Card'
 import { Switch } from '@/components/ui/Switch'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
+import { Select } from '@/components/ui/Select'
 import { Textarea } from '@/components/ui/Textarea'
 import { Badge } from '@/components/ui/Badge'
 import { Dialog } from '@/components/ui/Dialog'
 import { Table, type Column } from '@/components/ui/Table'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { EmptyState } from '@/components/ui/EmptyState'
-import { SkeletonRows } from '@/components/ui/Skeleton'
+import { SkeletonRows, SkeletonCard } from '@/components/ui/Skeleton'
 import { PillMultiSelect } from '@/components/ui/MultiSelect'
 import { useToast } from '@/components/ui/Toast'
 import { ErrorState } from '@/components/ErrorState'
@@ -51,6 +56,14 @@ import {
 } from '@/api/settings'
 import { downloadCertificateFile, tlsApi, tlsKeys } from '@/api/tls'
 import { KEY_PERMISSIONS, keyKeys, keysApi } from '@/api/keys'
+import {
+  errorPagesApi,
+  errorPageKeys,
+  ERROR_PAGE_MESSAGES,
+  ERROR_PAGE_VARIABLES,
+  defaultErrorPageTemplate,
+  renderErrorPageTemplate,
+} from '@/api/errorPages'
 import { passkeyKeys, passkeysApi } from '@/api/passkeys'
 import { authApi } from '@/api/auth'
 import { errorMessage } from '@/api/errors'
@@ -62,6 +75,13 @@ import { supportedLanguages } from '@/i18n'
 import { cn } from '@/lib/utils'
 import { formatDateTime, formatRelative, fromLocalInputValue, toLocalInputValue } from '@/lib/format'
 import type { ApiKey, CreateApiKeyRequest, EsTestResult, PasskeySummary } from '@/api/types'
+import {
+  ERROR_PAGE_CONTENT_TYPE_LABELS,
+  ERROR_PAGE_CONTENT_TYPES,
+  ERROR_PAGE_STATUS_CODES,
+  type ErrorPage,
+  type ErrorPageContentType,
+} from '@/api/types'
 
 const langLabels: Record<string, string> = { en: 'English', zh: '中文', ja: '日本語' }
 
@@ -100,6 +120,16 @@ export function SettingsPage() {
           <ElasticsearchCard canWrite={canWrite} />
         ) : (
           <AdminOnlyCard title={t('pages.settings.elasticsearch')} />
+        )}
+        {isAdmin ? (
+          <LogRetentionCard canWrite={canWrite} />
+        ) : (
+          <AdminOnlyCard title={t('pages.settings.logRetention')} />
+        )}
+        {isAdmin ? (
+          <ErrorPagesCard canWrite={canWrite} />
+        ) : (
+          <AdminOnlyCard title={t('pages.settings.errorPages')} />
         )}
         <ApiKeysCard canWrite={canWrite} />
       </div>
@@ -988,6 +1018,494 @@ function ElasticsearchCard({ canWrite }: { canWrite: boolean }) {
         )}
       </CardBody>
     </Card>
+  )
+}
+
+/* ── Log retention ──────────────────────────────────────────────────── */
+
+/** Server-side bounds from `api::log_retention::validate_days`. */
+const MIN_RETENTION_DAYS = 1
+const MAX_RETENTION_DAYS = 3650
+
+function LogRetentionCard({ canWrite }: { canWrite: boolean }) {
+  const { t } = useTranslation()
+  const toast = useToast()
+  const queryClient = useQueryClient()
+
+  const [accessDays, setAccessDays] = useState('')
+  const [securityDays, setSecurityDays] = useState('')
+  const [dirty, setDirty] = useState(false)
+
+  const settings = useQuery({
+    queryKey: settingsKeys.logRetention(),
+    queryFn: () => settingsApi.getLogRetention(),
+  })
+
+  useEffect(() => {
+    const row = settings.data
+    if (!row) return
+    setAccessDays(String(row.access_log_retention_days))
+    setSecurityDays(String(row.security_event_retention_days))
+    setDirty(false)
+  }, [settings.data])
+
+  const parsed = {
+    access: Number(accessDays),
+    security: Number(securityDays),
+  }
+  const inRange = (value: number) =>
+    Number.isInteger(value) && value >= MIN_RETENTION_DAYS && value <= MAX_RETENTION_DAYS
+  const valid = inRange(parsed.access) && inRange(parsed.security)
+
+  const save = useMutation({
+    mutationFn: () =>
+      settingsApi.saveLogRetention({
+        access_log_retention_days: parsed.access,
+        security_event_retention_days: parsed.security,
+      }),
+    onSuccess: (row) => {
+      void queryClient.invalidateQueries({ queryKey: settingsKeys.logRetention() })
+      setAccessDays(String(row.access_log_retention_days))
+      setSecurityDays(String(row.security_event_retention_days))
+      setDirty(false)
+      toast.success(t('pages.settings.logRetentionSaved'))
+    },
+  })
+
+  return (
+    <Card>
+      <CardHeader
+        title={t('pages.settings.logRetention')}
+        description={t('pages.settings.logRetentionDescription')}
+        action={
+          <Button
+            variant="primary"
+            size="sm"
+            disabled={!canWrite || !dirty || !valid}
+            loading={save.isPending}
+            icon={<Trash weight="duotone" className="h-4 w-4" />}
+            onClick={() => save.mutate()}
+          >
+            {t('common.save')}
+          </Button>
+        }
+      />
+      <CardBody>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Input
+            type="number"
+            label={t('pages.settings.logRetentionAccess')}
+            value={accessDays}
+            min={MIN_RETENTION_DAYS}
+            max={MAX_RETENTION_DAYS}
+            disabled={!canWrite}
+            onChange={(e) => {
+              setAccessDays(e.target.value)
+              setDirty(true)
+            }}
+          />
+          <Input
+            type="number"
+            label={t('pages.settings.logRetentionSecurity')}
+            value={securityDays}
+            min={MIN_RETENTION_DAYS}
+            max={MAX_RETENTION_DAYS}
+            disabled={!canWrite}
+            onChange={(e) => {
+              setSecurityDays(e.target.value)
+              setDirty(true)
+            }}
+          />
+        </div>
+
+        {!valid && (
+          <p className="mt-3 flex items-center gap-2 text-xs text-fg-danger">
+            <Warning weight="duotone" className="h-4 w-4 shrink-0" />
+            {t('pages.settings.logRetentionRange')}
+          </p>
+        )}
+        <p className="mt-3 text-xs text-fg-subtle">{t('pages.settings.logRetentionHint')}</p>
+        <p className="mt-1 text-xs text-fg-subtle">{t('pages.settings.logRetentionEsNote')}</p>
+      </CardBody>
+    </Card>
+  )
+}
+
+/* ── Custom error pages ─────────────────────────────────────────────── */
+
+interface ErrorPageEditor {
+  status_code: number
+  name: string
+  content_type: ErrorPageContentType
+  body_template: string
+  enabled: boolean
+  existingId: string | null
+}
+
+/**
+ * The global error page templates, edited from here because they apply to
+ * every site. One card per status code; a card opens the template editor for
+ * that code (or creates it), and the dialog previews the rendered output with
+ * sample variables.
+ */
+function ErrorPagesCard({ canWrite }: { canWrite: boolean }) {
+  const { t } = useTranslation()
+  const toast = useToast()
+  const queryClient = useQueryClient()
+
+  const [editor, setEditor] = useState<ErrorPageEditor | null>(null)
+  const [pendingReset, setPendingReset] = useState<ErrorPageEditor | null>(null)
+  const [pendingDelete, setPendingDelete] = useState<ErrorPage | null>(null)
+
+  const pagesQuery = useQuery({
+    queryKey: errorPageKeys.list(),
+    queryFn: () => errorPagesApi.list(),
+    select: (res) => res.items,
+  })
+
+  const byStatus = useMemo(() => {
+    const map = new Map<number, ErrorPage>()
+    for (const p of pagesQuery.data ?? []) map.set(p.status_code, p)
+    return map
+  }, [pagesQuery.data])
+
+  const invalidate = () => {
+    void queryClient.invalidateQueries({ queryKey: errorPageKeys.all })
+  }
+
+  const save = useMutation({
+    mutationFn: (state: ErrorPageEditor) =>
+      state.existingId
+        ? errorPagesApi.update(state.existingId, {
+            status_code: state.status_code,
+            name: state.name,
+            content_type: state.content_type,
+            body_template: state.body_template,
+            enabled: state.enabled,
+          })
+        : errorPagesApi.upsert({
+            status_code: state.status_code,
+            name: state.name,
+            content_type: state.content_type,
+            body_template: state.body_template,
+            enabled: state.enabled,
+          }),
+    onSuccess: () => {
+      toast.success(t('pages.errorPages.saved'))
+      setEditor(null)
+      invalidate()
+    },
+  })
+
+  const toggle = useMutation({
+    mutationFn: ({ page, enabled }: { page: ErrorPage; enabled: boolean }) =>
+      errorPagesApi.update(page.id, { enabled }),
+    onSuccess: () => invalidate(),
+  })
+
+  const remove = useMutation({
+    mutationFn: (id: string) => errorPagesApi.delete(id),
+    onSuccess: () => {
+      toast.success(t('pages.errorPages.deleted'))
+      setPendingDelete(null)
+      setEditor(null)
+      invalidate()
+    },
+  })
+
+  const openEditor = (statusCode: number) => {
+    const existing = byStatus.get(statusCode)
+    setEditor({
+      status_code: statusCode,
+      name: existing?.name ?? ERROR_PAGE_MESSAGES[statusCode] ?? String(statusCode),
+      content_type: (existing?.content_type as ErrorPageContentType) ?? 'text/html',
+      body_template:
+        existing?.body_template ??
+        defaultErrorPageTemplate(
+          statusCode,
+          (existing?.content_type as ErrorPageContentType) ?? 'text/html',
+        ),
+      enabled: existing?.enabled ?? true,
+      existingId: existing?.id ?? null,
+    })
+  }
+
+  const previewHtml = editor ? renderErrorPageTemplate(editor.body_template) : ''
+
+  return (
+    <>
+      <Card>
+        <CardHeader
+          title={t('pages.errorPages.title')}
+          description={t('pages.errorPages.description')}
+          action={
+            <Button
+              variant="secondary"
+              size="sm"
+              loading={pagesQuery.isFetching}
+              onClick={() => pagesQuery.refetch()}
+              icon={<ArrowClockwise weight="duotone" className="h-4 w-4" />}
+            >
+              {t('common.refresh')}
+            </Button>
+          }
+        />
+        <CardBody>
+          {pagesQuery.isError && !pagesQuery.data ? (
+            <ErrorState
+              error={pagesQuery.error}
+              onRetry={() => pagesQuery.refetch()}
+              retrying={pagesQuery.isFetching}
+            />
+          ) : pagesQuery.isPending ? (
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {ERROR_PAGE_STATUS_CODES.map((c) => (
+                <SkeletonCard key={c} />
+              ))}
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {ERROR_PAGE_STATUS_CODES.map((code) => {
+                const page = byStatus.get(code)
+                const customized = Boolean(page)
+                return (
+                  <Card
+                    key={code}
+                    interactive
+                    padded
+                    onClick={() => canWrite && openEditor(code)}
+                    className={cn('cursor-pointer', !canWrite && 'cursor-default')}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex items-center gap-3">
+                        <span
+                          className={cn(
+                            'flex h-12 w-12 shrink-0 items-center justify-center rounded-lg text-lg font-bold tabular-nums',
+                            page?.enabled
+                              ? 'bg-brand-soft text-brand'
+                              : 'bg-recessed text-fg-subtle',
+                          )}
+                        >
+                          {code}
+                        </span>
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-medium text-fg-strong">
+                            {page?.name || ERROR_PAGE_MESSAGES[code]}
+                          </p>
+                          <p className="mt-0.5 text-xs uppercase tracking-wide text-fg-subtle">
+                            {page?.content_type ?? 'text/html'}
+                          </p>
+                        </div>
+                      </div>
+                      {customized ? (
+                        <Badge tone="brand" size="sm">
+                          {t('pages.errorPages.customized')}
+                        </Badge>
+                      ) : (
+                        <Badge tone="neutral" size="sm">
+                          {t('pages.errorPages.default')}
+                        </Badge>
+                      )}
+                    </div>
+                    <div className="mt-4 flex items-center justify-between">
+                      <span className="text-xs text-fg-subtle">
+                        {customized
+                          ? t('pages.errorPages.clickToEdit')
+                          : t('pages.errorPages.clickToCreate')}
+                      </span>
+                      {page && (
+                        <span onClick={(e) => e.stopPropagation()}>
+                          <Switch
+                            size="sm"
+                            checked={page.enabled}
+                            disabled={!canWrite || toggle.isPending}
+                            aria-label={`${t('common.enabled')}: ${code}`}
+                            onCheckedChange={(enabled) => toggle.mutate({ page, enabled })}
+                          />
+                        </span>
+                      )}
+                    </div>
+                  </Card>
+                )
+              })}
+            </div>
+          )}
+        </CardBody>
+      </Card>
+
+      <Dialog
+        open={editor !== null}
+        onClose={save.isPending ? () => undefined : () => setEditor(null)}
+        size="lg"
+        title={editor ? `${editor.status_code} · ${t('pages.errorPages.editTitle')}` : ''}
+        description={t('pages.errorPages.editDescription')}
+        className="max-w-4xl"
+        footer={
+          editor && (
+            <>
+              {editor.existingId && canWrite && (
+                <Button
+                  variant="ghost"
+                  className="mr-auto hover:text-fg-danger"
+                  onClick={() => {
+                    const page = byStatus.get(editor.status_code)
+                    if (page) setPendingDelete(page)
+                  }}
+                  icon={<FileHtml weight="duotone" className="h-4 w-4" />}
+                >
+                  {t('pages.errorPages.delete')}
+                </Button>
+              )}
+              <Button
+                variant="secondary"
+                onClick={() => setPendingReset(editor)}
+                icon={<ArrowsCounterClockwise weight="duotone" className="h-4 w-4" />}
+              >
+                {t('pages.errorPages.resetDefault')}
+              </Button>
+              <Button variant="ghost" onClick={() => setEditor(null)} disabled={save.isPending}>
+                {t('common.cancel')}
+              </Button>
+              <Button
+                variant="primary"
+                onClick={() => editor && save.mutate(editor)}
+                loading={save.isPending}
+              >
+                {t('common.save')}
+              </Button>
+            </>
+          )
+        }
+      >
+        {editor && (
+          <div className="flex flex-col gap-4">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+              <Input
+                label={t('pages.errorPages.pageName')}
+                value={editor.name}
+                onChange={(e) => setEditor({ ...editor, name: e.target.value })}
+              />
+              <Select
+                label={t('pages.errorPages.contentType')}
+                value={editor.content_type}
+                options={ERROR_PAGE_CONTENT_TYPES.map((c) => ({
+                  value: c,
+                  label: ERROR_PAGE_CONTENT_TYPE_LABELS[c] ?? c.toUpperCase(),
+                }))}
+                onChange={(e) => {
+                  const content_type = e.target.value as ErrorPageContentType
+                  setEditor({ ...editor, content_type })
+                }}
+              />
+              <div className="flex items-end pb-1">
+                <Switch
+                  checked={editor.enabled}
+                  onCheckedChange={(enabled) => setEditor({ ...editor, enabled })}
+                  label={t('common.enabled')}
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_1fr_220px]">
+              {/* Template */}
+              <div className="flex flex-col gap-1.5">
+                <span className="flex items-center gap-1.5 text-[13px] font-medium text-fg">
+                  <Code weight="duotone" className="h-4 w-4" />
+                  {t('pages.errorPages.template')}
+                </span>
+                <Textarea
+                  mono
+                  rows={18}
+                  value={editor.body_template}
+                  onChange={(e) => setEditor({ ...editor, body_template: e.target.value })}
+                />
+              </div>
+
+              {/* Preview */}
+              <div className="flex flex-col gap-1.5">
+                <span className="flex items-center gap-1.5 text-[13px] font-medium text-fg">
+                  <Eye weight="duotone" className="h-4 w-4" />
+                  {t('pages.errorPages.preview')}
+                </span>
+                <div className="h-[388px] overflow-hidden rounded-md border border-line bg-white">
+                  {editor.content_type === 'text/html' ? (
+                    <iframe
+                      title={t('pages.errorPages.preview')}
+                      className="h-full w-full"
+                      sandbox=""
+                      srcDoc={previewHtml}
+                    />
+                  ) : (
+                    <pre className="pw-mono h-full w-full overflow-auto bg-recessed p-3 text-xs text-fg">
+                      {previewHtml}
+                    </pre>
+                  )}
+                </div>
+              </div>
+
+              {/* Variables */}
+              <div className="flex flex-col gap-1.5">
+                <span className="flex items-center gap-1.5 text-[13px] font-medium text-fg">
+                  <BracketsCurly weight="duotone" className="h-4 w-4" />
+                  {t('pages.errorPages.variables')}
+                </span>
+                <div className="flex max-h-[388px] flex-col gap-1 overflow-y-auto rounded-md border border-line bg-recessed/40 p-2">
+                  {ERROR_PAGE_VARIABLES.map((v) => (
+                    <button
+                      key={v.name}
+                      type="button"
+                      title={v.description}
+                      onClick={() =>
+                        setEditor((e) =>
+                          e ? { ...e, body_template: `${e.body_template}{{${v.name}}}` } : e,
+                        )
+                      }
+                      className="group flex flex-col items-start rounded px-1.5 py-1 text-left transition-colors hover:bg-elevated"
+                    >
+                      <span className="pw-mono text-xs text-brand">{`{{${v.name}}}`}</span>
+                      <span className="text-[11px] leading-tight text-fg-subtle">
+                        {v.description}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+      </Dialog>
+
+      <ConfirmDialog
+        open={pendingReset !== null}
+        onClose={() => setPendingReset(null)}
+        tone="primary"
+        onConfirm={() => {
+          if (!pendingReset) return
+          setEditor({
+            ...pendingReset,
+            content_type: pendingReset.content_type,
+            body_template: defaultErrorPageTemplate(
+              pendingReset.status_code,
+              pendingReset.content_type,
+            ),
+          })
+          setPendingReset(null)
+        }}
+        title={t('pages.errorPages.resetTitle')}
+        description={t('pages.errorPages.resetDescription')}
+        confirmLabel={t('pages.errorPages.resetDefault')}
+      />
+
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        onClose={() => setPendingDelete(null)}
+        onConfirm={() => pendingDelete && remove.mutate(pendingDelete.id)}
+        title={t('pages.errorPages.deleteTitle')}
+        description={t('pages.errorPages.deleteDescription')}
+        confirmLabel={t('common.delete')}
+        loading={remove.isPending}
+      />
+    </>
   )
 }
 

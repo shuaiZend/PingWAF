@@ -229,6 +229,9 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
     let _sync_handle =
         api::ip_groups::start_subscription_sync_scheduler(state.clone());
 
+    // ── 9c. Start the log retention sweeper ─────────────────────────────────
+    let _retention_handle = api::logs::start_retention_scheduler(state.clone());
+
     // ── 10. Spawn and wait for shutdown ─────────────────────────────────────
     tokio::select! {
         result = serve_http(http_listener, router, control_tls.clone()) => {

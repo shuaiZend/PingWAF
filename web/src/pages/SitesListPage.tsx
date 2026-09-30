@@ -10,6 +10,7 @@ import {
   PencilSimple,
   Play,
   Trash,
+  X,
 } from '@phosphor-icons/react'
 import { PageHeader } from '@/components/PageHeader'
 import { Card, CardBody } from '@/components/ui/Card'
@@ -39,6 +40,7 @@ const STATUS_TONE: Record<SiteStatus, BadgeTone> = {
 interface SiteFormState {
   name: string
   domain: string
+  alternateDomains: string[]
   upstreamAddress: string
   upstreamName: string
   upstreamTls: boolean
@@ -47,9 +49,21 @@ interface SiteFormState {
 const emptyForm: SiteFormState = {
   name: '',
   domain: '',
+  alternateDomains: [],
   upstreamAddress: '',
   upstreamName: '',
   upstreamTls: false,
+}
+
+/**
+ * A hostname, optionally a wildcard: `*.` may only lead, its base needs at
+ * least two labels, so `*.com` is not a valid hostname.
+ */
+const DOMAIN_PATTERN = /^(?=.{1,253}$)(\*\.)?([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/
+
+/** Drops a pasted scheme/trailing path and lower-cases the hostname. */
+function normaliseDomainInput(value: string): string {
+  return value.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '')
 }
 
 export function SitesListPage() {
@@ -154,6 +168,7 @@ export function SitesListPage() {
       ...emptyForm,
       name: site.name,
       domain: site.domain,
+      alternateDomains: site.alternate_domains ?? [],
     })
     setFormError(null)
     setDialogOpen(true)
@@ -168,20 +183,38 @@ export function SitesListPage() {
 
   const submit = () => {
     setFormError(null)
-    const domain = form.domain.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '')
+    const domain = normaliseDomainInput(form.domain)
     const name = form.name.trim()
 
     if (!name) {
       setFormError(t('pages.sites.nameRequired'))
       return
     }
-    if (!/^(?=.{1,253}$)([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/.test(domain)) {
+    if (!DOMAIN_PATTERN.test(domain)) {
       setFormError(t('pages.sites.domainInvalid'))
       return
     }
 
+    const alternateDomains: string[] = []
+    for (const raw of form.alternateDomains) {
+      const value = normaliseDomainInput(raw)
+      if (!value) continue
+      if (!DOMAIN_PATTERN.test(value)) {
+        setFormError(t('pages.sites.domainInvalid'))
+        return
+      }
+      if (value === domain || alternateDomains.includes(value)) {
+        setFormError(t('pages.sites.domainDuplicate', { domain: value }))
+        return
+      }
+      alternateDomains.push(value)
+    }
+
     if (editing) {
-      updateSite.mutate({ id: editing.id, data: { name, domain } })
+      updateSite.mutate({
+        id: editing.id,
+        data: { name, domain, alternate_domains: alternateDomains },
+      })
       return
     }
 
@@ -194,6 +227,7 @@ export function SitesListPage() {
     const payload: CreateSiteRequest = {
       name,
       domain,
+      alternate_domains: alternateDomains,
       upstream_address: upstreamAddress,
     }
     const upstreamName = form.upstreamName.trim()
@@ -216,7 +250,14 @@ export function SitesListPage() {
             <Globe weight="duotone" className="h-4 w-4" />
           </span>
           <div className="min-w-0">
-            <p className="pw-mono truncate font-medium text-fg-strong">{r.domain}</p>
+            <p className="pw-mono truncate font-medium text-fg-strong">
+              {r.domain}
+              {(r.alternate_domains?.length ?? 0) > 0 && (
+                <span className="ml-1.5 text-xs font-normal text-fg-subtle">
+                  +{r.alternate_domains.length}
+                </span>
+              )}
+            </p>
             <p className="truncate text-xs text-fg-subtle">{r.name}</p>
           </div>
         </div>
@@ -443,6 +484,58 @@ export function SitesListPage() {
             onChange={(e) => setForm((f) => ({ ...f, domain: e.target.value }))}
             required
           />
+
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center justify-between">
+              <span className="text-[13px] font-medium text-fg-subtle">
+                {t('pages.sites.alternateDomains')}
+              </span>
+              <Button
+                size="sm"
+                variant="ghost"
+                icon={<Plus weight="bold" className="h-3.5 w-3.5" />}
+                onClick={() =>
+                  setForm((f) => ({ ...f, alternateDomains: [...f.alternateDomains, ''] }))
+                }
+              >
+                {t('common.add')}
+              </Button>
+            </div>
+            {form.alternateDomains.map((value, index) => (
+              <div key={index} className="flex items-center gap-2">
+                <div className="flex-1">
+                  <Input
+                    value={value}
+                    placeholder="*.example.com"
+                    aria-label={t('pages.sites.alternateDomains')}
+                    prefixIcon={<Globe weight="duotone" />}
+                    onChange={(e) =>
+                      setForm((f) => ({
+                        ...f,
+                        alternateDomains: f.alternateDomains.map((item, i) =>
+                          i === index ? e.target.value : item,
+                        ),
+                      }))
+                    }
+                  />
+                </div>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  aria-label={t('common.remove')}
+                  className="hover:text-fg-danger"
+                  onClick={() =>
+                    setForm((f) => ({
+                      ...f,
+                      alternateDomains: f.alternateDomains.filter((_, i) => i !== index),
+                    }))
+                  }
+                  icon={<X weight="bold" className="h-4 w-4" />}
+                />
+              </div>
+            ))}
+            <p className="text-xs text-fg-subtle">{t('pages.sites.alternateDomainsHint')}</p>
+          </div>
 
           {!editing && (
             <>

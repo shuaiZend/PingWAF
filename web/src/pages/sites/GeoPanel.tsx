@@ -209,7 +209,11 @@ export function GeoPanel() {
                     label={t('pages.geo.action')}
                     value={config.action}
                     disabled={!canWrite}
-                    hint={t('pages.geo.actionHint')}
+                    hint={
+                      config.action === 'basic_auth'
+                        ? t('pages.basicAuth.ruleActionHint')
+                        : t('pages.geo.actionHint')
+                    }
                     options={GEO_ACTIONS.map((a) => ({
                       value: a,
                       label: t(`actions.${a}`, a),

@@ -18,6 +18,7 @@ pub mod geo;
 pub mod ip_groups;
 pub mod ip_rules;
 pub mod keys;
+pub mod log_retention;
 pub mod logs;
 pub mod mtls;
 pub mod passkeys;
@@ -25,6 +26,7 @@ pub mod rate_limiting;
 pub mod rewrite;
 pub mod rules;
 pub mod settings;
+pub mod site_basic_auth;
 pub mod sites;
 pub mod ssl;
 pub mod state;
@@ -58,6 +60,7 @@ pub fn build_router(state: AppState) -> Router {
     let api = Router::new()
         .merge(auth::routes())
         .merge(sites::routes())
+        .merge(site_basic_auth::routes())
         .merge(keys::routes())
         .merge(agents::routes())
         .merge(rules::routes())
@@ -66,6 +69,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(logs::routes())
         .merge(analytics::routes())
         .merge(settings::routes())
+        .merge(log_retention::routes())
         .merge(ssl::routes())
         .merge(mtls::routes())
         .merge(passkeys::routes())

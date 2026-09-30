@@ -11,11 +11,23 @@ pub mod action {
     pub const CHALLENGE: &str = "challenge";
     pub const JS_CHALLENGE: &str = "js_challenge";
     pub const ALLOW: &str = "allow";
+    /// Requires the site's basic auth credentials instead of answering with a
+    /// block page. Only the geo policy exposes it.
+    pub const BASIC_AUTH: &str = "basic_auth";
 
+    /// Actions a custom WAF rule may take.
     pub const ALL: [&str; 5] = [BLOCK, LOG, CHALLENGE, JS_CHALLENGE, ALLOW];
+
+    /// Actions the geo policy accepts: `log` has no geo enforcement meaning
+    /// and `allow` would contradict the match itself, so neither is offered.
+    pub const GEO_ALL: [&str; 4] = [BLOCK, CHALLENGE, JS_CHALLENGE, BASIC_AUTH];
 
     pub fn is_valid(action: &str) -> bool {
         ALL.contains(&action)
+    }
+
+    pub fn is_valid_geo(action: &str) -> bool {
+        GEO_ALL.contains(&action)
     }
 
     /// `pingwaf::WafAction` enum values as defined in control_plane.proto.
@@ -26,6 +38,7 @@ pub mod action {
             CHALLENGE => 2,
             JS_CHALLENGE => 3,
             ALLOW => 4,
+            BASIC_AUTH => 5,
             _ => 0,
         }
     }
@@ -250,5 +263,28 @@ pub mod characteristic {
         split_parameterized(value)
             .map(|(_, param)| param.to_string())
             .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_geo_policy_accepts_neither_log_nor_allow() {
+        for valid in action::GEO_ALL {
+            assert!(action::is_valid_geo(valid));
+        }
+        // The data plane has no geo outcome for either of these: `log` would
+        // behave as a block and `allow` would contradict the match.
+        assert!(!action::is_valid_geo(action::LOG));
+        assert!(!action::is_valid_geo(action::ALLOW));
+    }
+
+    #[test]
+    fn basic_auth_is_a_gate_action_not_a_rule_action() {
+        assert!(action::is_valid_geo(action::BASIC_AUTH));
+        assert!(!action::is_valid(action::BASIC_AUTH));
+        assert_eq!(5, action::to_proto(action::BASIC_AUTH));
     }
 }

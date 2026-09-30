@@ -16,7 +16,6 @@
     "caching": "缓存",
     "ssl": "SSL/TLS",
     "traffic": "流量",
-    "errorPages": "错误页",
     "logs": "日志",
     "agents": "节点",
     "settings": "设置",
@@ -34,6 +33,7 @@
     "edit": "编辑",
     "create": "创建",
     "add": "添加",
+    "remove": "移除",
     "search": "搜索",
     "confirm": "确认",
     "close": "关闭",
@@ -85,7 +85,8 @@
     "log": "记录",
     "challenge": "质询",
     "js_challenge": "JS 质询",
-    "allow": "放行"
+    "allow": "放行",
+    "basic_auth": "Basic 认证"
   },
   "characteristics": {
     "ip": "客户端 IP",
@@ -262,7 +263,10 @@
       "noResultsDescription": "没有站点匹配 \"{{query}}\"，请尝试其他搜索。",
       "domain": "域名",
       "domainHint": "完整域名（如 example.com）",
+      "alternateDomains": "附加域名",
+      "alternateDomainsHint": "可选。这些域名与主域名共用同一套配置。通配符（如 *.example.com）只匹配子域名，不包含裸域名本身。",
       "domainInvalid": "请输入有效的域名",
+      "domainDuplicate": "域名「{{domain}}」已被本站点使用",
       "namePlaceholder": "我的网站",
       "nameRequired": "站点名称不能为空",
       "plan": "套餐",
@@ -1182,6 +1186,37 @@
         "tx": "发送"
       }
     },
+    "basicAuth": {
+      "saved": "Basic 认证设置已保存",
+      "credentials": "凭据",
+      "credentialsHint": "数据面接受用户名与密码。校验在缓存之前执行，命中缓存也不会绕过认证。",
+      "emptyTitle": "尚未配置凭据",
+      "emptyHint": "添加用户名与密码后，访问者会看到浏览器的登录对话框。",
+      "addCredential": "添加凭据",
+      "username": "用户名",
+      "password": "密码",
+      "storedPassword": "保持原样即可保留已存密码",
+      "removeCredential": "删除凭据",
+      "credentialsCount": "可用凭据 {{count}} 条",
+      "credentialsRequired": "启用后至少需要一条凭据。",
+      "usernameRequired": "每条凭据都需要用户名。",
+      "passwordRequired": "每条凭据都需要密码。",
+      "behaviour": "门控行为",
+      "behaviourHint": "作用于整个站点；IP 规则仍可用「放行」动作豁免客户端。",
+      "enabled": "对所有请求要求认证",
+      "enabledHint": "关闭时，只有选择 Basic 认证动作的规则会要求认证。",
+      "realm": "认证域（Realm）",
+      "realmHint": "浏览器登录对话框显示的名称。",
+      "delay": "认证失败延迟（秒）",
+      "delayHint": "用于拖慢暴力破解，0 表示关闭；上限 10 秒，避免失败登录堆积连接。",
+      "hideCredentials": "转发前移除凭据",
+      "hideCredentialsHint": "认证通过后移除 Authorization 头，上游不会看到凭据。",
+      "notes": "说明",
+      "noteOrder": "校验在 WAF 插件内、缓存之前执行：未认证的请求不会命中缓存。",
+      "noteRules": "IP 与地域规则可选择「Basic 认证」动作，仅对命中的客户端要求认证。",
+      "noteExempt": "显式的「放行」规则可将客户端豁免于站点级门控，适合健康检查等场景。",
+      "ruleActionHint": "需先在「访问限制 → Basic 认证」中配置凭据。"
+    },
     "settings": {
       "addPasskey": "添加通行密钥",
       "deletePasskeyDescription": "该认证器将无法再登录你的账户，其他通行密钥不受影响。",
@@ -1261,6 +1296,15 @@
       "esSaved": "Elasticsearch 设置已保存",
       "esApplied": "设置已立即生效",
       "unsavedChanges": "您有未保存的更改",
+      "errorPages": "自定义错误页",
+      "logRetention": "日志留存",
+      "logRetentionDescription": "PostgreSQL 中日志表的保留时长。",
+      "logRetentionAccess": "访问日志保留天数",
+      "logRetentionSecurity": "拦截日志保留天数",
+      "logRetentionHint": "后台清理任务每 6 小时运行一次，删除超过上述天数的记录；保存后无需重启即可生效。手动清理端点不受此设置影响。",
+      "logRetentionEsNote": "已发送到 Elasticsearch 的日志在那里独立保留 360 天，不受此处设置影响。",
+      "logRetentionRange": "请输入 1 到 3650 之间的天数。",
+      "logRetentionSaved": "日志留存设置已保存",
       "permissions": "权限",
       "permissionsHint": "此密钥被允许执行的操作",
       "expires": "过期时间",
@@ -1468,9 +1512,10 @@
     },
     "accessControl": {
       "title": "访问限制",
-      "description": "按 IP 地址与地域允许或阻止访问；后续将在这里扩展账号口令、OAuth 等限制模块。",
+      "description": "按 IP 地址与地域允许或阻止访问，并可用 HTTP Basic 凭据为站点加一道门。",
       "tabIpRules": "IP 规则",
-      "tabGeo": "地域限制"
+      "tabGeo": "地域限制",
+      "tabBasicAuth": "Basic 认证"
     }
   },
   "challengeLevels": {
