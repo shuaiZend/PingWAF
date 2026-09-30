@@ -47,7 +47,7 @@ export function LoginPage() {
 
   const redirectTo = (location.state as LocationState | null)?.from ?? '/dashboard'
 
-  const [mode, setMode] = useState<'login' | 'register'>('login')
+  const [modeState, setModeState] = useState<'login' | 'register'>('login')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [name, setName] = useState('')
@@ -65,10 +65,9 @@ export function LoginPage() {
 
   const needsSetup = status?.needs_setup ?? false
   const registrationOpen = status?.registration_open ?? false
-
-  useEffect(() => {
-    if (needsSetup) setMode('register')
-  }, [needsSetup])
+  // With no accounts yet the only possible flow is registration, so pin the
+  // form instead of racing an effect against the user's clicks.
+  const mode = needsSetup ? 'register' : modeState
 
   // Already signed in (e.g. back button from a protected route) → skip ahead.
   useEffect(() => {
@@ -317,7 +316,7 @@ export function LoginPage() {
                   <button
                     type="button"
                     onClick={() => {
-                      setMode('login')
+                      setModeState('login')
                       setFormError(null)
                     }}
                     className="font-medium text-link hover:underline"
@@ -331,7 +330,7 @@ export function LoginPage() {
                   <button
                     type="button"
                     onClick={() => {
-                      setMode('register')
+                      setModeState('register')
                       setFormError(null)
                     }}
                     className="font-medium text-link hover:underline"

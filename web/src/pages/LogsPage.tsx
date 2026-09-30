@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery } from '@tanstack/react-query'
@@ -102,17 +102,22 @@ export function LogsPage() {
   const [purgeDays, setPurgeDays] = useState(30)
 
   // Adopt the URL text when it changes without the box (drill-down, history).
-  useEffect(() => {
+  const [lastSearchText, setLastSearchText] = useState(searchText)
+  if (searchText !== lastSearchText) {
+    setLastSearchText(searchText)
     setDraft(searchText)
-  }, [searchText])
+  }
 
   const { data: sites } = useSitesList()
 
   // Any query change must drop back to the first page, otherwise the request
   // asks for page 5 of a completely different result set.
-  useEffect(() => {
+  const queryFingerprint = JSON.stringify([tab, searchText, siteId, fromValue, toValue, pageSize])
+  const [lastQueryFingerprint, setLastQueryFingerprint] = useState(queryFingerprint)
+  if (queryFingerprint !== lastQueryFingerprint) {
+    setLastQueryFingerprint(queryFingerprint)
     setPage(1)
-  }, [tab, searchText, siteId, fromValue, toValue, pageSize])
+  }
 
   const parsedQuery = useMemo(
     () => parseLogQuery(searchText, tab),

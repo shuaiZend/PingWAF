@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useMemo, useState, type FormEvent } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -249,9 +249,14 @@ function AccountCard() {
   const [showPassword, setShowPassword] = useState(false)
   const [passwordError, setPasswordError] = useState<string | null>(null)
 
-  useEffect(() => {
-    setName(user?.name ?? '')
-  }, [user?.name])
+  // `null` until the first seed: a name already present at mount must still
+  // reach the form.
+  const serverName = user?.name ?? ''
+  const [lastServerName, setLastServerName] = useState<string | null>(null)
+  if (serverName !== lastServerName) {
+    setLastServerName(serverName)
+    setName(serverName)
+  }
 
   const profile = useMutation({
     mutationFn: () => authApi.updateProfile({ name: name.trim() || null }),
@@ -710,16 +715,18 @@ function ElasticsearchCard({ canWrite }: { canWrite: boolean }) {
   })
 
   // Load the stored config into the form, turning `***` into blank fields so a
-  // save can never write the mask back over the real secret.
-  useEffect(() => {
-    const config = settings.data?.config
-    if (!config) return
-    const stripped = stripMaskedSecrets(config)
+  // save can never write the mask back over the real secret. Render-phase
+  // reseed on new query data, so the form is right from the first paint.
+  const loadedConfig = settings.data?.config
+  const [lastLoadedConfig, setLastLoadedConfig] = useState<typeof loadedConfig | null>(null)
+  if (loadedConfig && loadedConfig !== lastLoadedConfig) {
+    setLastLoadedConfig(loadedConfig)
+    const stripped = stripMaskedSecrets(loadedConfig)
     setDraft(stripped)
     setUrlsText(stripped.urls.join('\n'))
     setDirty(false)
     setTestResult(null)
-  }, [settings.data])
+  }
 
   const patch = (next: Partial<EsConfigDraft>) => {
     setDraft((d) => ({ ...d, ...next }))
@@ -1041,13 +1048,14 @@ function LogRetentionCard({ canWrite }: { canWrite: boolean }) {
     queryFn: () => settingsApi.getLogRetention(),
   })
 
-  useEffect(() => {
-    const row = settings.data
-    if (!row) return
-    setAccessDays(String(row.access_log_retention_days))
-    setSecurityDays(String(row.security_event_retention_days))
+  const serverRow = settings.data
+  const [lastServerRow, setLastServerRow] = useState<typeof serverRow | null>(null)
+  if (serverRow && serverRow !== lastServerRow) {
+    setLastServerRow(serverRow)
+    setAccessDays(String(serverRow.access_log_retention_days))
+    setSecurityDays(String(serverRow.security_event_retention_days))
     setDirty(false)
-  }, [settings.data])
+  }
 
   const parsed = {
     access: Number(accessDays),
