@@ -63,10 +63,13 @@ export function AppLayout() {
   const userMenuRef = useRef<HTMLDivElement>(null)
   const langMenuRef = useRef<HTMLDivElement>(null)
 
-  // Close the mobile drawer on navigation.
-  useEffect(() => {
+  // Close the mobile drawer on navigation (render-phase reset on prop change,
+  // so the drawer never flashes open for the new page).
+  const [lastPathname, setLastPathname] = useState(location.pathname)
+  if (location.pathname !== lastPathname) {
+    setLastPathname(location.pathname)
     setMobileOpen(false)
-  }, [location.pathname])
+  }
 
   // Close dropdowns on outside click.
   useEffect(() => {

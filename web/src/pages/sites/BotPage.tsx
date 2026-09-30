@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
+import { useState, type FormEvent, type ReactNode } from 'react'
 import { useParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -41,14 +41,22 @@ export function BotPage() {
     enabled: Boolean(siteId),
   })
 
-  useEffect(() => {
-    if (configQuery.data) {
-      setConfig(configQuery.data)
+  // Seed the form from the query (render-phase reset on new data / first
+  // failure), so nothing flashes stale values on the first paint.
+  const serverConfig = configQuery.data
+  const loadFailed = configQuery.isError && Boolean(siteId)
+  // `null` until the first seed: cached query data present at mount must still
+  // reach the form.
+  const [sync, setSync] = useState<{ config: typeof serverConfig; failed: boolean } | null>(null)
+  if (!sync || sync.config !== serverConfig || sync.failed !== loadFailed) {
+    setSync({ config: serverConfig, failed: loadFailed })
+    if (serverConfig) {
+      setConfig(serverConfig)
       setDirty(false)
-    } else if (configQuery.isError && siteId) {
+    } else if (loadFailed) {
       setConfig(defaultBotConfig(siteId))
     }
-  }, [configQuery.data, configQuery.isError, siteId])
+  }
 
   const patch = (part: Partial<BotConfig>) => {
     setConfig((c) => (c ? { ...c, ...part } : c))

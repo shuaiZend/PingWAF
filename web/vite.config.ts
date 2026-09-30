@@ -8,7 +8,7 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: {
-      '@': path.resolve(__dirname, './src'),
+      '@': path.resolve(import.meta.dirname, './src'),
     },
   },
   server: {
@@ -27,11 +27,18 @@ export default defineConfig({
     chunkSizeWarningLimit: 900,
     rollupOptions: {
       output: {
-        manualChunks: {
-          react: ['react', 'react-dom', 'react-router-dom'],
-          charts: ['recharts'],
-          icons: ['@phosphor-icons/react'],
-          query: ['@tanstack/react-query', 'zustand'],
+        // Vite 8 only accepts the function form (the object form was removed).
+        manualChunks(id) {
+          const groups: Array<[string, RegExp]> = [
+            ['react', /[\\/]node_modules[\\/](react|react-dom|react-router|react-router-dom|scheduler)[\\/]/],
+            ['charts', /[\\/]node_modules[\\/]recharts[\\/]/],
+            ['icons', /[\\/]node_modules[\\/]@phosphor-icons[\\/]/],
+            ['query', /[\\/]node_modules[\\/](@tanstack[\\/]react-query|zustand)[\\/]/],
+          ]
+          for (const [name, pattern] of groups) {
+            if (pattern.test(id)) return name
+          }
+          return undefined
         },
       },
     },

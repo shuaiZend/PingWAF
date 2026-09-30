@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -150,11 +150,14 @@ export function SslPage() {
   // half-typed in another. The stored client CA is write-only — the GET only
   // reports whether one exists — so it is tracked as "configured" plus
   // whatever has been pasted since the last save.
-  useEffect(() => {
-    if (!serverSettings) return
+  // `null` until the first seed: cached query data present at mount must still
+  // reach the drafts.
+  const [lastServerSettings, setLastServerSettings] = useState<typeof serverSettings | null>(null)
+  if (serverSettings && serverSettings !== lastServerSettings) {
+    setLastServerSettings(serverSettings)
     setHasClientCa(serverSettings.has_mtls_client_ca)
     setDrafts((prev) => prev ?? toDrafts(serverSettings))
-  }, [serverSettings])
+  }
 
   const certs = useMemo(
     () =>

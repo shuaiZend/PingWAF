@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -143,11 +143,17 @@ export function RewritePage() {
     [rulesQuery.data],
   )
 
-  useEffect(() => {
-    if (!dialogOpen) return
-    setError(null)
-    setForm(editing ? formFromRule(editing) : emptyForm())
-  }, [dialogOpen, editing])
+  // Re-seed the dialog form every time it opens (render-phase reset), so the
+  // first paint already shows the right rule instead of the previous one.
+  const seedKey = dialogOpen ? (editing?.id ?? 'new') : ''
+  const [lastSeedKey, setLastSeedKey] = useState<string | null>(null)
+  if (seedKey !== lastSeedKey) {
+    setLastSeedKey(seedKey)
+    if (dialogOpen) {
+      setError(null)
+      setForm(editing ? formFromRule(editing) : emptyForm())
+    }
+  }
 
   const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: rewriteKeys.all(siteId) })

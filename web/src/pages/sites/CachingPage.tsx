@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useMemo, useState, type ReactNode } from 'react'
 import { useParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -148,16 +148,24 @@ export function CachingPage() {
       ? `${formatNumber(appliedQuotaMb)} MiB`
       : t('pages.caching.unlimited')
 
-  useEffect(() => {
-    if (!dialogOpen) return
-    setError(null)
-    setForm(editing ? formFromRule(editing) : emptyForm())
-  }, [dialogOpen, editing])
+  // Re-seed the dialog form every time it opens (render-phase reset), so the
+  // first paint already shows the right rule instead of the previous one.
+  const seedKey = dialogOpen ? (editing?.id ?? 'new') : ''
+  const [lastSeedKey, setLastSeedKey] = useState<string | null>(null)
+  if (seedKey !== lastSeedKey) {
+    setLastSeedKey(seedKey)
+    if (dialogOpen) {
+      setError(null)
+      setForm(editing ? formFromRule(editing) : emptyForm())
+    }
+  }
 
   /** Keep the input in step with the server value (also picks up clamping). */
-  useEffect(() => {
+  const [lastQuotaMb, setLastQuotaMb] = useState<number | null>(null)
+  if (appliedQuotaMb !== lastQuotaMb) {
+    setLastQuotaMb(appliedQuotaMb)
     setQuotaInput(String(appliedQuotaMb))
-  }, [appliedQuotaMb])
+  }
 
   const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: cacheKeys.site(siteId) })

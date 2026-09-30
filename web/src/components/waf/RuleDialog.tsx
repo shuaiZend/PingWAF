@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Plus, Trash, CaretUpDown, BracketsCurly } from '@phosphor-icons/react'
@@ -117,35 +117,43 @@ export function RuleDialog({
   const [error, setError] = useState<string | null>(null)
 
   // Re-seed the form every time the dialog opens so stale state never leaks
-  // between "create", "edit rule A" and "edit rule B".
-  useEffect(() => {
-    if (!open) return
-    setError(null)
-    if (rule) {
-      setForm(formFromRule(rule))
-      const parsed = parseExpression(rule.expression)
-      if (parsed) {
-        setEditor('builder')
-        setConditions(parsed.conditions)
-        setCombinator(parsed.combinator)
-        setRaw(rule.expression)
+  // between "create", "edit rule A" and "edit rule B". This runs during render
+  // (the supported "adjust state when props change" pattern) so the first paint
+  // already shows the right values.
+  const seedKey = open
+    ? JSON.stringify([rule?.id ?? 'new', presetExpression ?? '', presetTags ?? []])
+    : ''
+  const [lastSeedKey, setLastSeedKey] = useState<string | null>(null)
+  if (seedKey !== lastSeedKey) {
+    setLastSeedKey(seedKey)
+    if (open) {
+      setError(null)
+      if (rule) {
+        setForm(formFromRule(rule))
+        const parsed = parseExpression(rule.expression)
+        if (parsed) {
+          setEditor('builder')
+          setConditions(parsed.conditions)
+          setCombinator(parsed.combinator)
+          setRaw(rule.expression)
+        } else {
+          setEditor('raw')
+          setConditions([emptyCondition()])
+          setCombinator('and')
+          setRaw(rule.expression)
+        }
       } else {
-        setEditor('raw')
+        setForm({
+          ...emptyForm(),
+          tags: presetTags ? [...presetTags] : [],
+        })
         setConditions([emptyCondition()])
         setCombinator('and')
-        setRaw(rule.expression)
+        setEditor('builder')
+        setRaw(presetExpression ?? '')
       }
-      return
     }
-    setForm({
-      ...emptyForm(),
-      tags: presetTags ? [...presetTags] : [],
-    })
-    setConditions([emptyCondition()])
-    setCombinator('and')
-    setEditor('builder')
-    setRaw(presetExpression ?? '')
-  }, [open, rule, presetTags, presetExpression])
+  }
 
   const builtExpression = useMemo(
     () => buildExpression(conditions, combinator),

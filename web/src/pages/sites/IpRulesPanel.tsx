@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useParams, useSearchParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -109,17 +109,22 @@ export function IpRulesPanel() {
   // re-trigger the form-reset effect below and wipe the prefill.
   const prefillBlock = searchParams.get('block')
 
-  useEffect(() => {
-    if (!prefillBlock) return
-    setTab('single')
-    setForm({
-      ...emptyForm(),
-      mode: 'manual',
-      ranges: prefillBlock,
-      action: 'block',
-    })
-    setDialogOpen(true)
-  }, [prefillBlock])
+  // `null` until the first pass: a deep link present at mount must still open
+  // the dialog.
+  const [lastPrefillBlock, setLastPrefillBlock] = useState<string | null>(null)
+  if (prefillBlock !== lastPrefillBlock) {
+    setLastPrefillBlock(prefillBlock)
+    if (prefillBlock) {
+      setTab('single')
+      setForm({
+        ...emptyForm(),
+        mode: 'manual',
+        ranges: prefillBlock,
+        action: 'block',
+      })
+      setDialogOpen(true)
+    }
+  }
 
   const rulesQuery = useQuery({
     queryKey: ipRuleKeys.list(siteId),
@@ -150,12 +155,18 @@ export function IpRulesPanel() {
     setDialogOpen(true)
   }
 
-  useEffect(() => {
-    if (!dialogOpen) return
-    setError(null)
-    if (editing) setForm(formFromRule(editing))
-    else if (!prefillBlock) setForm(emptyForm())
-  }, [dialogOpen, editing, prefillBlock])
+  // Re-seed the dialog form every time it opens (render-phase reset), so the
+  // first paint already shows the right rule instead of the previous one.
+  const seedKey = dialogOpen ? `${editing?.id ?? 'new'}:${prefillBlock ?? ''}` : ''
+  const [lastSeedKey, setLastSeedKey] = useState<string | null>(null)
+  if (seedKey !== lastSeedKey) {
+    setLastSeedKey(seedKey)
+    if (dialogOpen) {
+      setError(null)
+      if (editing) setForm(formFromRule(editing))
+      else if (!prefillBlock) setForm(emptyForm())
+    }
+  }
 
   const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: ipRuleKeys.all(siteId) })
