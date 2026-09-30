@@ -148,6 +148,14 @@ cargo build --release --bin pingwaf --features full
 cargo build --bin pingwaf --no-default-features --features tls-rustls,full
 ```
 
+> Local builds are tuned for a small `target/`: dependencies are compiled
+> without debug info and workspace members keep line tables only, so a checkout
+> stays a few GB instead of tens of GB. `make clean` drops the cache outright,
+> and the heavy targets (`lint`, `test`, `cov`, `bench`, `release*`) clean up
+> automatically once `target/` passes `TARGET_MAX_GB` (20 GB by default;
+> override per invocation, e.g. `make test TARGET_MAX_GB=50`): first the
+> incremental caches, then the whole directory if that is not enough.
+
 ## Project Layout
 
 | Path | What lives there |
@@ -382,6 +390,9 @@ the standard Apache-2.0 header used throughout the workspace.
    重新生成）、cmake、clang、pkg-config、libssl-dev、nasm、PostgreSQL ≥ 14。
 2. **构建**：先 `cd web && npm ci && npm run build`（前端资源在编译期通过
    rust-embed 打进二进制），再 `cargo build --bin pingwaf --features full`。
+   本地构建已针对 `target/` 体积调优（依赖不保留调试信息）；`make clean`
+   可随时清理，`target/` 超过 `TARGET_MAX_GB`（默认 20 GB）时 `make lint` /
+   `test` / `release` 等目标会自动先删 incremental 缓存、必要时再整目录清理。
 3. **本地运行**：`cargo run --bin pingwaf --features full -- all-in-one
    --db-url "postgres://pingwaf:pingwaf@localhost:5432/pingwaf"`，
    控制台 <https://localhost:9080>（自签名证书），默认账号 `admin@pingwaf.local` / `pingwaf123`。

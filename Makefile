@@ -22,6 +22,42 @@ lint-rustls:
 fmt:
 	cargo fmt --all
 
+# ── Build hygiene ────────────────────────────────────────────────────────────
+# Cargo never garbage-collects target/: every feature set, test binary and
+# profile keeps its own artifacts forever — one checkout of this repo reached
+# 108 GB that way. The heavy targets below run `check-target` first. Once
+# target/ exceeds TARGET_MAX_GB it drops the incremental caches (the fastest
+# growing and cheapest part to lose), and only if that is not enough clears the
+# whole directory with `cargo clean`. Override per invocation
+# (`make test TARGET_MAX_GB=50`). `dev` is exempt on purpose: bacon owns that
+# loop and the incremental cache keeps it fast.
+TARGET_MAX_GB ?= 20
+
+HEAVY := lint lint-rustls test test-rustls cov bench bench-all bloat \
+	release release-full release-rustls-full release-all release-perf \
+	release-pyro
+
+$(HEAVY): check-target
+
+check-target:
+	@used=$$(du -sm target 2>/dev/null | cut -f1); \
+	limit=$$(( $(TARGET_MAX_GB) * 1024 )); \
+	if [ -n "$$used" ] && [ "$$used" -gt "$$limit" ]; then \
+		echo "target/ uses $${used} MB, over TARGET_MAX_GB=$(TARGET_MAX_GB): dropping incremental caches"; \
+		rm -rf target/*/incremental; \
+		used=$$(du -sm target 2>/dev/null | cut -f1); \
+		if [ -n "$$used" ] && [ "$$used" -gt "$$limit" ]; then \
+			echo "still $${used} MB: cargo clean"; \
+			cargo clean; \
+		fi; \
+	fi
+
+# Removes the build cache and the copied root `dist/`; `web/dist` is kept
+# because pingwaf-server embeds it at compile time.
+clean:
+	cargo clean
+	rm -rf dist
+
 build-web:
 	rm -rf dist \
 	&& cd web \
