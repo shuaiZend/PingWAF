@@ -43,6 +43,21 @@ verbatim for reference and attribution, and is not maintained here.
   Credentials are stored with the site configuration and masked in API
   responses.
 
+### ⚠️ Breaking Changes
+
+- The `jaeger` parameter of an OTLP exporter endpoint no longer enables the
+  deprecated Jaeger propagation format: the upgrade to OpenTelemetry 0.33
+  removed its propagator crate, and W3C TraceContext (still enabled by
+  default) covers the same ground. The parameter is accepted and logged as
+  ignored, so existing `otlp_exporter` values keep parsing.
+
+### 🔧 Internal
+
+- Refreshed the delivery toolchain: OpenTelemetry 0.33, ESLint 10 with
+  `eslint-plugin-react-hooks` 7, Vite 8 and `@vitejs/plugin-react` 6. The
+  dashboard's forms now seed their inputs during render instead of inside
+  effects, as the new hooks plugin requires.
+
 ## [PingWAF 0.17.1] — 2026-09-30
 
 ### 🐛 Bug Fixes
