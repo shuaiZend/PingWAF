@@ -157,6 +157,30 @@ inherits = "release"
 debug = 1
 strip = "none"
 
+# Local (dev/test) builds only — the release profiles above ship the binaries
+# and are deliberately left alone. Dependencies keep no debug info (nobody
+# steps through them), while workspace members keep line tables so a panic
+# still reports file:line. Without this, one checkout of this repo reached
+# 108 GB of target/: 60 GB of dependency DWARF plus 46 GB of incremental
+# caches left behind by a stream of feature-set variants.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+# `test` inherits dev's settings but NOT its package overrides, so repeat them.
+# Incremental caches are only ever written for workspace members and nothing
+# garbage-collects them, so `cargo test --workspace` piles one up per feature
+# set and test binary. Tests run in batches rather than in an edit loop, so the
+# cache buys little here and is disabled; `dev` keeps it for bacon.
+[profile.test]
+debug = "line-tables-only"
+incremental = false
+
+[profile.test.package."*"]
+debug = false
+
 
 [[bench]]
 name = "bench"
