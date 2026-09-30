@@ -15,8 +15,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::api::common::{
-    load_site_read, load_site_write, non_empty, normalise_domain, parse_uuid,
-    require_write, Page, Pagination,
+    ensure_acme_wildcard_supported, ensure_domains_available, load_site_read,
+    load_site_write, non_empty, normalise_domain, normalise_domain_list,
+    parse_uuid, require_write, Page, Pagination,
 };
 use crate::api::error::ApiError;
 use crate::api::state::AppState;
@@ -34,6 +35,8 @@ pub struct SiteResponse {
     pub id: Uuid,
     pub name: String,
     pub domain: String,
+    /// Extra hostnames served by the same site configuration.
+    pub alternate_domains: Vec<String>,
     pub status: String,
     pub plan: String,
     /// Disk budget, in MiB, the agents may use for this site's cache.
@@ -49,6 +52,7 @@ impl From<site::Model> for SiteResponse {
             id: model.id,
             name: model.name,
             domain: model.domain,
+            alternate_domains: model.alternate_domains,
             status: model.status,
             plan: model.plan,
             cache_quota_mb: model.cache_quota_mb,
@@ -154,6 +158,9 @@ pub struct ListQuery {
 pub struct CreateSiteRequest {
     pub name: String,
     pub domain: String,
+    /// Extra hostnames (wildcards allowed) the site also answers on.
+    #[serde(default)]
+    pub alternate_domains: Option<Vec<String>>,
     /// Origin the site proxies to — a CDN/WAF hostname or the application
     /// itself. Required: a site without an origin cannot serve traffic.
     pub upstream_address: String,
@@ -173,6 +180,9 @@ pub struct UpdateSiteRequest {
     pub name: Option<String>,
     #[serde(default)]
     pub domain: Option<String>,
+    /// Replaces the whole list; an empty array clears it.
+    #[serde(default)]
+    pub alternate_domains: Option<Vec<String>>,
     #[serde(default)]
     pub status: Option<String>,
     #[serde(default)]
@@ -682,6 +692,14 @@ async fn create(
         ));
     }
     let domain = normalise_domain(&payload.domain)?;
+    let alternate_domains = normalise_domain_list(
+        &domain,
+        &payload.alternate_domains.unwrap_or_default(),
+    )?;
+    let mut all_domains = vec![domain.clone()];
+    all_domains.extend(alternate_domains.iter().cloned());
+    ensure_domains_available(&state.db, &all_domains, None).await?;
+
     let upstream_name = non_empty(&payload.upstream_name)
         .unwrap_or_else(|| "origin".to_string());
     let upstream_address = normalize_origin_address(&payload.upstream_address)?;
@@ -711,6 +729,7 @@ async fn create(
         user_id: Set(current.id),
         name: Set(name),
         domain: Set(domain.clone()),
+        alternate_domains: Set(alternate_domains),
         status: Set(status),
         plan: Set(plan),
         cache_quota_mb: Set(crate::defaults::DEFAULT_CACHE_QUOTA_MB),
@@ -820,6 +839,8 @@ async fn update(
 ) -> Result<Json<SiteResponse>, ApiError> {
     let id = parse_uuid(&site_id, "site id")?;
     let model = load_site_write(&state.db, id, &current).await?;
+    let previous_domain = model.domain.clone();
+    let previous_alternates = model.alternate_domains.clone();
 
     let mut active: site::ActiveModel = model.into();
     if let Some(name) = non_empty(&payload.name) {
@@ -830,8 +851,26 @@ async fn update(
         }
         active.name = Set(name);
     }
-    if let Some(domain) = non_empty(&payload.domain) {
-        active.domain = Set(normalise_domain(&domain)?);
+    let requested_domain = match non_empty(&payload.domain) {
+        Some(domain) => Some(normalise_domain(&domain)?),
+        None => None,
+    };
+    if requested_domain.is_some() || payload.alternate_domains.is_some() {
+        let primary = requested_domain
+            .clone()
+            .unwrap_or_else(|| previous_domain.clone());
+        let alternates_source = payload
+            .alternate_domains
+            .clone()
+            .unwrap_or_else(|| previous_alternates.clone());
+        let alternates = normalise_domain_list(&primary, &alternates_source)?;
+
+        let mut all_domains = vec![primary.clone()];
+        all_domains.extend(alternates.iter().cloned());
+        ensure_domains_available(&state.db, &all_domains, Some(id)).await?;
+
+        active.domain = Set(primary);
+        active.alternate_domains = Set(alternates);
     }
     if let Some(status) = non_empty(&payload.status) {
         if !site_status::is_valid(&status) {
@@ -1349,6 +1388,19 @@ async fn upsert_ssl(
                 "unknown ACME challenge type '{challenge}'"
             )));
         }
+    }
+    // An ACME order without an uploaded PEM is issued against the site's whole
+    // hostname set, which a wildcard may not contain under http-01.
+    let uploaded_cert = payload
+        .cert_pem
+        .as_deref()
+        .is_some_and(|pem| !pem.trim().is_empty());
+    if !uploaded_cert && non_empty(&payload.acme_email).is_some() {
+        ensure_acme_wildcard_supported(
+            &site,
+            &[],
+            payload.acme_challenge_type.as_deref(),
+        )?;
     }
     let expires_at = match non_empty(&payload.expires_at) {
         Some(raw) => {

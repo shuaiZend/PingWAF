@@ -570,6 +570,11 @@ export function IpRulesPanel() {
               <Select
                 label={t('pages.waf.action')}
                 value={form.action}
+                hint={
+                  form.action === 'basic_auth'
+                    ? t('pages.basicAuth.ruleActionHint')
+                    : undefined
+                }
                 options={IP_RULE_ACTIONS.map((a) => ({
                   value: a,
                   label: t(`actions.${a}`, a),
@@ -617,6 +622,11 @@ export function IpRulesPanel() {
             <Select
               label={t('pages.waf.action')}
               value={bulkAction}
+              hint={
+                bulkAction === 'basic_auth'
+                  ? t('pages.basicAuth.ruleActionHint')
+                  : undefined
+              }
               options={IP_RULE_ACTIONS.map((a) => ({
                 value: a,
                 label: t(`actions.${a}`, a),

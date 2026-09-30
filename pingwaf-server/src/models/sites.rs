@@ -15,7 +15,7 @@ pub mod site_status {
     }
 }
 
-/// `sites` — one protected domain.
+/// `sites` — one protected site, served on one or more hostnames.
 pub mod sites {
     use super::*;
 
@@ -28,8 +28,13 @@ pub mod sites {
         pub id: Uuid,
         pub user_id: Uuid,
         pub name: String,
+        /// The primary hostname; it is the one certificate issuance and
+        /// display default to.
         #[sea_orm(unique)]
         pub domain: String,
+        /// Extra hostnames served by the same site, each with the same
+        /// routing, WAF and cache configuration as `domain`.
+        pub alternate_domains: Vec<String>,
         pub status: String,
         pub plan: String,
         /// Disk budget, in MiB, the agents may use for this site's cache.

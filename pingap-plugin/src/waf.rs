@@ -29,8 +29,9 @@ use super::{
     get_str_slice_conf,
 };
 use crate::challenge::{
-    ChallengeKind, VERIFY_ENDPOINT, block_page, build_challenge_response,
-    paused_page, rate_limit_page, resolve_cookie_secret,
+    ChallengeKind, VERIFY_ENDPOINT, basic_auth_page, block_page,
+    build_challenge_response, paused_page, rate_limit_page,
+    resolve_cookie_secret,
 };
 use async_trait::async_trait;
 use bytes::{BufMut, BytesMut};
@@ -39,12 +40,13 @@ use pingap_config::{PluginCategory, PluginConf};
 use pingap_core::{
     Ctx, HTTP_HEADER_NAME_X_REQUEST_ID, HttpResponse, Plugin, PluginStep,
     RequestPluginResult, ResponseBodyPluginResult, ResponsePluginResult,
-    ensure_client_ip, get_host,
+    constant_time_eq, ensure_client_ip, get_host,
 };
-use pingap_util::IpRules;
+use pingap_util::{IpRules, base64_decode};
 use pingora::http::ResponseHeader;
 use pingora::proxy::Session;
 use pingwaf_agent::cache::{
+    BasicAuthConfig as CacheBasicAuthConfig,
     BotProtectionConfig as CacheBotProtection, GeoConfig as CacheGeoConfig,
     IpAccessAction as CacheIpAccessAction, RateLimitRule as CacheRateLimitRule,
     SiteRules as CacheSiteRules, SslConfig as CacheSslConfig,
@@ -69,7 +71,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tor_geoip::GeoipDb;
-use tracing::debug;
+use tracing::{debug, warn};
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -137,6 +139,121 @@ impl MtlsPolicy {
     }
 }
 
+/// The site's HTTP basic authentication credentials and gate.
+///
+/// The gate sits inside the WAF plugin, which runs ahead of the cache plugin
+/// in the chain, so a stored response can never answer a request that has not
+/// been authenticated. Credentials reach the data plane pre-encoded; the
+/// request payload is decoded once and compared in constant time.
+struct BasicAuthGate {
+    /// The gate applies to every request, not only to the clients an access
+    /// rule with the `basic_auth` action singles out.
+    site_wide: bool,
+    realm: String,
+    /// Decoded `user:password` payloads.
+    credentials: Vec<Vec<u8>>,
+    delay: Option<std::time::Duration>,
+    hide_credentials: bool,
+}
+
+/// Realm advertised when the site did not name one.
+const DEFAULT_BASIC_REALM: &str = "Restricted";
+
+/// Keeps a configured realm from breaking out of the `WWW-Authenticate`
+/// header.
+fn sanitise_realm(value: &str) -> String {
+    let cleaned: String = value
+        .trim()
+        .chars()
+        .filter(|c| !c.is_control() && *c != '"' && *c != '\\')
+        .collect();
+    if cleaned.is_empty() {
+        DEFAULT_BASIC_REALM.to_string()
+    } else {
+        cleaned
+    }
+}
+
+impl BasicAuthGate {
+    /// `None` when the site has no usable credential: without one nothing
+    /// can pass, so the gate is left out and the operator sees the warning
+    /// logged instead. The credentials serve both the site-wide gate and the
+    /// `basic_auth` rule action, so they are compiled even while the
+    /// site-wide switch is off.
+    fn build(cfg: &CacheBasicAuthConfig) -> Option<Self> {
+        let credentials: Vec<Vec<u8>> = cfg
+            .credentials
+            .iter()
+            .filter_map(|credential| {
+                match base64_decode(&credential.authorization) {
+                    Ok(decoded) => Some(decoded),
+                    Err(error) => {
+                        warn!(
+                            username = %credential.username,
+                            error = %error,
+                            "basic auth credential is not valid base64; entry ignored"
+                        );
+                        None
+                    },
+                }
+            })
+            .collect();
+        if credentials.is_empty() {
+            if cfg.enabled {
+                warn!(
+                    "basic auth is enabled without a usable credential; gate disabled"
+                );
+            }
+            return None;
+        }
+        Some(Self {
+            site_wide: cfg.enabled,
+            realm: sanitise_realm(&cfg.realm),
+            credentials,
+            delay: (cfg.delay_seconds > 0).then(|| {
+                std::time::Duration::from_secs(u64::from(cfg.delay_seconds))
+            }),
+            hide_credentials: cfg.hide_credentials,
+        })
+    }
+
+    /// Whether the request carries a credential this gate accepts.
+    fn verify(&self, headers: &[(String, String)]) -> bool {
+        let Some(value) = headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+            .map(|(_, value)| value.as_str())
+        else {
+            return false;
+        };
+        // The scheme is case-insensitive (RFC 7235).
+        let Some((scheme, payload)) = value.split_once(' ') else {
+            return false;
+        };
+        if !scheme.eq_ignore_ascii_case("basic") {
+            return false;
+        }
+        let Ok(decoded) = base64_decode(payload.trim()) else {
+            return false;
+        };
+        self.credentials
+            .iter()
+            .any(|expected| constant_time_eq(expected, &decoded))
+    }
+}
+
+/// Whether any enabled access rule asks for the basic auth gate.
+fn access_rules_require_basic_auth(site_rules: &CacheSiteRules) -> bool {
+    let ip_rule = site_rules.ip_access_rules.iter().any(|rule| {
+        rule.enabled && matches!(rule.action, CacheIpAccessAction::BasicAuth)
+    });
+    let geo_rule = site_rules
+        .geo_config
+        .as_ref()
+        .is_some_and(|geo| matches!(geo.action, CacheWafAction::BasicAuth));
+    ip_rule || geo_rule
+}
+
 /// Site data resolved from the agent cache, compiled once per config
 /// fingerprint: the WAF engine, the access restrictions and the custom rule
 /// names used to label security events.
@@ -149,6 +266,9 @@ struct SiteContext {
     rate_limits: Option<RateLimitPolicy>,
     /// mTLS enforcement; `None` when the site does not use mTLS.
     mtls: Option<MtlsPolicy>,
+    /// Site-wide basic auth gate; `None` when the site has none, it is
+    /// disabled, or it stores no usable credential.
+    basic_auth: Option<BasicAuthGate>,
     /// Custom rule id → name.
     rule_names: HashMap<String, String>,
     /// Site paused from the dashboard: every request gets the maintenance page.
@@ -159,6 +279,16 @@ impl SiteContext {
     fn build(site_rules: &CacheSiteRules) -> Self {
         let waf_cfg = site_rules.waf_config.as_ref();
         let rate_limits = RateLimitPolicy::build(site_rules);
+        let basic_auth = site_rules
+            .basic_auth
+            .as_ref()
+            .and_then(BasicAuthGate::build);
+        if basic_auth.is_none() && access_rules_require_basic_auth(site_rules) {
+            warn!(
+                site_id = %site_rules.site_id,
+                "access rule requires basic auth but the site has no usable credentials; matching requests are refused"
+            );
+        }
         Self {
             engine: waf_cfg
                 .filter(|cfg| cfg.enabled)
@@ -171,6 +301,7 @@ impl SiteContext {
                 .map(BotPolicy::build),
             rate_limits: (!rate_limits.rules.is_empty()).then_some(rate_limits),
             mtls: MtlsPolicy::build(site_rules.ssl_config.as_ref()),
+            basic_auth,
             rule_names: waf_cfg
                 .map(|cfg| {
                     cfg.custom_rules
@@ -250,6 +381,8 @@ enum IpRuleAction {
     Allow,
     Challenge,
     Block,
+    /// The matching client must pass the site's basic auth gate.
+    BasicAuth,
 }
 
 /// One IP access rule with its ranges parsed once.
@@ -268,6 +401,8 @@ struct GeoRule {
     blocked_asns: HashSet<u32>,
     block_unknown: bool,
     challenge: bool,
+    /// The policy answers with a basic auth prompt instead of a block page.
+    basic_auth: bool,
 }
 
 /// Why a request was denied, and by which rule.
@@ -276,6 +411,29 @@ struct Denial {
     rule_name: String,
     detail: String,
     challenge: bool,
+    /// The request must pass the site's basic auth gate to proceed.
+    basic_auth: bool,
+}
+
+/// What the access restrictions decided for one request.
+enum PolicyOutcome {
+    /// No rule matched; the request continues.
+    NoMatch,
+    /// An explicit `allow` rule matched: the client is trusted, so the
+    /// site-wide basic auth gate is skipped along with the rules below it.
+    Allowed,
+    /// A rule stopped the request.
+    Denied(Denial),
+}
+
+impl PolicyOutcome {
+    /// The denial, when the request was stopped.
+    fn denial(&self) -> Option<&Denial> {
+        match self {
+            Self::Denied(denial) => Some(denial),
+            _ => None,
+        }
+    }
 }
 
 /// Access restrictions of one site: IP rules plus the geo policy.
@@ -283,8 +441,8 @@ struct Denial {
 /// IP rules are evaluated first-match-wins in the order the control plane sent
 /// them (priority ascending), so an `Allow` rule placed above a catch-all
 /// `Block` yields a whitelist and sits below a blacklist. An explicit `Allow`
-/// match short-circuits every rule below it; when nothing matches, the request
-/// continues.
+/// match short-circuits every rule below it — and the site-wide basic auth
+/// gate with them; when nothing matches, the request continues.
 #[derive(Default)]
 struct AccessPolicy {
     ip_rules: Vec<IpRule>,
@@ -307,6 +465,7 @@ impl AccessPolicy {
                         IpRuleAction::Challenge
                     },
                     CacheIpAccessAction::Block => IpRuleAction::Block,
+                    CacheIpAccessAction::BasicAuth => IpRuleAction::BasicAuth,
                 },
                 ranges: IpRules::new(&rule.ip_ranges),
             })
@@ -318,18 +477,15 @@ impl AccessPolicy {
     }
 
     /// Decides whether `ip` — and the country it resolves to — may proceed.
-    ///
-    /// `None` means the request continues; `Some(denial)` carries the rule
-    /// that stopped it.
-    fn evaluate(&self, ip: &str, country: Option<&str>) -> Option<Denial> {
+    fn evaluate(&self, ip: &str, country: Option<&str>) -> PolicyOutcome {
         if let Ok(addr) = ip.parse::<IpAddr>() {
             for rule in &self.ip_rules {
                 if !rule.ranges.is_match_addr(&addr) {
                     continue;
                 }
                 return match rule.action {
-                    IpRuleAction::Allow => None,
-                    IpRuleAction::Block => Some(Denial {
+                    IpRuleAction::Allow => PolicyOutcome::Allowed,
+                    IpRuleAction::Block => PolicyOutcome::Denied(Denial {
                         rule_id: rule.id.clone(),
                         rule_name: rule.name.clone(),
                         detail: format!(
@@ -337,8 +493,9 @@ impl AccessPolicy {
                             rule.id
                         ),
                         challenge: false,
+                        basic_auth: false,
                     }),
-                    IpRuleAction::Challenge => Some(Denial {
+                    IpRuleAction::Challenge => PolicyOutcome::Denied(Denial {
                         rule_id: rule.id.clone(),
                         rule_name: rule.name.clone(),
                         detail: format!(
@@ -346,12 +503,25 @@ impl AccessPolicy {
                             rule.id
                         ),
                         challenge: true,
+                        basic_auth: false,
+                    }),
+                    IpRuleAction::BasicAuth => PolicyOutcome::Denied(Denial {
+                        rule_id: rule.id.clone(),
+                        rule_name: rule.name.clone(),
+                        detail: format!(
+                            "client ip {ip} matched basic auth rule {}",
+                            rule.id
+                        ),
+                        challenge: false,
+                        basic_auth: true,
                     }),
                 };
             }
         }
 
-        let geo = self.geo.as_ref().filter(|geo| geo.enabled)?;
+        let Some(geo) = self.geo.as_ref().filter(|geo| geo.enabled) else {
+            return PolicyOutcome::NoMatch;
+        };
         let asn_denied = !geo.blocked_asns.is_empty()
             && lookup_asn(ip)
                 .is_some_and(|asn| geo.blocked_asns.contains(&asn));
@@ -364,9 +534,9 @@ impl AccessPolicy {
             None => geo.block_unknown,
         };
         if !asn_denied && !country_denied {
-            return None;
+            return PolicyOutcome::NoMatch;
         }
-        Some(Denial {
+        PolicyOutcome::Denied(Denial {
             rule_id: "geo_restriction".to_string(),
             rule_name: "Geo restriction".to_string(),
             detail: match (country, asn_denied) {
@@ -383,6 +553,7 @@ impl AccessPolicy {
                 },
             },
             challenge: geo.challenge,
+            basic_auth: geo.basic_auth,
         })
     }
 }
@@ -409,6 +580,7 @@ impl GeoRule {
                 cfg.action,
                 CacheWafAction::Challenge | CacheWafAction::JsChallenge
             ),
+            basic_auth: matches!(cfg.action, CacheWafAction::BasicAuth),
         }
     }
 }
@@ -484,6 +656,7 @@ impl BotPolicy {
                 )
             },
             challenge: self.action == BotAction::Challenge,
+            basic_auth: false,
         };
         match self.action {
             BotAction::Log => BotDecision::LogOnly(denial),
@@ -651,8 +824,9 @@ impl CompiledRateRule {
                 RateAction::Challenge
             },
             CacheWafAction::Block => RateAction::Block,
-            // Counting without consequence would only burn CPU.
-            CacheWafAction::Allow => return None,
+            // Counting without consequence would only burn CPU, and basic
+            // auth is not a rate limit outcome.
+            CacheWafAction::Allow | CacheWafAction::BasicAuth => return None,
         };
         Some(Self {
             id: rule.id.clone(),
@@ -1472,6 +1646,15 @@ fn build_site_engine(cfg: &CacheWafConfig) -> WafEngine {
                 CacheWafAction::Challenge => RuleAction::Challenge,
                 CacheWafAction::JsChallenge => RuleAction::JsChallenge,
                 CacheWafAction::Allow => RuleAction::Allow,
+                // Not a custom-rule action; the control plane never sends
+                // one, so the rule is dropped instead of guessed at.
+                CacheWafAction::BasicAuth => {
+                    warn!(
+                        rule = %r.id,
+                        "custom rule carries a non-rule action; rule skipped"
+                    );
+                    return None;
+                },
             };
             CompiledRule::compile(
                 r.id.clone(),
@@ -1916,28 +2099,77 @@ impl Plugin for WafPlugin {
         }
 
         // ── Access restrictions: IP rules and geo stop a request before the
-        // WAF engine runs, and apply whether or not it is enabled ──
-        if let Some(site) = &context
-            && let Some(denial) = site.policy.evaluate(
+        // WAF engine runs, and apply whether or not it is enabled. A rule
+        // whose action is `basic_auth` is not an outright denial: it feeds
+        // the gate below so the request continues once authenticated ──
+        let mut access = PolicyOutcome::NoMatch;
+        if let Some(site) = &context {
+            access = site.policy.evaluate(
                 &request_data.client_ip,
                 request_data.country_code.as_deref(),
-            )
-        {
-            let original_url = if query.is_empty() {
-                path
-            } else {
-                format!("{path}?{query}")
-            };
-            return Ok(Self::deny_request(
-                agent.as_ref(),
-                &site_id,
-                &request_id,
-                &host,
-                &request_data,
-                &denial,
-                &original_url,
-                self.pow_difficulty,
-            ));
+            );
+            if let Some(denial) =
+                access.denial().filter(|denial| !denial.basic_auth)
+            {
+                let original_url = if query.is_empty() {
+                    path
+                } else {
+                    format!("{path}?{query}")
+                };
+                return Ok(Self::deny_request(
+                    agent.as_ref(),
+                    &site_id,
+                    &request_id,
+                    &host,
+                    &request_data,
+                    denial,
+                    &original_url,
+                    self.pow_difficulty,
+                ));
+            }
+        }
+
+        // ── Basic authentication: the site-wide gate and any access rule
+        // with the `basic_auth` action share one credential set. It runs
+        // before bot/rate/WAF checks and inside the WAF plugin, which sits
+        // ahead of the cache plugin, so neither a cached response nor a
+        // later verdict can skip it. An `allow` rule is the one exemption:
+        // it means the client is trusted outright ──
+        let gate = context.as_ref().and_then(|site| site.basic_auth.as_ref());
+        let gate_required = match &access {
+            PolicyOutcome::Allowed => false,
+            PolicyOutcome::Denied(denial) => denial.basic_auth,
+            PolicyOutcome::NoMatch => gate.is_some_and(|gate| gate.site_wide),
+        };
+        if gate_required {
+            let authenticated =
+                gate.is_some_and(|gate| gate.verify(&request_data.headers));
+            if !authenticated {
+                if let Some(delay) = gate.and_then(|gate| gate.delay) {
+                    tokio::time::sleep(delay).await;
+                }
+                let realm = gate
+                    .map(|gate| gate.realm.as_str())
+                    .unwrap_or(DEFAULT_BASIC_REALM);
+                let reason = access
+                    .denial()
+                    .map(|denial| {
+                        format!("{}; authentication required", denial.detail)
+                    })
+                    .unwrap_or_else(|| {
+                        "site-wide basic authentication".to_string()
+                    });
+                let response = basic_auth_page(&request_id, realm, &reason);
+                emit_generated_access(agent.as_ref(), &request_id, &response);
+                return Ok(RequestPluginResult::Respond(response));
+            }
+            if let Some(gate) = gate
+                && gate.hide_credentials
+            {
+                session
+                    .req_header_mut()
+                    .remove_header(&http::header::AUTHORIZATION);
+            }
         }
 
         // ── Bot protection: UA classification runs after IP/geo and before
@@ -2276,6 +2508,7 @@ register_plugin!("waf", WafPlugin);
 pub(crate) mod tests {
     use super::*;
     use pingap_core::PluginStep;
+    use pingap_util::base64_encode;
     use pingora::proxy::Session;
     use pingwaf_agent::cache::RuleCache;
     use pingwaf_agent::client::ControlPlaneClient;
@@ -2795,6 +3028,283 @@ ml_threshold = 0.75
         else {
             panic!("expected a certificate without an organization to fail");
         };
+    }
+
+    /// Posture of a basic auth test agent.
+    struct BasicAuthPosture {
+        /// The site-wide gate is on: every request must authenticate.
+        site_wide: bool,
+        /// One enabled IP rule: the matched network and its action
+        /// (3 = allow, 4 = basic auth).
+        rule: Option<(&'static str, i32)>,
+        hide_credentials: bool,
+    }
+
+    /// Installs an agent whose only site carries `credentials` and the given
+    /// basic auth posture.
+    async fn install_basic_auth_agent(
+        credentials: &[(&str, &str)],
+        posture: BasicAuthPosture,
+    ) -> (
+        tokio::sync::MutexGuard<'static, ()>,
+        Arc<PingWafAgent>,
+        tempfile::TempDir,
+    ) {
+        let installed = install_test_agent().await;
+        let ip_rules: Vec<proto::IpAccessRule> = posture
+            .rule
+            .iter()
+            .map(|(network, action)| proto::IpAccessRule {
+                id: "rule-1".to_string(),
+                name: "example".to_string(),
+                ip_ranges: vec![(*network).to_string()],
+                action: *action,
+                note: String::new(),
+                enabled: true,
+            })
+            .collect();
+        let config_hash = format!(
+            "hash-basic-auth-{}-{:?}-{}",
+            posture.site_wide, posture.rule, posture.hide_credentials
+        );
+        installed
+            .1
+            .rule_cache
+            .update_from_site_config(&proto::SiteConfig {
+                sites: vec![proto::Site {
+                    id: "site-1".to_string(),
+                    name: "example".to_string(),
+                    domain: "example.com".to_string(),
+                    alternate_domains: Vec::new(),
+                    status: 0,
+                    rules: Some(proto::RuleBundle {
+                        site_id: "site-1".to_string(),
+                        config_hash: config_hash.clone(),
+                        ip_access_rules: ip_rules,
+                        basic_auth: Some(proto::BasicAuthConfig {
+                            enabled: posture.site_wide,
+                            realm: "Restricted".to_string(),
+                            credentials: credentials
+                                .iter()
+                                .map(|(username, password)| {
+                                    proto::BasicAuthCredential {
+                                        username: (*username).to_string(),
+                                        authorization: base64_encode(format!(
+                                            "{username}:{password}"
+                                        )),
+                                    }
+                                })
+                                .collect(),
+                            delay_seconds: 0,
+                            hide_credentials: posture.hide_credentials,
+                        }),
+                        ..Default::default()
+                    }),
+                }],
+                config_hash,
+                updated_at: None,
+            })
+            .unwrap();
+        installed
+    }
+
+    /// Runs one request carrying an optional `Authorization` header, and
+    /// reports whether the header was still there when the plugin finished.
+    async fn run_request_with_auth(
+        plugin: &WafPlugin,
+        client_ip: &str,
+        authorization: Option<&str>,
+    ) -> (RequestPluginResult, bool) {
+        let auth_header = authorization
+            .map(|value| format!("Authorization: {value}\r\n"))
+            .unwrap_or_default();
+        let input_header =
+            format!("GET / HTTP/1.1\r\nHost: example.com\r\n{auth_header}\r\n");
+        let mock_io = Builder::new().read(input_header.as_bytes()).build();
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+        let mut ctx = Ctx::default();
+        ctx.conn.client_ip = Some(client_ip.to_string());
+        let result = plugin
+            .handle_request(PluginStep::EarlyRequest, &mut session, &mut ctx)
+            .await
+            .unwrap();
+        let kept = session
+            .req_header()
+            .headers
+            .contains_key(http::header::AUTHORIZATION);
+        (result, kept)
+    }
+
+    /// The site-wide gate answers 401 with a challenge until the client
+    /// presents a stored credential, and the attempt lands in the access log
+    /// as a response the plugin generated itself.
+    #[tokio::test]
+    async fn test_basic_auth_gate_challenges_until_credentials_match() {
+        let (_guard, agent, _dir) = install_basic_auth_agent(
+            &[("alice", "hunter2")],
+            BasicAuthPosture {
+                site_wide: true,
+                rule: None,
+                hide_credentials: false,
+            },
+        )
+        .await;
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        let (result, _) =
+            run_request_with_auth(&plugin, "203.0.113.7", None).await;
+        let RequestPluginResult::Respond(resp) = result else {
+            panic!("expected the gate to challenge the request");
+        };
+        assert_eq!(http::StatusCode::UNAUTHORIZED, resp.status);
+        let challenge = resp.headers.as_ref().and_then(|headers| {
+            headers
+                .iter()
+                .find(|(name, _)| name == http::header::WWW_AUTHENTICATE)
+                .and_then(|(_, value)| value.to_str().ok())
+        });
+        assert_eq!(Some("Basic realm=\"Restricted\""), challenge);
+        let entry = agent.client.pop_log().await.unwrap();
+        assert_eq!(401, entry.response_status);
+        // A denial, not a WAF verdict: nothing is queued as a security event.
+        assert!(agent.client.pop_log().await.is_none());
+
+        let wrong = format!("Basic {}", base64_encode("alice:nope"));
+        let (result, _) =
+            run_request_with_auth(&plugin, "203.0.113.7", Some(&wrong)).await;
+        let RequestPluginResult::Respond(resp) = result else {
+            panic!("expected the wrong password to be refused");
+        };
+        assert_eq!(http::StatusCode::UNAUTHORIZED, resp.status);
+
+        let right = format!("Basic {}", base64_encode("alice:hunter2"));
+        let (result, kept) =
+            run_request_with_auth(&plugin, "203.0.113.7", Some(&right)).await;
+        assert!(result == RequestPluginResult::Continue);
+        // The gate keeps the header unless hiding it was configured.
+        assert!(kept);
+    }
+
+    /// `hide_credentials` strips the `Authorization` header once the request
+    /// is authenticated.
+    #[tokio::test]
+    async fn test_basic_auth_hide_credentials_strips_the_header() {
+        let (_guard, _agent, _dir) = install_basic_auth_agent(
+            &[("alice", "hunter2")],
+            BasicAuthPosture {
+                site_wide: true,
+                rule: None,
+                hide_credentials: true,
+            },
+        )
+        .await;
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        let right = format!("Basic {}", base64_encode("alice:hunter2"));
+        let (result, kept) =
+            run_request_with_auth(&plugin, "203.0.113.7", Some(&right)).await;
+        assert!(result == RequestPluginResult::Continue);
+        assert!(!kept);
+    }
+
+    /// An IP rule whose action is `basic_auth` gates only the clients it
+    /// matches — the site-wide switch stays off — and lets them continue
+    /// once authenticated.
+    #[tokio::test]
+    async fn test_basic_auth_rule_action_gates_matching_clients() {
+        let (_guard, _agent, _dir) = install_basic_auth_agent(
+            &[("alice", "hunter2")],
+            BasicAuthPosture {
+                site_wide: false,
+                rule: Some(("10.1.1.0/24", 4)),
+                hide_credentials: false,
+            },
+        )
+        .await;
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        // A client the rule does not match passes untouched.
+        let (result, _) =
+            run_request_with_auth(&plugin, "203.0.113.7", None).await;
+        assert!(result == RequestPluginResult::Continue);
+
+        let (result, _) =
+            run_request_with_auth(&plugin, "10.1.1.1", None).await;
+        let RequestPluginResult::Respond(resp) = result else {
+            panic!("expected the rule to require authentication");
+        };
+        assert_eq!(http::StatusCode::UNAUTHORIZED, resp.status);
+
+        let right = format!("Basic {}", base64_encode("alice:hunter2"));
+        let (result, _) =
+            run_request_with_auth(&plugin, "10.1.1.1", Some(&right)).await;
+        assert!(result == RequestPluginResult::Continue);
+    }
+
+    /// A rule that requires authentication while the site stores no
+    /// credential refuses the matched client outright.
+    #[tokio::test]
+    async fn test_basic_auth_rule_without_credentials_refuses() {
+        let (_guard, _agent, _dir) = install_basic_auth_agent(
+            &[],
+            BasicAuthPosture {
+                site_wide: false,
+                rule: Some(("10.1.1.0/24", 4)),
+                hide_credentials: false,
+            },
+        )
+        .await;
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        let (result, _) =
+            run_request_with_auth(&plugin, "10.1.1.1", None).await;
+        let RequestPluginResult::Respond(resp) = result else {
+            panic!("expected a refusal without credentials to verify");
+        };
+        assert_eq!(http::StatusCode::UNAUTHORIZED, resp.status);
+    }
+
+    /// An `allow` rule exempts its clients from the site-wide gate, so a
+    /// monitoring range can keep polling a protected site.
+    #[tokio::test]
+    async fn test_ip_allow_rule_exempts_the_site_gate() {
+        let (_guard, _agent, _dir) = install_basic_auth_agent(
+            &[("alice", "hunter2")],
+            BasicAuthPosture {
+                site_wide: true,
+                rule: Some(("10.1.1.0/24", 3)),
+                hide_credentials: false,
+            },
+        )
+        .await;
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        let (result, _) =
+            run_request_with_auth(&plugin, "10.1.1.1", None).await;
+        assert!(result == RequestPluginResult::Continue);
+
+        let (result, _) =
+            run_request_with_auth(&plugin, "203.0.113.7", None).await;
+        let RequestPluginResult::Respond(resp) = result else {
+            panic!("expected the gate to challenge an unlisted client");
+        };
+        assert_eq!(http::StatusCode::UNAUTHORIZED, resp.status);
     }
 
     /// Builds one request against the plugin from `client_ip`.

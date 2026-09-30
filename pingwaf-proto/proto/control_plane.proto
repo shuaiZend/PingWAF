@@ -239,6 +239,29 @@ message RuleBundle {
 
   // Bot protection (UA classification)
   BotProtectionConfig bot_protection = 21;
+
+  // Site-wide basic authentication gate
+  BasicAuthConfig basic_auth = 22;
+}
+
+// Site-wide HTTP basic authentication. Enforced by the WAF plugin, which sits
+// at the head of the plugin chain, so a cache hit cannot bypass the gate.
+message BasicAuthConfig {
+  bool enabled = 1;
+  // Realm announced in the `WWW-Authenticate` challenge.
+  string realm = 2;
+  // Accepted credentials. `authorization` is the base64 of `user:password`,
+  // ready to compare against the request's Authorization header.
+  repeated BasicAuthCredential credentials = 3;
+  // Seconds to sleep after a failed attempt, slowing down brute force.
+  uint32 delay_seconds = 4;
+  // Strip the Authorization header before forwarding to the origin.
+  bool hide_credentials = 5;
+}
+
+message BasicAuthCredential {
+  string username = 1;
+  string authorization = 2;
 }
 
 message WafConfig {
@@ -292,6 +315,9 @@ enum WafAction {
   WAF_ACTION_CHALLENGE = 2;
   WAF_ACTION_JS_CHALLENGE = 3;
   WAF_ACTION_ALLOW = 4;
+  // Require basic authentication for the matched request. Only meaningful in
+  // the geo rule's action: custom WAF rules cannot express it.
+  WAF_ACTION_BASIC_AUTH = 5;
 }
 
 message RuleOverride {
@@ -345,6 +371,8 @@ enum IpAccessAction {
   IP_ACCESS_CHALLENGE = 1;
   IP_ACCESS_JS_CHALLENGE = 2;
   IP_ACCESS_ALLOW = 3;
+  // Require basic authentication for the matched client.
+  IP_ACCESS_BASIC_AUTH = 4;
 }
 
 message GeoConfig {

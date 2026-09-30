@@ -194,6 +194,32 @@ pub(crate) fn block_page(request_id: &str, reason: &str) -> HttpResponse {
         .finish()
 }
 
+/// A 401 HTML page asking the client to authenticate, sent by the site-wide
+/// basic auth gate and by access rules that require credentials.
+pub(crate) fn basic_auth_page(
+    request_id: &str,
+    realm: &str,
+    reason: &str,
+) -> HttpResponse {
+    let challenge = format!(r#"Basic realm="{realm}""#);
+    let body = format!(
+        "<html><body><h1>401 Unauthorized</h1>\
+<p>This resource requires basic authentication.</p>\
+<p>Reason: {reason}</p><p>Event ID: {request_id}</p></body></html>"
+    );
+    HttpResponse::builder(StatusCode::UNAUTHORIZED)
+        .body(body)
+        .header(HTTP_HEADER_CONTENT_HTML.clone())
+        .header((
+            header::WWW_AUTHENTICATE,
+            HeaderValue::from_str(&challenge).unwrap_or(
+                HeaderValue::from_static("Basic realm=\"Restricted\""),
+            ),
+        ))
+        .no_store()
+        .finish()
+}
+
 /// A 503 maintenance page for a paused site. Sending a response instead of
 /// dropping the site from the data-plane config keeps the certificate and the
 /// log pipeline live, so the dashboard still shows the traffic.

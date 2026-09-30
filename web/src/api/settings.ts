@@ -1,5 +1,11 @@
 import { apiClient } from './client'
-import type { EsConfig, EsSettingsView, EsTestResult } from './types'
+import type {
+  EsConfig,
+  EsSettingsView,
+  EsTestResult,
+  LogRetentionSettings,
+  UpdateLogRetentionRequest,
+} from './types'
 
 /** The placeholder the server substitutes for `password` / `api_key`. */
 export const SECRET_MASK = '***'
@@ -30,6 +36,16 @@ export const settingsApi = {
 
   /** Probes the running shipper / stored config — no secrets required. */
   testLive: () => apiClient.post<EsTestResult>('/settings/elasticsearch/test'),
+
+  /**
+   * PostgreSQL log retention — `/api/v1/settings/log-retention` (administrators
+   * only). How long the two log tables are kept; the background sweeper reads
+   * this row every six hours. Elasticsearch keeps its own fixed 360-day window.
+   */
+  getLogRetention: () => apiClient.get<LogRetentionSettings>('/settings/log-retention'),
+
+  saveLogRetention: (windows: UpdateLogRetentionRequest) =>
+    apiClient.put<LogRetentionSettings>('/settings/log-retention', windows),
 }
 
 /** Drops `***` placeholders so a save never overwrites a real secret with a mask. */
@@ -63,6 +79,7 @@ export function defaultEsConfig(): EsConfigDraft {
 export const settingsKeys = {
   all: ['settings'] as const,
   elasticsearch: () => [...settingsKeys.all, 'elasticsearch'] as const,
+  logRetention: () => [...settingsKeys.all, 'log-retention'] as const,
 }
 
 export default settingsApi

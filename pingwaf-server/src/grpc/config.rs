@@ -7,12 +7,14 @@
 
 use std::collections::{HashMap, HashSet};
 
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
 use chrono::{DateTime, TimeZone, Utc};
 use pingwaf_proto::control_plane::{
-    BotProtectionConfig, CacheRule, ChallengeConfig, CustomErrorPage,
-    GeoConfig, IpAccessRule, RateLimitRule, RewriteOperation, RewriteRule,
-    RouteConfig, RuleBundle, Site, SiteConfig, SslConfig, UpstreamConfig,
-    UpstreamPeer, WafConfig, WafRule,
+    BasicAuthConfig, BasicAuthCredential, BotProtectionConfig, CacheRule,
+    ChallengeConfig, CustomErrorPage, GeoConfig, IpAccessRule, RateLimitRule,
+    RewriteOperation, RewriteRule, RouteConfig, RuleBundle, Site, SiteConfig,
+    SslConfig, UpstreamConfig, UpstreamPeer, WafConfig, WafRule,
 };
 use prost::Message;
 use prost_types::Timestamp;
@@ -24,11 +26,12 @@ use uuid::Uuid;
 
 use crate::api::challenge::challenge_level;
 use crate::api::ip_rules::ip_action;
+use crate::api::site_basic_auth as site_basic_auth_api;
 use crate::models::{
     acme_challenge, action, bot_protection, cache_rules, challenge_settings,
     characteristic, client_cert_status, error_pages, geo_rules,
     ip_access_rules, ip_group_sites, ip_groups, mode, mtls_client_certificate,
-    rate_limit_rules, rewrite_rules, rule, rule_groups, site,
+    rate_limit_rules, rewrite_rules, rule, rule_groups, site, site_basic_auth,
     site_certificates, site_routes, site_ssl, site_status, site_upstream_pools,
     site_upstreams,
 };
@@ -324,6 +327,16 @@ async fn load_challenge_settings(
         .await
 }
 
+async fn load_basic_auth(
+    db: &DatabaseConnection,
+    site_id: Uuid,
+) -> Result<Option<site_basic_auth::Model>, sea_orm::DbErr> {
+    site_basic_auth::Entity::find()
+        .filter(site_basic_auth::Column::SiteId.eq(site_id))
+        .one(db)
+        .await
+}
+
 async fn load_rewrite_rules(
     db: &DatabaseConnection,
     site_id: Uuid,
@@ -336,12 +349,15 @@ async fn load_rewrite_rules(
         .await
 }
 
+/// Loads the enabled global error pages.
+///
+/// Error pages are deployment-wide, so every site's bundle carries the same
+/// list; the data plane picks the template matching the status code it is about
+/// to return.
 async fn load_error_pages(
     db: &DatabaseConnection,
-    site_id: Uuid,
 ) -> Result<Vec<error_pages::Model>, sea_orm::DbErr> {
     error_pages::Entity::find()
-        .filter(error_pages::Column::SiteId.eq(site_id))
         .filter(error_pages::Column::Enabled.eq(true))
         .order_by_asc(error_pages::Column::StatusCode)
         .all(db)
@@ -773,6 +789,47 @@ fn challenge_to_proto(
     }
 }
 
+/// Converts the site's basic auth row into the protocol representation.
+///
+/// The agent receives `Authorization` payloads the way a client would send
+/// them — `Basic <base64(user:password)>` — so the password never has to be
+/// encoded on the request path. A row that cannot be decoded ships disabled
+/// rather than failing the whole bundle: an unreadable credential list must
+/// not lock the site out.
+fn basic_auth_to_proto(
+    row: Option<&site_basic_auth::Model>,
+) -> Option<BasicAuthConfig> {
+    let row = row?;
+    let credentials = match site_basic_auth_api::stored_credentials(row) {
+        Ok(credentials) => credentials,
+        Err(error) => {
+            tracing::warn!(
+                site_id = %row.site_id,
+                error = %error,
+                "basic auth credentials are unreadable; shipping the gate disabled"
+            );
+            Vec::new()
+        },
+    };
+    let credentials: Vec<BasicAuthCredential> = credentials
+        .iter()
+        .map(|credential| BasicAuthCredential {
+            username: credential.username.clone(),
+            authorization: BASE64_STANDARD.encode(format!(
+                "{}:{}",
+                credential.username, credential.password
+            )),
+        })
+        .collect();
+    Some(BasicAuthConfig {
+        enabled: row.enabled && !credentials.is_empty(),
+        realm: row.realm.clone(),
+        credentials,
+        delay_seconds: row.delay_seconds.max(0) as u32,
+        hide_credentials: row.hide_credentials,
+    })
+}
+
 async fn load_bot_protection(
     db: &DatabaseConnection,
     site_id: Uuid,
@@ -897,8 +954,9 @@ pub async fn build_rule_bundle(
     let referenced_groups = load_referenced_groups(db, &ip_rules).await?;
     let geo = load_geo_rules(db, site_row.id).await?;
     let challenge = load_challenge_settings(db, site_row.id).await?;
+    let basic_auth = load_basic_auth(db, site_row.id).await?;
     let rewrites = load_rewrite_rules(db, site_row.id).await?;
-    let err_pages = load_error_pages(db, site_row.id).await?;
+    let err_pages = load_error_pages(db).await?;
     let certificates = load_certificates(db, site_row.id).await?;
     let bot = load_bot_protection(db, site_row.id).await?;
     let mtls = load_mtls(db, site_row.id).await?;
@@ -932,6 +990,7 @@ pub async fn build_rule_bundle(
         upstreams: pools_to_proto(&pools, &upstreams),
         routes: routes_to_proto(&routes, &pools, &upstreams, &route_groups),
         bot_protection: Some(bot_protection_to_proto(bot.as_ref())),
+        basic_auth: basic_auth_to_proto(basic_auth.as_ref()),
     };
 
     bundle.config_hash = fingerprint(&bundle);
@@ -972,7 +1031,7 @@ pub async fn build_site_config(
             id: row.id.to_string(),
             name: row.name.clone(),
             domain: row.domain.clone(),
-            alternate_domains: Vec::new(),
+            alternate_domains: row.alternate_domains.clone(),
             status: site_status_proto(&row.status),
             rules: Some(bundle),
         });

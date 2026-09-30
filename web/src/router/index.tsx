@@ -30,7 +30,6 @@ import { GlobalTrafficPage } from '@/pages/GlobalTrafficPage'
 import { IpGroupsPage } from '@/pages/IpGroupsPage'
 import { RewritePage } from '@/pages/sites/RewritePage'
 import { OriginPage } from '@/pages/sites/OriginPage'
-import { ErrorPagesPage } from '@/pages/sites/ErrorPagesPage'
 import { SiteSettingsPage } from '@/pages/placeholders'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { Button } from '@/components/ui/Button'
@@ -100,7 +99,6 @@ export const router = createBrowserRouter([
           { path: 'ssl', element: <SslPage /> },
           { path: 'traffic', element: <TrafficPage /> },
           { path: 'rules/rewrite', element: <RewritePage /> },
-          { path: 'rules/error-pages', element: <ErrorPagesPage /> },
           { path: 'settings', element: <SiteSettingsPage /> },
         ],
       },

@@ -555,7 +555,7 @@ fn cached_rules_to_pingap_config(
                     ..Default::default()
                 })
             } else if ssl.acme_enabled && !ssl.acme_email.is_empty() {
-                Some(acme_certificate_conf(ssl, domains))
+                acme_certificate_conf(ssl, domains)
             } else {
                 None
             };
@@ -651,29 +651,64 @@ fn build_pingap_config(rule_cache: &RuleCache) -> Option<PingapConfig> {
 /// carries the provider plus credentials: the endpoint defaults to the
 /// provider's API host and every `acme_dns_config` entry becomes a query
 /// pair — the layout pingap's DNS tasks parse.
-fn acme_certificate_conf(ssl: &SslConfig, domains: String) -> CertificateConf {
+/// Returns `None` when the order cannot be issued and must be skipped:
+/// a wildcard hostname only validates through DNS-01, so an entry that would
+/// fall back to HTTP-01 is dropped (with an error log) instead of making the
+/// lets-encrypt task retry a doomed order forever. The API refuses the same
+/// combination, so this only fires for rows written before that check existed.
+fn acme_certificate_conf(
+    ssl: &SslConfig,
+    domains: String,
+) -> Option<CertificateConf> {
+    let wildcard = domains
+        .split(',')
+        .any(|domain| domain.trim().starts_with("*."));
     let mut cert = CertificateConf {
-        domains: Some(domains),
+        domains: Some(domains.clone()),
         acme: Some(format!("http://{}", ssl.acme_email)),
         ..Default::default()
     };
     if ssl.acme_challenge_type != "AcmeDns01" {
-        return cert;
+        if wildcard {
+            error!(
+                domains = %domains,
+                "wildcard hostnames need the dns-01 ACME challenge; skipping issuance for the http-01 order"
+            );
+            return None;
+        }
+        return Some(cert);
     }
-    let Some(provider) = normalize_dns_provider(&ssl.acme_dns_provider) else {
+    let provider = match normalize_dns_provider(&ssl.acme_dns_provider) {
         // Unknown provider: stay on HTTP-01 rather than emit an entry the
         // config validation rejects outright.
-        return cert;
+        Some(provider) => provider,
+        None if wildcard => {
+            error!(
+                domains = %domains,
+                "wildcard hostnames need a configured DNS provider for dns-01; skipping issuance"
+            );
+            return None;
+        },
+        None => return Some(cert),
     };
     if provider == "manual" {
-        return cert;
+        // Manual mode renders no dns fields, i.e. the order falls back to
+        // HTTP-01, which a wildcard can never pass.
+        if wildcard {
+            error!(
+                domains = %domains,
+                "the manual dns-01 provider cannot validate a wildcard automatically; skipping issuance"
+            );
+            return None;
+        }
+        return Some(cert);
     }
     cert.dns_challenge = Some(true);
     cert.dns_provider = Some(provider.to_string());
     if let Some(url) = acme_dns_service_url(provider, &ssl.acme_dns_config) {
         cert.dns_service_url = Some(url);
     }
-    cert
+    Some(cert)
 }
 
 /// The DNS provider endpoint with credentials appended as query pairs.
@@ -1426,6 +1461,7 @@ mod tests {
             upstreams: vec![],
             routes: vec![],
             bot_protection: None,
+            basic_auth: None,
         }
     }
 
@@ -2073,11 +2109,58 @@ mod tests {
     #[test]
     fn acme_http01_conf_marks_acme_without_dns_fields() {
         let ssl = acme_ssl();
-        let cert = acme_certificate_conf(&ssl, "a.example.com".to_string());
+        let cert = acme_certificate_conf(&ssl, "a.example.com".to_string())
+            .expect("plain hostnames issue over http-01");
         assert_eq!(cert.acme.as_deref(), Some("http://admin@example.com"));
         assert_eq!(cert.domains.as_deref(), Some("a.example.com"));
         assert_eq!(cert.dns_challenge, None);
         assert_eq!(cert.dns_provider, None);
+    }
+
+    #[test]
+    fn acme_wildcards_are_skipped_unless_dns01_is_usable() {
+        // http-01 cannot validate a wildcard: the order is dropped instead
+        // of retried forever.
+        let ssl = acme_ssl();
+        assert!(
+            acme_certificate_conf(&ssl, "*.example.com".to_string()).is_none()
+        );
+        assert!(
+            acme_certificate_conf(
+                &ssl,
+                "example.com,*.example.com".to_string()
+            )
+            .is_none()
+        );
+
+        // dns-01 with a provider that resolves to no endpoint falls back to
+        // http-01, so a wildcard is dropped there too.
+        let mut ssl = acme_ssl();
+        ssl.acme_challenge_type = "AcmeDns01".to_string();
+        ssl.acme_dns_provider = "not-a-provider".to_string();
+        assert!(
+            acme_certificate_conf(&ssl, "*.example.com".to_string()).is_none()
+        );
+
+        // Manual mode renders no DNS challenge either.
+        ssl.acme_dns_provider = "manual".to_string();
+        assert!(
+            acme_certificate_conf(&ssl, "*.example.com".to_string()).is_none()
+        );
+
+        // A real provider issues the wildcard through dns-01.
+        ssl.acme_dns_provider = "ali".to_string();
+        let cert = acme_certificate_conf(&ssl, "*.example.com".to_string())
+            .expect("dns-01 issues wildcards");
+        assert_eq!(cert.dns_challenge, Some(true));
+        assert_eq!(cert.dns_provider.as_deref(), Some("ali"));
+
+        // The unknown-provider fallback still serves plain hostnames.
+        ssl.acme_challenge_type = "AcmeDns01".to_string();
+        ssl.acme_dns_provider = "not-a-provider".to_string();
+        assert!(
+            acme_certificate_conf(&ssl, "a.example.com".to_string()).is_some()
+        );
     }
 
     #[test]
@@ -2092,7 +2175,8 @@ mod tests {
         ssl.acme_dns_config
             .insert("access_key_secret".to_string(), "s3cret".to_string());
 
-        let cert = acme_certificate_conf(&ssl, "a.example.com".to_string());
+        let cert = acme_certificate_conf(&ssl, "a.example.com".to_string())
+            .expect("ali resolves to an endpoint");
         assert_eq!(cert.dns_challenge, Some(true));
         assert_eq!(cert.dns_provider.as_deref(), Some("ali"));
         let url = cert.dns_service_url.expect("service url");
@@ -2107,7 +2191,8 @@ mod tests {
         ssl.acme_challenge_type = "AcmeDns01".to_string();
         ssl.acme_dns_provider = "not-a-provider".to_string();
 
-        let cert = acme_certificate_conf(&ssl, "a.example.com".to_string());
+        let cert = acme_certificate_conf(&ssl, "a.example.com".to_string())
+            .expect("unknown providers fall back to http-01");
         assert_eq!(cert.dns_challenge, None);
         assert_eq!(cert.dns_provider, None);
     }

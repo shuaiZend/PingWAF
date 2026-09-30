@@ -21,12 +21,16 @@ pub async fn ensure_index_template(
     // 1. Retention policy — best effort. ILM ships with the free Basic licence,
     //    but a managed ES service may forbid it; a failure here must not stop the
     //    template (and therefore the shipper) from working.
+    //
+    //    The delete phase is a fixed 360 days on purpose: Elasticsearch is an
+    //    archive that survives the PostgreSQL sweeps, so its window is longer
+    //    and independent of the configurable retention in the dashboard.
     let ilm_name = format!("{prefix}-logs-retention");
     let ilm_body = serde_json::json!({
         "policy": {
             "phases": {
                 "hot": { "min_age": "0ms", "actions": {} },
-                "delete": { "min_age": "30d", "actions": { "delete": {} } }
+                "delete": { "min_age": "360d", "actions": { "delete": {} } }
             }
         }
     });

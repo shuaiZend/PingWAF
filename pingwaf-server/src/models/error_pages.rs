@@ -1,4 +1,4 @@
-//! `error_pages` — per-site custom error page templates.
+//! `error_pages` — the global custom error page templates.
 
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub id: Uuid,
-    pub site_id: Uuid,
+    /// The only global page per status code.
     pub status_code: i32,
     pub name: String,
     pub content_type: String,

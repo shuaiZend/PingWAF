@@ -280,7 +280,7 @@ Build metadata.
 ```json
 {
   "name": "pingwaf-server",
-  "version": "0.17.1",
+  "version": "0.18.0",
   "api": "/api/v1",
   "registration_open": true
 }
@@ -290,7 +290,19 @@ Build metadata.
 
 ## Sites
 
-A site is one protected domain plus its origin pools, rules and TLS posture.
+A site is one protected domain plus its origin pools, rules and TLS posture. A
+site may serve several hostnames: `domain` is the primary one and
+`alternate_domains` lists the rest, all sharing the same routing, WAF and cache
+configuration. Wildcards are accepted in the leading label (`*.example.com`)
+and only match subdomains — the bare domain needs its own entry. A wildcard
+never matches the apex, so `example.com` plus `*.example.com` is a valid pair.
+
+Two sites may not claim overlapping hostnames: identical names, a wildcard
+covering another site's hostname, and nested wildcards are all rejected with
+`400` because pingap's host matching would make the winner depend on
+configuration order. An ACME certificate for a wildcard hostname requires the
+`dns-01` challenge with a configured DNS provider — `http-01` cannot validate
+`*`, and the API refuses that combination.
 
 `status` is the site lifecycle:
 
@@ -322,6 +334,7 @@ List sites (paginated).
       "id": "uuid",
       "name": "My Site",
       "domain": "example.com",
+      "alternate_domains": ["api.example.com", "*.static.example.com"],
       "status": "active",
       "plan": "free",
       "user_id": "uuid",
@@ -344,6 +357,7 @@ Create a new site. `upstream_address` is required: a site without an origin cann
 {
   "name": "My Site",
   "domain": "example.com",
+  "alternate_domains": ["*.example.com"],
   "upstream_address": "10.0.1.50:3000",
   "upstream_name": "origin",
   "upstream_tls": false,
@@ -366,7 +380,9 @@ Update site fields, including the status that pauses and resumes a site:
 { "status": "paused" }
 ```
 
-Only the fields present in the body are touched.
+Only the fields present in the body are touched. `alternate_domains` replaces
+the whole list when present; `[]` clears it. Changing `domain` or
+`alternate_domains` re-runs the cross-site hostname checks above.
 
 ### DELETE /sites/{site_id}
 
@@ -927,7 +943,7 @@ List registered agents.
       "site_domain": "example.com",
       "hostname": "edge-01",
       "ip_address": "10.0.1.5",
-      "version": "0.17.1",
+      "version": "0.18.0",
       "os_info": "Linux 6.1.0",
       "cpu_cores": 4,
       "memory_bytes": 8589934592,
@@ -1486,7 +1502,7 @@ Create an IP rule. Set either `ip_ranges` (manual mode) or `group_id` (reference
 }
 ```
 
-`action` is `block`, `allow`, `challenge` or `js_challenge`. Sending `group_id` instead of `ip_ranges` makes the rule track the group's latest ranges.
+`action` is `block`, `allow`, `challenge`, `js_challenge` or `basic_auth`. Sending `group_id` instead of `ip_ranges` makes the rule track the group's latest ranges. A `basic_auth` rule challenges the matched clients and continues to the remaining checks once they authenticate; configure the credentials under [Basic Auth](#basic-auth) first.
 
 ### PUT /sites/{site_id}/ip-rules/{rule_id}
 
@@ -1638,7 +1654,7 @@ Update geo restrictions.
 }
 ```
 
-`mode` is `block_list` or `allow_list`; `blocked_asns` entries are ASN numbers, optionally prefixed with `AS`.
+`mode` is `block_list` or `allow_list`; `blocked_asns` entries are ASN numbers, optionally prefixed with `AS`. `action` is `block`, `challenge`, `js_challenge` or `basic_auth`.
 
 ### GET /sites/{site_id}/geo/stats
 
@@ -1650,6 +1666,59 @@ Requests per country over the last 24 hours (up to 20 countries), for the bar ch
   {"country_code": "CN", "requests": 5210},
   {"country_code": "US", "requests": 1240}
 ]
+```
+
+---
+
+## Basic Auth
+
+HTTP basic authentication for one site. The check runs inside the WAF plugin,
+ahead of the cache, so a stored response can never answer an unauthenticated
+request. It applies site-wide when `enabled` is true, and to the clients an IP
+or geo rule with the `basic_auth` action matches — an explicit `allow` rule
+exempts a client from the site-wide gate.
+
+Passwords are masked with `***` in responses; sending the mask back keeps the
+stored password instead of overwriting it. Site write permission is required.
+
+### GET /sites/{site_id}/basic-auth
+
+Get the site's basic auth configuration, creating a disabled default when the
+site never saved one.
+
+**Response (200):**
+```json
+{
+  "id": "0d1b0f2e-…",
+  "site_id": "6f1c…",
+  "enabled": false,
+  "realm": "Restricted",
+  "credentials": [{"username": "alice", "password": "***"}],
+  "delay_seconds": 1,
+  "hide_credentials": false,
+  "created_at": "2026-09-30T09:00:00Z",
+  "updated_at": "2026-09-30T09:00:00Z"
+}
+```
+
+### PUT /sites/{site_id}/basic-auth
+
+Update basic auth. `credentials` replaces the whole list when present; `realm`
+must be 1–200 characters, `delay_seconds` between 0 and 10, and usernames must
+be non-empty and unique. Enabling the gate with no credential is rejected.
+
+**Request:**
+```json
+{
+  "enabled": true,
+  "realm": "Staging",
+  "credentials": [
+    {"username": "alice", "password": "hunter2"},
+    {"username": "bob", "password": "***"}
+  ],
+  "delay_seconds": 1,
+  "hide_credentials": true
+}
 ```
 
 ---
@@ -1739,13 +1808,17 @@ Delete a rewrite rule.
 A custom error page replaces the body of any response with a matching status
 code — including responses the edge itself produces (a WAF block, a rate limit,
 a paused site), not only ones that came from the origin. At most one page per
-status code per site.
+status code, and the pages are global: every site is served the same templates.
+Administrators only, and edited from Settings in the dashboard.
 
-### GET /sites/{site_id}/error-pages
+A write pushes the new templates to every registered agent's next configuration
+update, so no per-site publish is involved.
+
+### GET /error-pages
 
 List custom error pages (paginated), ordered by status code.
 
-### POST /sites/{site_id}/error-pages
+### POST /error-pages
 
 Create a custom error page.
 
@@ -1762,7 +1835,7 @@ Create a custom error page.
 
 | Field | Description |
 |-------|-------------|
-| `status_code` | 400-599 |
+| `status_code` | 400-599, unique |
 | `name` | 1-200 characters |
 | `content_type` | Defaults to `text/html` |
 | `body_template` | Tera template, must not be empty |
@@ -1774,11 +1847,11 @@ Create a custom error page.
 that fails to render falls back to a plain-text body, so a typo cannot turn a
 `403` into a `500`.
 
-### PUT /sites/{site_id}/error-pages/{page_id}
+### PUT /error-pages/{page_id}
 
 Update an error page; omitted fields keep their value.
 
-### DELETE /sites/{site_id}/error-pages/{page_id}
+### DELETE /error-pages/{page_id}
 
 Delete an error page.
 
@@ -1817,6 +1890,40 @@ Test Elasticsearch connectivity.
   "message": "Connected to Elasticsearch 8.12.0"
 }
 ```
+
+### GET /settings/log-retention
+
+How long the PostgreSQL log tables are kept, in days. Administrators only. The
+row is created with the default `180` days on first read.
+
+**Response (200):**
+```json
+{
+  "id": 1,
+  "access_log_retention_days": 180,
+  "security_event_retention_days": 180,
+  "updated_at": "2026-09-30T00:00:00Z"
+}
+```
+
+### PUT /settings/log-retention
+
+Update one or both retention windows. Administrators only. Each value must be
+between `1` and `3650` days.
+
+**Request:**
+```json
+{
+  "access_log_retention_days": 90,
+  "security_event_retention_days": 365
+}
+```
+
+A background sweep runs shortly after startup and then every six hours, so a
+saved change takes effect without a restart. The optional `site_id` on
+`DELETE /logs/purge` still narrows a manual purge; these settings configure the
+automatic sweeps only. Elasticsearch archives are governed separately: the ILM
+policy deletes indices after a fixed 360 days.
 
 ---
 
@@ -2009,6 +2116,8 @@ List endpoints support pagination:
 
 ## Log retention
 
-`DELETE /logs/purge` deletes rows older than `older_than_days` (default 30) for
-one site or, for an administrator, for every site. Operators that keep the
-default `30` day window should schedule the call; there is no background purger.
+Log rows are swept automatically: the control plane deletes rows older than the
+configured windows (see `GET/PUT /settings/log-retention`, default `180` days
+for both tables) every six hours. `DELETE /logs/purge` remains available for an
+ad-hoc cleanup and deletes rows older than `older_than_days` (default 30) for
+one site or, for an administrator, for every site.

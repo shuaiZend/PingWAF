@@ -29,9 +29,15 @@ pub mod ip_action {
     pub const CHALLENGE: &str = "challenge";
     pub const JS_CHALLENGE: &str = "js_challenge";
     pub const ALLOW: &str = "allow";
+    /// Ask for basic authentication; the credentials come from the site's
+    /// basic auth settings.
+    pub const BASIC_AUTH: &str = "basic_auth";
 
     pub fn is_valid(action: &str) -> bool {
-        matches!(action, BLOCK | CHALLENGE | JS_CHALLENGE | ALLOW)
+        matches!(
+            action,
+            BLOCK | CHALLENGE | JS_CHALLENGE | ALLOW | BASIC_AUTH
+        )
     }
 
     /// Maps to the proto `IpAccessAction` enum.
@@ -41,6 +47,7 @@ pub mod ip_action {
             CHALLENGE => 1,
             JS_CHALLENGE => 2,
             ALLOW => 3,
+            BASIC_AUTH => 4,
             _ => 0,
         }
     }

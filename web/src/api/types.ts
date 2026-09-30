@@ -89,7 +89,10 @@ export type SiteStatus = 'active' | 'paused' | 'pending'
 export interface Site {
   id: string
   name: string
+  /** Primary hostname; certificate issuance and display default to it. */
   domain: string
+  /** Extra hostnames served by the same site configuration. */
+  alternate_domains: string[]
   status: SiteStatus | string
   plan: string
   /** Disk budget, in MiB, the agents may use for this site's cache. */
@@ -172,6 +175,8 @@ export interface SiteDetail {
 export interface CreateSiteRequest {
   name: string
   domain: string
+  /** Extra hostnames (wildcards allowed) the site also answers on. */
+  alternate_domains?: string[]
   /**
    * Origin the site proxies to — a CDN/WAF hostname or the application itself.
    * Required: a site without an origin cannot serve traffic.
@@ -186,6 +191,8 @@ export interface CreateSiteRequest {
 export interface UpdateSiteRequest {
   name?: string
   domain?: string
+  /** Replaces the whole list; an empty array clears it. */
+  alternate_domains?: string[]
   status?: string
   plan?: string
 }
@@ -850,6 +857,22 @@ export interface EsTestResult {
   template_installed: boolean
 }
 
+/** `models::log_retention::Model` — the global PostgreSQL retention windows. */
+export interface LogRetentionSettings {
+  id: number
+  /** Days a row of `access_logs` is kept before the sweeper deletes it. */
+  access_log_retention_days: number
+  /** Days a row of `security_events` is kept. */
+  security_event_retention_days: number
+  updated_at: string
+}
+
+/** `api::log_retention::UpdateLogRetentionRequest` */
+export interface UpdateLogRetentionRequest {
+  access_log_retention_days?: number
+  security_event_retention_days?: number
+}
+
 /* ── Control-plane certificate ────────────────────────────────────── */
 
 export type TlsCertificateSource = 'self_signed' | 'uploaded'
@@ -1278,13 +1301,20 @@ export type UpdateChallengeRequest = ChallengeConfig
 
 /* ── IP access rules ──────────────────────────────────────────────── */
 
-export type IpRuleAction = 'block' | 'challenge' | 'js_challenge' | 'allow'
+export type IpRuleAction =
+  | 'block'
+  | 'challenge'
+  | 'js_challenge'
+  | 'allow'
+  /** Requires the site's basic auth credentials for the matched clients. */
+  | 'basic_auth'
 
 export const IP_RULE_ACTIONS: IpRuleAction[] = [
   'block',
   'challenge',
   'js_challenge',
   'allow',
+  'basic_auth',
 ]
 
 export interface IpRule {
@@ -1406,13 +1436,13 @@ export const ERROR_PAGE_STATUS_CODES = [403, 429, 502, 503, 504] as const
 
 export interface ErrorPage {
   id: string
-  site_id: string
   status_code: number
   name: string
   content_type: ErrorPageContentType | string
   body_template: string
   enabled: boolean
   created_at: string
+  updated_at: string
 }
 
 export interface UpsertErrorPageRequest {
@@ -1458,9 +1488,19 @@ export type GeoMode = 'block_list' | 'allow_list'
 
 export const GEO_MODES: GeoMode[] = ['block_list', 'allow_list']
 
-export type GeoAction = 'block' | 'challenge' | 'js_challenge'
+export type GeoAction =
+  | 'block'
+  | 'challenge'
+  | 'js_challenge'
+  /** Requires the site's basic auth credentials for the matched countries. */
+  | 'basic_auth'
 
-export const GEO_ACTIONS: GeoAction[] = ['block', 'challenge', 'js_challenge']
+export const GEO_ACTIONS: GeoAction[] = [
+  'block',
+  'challenge',
+  'js_challenge',
+  'basic_auth',
+]
 
 export interface GeoConfig {
   site_id: string
@@ -1475,6 +1515,47 @@ export interface GeoConfig {
 }
 
 export type UpdateGeoRequest = Partial<Omit<GeoConfig, 'site_id'>>
+
+/* ── Basic authentication ─────────────────────────────────────────── */
+
+/** One accepted credential. Passwords are masked with `***` in responses. */
+export interface BasicAuthCredential {
+  username: string
+  password: string
+}
+
+export interface SiteBasicAuth {
+  id: string
+  site_id: string
+  /** Gate every request of the site, not just the ones an access rule marks. */
+  enabled: boolean
+  /** Realm advertised in the `WWW-Authenticate` challenge. */
+  realm: string
+  credentials: BasicAuthCredential[]
+  /** Seconds a failed attempt is delayed before the 401 is sent (0..10). */
+  delay_seconds: number
+  /** Strip the `Authorization` header once a request is authenticated. */
+  hide_credentials: boolean
+  created_at: string
+  updated_at: string
+}
+
+export type UpdateBasicAuthRequest = Partial<
+  Pick<
+    SiteBasicAuth,
+    | 'enabled'
+    | 'realm'
+    | 'credentials'
+    | 'delay_seconds'
+    | 'hide_credentials'
+  >
+>
+
+/** Password sent back to keep the stored one unchanged. */
+export const BASIC_AUTH_SECRET_MASK = '***'
+/** Bounds mirrored from the control plane. */
+export const BASIC_AUTH_MIN_DELAY_SECONDS = 0
+export const BASIC_AUTH_MAX_DELAY_SECONDS = 10
 
 export interface GeoCountryStat {
   country_code: string

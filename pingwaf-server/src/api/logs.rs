@@ -7,7 +7,7 @@ use axum::Router;
 use chrono::{DateTime, Duration, Utc};
 use sea_orm::{
     ColumnTrait, Condition, DatabaseConnection, EntityTrait, PaginatorTrait,
-    QueryFilter, QueryOrder,
+    QueryFilter, QueryOrder, QuerySelect, QueryTrait,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -385,6 +385,83 @@ async fn list_access(
     Ok(Json(Page::new(rows, total, pagination)))
 }
 
+/// Rows deleted per statement by [`purge_logs`].
+const PURGE_BATCH_SIZE: u64 = 10_000;
+
+/// Outcome of one retention sweep.
+#[derive(Debug, Clone, Copy)]
+pub struct PurgeOutcome {
+    pub deleted_security_events: u64,
+    pub deleted_access_logs: u64,
+    pub access_cutoff: DateTime<Utc>,
+    pub security_cutoff: DateTime<Utc>,
+}
+
+/// Deletes rows older than the given windows, in bounded batches.
+///
+/// Both tables are append-heavy, so one `DELETE ... WHERE timestamp < cutoff`
+/// can hold locks on millions of rows; each statement deletes through an id
+/// subquery limited to [`PURGE_BATCH_SIZE`] rows and the loop drains the
+/// backlog. Access logs and security events keep separate windows, and
+/// `site_id` narrows the sweep to a single site. Shared by the manual purge
+/// endpoint and the scheduled sweep.
+pub async fn purge_logs(
+    db: &DatabaseConnection,
+    access_days: i64,
+    security_days: i64,
+    site_id: Option<Uuid>,
+) -> Result<PurgeOutcome, ApiError> {
+    let access_cutoff = Utc::now() - Duration::days(access_days);
+    let security_cutoff = Utc::now() - Duration::days(security_days);
+
+    let mut deleted_access = 0_u64;
+    loop {
+        let mut batch = access_log::Entity::find()
+            .select_only()
+            .column(access_log::Column::Id)
+            .filter(access_log::Column::Timestamp.lt(access_cutoff))
+            .limit(PURGE_BATCH_SIZE);
+        if let Some(id) = site_id {
+            batch = batch.filter(access_log::Column::SiteId.eq(id));
+        }
+        let deleted = access_log::Entity::delete_many()
+            .filter(access_log::Column::Id.in_subquery(batch.into_query()))
+            .exec(db)
+            .await?;
+        deleted_access += deleted.rows_affected;
+        if deleted.rows_affected < PURGE_BATCH_SIZE {
+            break;
+        }
+    }
+
+    let mut deleted_security = 0_u64;
+    loop {
+        let mut batch = security_event::Entity::find()
+            .select_only()
+            .column(security_event::Column::Id)
+            .filter(security_event::Column::Timestamp.lt(security_cutoff))
+            .limit(PURGE_BATCH_SIZE);
+        if let Some(id) = site_id {
+            batch = batch.filter(security_event::Column::SiteId.eq(id));
+        }
+        let deleted = security_event::Entity::delete_many()
+            .filter(security_event::Column::Id.in_subquery(batch.into_query()))
+            .exec(db)
+            .await?;
+        deleted_security += deleted.rows_affected;
+        if deleted.rows_affected < PURGE_BATCH_SIZE {
+            break;
+        }
+    }
+
+    Ok(PurgeOutcome {
+        deleted_security_events: deleted_security,
+        deleted_access_logs: deleted_access,
+        access_cutoff,
+        security_cutoff,
+    })
+}
+
 /// `DELETE /api/v1/logs/purge` — retention sweep, administrators only.
 async fn purge(
     State(state): State<AppState>,
@@ -406,40 +483,81 @@ async fn purge(
         None => None,
     };
 
-    let mut security_condition =
-        Condition::all().add(security_event::Column::Timestamp.lt(cutoff));
-    let mut access_condition =
-        Condition::all().add(access_log::Column::Timestamp.lt(cutoff));
-    if let Some(id) = site_filter {
-        security_condition =
-            security_condition.add(security_event::Column::SiteId.eq(id));
-        access_condition =
-            access_condition.add(access_log::Column::SiteId.eq(id));
-    }
-
-    let security = security_event::Entity::delete_many()
-        .filter(security_condition)
-        .exec(&state.db)
-        .await?;
-    let access = access_log::Entity::delete_many()
-        .filter(access_condition)
-        .exec(&state.db)
-        .await?;
+    let outcome = purge_logs(&state.db, days, days, site_filter).await?;
 
     tracing::info!(
         cutoff = %cutoff,
         site_id = ?site_filter,
-        security_events = security.rows_affected,
-        access_logs = access.rows_affected,
+        security_events = outcome.deleted_security_events,
+        access_logs = outcome.deleted_access_logs,
         requested_by = %current.id,
         "log retention sweep completed"
     );
 
     Ok(Json(PurgeResult {
-        deleted_security_events: security.rows_affected,
-        deleted_access_logs: access.rows_affected,
+        deleted_security_events: outcome.deleted_security_events,
+        deleted_access_logs: outcome.deleted_access_logs,
         cutoff,
     }))
+}
+
+/// How long after boot the first scheduled sweep runs.
+const SWEEP_STARTUP_DELAY: std::time::Duration =
+    std::time::Duration::from_secs(60);
+/// Gap between scheduled sweeps.
+const SWEEP_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(6 * 60 * 60);
+
+/// Launches the background retention sweeper.
+///
+/// The first sweep is delayed past startup instead of firing immediately, and
+/// later sweeps run every six hours. Each one reads the settings row and
+/// deletes rows older than the two configured windows, so changing the
+/// settings takes effect without a restart. Deletion is idempotent, which is
+/// why a sweep at any time is safe to run alongside the manual purge endpoint.
+pub fn start_retention_scheduler(
+    state: AppState,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        tokio::time::sleep(SWEEP_STARTUP_DELAY).await;
+        loop {
+            if let Err(err) = run_retention_sweep(&state).await {
+                tracing::warn!(
+                    error = %err,
+                    "scheduled log retention sweep failed"
+                );
+            }
+            tokio::time::sleep(SWEEP_INTERVAL).await;
+        }
+    })
+}
+
+/// One scheduled sweep: read the settings row, then delete what aged out.
+async fn run_retention_sweep(state: &AppState) -> Result<(), ApiError> {
+    let settings = crate::api::log_retention::load(&state.db).await?;
+    let outcome = purge_logs(
+        &state.db,
+        i64::from(settings.access_log_retention_days),
+        i64::from(settings.security_event_retention_days),
+        None,
+    )
+    .await?;
+
+    if outcome.deleted_access_logs == 0 && outcome.deleted_security_events == 0
+    {
+        tracing::debug!(
+            "scheduled log retention sweep found nothing to delete"
+        );
+        return Ok(());
+    }
+    tracing::info!(
+        access_logs = outcome.deleted_access_logs,
+        security_events = outcome.deleted_security_events,
+        access_days = settings.access_log_retention_days,
+        security_days = settings.security_event_retention_days,
+        "scheduled log retention sweep completed"
+    );
+    Ok(())
 }
 
 #[cfg(test)]

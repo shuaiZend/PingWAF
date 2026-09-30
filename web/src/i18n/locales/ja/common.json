@@ -16,7 +16,6 @@
     "caching": "キャッシュ",
     "ssl": "SSL/TLS",
     "traffic": "トラフィック",
-    "errorPages": "エラーページ",
     "logs": "ログ",
     "agents": "エージェント",
     "settings": "設定",
@@ -34,6 +33,7 @@
     "edit": "編集",
     "create": "作成",
     "add": "追加",
+    "remove": "削除",
     "search": "検索",
     "confirm": "確認",
     "close": "閉じる",
@@ -85,7 +85,8 @@
     "log": "ログ",
     "challenge": "チャレンジ",
     "js_challenge": "JS チャレンジ",
-    "allow": "許可"
+    "allow": "許可",
+    "basic_auth": "Basic 認証"
   },
   "characteristics": {
     "ip": "クライアント IP",
@@ -262,7 +263,10 @@
       "noResultsDescription": "\"{{query}}\" に一致するサイトがありません。別の検索をお試しください。",
       "domain": "ドメイン",
       "domainHint": "完全修飾ドメイン名（例：example.com）",
+      "alternateDomains": "追加ドメイン",
+      "alternateDomainsHint": "任意。ここに追加したホスト名はプライマリドメインと同じ設定で配信されます。ワイルドカード（例：*.example.com）はサブドメインに一致しますが、ベアドメインには一致しません。",
       "domainInvalid": "有効なドメインを入力してください",
+      "domainDuplicate": "「{{domain}}」はすでにこのサイトで使用されています",
       "namePlaceholder": "マイウェブサイト",
       "nameRequired": "サイト名は必須です",
       "plan": "プラン",
@@ -1182,6 +1186,37 @@
         "tx": "送信"
       }
     },
+    "basicAuth": {
+      "saved": "Basic 認証の設定を保存しました",
+      "credentials": "認証情報",
+      "credentialsHint": "データプレーンが受け付けるユーザー名とパスワード。検証はキャッシュより前に実行されるため、キャッシュ済みの応答で認証を回避できません。",
+      "emptyTitle": "認証情報がまだありません",
+      "emptyHint": "ユーザー名とパスワードを追加すると、ブラウザのサインインダイアログで認証を求めます。",
+      "addCredential": "認証情報を追加",
+      "username": "ユーザー名",
+      "password": "パスワード",
+      "storedPassword": "変更しない場合は保存済みパスワードを維持します",
+      "removeCredential": "認証情報を削除",
+      "credentialsCount": "有効な認証情報: {{count}} 件",
+      "credentialsRequired": "有効にするには認証情報が 1 件以上必要です。",
+      "usernameRequired": "各認証情報にユーザー名が必要です。",
+      "passwordRequired": "各認証情報にパスワードが必要です。",
+      "behaviour": "ゲートの動作",
+      "behaviourHint": "サイト全体に適用されます。IP ルールの「許可」アクションでクライアントを免除できます。",
+      "enabled": "すべてのリクエストに認証を要求",
+      "enabledHint": "オフの場合、Basic 認証アクションを指定したルールのみ認証を要求します。",
+      "realm": "レルム",
+      "realmHint": "ブラウザのサインインダイアログに表示されます。",
+      "delay": "認証失敗時の遅延（秒）",
+      "delayHint": "ブルートフォースを鈍らせます。0 で無効、上限は 10 秒で、失敗したログインが接続を滞留させないようにします。",
+      "hideCredentials": "オリジンへ転送する前に認証情報を削除",
+      "hideCredentialsHint": "認証成功後に Authorization ヘッダーを削除し、上流に認証情報を渡しません。",
+      "notes": "注意",
+      "noteOrder": "検証は WAF プラグイン内、キャッシュより前に実行されるため、未認証のリクエストがキャッシュで応答されることはありません。",
+      "noteRules": "IP ルールと地域ルールで Basic 認証アクションを選ぶと、一致したクライアントだけに認証を要求できます。",
+      "noteExempt": "明示的な「許可」ルールはサイト全体のゲートを免除します。ヘルスチェックなどに便利です。",
+      "ruleActionHint": "先に「アクセス制限 → Basic 認証」で認証情報を設定してください。"
+    },
     "settings": {
       "addPasskey": "パスキーを追加",
       "deletePasskeyDescription": "この認証器ではアカウントにサインインできなくなります。他のパスキーには影響しません。",
@@ -1261,6 +1296,15 @@
       "esSaved": "Elasticsearch 設定が保存されました",
       "esApplied": "設定が即座に適用されました",
       "unsavedChanges": "未保存の変更があります",
+      "errorPages": "カスタムエラーページ",
+      "logRetention": "ログ保持",
+      "logRetentionDescription": "PostgreSQL のログテーブルを保持する期間。",
+      "logRetentionAccess": "アクセスログの保持日数",
+      "logRetentionSecurity": "セキュリティイベントの保持日数",
+      "logRetentionHint": "バックグラウンドのクリーンアップは 6 時間ごとに実行され、指定日数を超えた行を削除します。保存後は再起動なしで反映されます。手動パージのエンドポイントには影響しません。",
+      "logRetentionEsNote": "Elasticsearch に転送済みのログは、この設定とは無関係に 360 日間保持されます。",
+      "logRetentionRange": "1〜3650 の日数を入力してください。",
+      "logRetentionSaved": "ログ保持設定が保存されました",
       "permissions": "権限",
       "permissionsHint": "このキーに許可される操作",
       "expires": "有効期限",
@@ -1468,9 +1512,10 @@
     },
     "accessControl": {
       "title": "アクセス制限",
-      "description": "IP アドレスと地域でトラフィックを許可・拒否します。今後、Basic 認証や OAuth などの制限モジュールもここに追加されます。",
+      "description": "IP アドレスと地域でトラフィックを許可・拒否し、HTTP Basic 認証でリクエストを保護できます。",
       "tabIpRules": "IP ルール",
-      "tabGeo": "地域制限"
+      "tabGeo": "地域制限",
+      "tabBasicAuth": "Basic 認証"
     }
   },
   "challengeLevels": {

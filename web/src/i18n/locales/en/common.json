@@ -16,7 +16,6 @@
     "caching": "Caching",
     "ssl": "SSL/TLS",
     "traffic": "Traffic",
-    "errorPages": "Error Pages",
     "logs": "Logs",
     "agents": "Agents",
     "settings": "Settings",
@@ -34,6 +33,7 @@
     "edit": "Edit",
     "create": "Create",
     "add": "Add",
+    "remove": "Remove",
     "search": "Search",
     "confirm": "Confirm",
     "close": "Close",
@@ -85,7 +85,8 @@
     "log": "Log",
     "challenge": "Challenge",
     "js_challenge": "JS Challenge",
-    "allow": "Allow"
+    "allow": "Allow",
+    "basic_auth": "Basic auth"
   },
   "characteristics": {
     "ip": "Client IP",
@@ -262,7 +263,10 @@
       "noResultsDescription": "No sites match \"{{query}}\". Try a different search.",
       "domain": "Domain",
       "domainHint": "Fully qualified domain name (e.g. example.com)",
+      "alternateDomains": "Additional domains",
+      "alternateDomainsHint": "Optional. Every hostname here serves the same configuration as the primary domain. A wildcard such as *.example.com covers its subdomains but not the bare domain.",
       "domainInvalid": "Please enter a valid domain",
+      "domainDuplicate": "\"{{domain}}\" is already served by this site",
       "namePlaceholder": "My website",
       "nameRequired": "Site name is required",
       "plan": "Plan",
@@ -1182,6 +1186,37 @@
         "tx": "Transmit"
       }
     },
+    "basicAuth": {
+      "saved": "Basic auth settings saved",
+      "credentials": "Credentials",
+      "credentialsHint": "Usernames and passwords the data plane accepts. The check runs before the cache, so a stored response can never skip the gate.",
+      "emptyTitle": "No credentials yet",
+      "emptyHint": "Add a username and password so visitors get the browser sign-in dialog.",
+      "addCredential": "Add credential",
+      "username": "Username",
+      "password": "Password",
+      "storedPassword": "Leave as is to keep the stored password",
+      "removeCredential": "Remove credential",
+      "credentialsCount": "Credentials ready: {{count}}",
+      "credentialsRequired": "An enabled gate needs at least one credential.",
+      "usernameRequired": "Every credential needs a username.",
+      "passwordRequired": "Every credential needs a password.",
+      "behaviour": "Gate behaviour",
+      "behaviourHint": "Applies to the whole site; IP rules can still exempt a client with an allow action.",
+      "enabled": "Challenge every request",
+      "enabledHint": "When off, only rules that pick the basic auth action are gated.",
+      "realm": "Realm",
+      "realmHint": "Shown in the browser sign-in dialog.",
+      "delay": "Failed-attempt delay (seconds)",
+      "delayHint": "Slows brute-force attempts; 0 turns it off. Capped at 10 seconds so failed logins cannot pile up connections.",
+      "hideCredentials": "Strip credentials before the origin",
+      "hideCredentialsHint": "Removes the Authorization header after a successful check so the upstream never sees it.",
+      "notes": "Notes",
+      "noteOrder": "The check runs inside the WAF plugin, before the cache: an unauthenticated request never gets a stored response.",
+      "noteRules": "IP and geo rules can pick the basic auth action to gate only the clients they match.",
+      "noteExempt": "An explicit allow rule exempts a client from the site-wide gate — handy for health checks.",
+      "ruleActionHint": "Configure credentials on the Access control → Basic auth tab first."
+    },
     "settings": {
       "addPasskey": "Add passkey",
       "deletePasskeyDescription": "This authenticator will no longer be able to sign in to your account. Other passkeys are unaffected.",
@@ -1261,6 +1296,15 @@
       "esSaved": "Elasticsearch settings saved",
       "esApplied": "Settings applied immediately",
       "unsavedChanges": "You have unsaved changes",
+      "errorPages": "Custom error pages",
+      "logRetention": "Log retention",
+      "logRetentionDescription": "How long the PostgreSQL log tables are kept.",
+      "logRetentionAccess": "Access log retention (days)",
+      "logRetentionSecurity": "Security event retention (days)",
+      "logRetentionHint": "A background sweep runs every six hours and deletes rows older than these windows; changes take effect without a restart. The manual purge endpoint is unaffected.",
+      "logRetentionEsNote": "Logs already shipped to Elasticsearch are kept there for 360 days regardless of these values.",
+      "logRetentionRange": "Enter a value between 1 and 3650 days.",
+      "logRetentionSaved": "Log retention settings saved",
       "permissions": "Permissions",
       "permissionsHint": "What this key is allowed to do",
       "expires": "Expires",
@@ -1468,9 +1512,10 @@
     },
     "accessControl": {
       "title": "Access control",
-      "description": "Allow or deny traffic by IP address and geography. Credential-based restrictions (basic auth, OAuth) will be added here as further modules.",
+      "description": "Allow or deny traffic by IP address and geography, and gate requests behind HTTP basic credentials.",
       "tabIpRules": "IP rules",
-      "tabGeo": "Geo restrictions"
+      "tabGeo": "Geo restrictions",
+      "tabBasicAuth": "Basic auth"
     }
   },
   "challengeLevels": {

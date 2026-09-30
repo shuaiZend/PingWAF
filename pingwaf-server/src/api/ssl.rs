@@ -17,8 +17,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::api::common::{
-    load_site_read, load_site_write, non_empty, parse_uuid, scope_site, Page,
-    Pagination,
+    ensure_acme_wildcard_supported, load_site_read, load_site_write, non_empty,
+    parse_uuid, scope_site, Page, Pagination,
 };
 use crate::api::error::ApiError;
 use crate::api::sites::{
@@ -198,6 +198,15 @@ fn default_challenge_type() -> String {
     "http-01".to_string()
 }
 
+/// Splits the comma-separated hostname list a certificate row stores.
+fn split_domains(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(|part| part.trim().to_string())
+        .filter(|part| !part.is_empty())
+        .collect()
+}
+
 /// Routes contributed to `/api/v1`.
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -275,9 +284,9 @@ async fn create_certificate(
     Json(payload): Json<CreateCertificateRequest>,
 ) -> Result<Response, ApiError> {
     let id = parse_uuid(&site_id, "site id")?;
-    load_site_write(&state.db, id, &current).await?;
+    let site = load_site_write(&state.db, id, &current).await?;
 
-    let model = insert_certificate(&state, id, payload).await?;
+    let model = insert_certificate(&state, &site, payload).await?;
     Ok(
         (StatusCode::CREATED, Json(CertificateResponse::from(model)))
             .into_response(),
@@ -287,9 +296,10 @@ async fn create_certificate(
 /// Validates and stores one certificate row, then tells the site's agents.
 async fn insert_certificate(
     state: &AppState,
-    site_id: Uuid,
+    site: &site::Model,
     payload: CreateCertificateRequest,
 ) -> Result<site_certificates::Model, ApiError> {
+    let site_id = site.id;
     let domain = payload.domain.trim().to_lowercase();
     if domain.is_empty() || domain.len() > 255 {
         return Err(ApiError::BadRequest(
@@ -301,6 +311,15 @@ async fn insert_certificate(
             "invalid acme_challenge_type '{}'",
             payload.acme_challenge_type
         )));
+    }
+    // An ACME order without an uploaded PEM is issued against the site's whole
+    // hostname set, which a wildcard may not contain under http-01.
+    if payload.cert_pem.is_none() && payload.acme_email.is_some() {
+        ensure_acme_wildcard_supported(
+            site,
+            &split_domains(&domain),
+            Some(&payload.acme_challenge_type),
+        )?;
     }
 
     let status = if payload.cert_pem.is_some() {
@@ -375,9 +394,36 @@ async fn update_certificate(
 ) -> Result<Json<CertificateResponse>, ApiError> {
     let id = parse_uuid(&site_id, "site id")?;
     let target = parse_uuid(&cert_id, "certificate id")?;
-    load_site_write(&state.db, id, &current).await?;
+    let site = load_site_write(&state.db, id, &current).await?;
 
     let row = find_certificate(&state, id, target).await?;
+
+    // An ACME order without a stored PEM is issued against the site's whole
+    // hostname set, which a wildcard may not contain under http-01.
+    let cert_missing = match payload.cert_pem.as_deref() {
+        Some(pem) => pem.trim().is_empty(),
+        None => row
+            .cert_pem
+            .as_deref()
+            .is_none_or(|pem| pem.trim().is_empty()),
+    };
+    let acme_email = match payload.acme_email.as_ref() {
+        Some(email) => non_empty(&Some(email.clone())),
+        None => non_empty(&row.acme_email),
+    };
+    if cert_missing && acme_email.is_some() {
+        let challenge = non_empty(&payload.acme_challenge_type)
+            .unwrap_or_else(|| row.acme_challenge_type.clone());
+        let cert_domain = non_empty(&payload.domain)
+            .map(|value| value.to_lowercase())
+            .unwrap_or_else(|| row.domain.clone());
+        ensure_acme_wildcard_supported(
+            &site,
+            &split_domains(&cert_domain),
+            Some(&challenge),
+        )?;
+    }
+
     let mut active: site_certificates::ActiveModel = row.into();
 
     if let Some(domain) = non_empty(&payload.domain) {
@@ -685,7 +731,7 @@ async fn create_global_certificate(
     let site = load_site_write(&state.db, site_id, &current).await?;
     let activate = payload.activate;
 
-    let model = insert_certificate(&state, site_id, payload).await?;
+    let model = insert_certificate(&state, &site, payload).await?;
 
     if activate {
         let posture = TlsPostureRequest {
