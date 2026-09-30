@@ -29,7 +29,7 @@ use opentelemetry_sdk::{
 
 use pingora::{server::ShutdownWatch, services::background::BackgroundService};
 use std::time::Duration;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use url::Url;
 
 const LOG_TARGET: &str = "pingap::otel";
@@ -59,8 +59,6 @@ pub struct TracerConfig {
     max_export_batch_size: usize,
     /// Maximum timeout duration for exporting a batch
     max_export_timeout: Duration,
-    /// Enable Jaeger propagation format support
-    support_jaeger_propagator: bool,
     /// Enable W3C Baggage propagation format support
     support_baggage_propagator: bool,
     compression: Option<Compression>,
@@ -76,7 +74,6 @@ impl Default for TracerConfig {
             scheduled_delay: DEFAULT_SCHEDULED_DELAY,
             max_export_batch_size: DEFAULT_MAX_EXPORT_BATCH_SIZE,
             max_export_timeout: DEFAULT_MAX_EXPORT_TIMEOUT,
-            support_jaeger_propagator: false,
             support_baggage_propagator: false,
             compression: None,
         }
@@ -184,7 +181,13 @@ impl TracerServiceBuilder {
                     }
                 },
                 "jaeger" => {
-                    self.config.support_jaeger_propagator = true;
+                    // Accepted for config compatibility: the Jaeger
+                    // propagation format is deprecated upstream and its
+                    // propagator crate has no 0.33 release.
+                    warn!(
+                        target: LOG_TARGET,
+                        "jaeger propagation format is no longer supported"
+                    );
                 },
                 "baggage" => {
                     self.config.support_baggage_propagator = true;
@@ -284,15 +287,6 @@ impl BackgroundService for TracerService {
                 let mut propagators: Vec<
                     Box<dyn TextMapPropagator + Send + Sync>,
                 > = vec![Box::new(TraceContextPropagator::new())];
-                if self.config.support_jaeger_propagator {
-                    // The Jaeger propagation format is deprecated upstream in
-                    // favor of W3C TraceContext, but we keep it as an opt-in
-                    // for interop with existing Jaeger deployments.
-                    #[allow(deprecated)]
-                    propagators.push(Box::new(
-                        opentelemetry_jaeger_propagator::Propagator::new(),
-                    ));
-                }
                 if self.config.support_baggage_propagator {
                     propagators.push(Box::new(BaggagePropagator::new()));
                 }
@@ -306,8 +300,6 @@ impl BackgroundService for TracerService {
                     target: LOG_TARGET,
                     name = self.name,
                     endpoint = self.endpoint,
-                    support_jaeger_propagator =
-                        self.config.support_jaeger_propagator,
                     support_baggage_propagator =
                         self.config.support_baggage_propagator,
                     "opentelemetry init success"
