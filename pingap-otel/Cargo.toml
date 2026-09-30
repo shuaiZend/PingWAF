@@ -20,7 +20,6 @@ async-trait = { workspace = true }
 humantime = { workspace = true }
 opentelemetry = { workspace = true }
 opentelemetry-http = { workspace = true }
-opentelemetry-jaeger-propagator = { workspace = true }
 opentelemetry-otlp = { workspace = true }
 opentelemetry_sdk = { workspace = true }
 pingora = { workspace = true }

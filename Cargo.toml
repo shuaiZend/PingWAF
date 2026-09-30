@@ -301,17 +301,17 @@ memory-stats = { version = "1.2.0", features = ["always_use_statm"] }
 mime_guess = "2.0.5"
 nanoid = "0.5.0"
 num_cpus = "1.17.0"
-opentelemetry = { version = "0.32.0", default-features = false, features = [
+opentelemetry = { version = "0.33.0", default-features = false, features = [
     "trace",
 ] }
-opentelemetry-http = { version = "0.32.0", default-features = false }
-opentelemetry-jaeger-propagator = { version = "0.32.0" }
-opentelemetry-otlp = { version = "0.32.0", default-features = false, features = [
+opentelemetry-http = { version = "0.33.0", default-features = false }
+opentelemetry-otlp = { version = "0.33.0", default-features = false, features = [
     "grpc-tonic",
     "trace",
 ] }
-opentelemetry_sdk = { version = "0.32.1", features = [
+opentelemetry_sdk = { version = "0.33.0", features = [
     "rt-tokio",
+    "trace",
 ], default-features = false }
 path-absolutize = "4.0.1"
 pingap-acme = { version = "0.18.0", path = "pingap-acme", default-features = false }
