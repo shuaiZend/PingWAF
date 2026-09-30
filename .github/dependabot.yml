@@ -29,12 +29,11 @@ updates:
       - dependency-name: "sea-orm-migration"
         update-types:
           - version-update:semver-major
-      # pingora-core 0.9 pins sentry 0.36, so a newer sentry-core cannot be
-      # handed to pingora's set_sentry_config; lift this after pingora ships
-      # a newer sentry.
+      # pingora-core 0.9 pins sentry 0.36, so no sentry-core bump can be
+      # handed to pingora's set_sentry_config; ignore every update rather
+      # than only majors, since 0.x minors would slip past update-types.
+      # Lift this once pingora ships a newer sentry.
       - dependency-name: "sentry-core"
-        update-types:
-          - version-update:semver-major
 
   - package-ecosystem: npm
     directory: /web
