@@ -651,6 +651,22 @@ export interface TimeBucket {
   blocked: number
 }
 
+/** `api::analytics::TrafficBucket` — egress bytes inside one fixed-width window. */
+export interface TrafficBucket {
+  bucket: string
+  bytes: number
+}
+
+/** `api::analytics::Traffic` — egress bandwidth over a window; never origin-pull. */
+export interface TrafficSeries {
+  from: string
+  to: string
+  site_id: string | null
+  step_seconds: number
+  total_bytes: number
+  buckets: TrafficBucket[]
+}
+
 /** `api::analytics::TopRule` */
 export interface TopRule {
   rule_id: string
@@ -1439,6 +1455,32 @@ export interface BulkImportIpRequest {
 
 export type UpdateIpRuleRequest = Partial<CreateIpRuleRequest>
 
+/* ── Auto-blocked IPs (dynamic edge blocks) ───────────────────────── */
+
+/**
+ * One IP the edge currently refuses for a site: WAF/rate-limit auto-blocks
+ * and server-issued block commands. The control plane mirrors each agent's
+ * list from the heartbeat; several agents enforcing the same IP are folded
+ * into a single row (`agent_count`).
+ */
+export interface BlockedIp {
+  ip: string
+  reason: string | null
+  blocked_at: string
+  /** null = permanent block (no automatic expiry). */
+  expires_at: string | null
+  agent_count: number
+  /** Total security events recorded for this IP at this site. */
+  attack_count: number
+  last_attack_at: string | null
+}
+
+export interface UnblockIpResponse {
+  ip: string
+  agents: number
+  delivered: number
+}
+
 /* ── Rewrite rules ────────────────────────────────────────────────── */
 
 export type RewriteDirection = 'request' | 'response'
@@ -1658,6 +1700,7 @@ export const TRAFFIC_RANGES: TrafficRange[] = ['1h', '6h', '24h', '7d', '30d']
 export interface TrafficOverview {
   summary: AnalyticsSummary
   series: TimeBucket[]
+  egress: TrafficSeries
   topPaths: TopPath[]
   topIps: TopIp[]
   topRules: TopRule[]

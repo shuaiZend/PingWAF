@@ -212,6 +212,7 @@
       "activeAgents": "稼働中のエージェント",
       "agentsOnline": "{{count}} 台オンライン",
       "requestsWindow": "リクエスト",
+      "egressWindow": "送信トラフィック",
       "blockedWindow": "ブロック",
       "blocked": "ブロックされたリクエスト",
       "blockedShort": "ブロック",
@@ -701,7 +702,22 @@
       "ruleUpdated": "IP ルールを更新しました",
       "ruleDeleted": "IP ルールを削除しました",
       "deleteTitle": "IP ルールを削除",
-      "deleteDescription": "この操作は元に戻せません。"
+      "deleteDescription": "この操作は元に戻せません。",
+      "autoBlocked": {
+        "title": "自動ブロック済み IP",
+        "description": "WAF またはレート制限の判定により、エッジが現在このサイトへの接続を拒否している IP です。一覧はエージェントのハートビートで自動更新されます。",
+        "ip": "IP アドレス",
+        "attacks": "攻撃回数",
+        "lastAttack": "最終攻撃",
+        "expiresAt": "自動解除予定",
+        "permanent": "永久",
+        "unblock": "解除",
+        "unblockTitle": "IP を解除",
+        "unblockDescription": "ブロックを適用しているすべてのノードで、直ちにこの IP の拒否を停止します。",
+        "unblocked": "IP を解除しました",
+        "empty": "自動ブロック済み IP はありません",
+        "emptyDescription": "WAF や CC 防御によってブロックされた IP と攻撃履歴がここに表示されます。"
+      }
     },
     "caching": {
       "title": "キャッシュ",
@@ -944,6 +960,9 @@
       "description": "リクエスト分析、レイテンシ、レスポンス内訳。",
       "requests": "リクエスト",
       "bandwidth": "帯域幅",
+      "egressHint": "クライアントへ送信したレートのみを集計。オリジン取得は含みません。",
+      "totalEgress": "送信トラフィック",
+      "avgBitrate": "平均レート",
       "statusCodes": "ステータスコード",
       "totalRequests": "総リクエスト数",
       "uniqueIps": "ユニーク IP",
@@ -1480,7 +1499,15 @@
       "mcpClientConfig": "クライアント設定（JSON）",
       "mcpCli": "Claude Code ワンライナー",
       "mcpNote": "MCP はコンソールの認証情報を共用し、API 保護（IP 許可リスト・WAF）の対象です。書き込みツールには write 権限を持ち、所有者が管理者のキーが必要です。",
-      "mcpManageKeys": "API キーを管理"
+      "mcpManageKeys": "API キーを管理",
+      "about": "概要",
+      "aboutDescription": "この PingWAF インストールのバージョンとプロジェクト情報。",
+      "aboutProduct": "製品",
+      "aboutUpstream": "アップストリーム",
+      "aboutUpstreamValue": "Tree Xie による pingap をベース（Apache-2.0 ライセンス）。",
+      "aboutProject": "プロジェクト",
+      "aboutOpenProject": "プロジェクトページを開く",
+      "aboutNote": "リリース、ドキュメント、課題の追跡は上記リポジトリで行われます。"
     },
     "geo": {
       "title": "地域制限",
@@ -1636,6 +1663,7 @@
       "title": "リクエストライフサイクル",
       "description": "PingWAF の各機能がプロキシパイプラインのどの段階で動作するかの対応表です。WAF、IP、Bot、レート制限、キャッシュの各ルールがどこで実行されるかを確認し、リクエストが許可・ブロック・チャレンジされた理由のデバッグに役立ててください。",
       "docLink": "ドキュメント",
+      "quickNav": "ページ内ナビ",
       "stages": {
         "tls": {
           "title": "TLS と接続",

@@ -33,6 +33,7 @@ pub mod m20240101_000025_defense_settings;
 pub mod m20240101_000026_api_protection;
 pub mod m20240101_000027_ai_agent;
 pub mod m20240101_000028_access_log_search_indexes;
+pub mod m20240101_000029_agent_blocked_ips;
 
 use sea_orm_migration::prelude::*;
 
@@ -73,6 +74,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20240101_000026_api_protection::Migration),
             Box::new(m20240101_000027_ai_agent::Migration),
             Box::new(m20240101_000028_access_log_search_indexes::Migration),
+            Box::new(m20240101_000029_agent_blocked_ips::Migration),
         ]
     }
 }
@@ -84,7 +86,7 @@ mod tests {
     #[test]
     fn migrations_are_ordered_and_unique() {
         let migrations = Migrator::migrations();
-        assert_eq!(migrations.len(), 28);
+        assert_eq!(migrations.len(), 29);
         let names: Vec<String> =
             migrations.iter().map(|m| m.name().to_owned()).collect();
         let mut sorted = names.clone();

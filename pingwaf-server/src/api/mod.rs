@@ -9,6 +9,7 @@ pub mod ai;
 pub mod analytics;
 pub mod api_protection;
 pub mod auth;
+pub mod blocked_ips;
 pub mod bot;
 pub mod cache;
 pub mod challenge;
@@ -80,6 +81,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(passkeys::routes())
         .merge(ip_rules::routes())
         .merge(ip_groups::routes())
+        .merge(blocked_ips::routes())
         .merge(geo::routes())
         .merge(bot::routes())
         .merge(challenge::routes())

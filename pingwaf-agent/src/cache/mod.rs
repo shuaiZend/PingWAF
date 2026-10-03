@@ -557,8 +557,16 @@ pub struct BlockedIpEntry {
     pub ip: String,
     pub site_id: String,
     pub reason: String,
+    /// When the block was recorded; drives the control plane's list order.
+    /// Files written before this field existed load with the epoch default.
+    #[serde(default = "default_blocked_at")]
+    pub blocked_at: DateTime<Utc>,
     /// None = permanent block
     pub expires_at: Option<DateTime<Utc>>,
+}
+
+fn default_blocked_at() -> DateTime<Utc> {
+    DateTime::from_timestamp(0, 0).expect("epoch is a valid timestamp")
 }
 
 impl BlockedIpEntry {
@@ -986,6 +994,7 @@ impl RuleCache {
             ip: ip.to_string(),
             site_id: site_id.to_string(),
             reason: reason.to_string(),
+            blocked_at: Utc::now(),
             expires_at,
         };
 
@@ -1024,6 +1033,17 @@ impl RuleCache {
             debug!(count = expired_keys.len(), "Cleaned up expired IP blocks");
             let _ = self.persist_blocked_ips();
         }
+    }
+
+    /// Snapshot of every block currently in force, for the heartbeat report.
+    /// Expired entries are dropped on read so a lapsed block is never
+    /// re-propagated to the control plane.
+    pub fn blocked_ips_snapshot(&self) -> Vec<BlockedIpEntry> {
+        self.blocked_ips
+            .iter()
+            .filter(|e| !e.value().is_expired())
+            .map(|e| e.value().clone())
+            .collect()
     }
 
     // ─── Disk Persistence ───────────────────────────────────

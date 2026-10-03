@@ -63,6 +63,19 @@ export const RANGE_HOURS: Record<TrafficRange, number> = {
   '30d': 24 * 30,
 }
 
+/**
+ * Bucket width (seconds) per preset range for the egress chart. Short windows
+ * get the finest 5s resolution; wider ones widen the step so the series stays
+ * under the server's bucket cap (~8k) and readable on screen.
+ */
+export const TRAFFIC_STEP: Record<TrafficRange, number> = {
+  '1h': 5,
+  '6h': 30,
+  '24h': 300,
+  '7d': 900,
+  '30d': 3600,
+}
+
 /** Builds the `{from,to,interval}` query for a preset range. */
 export function rangeQueryFor(range: TrafficRange): RangeQuery {
   const hours = RANGE_HOURS[range]
@@ -78,15 +91,17 @@ export async function fetchTrafficOverview(
   range: TrafficRange = '24h',
 ): Promise<TrafficOverview> {
   const params: RangeQuery = { ...(siteId ? { site_id: siteId } : {}), ...rangeQueryFor(range) }
-  const [summary, series, topPaths, topIps, topRules, statusCodes] = await Promise.all([
-    analyticsApi.summary(params),
-    analyticsApi.requestsOverTime(params),
-    analyticsApi.topPaths({ ...params, limit: 10 }),
-    analyticsApi.topIps({ ...params, limit: 10 }),
-    analyticsApi.topRules({ ...params, limit: 10 }),
-    analyticsApi.statusCodes(params),
-  ])
-  return { summary, series, topPaths, topIps, topRules, statusCodes }
+  const [summary, series, egress, topPaths, topIps, topRules, statusCodes] =
+    await Promise.all([
+      analyticsApi.summary(params),
+      analyticsApi.requestsOverTime(params),
+      analyticsApi.traffic({ ...params, step: TRAFFIC_STEP[range] }),
+      analyticsApi.topPaths({ ...params, limit: 10 }),
+      analyticsApi.topIps({ ...params, limit: 10 }),
+      analyticsApi.topRules({ ...params, limit: 10 }),
+      analyticsApi.statusCodes(params),
+    ])
+  return { summary, series, egress, topPaths, topIps, topRules, statusCodes }
 }
 
 /**

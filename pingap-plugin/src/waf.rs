@@ -1430,10 +1430,13 @@ impl LogBodyPrefix {
 /// How long a request may sit between `handle_request` and the end of its
 /// response body before the pending entry counts as abandoned.
 pub const PENDING_ACCESS_SWEEP_TTL: Duration = Duration::from_secs(45);
-
 /// Orphaned entries (e.g. upstream connect failures that bypass
 /// `handle_response`) are evicted once they outlive this window.
 const PENDING_ACCESS_TTL: Duration = Duration::from_secs(60);
+
+/// Default edge refusal window after a WAF block verdict: repeat requests
+/// from the same client are dropped before the engine runs again.
+const WAF_AUTO_BLOCK_SECS: u64 = 600;
 
 /// Only pay for garbage collection above this many outstanding entries.
 const PENDING_ACCESS_GC_THRESHOLD: usize = 65536;
@@ -2189,6 +2192,25 @@ impl Plugin for WafPlugin {
             return Ok(RequestPluginResult::Respond(response));
         }
 
+        // ── Dynamic IP blocks: an IP the edge already refused (an auto-block
+        // from an earlier WAF/rate-limit verdict or a server-issued block
+        // command) is rejected before any rule runs. Like the paused-site
+        // and mTLS denials this enforces an existing decision, so observation
+        // mode never downgrades it. Unknown hosts carry no synced site id and
+        // therefore can never match a block. ──
+        if !site_id.is_empty()
+            && agent.as_ref().is_some_and(|agent| {
+                agent.is_ip_blocked(&site_id, &request_data.client_ip)
+            })
+        {
+            let response = block_page(
+                &request_id,
+                "IP temporarily blocked by WAF defense",
+            );
+            emit_generated_access(agent.as_ref(), &request_id, &response);
+            return Ok(RequestPluginResult::Respond(response));
+        }
+
         // ── mTLS: a site that requires a client certificate refuses the
         // request before any other rule runs. Revoked certificates and
         // organization mismatches are refused here too, since the TLS layer
@@ -2427,6 +2449,19 @@ impl Plugin for WafPlugin {
                         &verdict,
                         &tripped.rule_name,
                     );
+                    // Defense in depth: refuse the client at the edge for the
+                    // mitigation window so a repeat offender never reaches
+                    // the counters (or the origin) again in that time.
+                    if !tripped.challenge
+                        && let Some(agent) = &agent
+                    {
+                        agent.block_ip(
+                            &site_id,
+                            &request_data.client_ip,
+                            Some(Duration::from_secs(tripped.retry_after)),
+                            &format!("rate limit: {}", tripped.rule_name),
+                        );
+                    }
                     let response = if tripped.challenge {
                         build_challenge_response(
                             &request_id,
@@ -2558,6 +2593,17 @@ impl Plugin for WafPlugin {
             &rule_name,
         );
         let response = if verdict.action == WafAction::Block {
+            // Auto-block the client for a grace window: repeat requests are
+            // refused at the edge (see the entry check above) instead of
+            // running the engine every time.
+            if let Some(agent) = &agent {
+                agent.block_ip(
+                    &site_id,
+                    &request_data.client_ip,
+                    Some(Duration::from_secs(WAF_AUTO_BLOCK_SECS)),
+                    &format!("waf: {rule_name}"),
+                );
+            }
             block_page(&request_id, &verdict.details)
         } else {
             // Challenge verdict — delegate to the challenge subsystem.
@@ -3696,12 +3742,15 @@ ml_threshold = 0.75
         assert!(agent.client.pop_log().await.is_none());
 
         // ── Passed request: metrics counted, access logged at response ──
+        // A distinct client IP: the blocked request above auto-blocked its
+        // own client at the edge, and this leg must stay reachable.
         let input_header =
             "GET /api/users?page=1 HTTP/1.1\r\nHost: example.com\r\n\r\n";
         let mock_io = Builder::new().read(input_header.as_bytes()).build();
         let mut session = Session::new_h1(Box::new(mock_io));
         session.read_request().await.unwrap();
         let mut ctx = Ctx::default();
+        ctx.conn.client_ip = Some("203.0.113.21".to_string());
         let result = plugin
             .handle_request(PluginStep::EarlyRequest, &mut session, &mut ctx)
             .await
@@ -4577,17 +4626,33 @@ ml_threshold = 0.75
         };
         assert_eq!(http::StatusCode::TOO_MANY_REQUESTS, resp.status);
 
+        // The tripped client is refused at the edge for the retry window:
+        // even an uncounted path is answered without reaching the counters.
+        let RequestPluginResult::Respond(resp) =
+            run_rate_request(&plugin, "203.0.113.11", "/other", None).await
+        else {
+            panic!("expected the edge block to answer");
+        };
+        assert_eq!(http::StatusCode::FORBIDDEN, resp.status);
+
+        // A fresh client proves the path characteristic splits counters
+        // (/api/detail keeps counting from zero) and the expression keeps
+        // non-/api/ requests out of the rule entirely.
         assert!(
-            run_rate_request(&plugin, "203.0.113.11", "/api/detail", None)
+            run_rate_request(&plugin, "203.0.113.15", "/api/list", None).await
+                == RequestPluginResult::Continue
+        );
+        assert!(
+            run_rate_request(&plugin, "203.0.113.15", "/api/detail", None)
                 .await
                 == RequestPluginResult::Continue
         );
         assert!(
-            run_rate_request(&plugin, "203.0.113.11", "/other", None).await
+            run_rate_request(&plugin, "203.0.113.15", "/other", None).await
                 == RequestPluginResult::Continue
         );
         assert!(
-            run_rate_request(&plugin, "203.0.113.11", "/other", None).await
+            run_rate_request(&plugin, "203.0.113.15", "/other", None).await
                 == RequestPluginResult::Continue
         );
     }

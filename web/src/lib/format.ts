@@ -188,6 +188,20 @@ export function formatSize(bytes: number | null | undefined): string {
   return `${value.toFixed(value < 10 ? 1 : 0)} ${units[i]}`
 }
 
+/** `bit/s` → `1.3 Mbps`; decimal ladder, as customary for bandwidth. */
+export function formatBitrate(bps: number | null | undefined): string {
+  if (bps === null || bps === undefined || !Number.isFinite(bps)) return '—'
+  if (bps < 1000) return `${Math.round(bps)} bps`
+  const units = ['Kbps', 'Mbps', 'Gbps']
+  let value = bps / 1000
+  let i = 0
+  while (value >= 1000 && i < units.length - 1) {
+    value /= 1000
+    i += 1
+  }
+  return `${value.toFixed(value < 10 ? 1 : 0)} ${units[i]}`
+}
+
 /** Uppercases an HTTP verb for table cells. */
 export function formatMethod(method: string | null | undefined): string {
   return method ? method.toUpperCase() : '—'

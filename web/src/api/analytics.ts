@@ -9,6 +9,7 @@ import type {
   TopIp,
   TopPath,
   TopRule,
+  TrafficSeries,
 } from './types'
 
 /**
@@ -23,6 +24,14 @@ export const analyticsApi = {
 
   requestsOverTime: (params: RangeQuery = {}) =>
     apiClient.get<TimeBucket[]>('/analytics/requests-over-time', { query: params }),
+
+  /**
+   * Egress bytes bucketed at a fixed width (default 5s). `step` must be one of
+   * the server whitelist (5/10/30/60/300/900/3600/86400) and small enough that
+   * the window yields at most ~8k buckets.
+   */
+  traffic: (params: RangeQuery & { step?: number } = {}) =>
+    apiClient.get<TrafficSeries>('/analytics/traffic', { query: params }),
 
   sitesOverTime: (params: RangeQuery = {}) =>
     apiClient.get<SiteTrafficBucket[]>('/analytics/sites-over-time', { query: params }),
@@ -88,6 +97,8 @@ export const analyticsKeys = {
   all: ['analytics'] as const,
   summary: (params: RangeQuery) => [...analyticsKeys.all, 'summary', params] as const,
   traffic: (params: RangeQuery) => [...analyticsKeys.all, 'traffic', params] as const,
+  bandwidth: (params: RangeQuery & { step?: number }) =>
+    [...analyticsKeys.all, 'bandwidth', params] as const,
   sitesOverTime: (params: RangeQuery) => [...analyticsKeys.all, 'sites-over-time', params] as const,
   topRules: (params: RangeQuery) => [...analyticsKeys.all, 'top-rules', params] as const,
   topIps: (params: RangeQuery) => [...analyticsKeys.all, 'top-ips', params] as const,
