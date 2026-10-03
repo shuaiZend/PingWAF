@@ -4,9 +4,10 @@
 //! afterwards: `register_agent` trades a long-lived API key for an agent token,
 //! and every other RPC verifies that token before touching the database.
 
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex};
 
 use chrono::{DateTime, Utc};
 use pingwaf_proto::control_plane::{
@@ -69,6 +70,18 @@ const MAX_METRIC_NAME: usize = 200;
 /// Probe samples are kept for a day: at a 5-second cadence a single agent
 /// writes roughly 17k rows a day, so expired rows are pruned while ingesting.
 const HOST_SAMPLE_RETENTION_HOURS: i64 = 24;
+
+/// Spacing enforced between persisted probe samples, per agent. The agent
+/// probes every few seconds but only one row per interval is worth keeping:
+/// the probe panel plots the newest points, and a minute of resolution covers
+/// hours of history while cutting the table to a fraction of its raw volume.
+const SAMPLE_PERSIST_INTERVAL_SECS: i64 = 60;
+
+/// Last 60-second bucket persisted per agent, so downsampling holds across
+/// heartbeat batches rather than restarting with each message. One entry per
+/// agent ever seen; agents are few and the value is 8 bytes.
+static LAST_PERSISTED_BUCKET: LazyLock<Mutex<HashMap<Uuid, i64>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Agent rows offline for longer than this are dropped from the inventory:
 /// decommissioned nodes and renamed hosts would otherwise survive as
@@ -806,7 +819,8 @@ async fn persist_site_certificates(
 /// Persists the probe samples carried by one heartbeat and prunes expired rows.
 ///
 /// The agent samples every few seconds and buffers locally, so a single message
-/// normally carries several points.
+/// normally carries several points; only the first sample of each
+/// [`SAMPLE_PERSIST_INTERVAL_SECS`] bucket survives (see the constant's docs).
 async fn persist_host_samples(
     db: &DatabaseConnection,
     agent_id: Uuid,
@@ -816,8 +830,25 @@ async fn persist_host_samples(
         return;
     }
     let now = Utc::now();
-    let rows: Vec<host_sample::ActiveModel> = samples
-        .iter()
+    let kept: Vec<&HostSample> = {
+        let mut last_buckets = LAST_PERSISTED_BUCKET
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        samples
+            .iter()
+            .filter(|sample| {
+                let at = sample_time(sample.ts_millis, now);
+                let bucket = at.timestamp() / SAMPLE_PERSIST_INTERVAL_SECS;
+                if last_buckets.get(&agent_id) == Some(&bucket) {
+                    return false;
+                }
+                last_buckets.insert(agent_id, bucket);
+                true
+            })
+            .collect()
+    };
+    let rows: Vec<host_sample::ActiveModel> = kept
+        .into_iter()
         .map(|sample| host_sample::ActiveModel {
             agent_id: Set(agent_id),
             sampled_at: Set(sample_time(sample.ts_millis, now)),
@@ -845,6 +876,11 @@ async fn persist_host_samples(
             ..Default::default()
         })
         .collect();
+
+    if rows.is_empty() {
+        // Every sample landed in a bucket that already has its row.
+        return;
+    }
 
     if let Err(err) = host_sample::Entity::insert_many(rows).exec(db).await {
         tracing::warn!(%agent_id, error = %err, "could not persist host samples");

@@ -287,7 +287,9 @@ struct RateWindow {
 /// A cached per-site decision engine plus the agent config fingerprint it was
 /// built from.
 struct CachedChallengeEngine {
-    fingerprint: String,
+    /// Config fingerprint the engine was built from. An `Arc` so the per
+    /// request fingerprint check stays allocation-free.
+    fingerprint: Arc<str>,
     engine: Option<Arc<ChallengeEngine>>,
 }
 

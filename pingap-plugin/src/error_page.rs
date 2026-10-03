@@ -252,7 +252,7 @@ type CompiledSitePages = (Arc<Tera>, CompiledErrorPageMap);
 /// Per-host cache of agent-supplied compiled pages plus the fingerprint they
 /// were built from.
 struct CachedSitePages {
-    fingerprint: String,
+    fingerprint: Arc<str>,
     tera: Arc<Tera>,
     pages: CompiledErrorPageMap,
 }
