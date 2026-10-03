@@ -318,7 +318,7 @@ impl FileCache {
         if !self.has_budget() {
             return;
         }
-        let _ = self.current_size.fetch_update(
+        let _ = self.current_size.try_update(
             Ordering::Relaxed,
             Ordering::Relaxed,
             |cur| Some(cur.saturating_sub(len)),
@@ -330,7 +330,7 @@ impl FileCache {
         if !self.has_budget() {
             return;
         }
-        let _ = self.current_size.fetch_update(
+        let _ = self.current_size.try_update(
             Ordering::Relaxed,
             Ordering::Relaxed,
             |cur| Some(cur.saturating_sub(old_len).saturating_add(new_len)),
