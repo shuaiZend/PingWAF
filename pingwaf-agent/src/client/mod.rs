@@ -533,8 +533,14 @@ impl ControlPlaneClient {
     ) -> anyhow::Result<()> {
         let mut client = ProtoClient::new(channel);
 
-        let heartbeat_interval =
-            Duration::from_secs(self.config.heartbeat_interval_secs.max(5));
+        // The control plane decides the heartbeat cadence — its staleness
+        // thresholds are derived from the same value — so the interval it
+        // handed down at registration wins; the local setting only applies
+        // when the server did not send one.
+        let heartbeat_interval = effective_heartbeat_interval(
+            reg_response.heartbeat_interval_seconds,
+            self.config.heartbeat_interval_secs,
+        );
 
         // Create a channel for sending heartbeats to the stream
         let (hb_tx, hb_rx) = mpsc::channel::<proto::AgentHeartbeat>(4);
@@ -1020,6 +1026,21 @@ fn next_backoff(current_ms: u64, max_ms: u64) -> u64 {
     current_ms.saturating_mul(2).min(max_ms)
 }
 
+/// The cadence the heartbeat sender ticks at.
+///
+/// The server-sent interval wins whenever the control plane handed one down
+/// (a positive value; its config validation guarantees one in practice),
+/// otherwise the agent's local configuration applies. Either way the result
+/// is clamped so a pathological value cannot silence liveness reporting.
+fn effective_heartbeat_interval(server_secs: i64, local_secs: u64) -> Duration {
+    let secs = if server_secs > 0 {
+        server_secs as u64
+    } else {
+        local_secs
+    };
+    Duration::from_secs(secs.max(5))
+}
+
 /// Convert a probe sample into its wire representation.
 fn to_proto_sample(sample: &HostSample) -> proto::HostSample {
     proto::HostSample {
@@ -1172,6 +1193,27 @@ mod tests {
         assert_eq!(next_backoff(60_000, 60_000), 60_000);
         // A pathological current value must not overflow.
         assert_eq!(next_backoff(u64::MAX, 1_000), 1_000);
+    }
+
+    #[test]
+    fn heartbeat_interval_prefers_the_server_value() {
+        // A registered interval wins over the local default.
+        assert_eq!(
+            effective_heartbeat_interval(15, 30),
+            Duration::from_secs(15)
+        );
+        // Servers that do not send one (0) fall back to the local config.
+        assert_eq!(
+            effective_heartbeat_interval(0, 30),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            effective_heartbeat_interval(-5, 30),
+            Duration::from_secs(30)
+        );
+        // Either source is clamped to the reporting minimum.
+        assert_eq!(effective_heartbeat_interval(1, 30), Duration::from_secs(5));
+        assert_eq!(effective_heartbeat_interval(0, 2), Duration::from_secs(5));
     }
 
     #[test]

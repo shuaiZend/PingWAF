@@ -709,7 +709,7 @@ the agent log settings with a dash in the `Environment` column are
 | `--api-key` | `PINGWAF_API_KEY` | `""` | Agent authentication key (empty = auto-register over loopback in all-in-one) |
 | `--cache-dir` | `PINGWAF_CACHE_DIR` | `./data/cache` | Local rule cache directory |
 | `--fail-open` | `PINGWAF_FAIL_OPEN` | `true` | Keep proxying when the control plane is unreachable |
-| `--heartbeat-interval-secs` | `PINGWAF_HEARTBEAT_INTERVAL` | `30` | Heartbeat frequency |
+| `--heartbeat-interval-secs` | `PINGWAF_HEARTBEAT_INTERVAL` | `30` | Fallback heartbeat frequency, used only when the control plane hands no interval down at registration |
 | `--metrics-ship-interval-secs` | `PINGWAF_METRICS_SHIP_INTERVAL` | `30` | Edge-metrics ship interval; `0` disables shipping |
 | `--log-batch-size` | — | `100` | Log entries per flush |
 | `--log-flush-interval-secs` | — | `5` | Maximum time between log flushes |
