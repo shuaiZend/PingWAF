@@ -1660,7 +1660,7 @@
         },
         "failure": {
           "title": "Failure",
-          "desc": "Only on errors: classified as 502 upstream error / 499 client gone / 408 read timeout / 400 invalid header, then rendered with an error template that the custom error pages can replace."
+          "desc": "Only on errors: classified as 502 upstream error / 499 client gone / 408 read timeout / 400 invalid header, then rendered with pingap's built-in error template. No plugin runs here, so custom error pages cannot replace this page."
         },
         "logging": {
           "title": "Logging",
@@ -1730,6 +1730,10 @@
         "customPages": {
           "title": "Custom error pages",
           "desc": "Error pages replace upstream error responses. WAF block/challenge pages are generated before the upstream is contacted and keep their built-in design."
+        },
+        "responseCache": {
+          "title": "Response edits and the cache",
+          "desc": "The cache stores the response as it leaves the upstream phase. Response-phase changes — rewrite response rules, HSTS — run after the cache on every serve (cache hits included), so the stored copy stays unmodified; error-page replacements are sent with no-store and never stored."
         }
       }
     }
