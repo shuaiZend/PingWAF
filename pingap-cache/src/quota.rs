@@ -210,7 +210,7 @@ impl DomainUsage {
     }
 
     fn add_bytes(&self, delta: u64) {
-        let _ = self.current_bytes.fetch_update(
+        let _ = self.current_bytes.try_update(
             Ordering::Relaxed,
             Ordering::Relaxed,
             |cur| Some(cur.saturating_add(delta)),
@@ -221,7 +221,7 @@ impl DomainUsage {
         // Saturating: the ledger is an estimate (files can vanish behind our
         // back) and must never wrap into a value that makes every write look
         // over quota.
-        let _ = self.current_bytes.fetch_update(
+        let _ = self.current_bytes.try_update(
             Ordering::Relaxed,
             Ordering::Relaxed,
             |cur| Some(cur.saturating_sub(delta)),
