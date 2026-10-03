@@ -74,6 +74,10 @@ pub struct SiteRules {
     /// Site-wide basic auth gate; `None` when the site has none configured.
     #[serde(default)]
     pub basic_auth: Option<BasicAuthConfig>,
+    /// Observation mode: detections keep running but nothing is enforced —
+    /// WAF, IP/geo rules, bot protection and rate limiting only record.
+    #[serde(default)]
+    pub observation_mode: bool,
 }
 
 impl SiteRules {
@@ -1171,6 +1175,7 @@ impl RuleCache {
                 .basic_auth
                 .as_ref()
                 .map(Self::convert_basic_auth),
+            observation_mode: bundle.observation_mode,
         }
     }
 
@@ -1512,6 +1517,7 @@ mod tests {
                     rewrite_rules: Vec::new(),
                     error_pages: Vec::new(),
                     basic_auth: None,
+                    observation_mode: false,
                     ssl_config: None,
                     upstreams: vec![UpstreamConfig {
                         name: "default".to_string(),

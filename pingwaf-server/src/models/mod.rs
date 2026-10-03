@@ -12,11 +12,14 @@
 
 pub mod agent_metrics;
 pub mod agents;
+pub mod ai;
+pub mod api_protection;
 pub mod bot_protection;
 pub mod certificate_events;
 pub mod certificates;
 pub mod challenge_settings;
 pub mod control_plane_tls;
+pub mod defense_settings;
 pub mod error_pages;
 pub mod geo_rules;
 pub mod host_samples;
@@ -36,6 +39,14 @@ pub mod users;
 
 pub use agent_metrics::agent_metrics as agent_metric;
 pub use agents::{agent_status, agents as agent};
+pub use ai::{
+    ai_conversations as ai_conversation, ai_defaults,
+    ai_messages as ai_message, ai_settings as ai_setting, message_role,
+};
+pub use api_protection::{
+    api_protection_settings as api_protection_setting,
+    control_plane_access_logs as control_plane_access_log,
+};
 pub use certificates::site_certificates;
 pub use control_plane_tls::{
     control_plane_certificates as control_plane_certificate,

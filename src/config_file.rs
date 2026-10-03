@@ -53,6 +53,14 @@ pub fn injections(mode: &str, argv: &[String]) -> anyhow::Result<Vec<String>> {
     let Some(sub) = PingWafCli::command().find_subcommand(mode).cloned() else {
         return Ok(Vec::new());
     };
+    // Only the run modes carry `--config`; the maintenance commands have no
+    // file to read (and asking for the argument would panic clap's lookup).
+    if sub
+        .get_arguments()
+        .all(|arg| arg.get_id().as_str() != "config")
+    {
+        return Ok(Vec::new());
+    }
 
     let mut sub_args = argv.to_vec();
     sub_args.remove(1);

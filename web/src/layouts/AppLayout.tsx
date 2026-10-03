@@ -45,6 +45,7 @@ const crumbKeys: Record<string, string> = {
   'error-pages': 'pages.errorPages.title',
   settings: 'pages.settings.title',
   logs: 'pages.logs.title',
+  assistant: 'pages.assistant.title',
   agents: 'pages.agents.title',
   lifecycle: 'pages.lifecycle.title',
 }

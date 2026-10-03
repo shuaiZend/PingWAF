@@ -650,6 +650,27 @@ Remove certificate.
 
 Trigger manual certificate renewal (ACME-managed certificates only).
 
+### GET /certificates/summary
+
+Certificate counts across every site the caller may see (administrators: all
+sites; other accounts: their own). Handy for a dashboard badge — one call
+instead of paging through every site.
+
+**Response (200):**
+```json
+{
+  "total": 12,
+  "active": 10,
+  "pending": 1,
+  "failed": 0,
+  "expired": 0,
+  "expiring_soon": 1
+}
+```
+
+`expiring_soon` counts certificates that lapse within the next 30 days,
+already-lapsed ones included.
+
 ### GET /certificates/{cert_id}/events
 
 Event log for one certificate, newest first (paginated).
@@ -958,6 +979,38 @@ List registered agents.
 }
 ```
 
+### POST /agents/enroll
+
+Mint an agent API key and get back the command line that brings a node
+online. Any account with write access (non-viewer). The agent registers
+itself over gRPC on first connect, so running the returned command is all
+that is needed for the node to appear in `GET /agents`.
+
+**Request:**
+```json
+{
+  "name": "edge-01"
+}
+```
+
+`name` is optional — it labels the minted key in `GET /keys` and defaults to
+`agent-enrollment-<timestamp>`. Max `100` characters.
+
+**Response (201):**
+```json
+{
+  "key_id": "uuid",
+  "token": "pwk_…",
+  "server_url": "waf.example.com:9090",
+  "install_command": "curl -fsSL …/install.sh | sudo bash -s -- --mode agent --server-url waf.example.com:9090 --api-key pwk_…",
+  "binary_command": "pingwaf agent --server-url waf.example.com:9090 --api-key pwk_…"
+}
+```
+
+`token` is shown exactly once — only its hash is stored. `server_url` is the
+caller's host plus the configured gRPC port (the bind address is not routable
+from another server). The key carries the `agent` and `read` permissions.
+
 ### GET /agents/{agent_id}
 
 Get agent details.
@@ -1179,6 +1232,23 @@ Update a cache rule.
 
 Delete a cache rule.
 
+### POST /sites/{site_id}/cache/defaults
+
+Re-add the built-in cache rules that are missing, **disabled**, so caching can
+be turned on with a single switch instead of writing rules from scratch. Rules
+that already exist (matched by name) are left untouched, and the site's
+configuration is pushed to its agents when anything was inserted.
+
+**Response (200):**
+```json
+{
+  "inserted": 2,
+  "total": 5
+}
+```
+
+`total` is the number of built-in rules; `inserted` how many were missing.
+
 ### GET /cache/status
 
 Get cache usage across all sites.
@@ -1222,6 +1292,12 @@ Delete by rule ID.
 Every proxied request writes one `access_logs` row; a request the WAF acted on
 also writes a `security_events` row that shares its `request_id` with the access
 row, so a security event can be joined back to the full request and response.
+
+The control plane keeps a third, separate log about *itself*:
+`control_plane_access_logs` records the requests served by the dashboard and
+REST API on port 9080. It is never mixed into the site logs, carries no site
+id, and is readable by administrators only — see
+[GET /logs/control-plane](#get-logscontrol-plane).
 
 > **Headers and bodies are stored verbatim.** `Cookie`, `Authorization` and
 > `Set-Cookie` values are deliberately *not* redacted — the console is meant to
@@ -1379,6 +1455,85 @@ Rows are only as complete as the agent that produced them: `scheme`, `protocol`
 and the response fields come from agents on 0.15.0 or newer. Against an older
 agent those columns stay `null` and the console shows the request side only.
 
+### GET /logs/control-plane
+
+List the control plane's own access log (port 9080), newest first.
+Administrators only: the table is cross-tenant and has no site column.
+Recording is controlled by the `access_log_enabled` switch and
+`access_log_retention_days` of
+[PUT /settings/api-protection](#put-settingsapi-protection). Health probes
+(`/healthz`, `/api/v1/health`) are exempt and write no rows.
+
+**Query Parameters:**
+| Param | Type | Description |
+|-------|------|-------------|
+| `page` | int | Page number (default: 1) |
+| `page_size` | int | Items per page (default: 50, max: 200) |
+| `from` | string | RFC 3339 start (default: 24 hours ago) |
+| `to` | string | RFC 3339 end (default: now) |
+| `client_ip` | string | Exact IP; `a,b` for a list; `10.0.0.*` for a prefix |
+| `method` | string | HTTP method, upper-cased server side (`a,b` for a list) |
+| `action` | string | `allowed`, `blocked_allowlist`, `blocked_waf`, `observed_waf` (`a,b` for a list) |
+| `status_code` | int | Exact status, 100-599 |
+| `path` | string | Substring match on the request path |
+| `host` | string | Request host (`*` wildcards allowed) |
+| `request_id` | string | Exact request id |
+| `q` | string | Free text; matches the path or the host |
+
+`from` must be earlier than `to` and the window may not exceed 90 days.
+
+**Response (200):** paginated `control_plane_access_logs` rows.
+
+```json
+{
+  "items": [
+    {
+      "id": 1,
+      "request_id": "6f1c…",
+      "timestamp": "2024-01-01T00:00:00Z",
+      "client_ip": "203.0.113.7",
+      "method": "GET",
+      "host": "waf.example.com:9080",
+      "path": "/api/v1/sites",
+      "query_string": "page=1",
+      "scheme": "https",
+      "protocol": "HTTP/1.1",
+      "status_code": 200,
+      "latency_ms": 12,
+      "user_agent": "curl/8.4.0",
+      "referer": null,
+      "user_id": "uuid",
+      "user_email": "admin@pingwaf.local",
+      "action": "allowed",
+      "reason": null
+    }
+  ],
+  "total": 1,
+  "page": 1,
+  "page_size": 50
+}
+```
+
+`action` records what the listener's self-protection did with the request:
+
+| Value | Meaning |
+|-------|---------|
+| `allowed` | The request passed every check (the default). |
+| `blocked_allowlist` | Refused with `403 ip_not_allowed` by the IP allowlist. |
+| `blocked_waf` | Refused with `403 blocked_by_waf`, or `413 request_body_too_large` when the body exceeded the inspection limit. |
+| `observed_waf` | A WAF match that was recorded but not enforced, either because `waf_mode` is `monitor` or because the engine itself rated the verdict monitor-only. |
+
+`reason` carries the detail behind a non-`allowed` action and is `null`
+otherwise. `user_id` and `user_email` are decoded from a Bearer token that
+happens to be on the request, purely for the log — the handler still
+authenticates for real, so an invalid token logs `null` for both. `client_ip`
+is always the TCP peer, never a forwarding header: behind a reverse proxy the
+proxy's address is what is logged (and must be allowlisted).
+
+Rows are written asynchronously and in batches, so the newest seconds of
+traffic may not be visible yet; a queue overflow drops records with a server
+warning rather than stalling requests.
+
 ### DELETE /logs/purge
 
 Delete log rows older than a cutoff. Administrators only.
@@ -1398,9 +1553,15 @@ DELETE /api/v1/logs/purge?older_than_days=30
 {
   "deleted_security_events": 120,
   "deleted_access_logs": 8421,
+  "deleted_control_plane_logs": 42,
   "cutoff": "2024-01-01T00:00:00Z"
 }
 ```
+
+`deleted_control_plane_logs` counts rows removed from
+`control_plane_access_logs`; it is always `0` when `site_id` is given, since
+control plane rows carry no site. The scheduled sweep keeps that table to its
+own window (`access_log_retention_days` of the API protection settings).
 
 ---
 
@@ -1925,6 +2086,134 @@ saved change takes effect without a restart. The optional `site_id` on
 automatic sweeps only. Elasticsearch archives are governed separately: the ILM
 policy deletes indices after a fixed 360 days.
 
+### GET /settings/defense
+
+Global defense switches, stored as a single row. Administrators only.
+Today that is observation mode: with it **on**, the data plane keeps every
+detection running (WAF, IP and geo rules, bot protection, rate limiting) but
+only records what it would have blocked — nothing is blocked, challenged or
+rate-limited. Access control is never downgraded: mTLS, basic auth and a
+paused site still take effect.
+
+**Response (200):**
+```json
+{
+  "id": 1,
+  "observation_mode": false,
+  "updated_at": "2026-10-03T00:00:00Z"
+}
+```
+
+The row is created with `observation_mode: false` on first read.
+
+### PUT /settings/defense
+
+Set observation mode. Administrators only. The flag rides inside every rule
+bundle, so a change marks all site configurations as changed and pushes fresh
+bundles to the agents right away — no restart, no manual sync.
+
+**Request:**
+```json
+{
+  "observation_mode": true
+}
+```
+
+`observation_mode` is required; a body without it is rejected with `400`.
+A change made directly in the database — e.g. by the
+`pingwaf mode observe` CLI on the server — is picked up and pushed by a
+background watcher within about 15 seconds.
+
+**Response (200):** the updated row, same shape as `GET`.
+
+### GET /settings/api-protection
+
+The 9080 listener's self-protection: its own access log, IP allowlist and
+WAF. Administrators only. The row is created on first read with the defaults
+shown below.
+
+**Response (200):**
+```json
+{
+  "id": 1,
+  "access_log_enabled": true,
+  "access_log_retention_days": 30,
+  "ip_allowlist_enabled": false,
+  "ip_allowlist_ranges": [],
+  "ip_allowlist_group_id": null,
+  "waf_enabled": false,
+  "waf_mode": "block",
+  "updated_at": "2026-10-03T00:00:00Z",
+  "effective_allowlist_entries": 0
+}
+```
+
+`effective_allowlist_entries` is what the allowlist resolves to right now:
+the inline ranges plus the ranges of the referenced group (a disabled group
+contributes nothing); `0` while the allowlist is switched off.
+
+While a guard is on, a request it refuses never reaches the API: the
+allowlist answers `403` with error code `ip_not_allowed`, the WAF answers
+`403 blocked_by_waf` (or `413 request_body_too_large` for a body above the
+inspection limit), and either refusal is recorded in
+`GET /logs/control-plane`.
+
+### PUT /settings/api-protection
+
+Update any subset of the settings. Administrators only. Every field is
+optional — omitted fields keep their current value, so a JSON body may hold
+just the one switch being changed. A successful write rebuilds the
+in-process policy before responding, so the change applies to the next 9080
+request.
+
+**Request:**
+```json
+{
+  "access_log_enabled": true,
+  "access_log_retention_days": 30,
+  "ip_allowlist_enabled": true,
+  "ip_allowlist_ranges": ["203.0.113.4", "10.0.0.0/8"],
+  "ip_allowlist_group_id": "uuid",
+  "waf_enabled": true,
+  "waf_mode": "monitor",
+  "force": false
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `access_log_enabled` | bool | Record one row per 9080 request (see `GET /logs/control-plane`). |
+| `access_log_retention_days` | int | Retention window for that log, 1-3650 days. |
+| `ip_allowlist_enabled` | bool | Restrict the API to the allowlist below. |
+| `ip_allowlist_ranges` | string[] | Addresses and CIDRs; blanks are dropped, each entry must parse. |
+| `ip_allowlist_group_id` | string | Reference an `ip_groups` row; `""` clears the reference; omit or `null` to keep it. |
+| `waf_enabled` | bool | Inspect API requests with the embedded WAF engine. |
+| `waf_mode` | string | `block` or `monitor`; monitor only records matches (they show up as `observed_waf`). |
+| `force` | bool | Apply a change the lockout guard below would refuse. |
+
+Validation failures return `400`: an unparsable allowlist entry, a retention
+outside 1-3650 days, an unknown `ip_groups` reference, or a `waf_mode` other
+than `block` / `monitor`.
+
+**Lockout guard.** A write that leaves the allowlist enabled without covering
+the connection sending it is refused with `422`, because it would lock the
+operator out of the console they are using:
+
+```json
+{
+  "error": {
+    "code": "unprocessable_entity",
+    "message": "the new allowlist does not include your address (203.0.113.7); add it first, or send force=true to apply anyway"
+  }
+}
+```
+
+Add the address (or retry with `force: true`) to apply it anyway. The
+`pingwaf security allowlist off` CLI on the server is the escape hatch when
+HTTP access is already gone.
+
+**Response (200):** the same view as `GET`.
+
 ---
 
 ## Control-plane certificate
@@ -2015,6 +2304,261 @@ names (configured `tls_sans` plus the host name, the passkey relying party,
 
 ---
 
+## AI assistant
+
+The built-in assistant behind the console's **AI Assistant** page. A turn runs
+an OpenAI-compatible chat-completions loop (streaming when the provider
+supports it) and hands the model the same tool registry that backs the
+[MCP server](#mcp-server), so it can inspect sites, agents, certificates,
+traffic and logs — and, when allowed, change sites.
+
+Every endpoint in this section is administrators only: one provider key is
+shared across the fleet and the tools reach every site.
+
+### GET /settings/ai
+
+The assistant's configuration, stored as a single row. The row is created with
+the defaults shown below on first read.
+
+**Response (200):**
+```json
+{
+  "enabled": false,
+  "base_url": "https://api.openai.com/v1",
+  "api_key": "",
+  "model": "gpt-4o-mini",
+  "system_prompt": "",
+  "temperature": 0.2,
+  "max_tool_rounds": 5,
+  "allow_write_tools": false,
+  "updated_at": "2026-10-03T00:00:00Z"
+}
+```
+
+`api_key` is `***` when a key is stored and empty when none is; the stored key
+is never returned. An empty `system_prompt` means the built-in prompt is used.
+
+### PUT /settings/ai
+
+Update any subset of the settings; omitted fields keep their stored value.
+`api_key` follows the secret round-trip: omitted or `null` keeps the stored
+key, `***` keeps it too (what the dashboard sends when the field was left
+untouched), and `""` clears it. Enabling the assistant requires a `base_url`
+(http or https), a `model` and a key; an incomplete configuration is refused
+with `400`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `enabled` | bool | Master switch. While off, chat turns are refused with `409`. |
+| `base_url` | string | OpenAI-compatible API root, at most 500 characters. |
+| `api_key` | string | Provider key; see the round-trip rules above. |
+| `model` | string | Model name, at most 200 characters. |
+| `system_prompt` | string | Replaces the built-in prompt; blank uses the default. |
+| `temperature` | number | 0–2. |
+| `max_tool_rounds` | int | Tool-calling rounds per answer, 1–10. |
+| `allow_write_tools` | bool | Let the assistant call the site-mutating tools. |
+
+**Response (200):** the same view as `GET`.
+
+### POST /settings/ai/test
+
+Probe a provider. The JSON body may hold any subset of the fields above;
+absent fields fall back to the stored row, and the probe runs with `enabled`
+forced on, so a draft can be tested before it is saved. The model is asked for
+a one-word reply.
+
+**Response (200):**
+```json
+{
+  "ok": true,
+  "model": "gpt-4o-mini",
+  "reply": "ok",
+  "error": null
+}
+```
+
+A reachable provider that answers with an error still returns `200` with
+`ok: false` and the provider's message in `error`; only an unusable
+configuration (missing URL or model) is a `400`.
+
+### GET /ai/conversations
+
+List conversations, newest first. Supports the standard pagination query
+(`page`, `page_size`).
+
+**Response (200):**
+```json
+{
+  "items": [
+    {
+      "id": "uuid",
+      "title": "Why is example.com returning 502s?",
+      "created_at": "2026-10-03T00:00:00Z",
+      "updated_at": "2026-10-03T00:05:00Z"
+    }
+  ],
+  "total": 1,
+  "page": 1,
+  "page_size": 20
+}
+```
+
+The `title` is derived from the first message (first line, 60 characters,
+ellipsised) and stays empty until the first message is sent.
+
+### POST /ai/conversations
+
+Create an empty conversation. `title` is optional (at most 200 characters) and
+usually left out — the first message names the conversation.
+
+**Response (201):** the conversation summary.
+
+### GET /ai/conversations/{conversation_id}
+
+One conversation with its messages, oldest first, capped at the most recent
+500. `404` for an unknown id.
+
+**Response (200):**
+```json
+{
+  "id": "uuid",
+  "title": "Why is example.com returning 502s?",
+  "created_at": "2026-10-03T00:00:00Z",
+  "updated_at": "2026-10-03T00:05:00Z",
+  "messages": [
+    { "id": "uuid", "role": "user", "content": "…", "created_at": "…" },
+    {
+      "id": "uuid",
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+        {
+          "id": "call_1",
+          "type": "function",
+          "function": {
+            "name": "query_access_logs",
+            "arguments": "{\"status_class\":5}"
+          }
+        }
+      ],
+      "created_at": "…"
+    },
+    {
+      "id": "uuid",
+      "role": "tool",
+      "content": "{\"rows\":[…]}",
+      "tool_call_id": "call_1",
+      "tool_name": "query_access_logs",
+      "created_at": "…"
+    }
+  ]
+}
+```
+
+`tool_calls` appears on assistant messages only, and `tool_call_id` /
+`tool_name` on tool messages only.
+
+### DELETE /ai/conversations/{conversation_id}
+
+Delete a conversation and its messages (cascade). **Response:** `204`.
+
+### POST /ai/conversations/{conversation_id}/messages
+
+Run one turn: the message is stored, then the model may call tools (at most
+`max_tool_rounds` rounds) before it answers.
+
+**Request:**
+```json
+{ "content": "Which sites returned 5xx in the last hour?" }
+```
+
+With `Accept: text/event-stream` the response is an SSE stream of JSON events,
+one `data:` line per event:
+
+| Event | Payload | Meaning |
+|-------|---------|---------|
+| `conversation` | `{"id","title"}` | Sent first when the first message names the conversation. |
+| `delta` | `{"text"}` | Incremental assistant text. |
+| `tool_call` | `{"id","name","arguments"}` | The model requested a tool call. |
+| `tool_result` | `{"id","name","result","is_error"}` | The tool answered; `result` is its raw JSON. |
+| `done` | `{"content"}` | The turn finished; `content` is the final answer. |
+| `error` | `{"message"}` | The turn failed; the message is safe to display. |
+
+Without that header the same events are folded into one buffered JSON
+response once the turn completes:
+
+```json
+{
+  "conversation_id": "uuid",
+  "content": "The final answer…",
+  "tool_calls": [
+    { "id": "call_1", "name": "query_access_logs", "arguments": {}, "result": {}, "is_error": false }
+  ]
+}
+```
+
+Errors: `400` for an empty or oversized message (8 000 characters), `404` for
+an unknown conversation, `409` when the assistant is disabled or its provider
+configuration is incomplete. A failure during the turn arrives as an `error`
+event in SSE mode and as `502 Bad Gateway` in buffered mode.
+
+## MCP server
+
+The control plane hosts an MCP (Model Context Protocol) endpoint at `/mcp` —
+note the path hangs off the root of the TLS listener, not under `/api/v1`. It
+speaks MCP over **Streamable HTTP**: clients `POST` JSON-RPC 2.0 messages and
+receive JSON responses; `GET` and `DELETE` answer `405` so probing clients
+fall back to POST. The endpoint is stateless — no `Mcp-Session-Id` is issued.
+
+Authentication reuses the console credentials: `Authorization: Bearer` with
+either a `pwk_…` API key or a user JWT. A key needs the `read` permission (and
+its owner must be an administrator) to be accepted at all; the write tools
+additionally require the `write` permission on the key. JWT sessions use the
+token's role directly — administrators may call every tool, viewers none.
+
+Supported methods: `initialize`, `ping`, `tools/list`, `tools/call`,
+`resources/list`, `resources/read`, `resources/templates/list`,
+`prompts/list`, `prompts/get`, `logging/setLevel` (accepted, no-op), and
+JSON-RPC batches thereof. Notifications receive `202 Accepted`.
+
+Because the route hangs off the root router, the 9080 self-protection stack —
+access log, IP allowlist, WAF ([see API protection](#get-settingsapi-protection))
+— applies to `/mcp` exactly as it does to the REST API.
+
+### Tools
+
+The registry is shared with the AI assistant; `tools/list` returns only the
+tools the calling credential may use (write tools are hidden from read-only
+credentials).
+
+| Tool | Write | Description |
+|------|-------|-------------|
+| `list_sites` | | Sites with status and online agent count. |
+| `list_agents` | | Agents with status, version and heartbeat. |
+| `certificate_summary` | | TLS certificate counts, including expiring-in-30-days. |
+| `query_access_logs` | | Recent proxied requests; the primary diagnosis tool. |
+| `query_waf_events` | | WAF detections with rule, request and action. |
+| `get_traffic_summary` | | Aggregated traffic for a window. |
+| `get_defense_status` | | Observation mode and the control plane's own guards. |
+| `list_ip_groups` | | Shared IP groups with size and sync state. |
+| `query_control_plane_logs` | | The 9080 access log, including allowlist/WAF verdicts. |
+| `set_observation_mode` | ✓ | Turn global observation mode on or off. |
+| `set_site_status` | ✓ | Activate or pause one site. |
+
+Errors follow the JSON-RPC convention: `-32601` for an unknown method,
+`-32602` for invalid parameters, and a tool's own failure is returned as a
+result with `isError: true` and the message in the content text.
+
+### Resources and prompts
+
+`resources/list` exposes the fleet's readable state as MCP resources, each
+with a `pingwaf://` URI (defense status, sites, agents, certificates, traffic
+and the control-plane log). `prompts/list` offers ready-made troubleshooting
+prompts — incident triage, traffic report, security review and certificate
+audit — that clients can surface as one-click actions.
+
+---
+
 ## Debug & Profiling
 
 Built-in pprof-style profiling of the control-plane process. All endpoints require an admin token. Sampling is process-global: while a capture is running, further requests return `409 Conflict`.
@@ -2084,7 +2628,7 @@ All errors follow a consistent format:
 | 403 | `forbidden` | Insufficient permissions |
 | 404 | `not_found` | Resource does not exist |
 | 409 | `conflict` | Duplicate resource |
-| 422 | `unprocessable` | Validation failed |
+| 422 | `unprocessable_entity` | Validation failed by a business rule |
 | 429 | `too_many_requests` | Rate limited (passkey challenges) |
 | 500 | `internal_error` | Server error |
 | 501 | `not_implemented` | Feature disabled on this deployment (passkeys) |
@@ -2121,3 +2665,8 @@ configured windows (see `GET/PUT /settings/log-retention`, default `180` days
 for both tables) every six hours. `DELETE /logs/purge` remains available for an
 ad-hoc cleanup and deletes rows older than `older_than_days` (default 30) for
 one site or, for an administrator, for every site.
+
+The control plane's own access log has its own window,
+`access_log_retention_days` on `GET/PUT /settings/api-protection` (default
+`30` days). The scheduled sweep enforces it; an ad-hoc `DELETE /logs/purge`
+without `site_id` trims it with the same `older_than_days` as the site logs.

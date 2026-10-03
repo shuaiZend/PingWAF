@@ -5,13 +5,16 @@
 //! finally bakes the [`AppState`] in.
 
 pub mod agents;
+pub mod ai;
 pub mod analytics;
+pub mod api_protection;
 pub mod auth;
 pub mod bot;
 pub mod cache;
 pub mod challenge;
 pub mod common;
 pub mod debug;
+pub mod defense;
 pub mod error;
 pub mod error_pages;
 pub mod geo;
@@ -25,6 +28,7 @@ pub mod passkeys;
 pub mod rate_limiting;
 pub mod rewrite;
 pub mod rules;
+pub mod self_protection;
 pub mod settings;
 pub mod site_basic_auth;
 pub mod sites;
@@ -82,12 +86,20 @@ pub fn build_router(state: AppState) -> Router {
         .merge(error_pages::routes())
         .merge(debug::routes())
         .merge(system_tls::routes())
+        .merge(defense::routes())
+        .merge(api_protection::routes())
+        .merge(ai::routes())
         .route("/health", get(health))
         .route("/version", get(version))
         .fallback(api_not_found);
 
     let mut root = Router::new()
         .nest(API_PREFIX, api)
+        // The hosted MCP endpoint lives outside `/api/v1` (clients append
+        // `/mcp` to the base URL), and hanging off the root router is what
+        // makes the self-protection stack below (access log, IP allowlist,
+        // WAF) cover it automatically.
+        .merge(crate::mcp::routes())
         // Load balancers and container probes usually hit the root path.
         .route("/healthz", get(health));
     // Serve the embedded React frontend for all non-API routes (SPA)
@@ -112,6 +124,22 @@ pub fn build_router(state: AppState) -> Router {
                 path = %request.uri().path(),
             )
         },
+    ))
+    // Self-protection wraps everything above: the access log sees the final
+    // status code, and a request the allowlist or the WAF refuses never
+    // reaches the tracing/compression stack. Later `.layer` calls are the
+    // outer ones, so `access_log` ends up first.
+    .layer(middleware::from_fn_with_state(
+        state.clone(),
+        self_protection::waf_guard,
+    ))
+    .layer(middleware::from_fn_with_state(
+        state.clone(),
+        self_protection::ip_allowlist,
+    ))
+    .layer(middleware::from_fn_with_state(
+        state.clone(),
+        self_protection::access_log,
     ))
     .with_state(state)
 }
@@ -220,7 +248,7 @@ fn https_location(request: &Request) -> Option<HeaderValue> {
 }
 
 /// Paths that answer on both schemes, so probes need no certificate.
-fn is_health_probe(path: &str) -> bool {
+pub(crate) fn is_health_probe(path: &str) -> bool {
     matches!(path, "/healthz" | "/api/v1/health")
 }
 

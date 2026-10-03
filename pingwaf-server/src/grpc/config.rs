@@ -29,11 +29,11 @@ use crate::api::ip_rules::ip_action;
 use crate::api::site_basic_auth as site_basic_auth_api;
 use crate::models::{
     acme_challenge, action, bot_protection, cache_rules, challenge_settings,
-    characteristic, client_cert_status, error_pages, geo_rules,
-    ip_access_rules, ip_group_sites, ip_groups, mode, mtls_client_certificate,
-    rate_limit_rules, rewrite_rules, rule, rule_groups, site, site_basic_auth,
-    site_certificates, site_routes, site_ssl, site_status, site_upstream_pools,
-    site_upstreams,
+    characteristic, client_cert_status, defense_settings, error_pages,
+    geo_rules, ip_access_rules, ip_group_sites, ip_groups, mode,
+    mtls_client_certificate, rate_limit_rules, rewrite_rules, rule,
+    rule_groups, site, site_basic_auth, site_certificates, site_routes,
+    site_ssl, site_status, site_upstream_pools, site_upstreams,
 };
 use crate::pki::mtls::normalise_fingerprint;
 
@@ -960,6 +960,12 @@ pub async fn build_rule_bundle(
     let certificates = load_certificates(db, site_row.id).await?;
     let bot = load_bot_protection(db, site_row.id).await?;
     let mtls = load_mtls(db, site_row.id).await?;
+    // A missing settings row means observation mode was never switched on, so
+    // the data plane keeps enforcing.
+    let observation_mode = defense_settings::Entity::find_by_id(1)
+        .one(db)
+        .await?
+        .is_some_and(|row| row.observation_mode);
 
     let custom_rules: Vec<WafRule> =
         rules_rows.iter().map(rule_to_proto).collect();
@@ -991,6 +997,7 @@ pub async fn build_rule_bundle(
         routes: routes_to_proto(&routes, &pools, &upstreams, &route_groups),
         bot_protection: Some(bot_protection_to_proto(bot.as_ref())),
         basic_auth: basic_auth_to_proto(basic_auth.as_ref()),
+        observation_mode,
     };
 
     bundle.config_hash = fingerprint(&bundle);

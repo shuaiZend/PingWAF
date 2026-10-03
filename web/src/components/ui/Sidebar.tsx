@@ -19,6 +19,7 @@ import {
   CaretDown,
   Network,
   FlowArrow,
+  Sparkle,
   type Icon,
 } from '@phosphor-icons/react'
 import { cn } from '@/lib/utils'
@@ -102,6 +103,7 @@ export function Sidebar({ collapsed, onNavigate }: SidebarProps) {
     { kind: 'leaf', to: '/ssl', labelKey: 'nav.ssl', icon: Lock },
     { kind: 'leaf', to: '/traffic', labelKey: 'nav.traffic', icon: ChartLine },
     { kind: 'leaf', to: '/logs', labelKey: 'nav.logs', icon: List },
+    { kind: 'leaf', to: '/assistant', labelKey: 'nav.assistant', icon: Sparkle },
     { kind: 'leaf', to: '/agents', labelKey: 'nav.agents', icon: Desktop },
     { kind: 'leaf', to: '/lifecycle', labelKey: 'nav.lifecycle', icon: FlowArrow },
     { kind: 'leaf', to: '/settings', labelKey: 'nav.settings', icon: Gear },

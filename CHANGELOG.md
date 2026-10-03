@@ -8,6 +8,72 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [Unreleased]
+
+### ⛰️ Features
+
+- *(cli)* The `pingwaf` binary gains break-glass maintenance commands that talk
+  straight to PostgreSQL, so they keep working when the control plane is down,
+  not yet seeded, or its own IP allowlist has locked the operator out:
+  `user list`, `user add-admin` and `user reset-password` (password generated
+  and printed once when omitted), `mode observe` / `mode enforce` /
+  `mode status` for observation mode, and `security status` /
+  `security allowlist on|off` for the 9080 protection switches.
+- *(security)* Observation mode: one global switch makes every protection
+  detect but not enforce — a WAF verdict, IP/Geo rule or bot rule that would
+  have been blocked, and a rate limit that would have tripped, are recorded as
+  monitor security events while the request proceeds. Access control is never
+  downgraded: mTLS, basic auth and a paused site still deny. The flag rides
+  inside every rule bundle, so agents pick it up on the next configuration
+  push; the CLI writes the row and the control plane pushes within seconds.
+- *(security)* The control plane protects its own listener (9080). It records
+  one access-log row per request — client, user, action, status, latency,
+  reason — kept in PostgreSQL with its own retention window (default 30 days),
+  searchable in the console and through `GET /logs/control-plane`. An IP
+  allowlist (inline addresses and CIDRs plus an optional reference to an
+  `ip_groups` row) and the embedded WAF (block or monitor mode, 128 KiB body
+  inspection limit) gate every API request; health probes are exempt. A write
+  that would enable the allowlist without covering the caller is refused with
+  `422` unless `force` is set, so the console cannot lock out its own
+  operator. All of it is editable from Settings and via
+  `GET/PUT /settings/api-protection`.
+- *(dashboard)* Two new Settings cards (administrators only): observation mode
+  — with a banner while it is on — and API protection (access log, allowlist
+  with inline ranges and IP-group reference, WAF mode). The Logs page gains a
+  third "Control plane" tab with the same search grammar and a request detail
+  view, and the log purge result reports the control plane rows removed.
+  English, Chinese and Japanese translations included.
+- *(ai)* An AI assistant is embedded in the console (administrators only). It
+  talks to any OpenAI-compatible endpoint — base URL, model, API key,
+  temperature, round limit and system prompt live in Settings, with a test
+  button before saving — streams answers over SSE, and grounds them by calling
+  the built-in MCP tools: sites, agents, certificates, access logs, WAF
+  events, traffic and defense status. Read-only tools are on by default; the
+  two write tools (observation mode, site enable/disable) stay off until
+  explicitly allowed. Conversations are stored server-side, so history
+  survives reloads, and the API lives under `/settings/ai` and
+  `/ai/conversations`.
+- *(mcp)* The control plane speaks MCP over Streamable HTTP at `/mcp`, so
+  external agents — Claude, IDE copilots, scripts — can inspect a deployment
+  with the same eleven tools as the built-in assistant. Authentication reuses
+  API keys (`pwk_…`, requiring the matching read/write permission) or JWT
+  users with role-based access, and the endpoint sits behind the same 9080
+  protection stack (access log, IP allowlist, embedded WAF) as the rest of
+  the API. The transport is stateless, with resources and prompts for common
+  deployment data, and GET/DELETE answered with `405`.
+
+### 🔧 Internal
+
+- The API reference (`docs/api.md`) documents the new endpoints
+  (`/settings/api-protection`, `/settings/defense`, `/logs/control-plane`,
+  the control plane log purge count) and backfills three previously
+  undocumented ones (`POST /agents/enroll`, `GET /certificates/summary`,
+  `POST /sites/{site_id}/cache/defaults`); the `422` error code now reads
+  `unprocessable_entity`, matching the implementation. The AI assistant and
+  MCP server are documented as well: the AI settings and conversation
+  endpoints (including the SSE event stream) and the `/mcp` JSON-RPC surface
+  with its authentication rules and tool inventory.
+
 ## [PingWAF 0.18.0] — 2026-09-30
 
 ### ⛰️ Features

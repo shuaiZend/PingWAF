@@ -29,6 +29,9 @@ pub mod m20240101_000021_site_alternate_domains;
 pub mod m20240101_000022_log_retention_settings;
 pub mod m20240101_000023_global_error_pages;
 pub mod m20240101_000024_site_basic_auth;
+pub mod m20240101_000025_defense_settings;
+pub mod m20240101_000026_api_protection;
+pub mod m20240101_000027_ai_agent;
 
 use sea_orm_migration::prelude::*;
 
@@ -65,6 +68,9 @@ impl MigratorTrait for Migrator {
             Box::new(m20240101_000022_log_retention_settings::Migration),
             Box::new(m20240101_000023_global_error_pages::Migration),
             Box::new(m20240101_000024_site_basic_auth::Migration),
+            Box::new(m20240101_000025_defense_settings::Migration),
+            Box::new(m20240101_000026_api_protection::Migration),
+            Box::new(m20240101_000027_ai_agent::Migration),
         ]
     }
 }
@@ -76,7 +82,7 @@ mod tests {
     #[test]
     fn migrations_are_ordered_and_unique() {
         let migrations = Migrator::migrations();
-        assert_eq!(migrations.len(), 24);
+        assert_eq!(migrations.len(), 27);
         let names: Vec<String> =
             migrations.iter().map(|m| m.name().to_owned()).collect();
         let mut sorted = names.clone();

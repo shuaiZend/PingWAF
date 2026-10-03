@@ -873,6 +873,91 @@ export interface UpdateLogRetentionRequest {
   security_event_retention_days?: number
 }
 
+/* ── Control-plane self-protection (port 9080) ────────────────────── */
+
+/** `models::api_protection::api_protection_settings::Model`. */
+export interface ApiProtectionSettings {
+  id: number
+  access_log_enabled: boolean
+  access_log_retention_days: number
+  ip_allowlist_enabled: boolean
+  /** Inline addresses / CIDR ranges that may call the API. */
+  ip_allowlist_ranges: string[]
+  /** An `ip_groups` row whose ranges join the allowlist. */
+  ip_allowlist_group_id: string | null
+  waf_enabled: boolean
+  /** `block` or `monitor`; monitor only records matches. */
+  waf_mode: ApiProtectionWafMode | string
+  updated_at: string
+}
+
+export type ApiProtectionWafMode = 'block' | 'monitor'
+
+/** `api::api_protection::ApiProtectionView` */
+export interface ApiProtectionView extends ApiProtectionSettings {
+  /** Entries (inline plus group) the effective allowlist holds right now. */
+  effective_allowlist_entries: number
+}
+
+/** `api::api_protection::UpdateApiProtectionRequest` */
+export interface UpdateApiProtectionRequest {
+  access_log_enabled?: boolean
+  access_log_retention_days?: number
+  ip_allowlist_enabled?: boolean
+  ip_allowlist_ranges?: string[]
+  /** Absent/`null` keeps the reference; `''` clears it; a UUID points at a group. */
+  ip_allowlist_group_id?: string | null
+  waf_enabled?: boolean
+  waf_mode?: ApiProtectionWafMode | string
+  /** Applies a change even when it excludes the calling connection. */
+  force?: boolean
+}
+
+/** `models::api_protection::control_plane_access_logs::Model`. */
+export interface ControlPlaneAccessLog {
+  id: number
+  request_id: string | null
+  timestamp: string
+  client_ip: string
+  method: string
+  host: string | null
+  path: string
+  query_string: string | null
+  scheme: string | null
+  protocol: string | null
+  status_code: number | null
+  latency_ms: number | null
+  user_agent: string | null
+  referer: string | null
+  user_id: string | null
+  user_email: string | null
+  /** `allowed`, `blocked_allowlist`, `blocked_waf` or `observed_waf`. */
+  action: string
+  reason: string | null
+}
+
+/** `api::api_protection::ControlPlaneLogQuery` */
+export interface ControlPlaneLogQuery extends PaginationQuery {
+  from?: string
+  to?: string
+  client_ip?: string
+  method?: string
+  action?: string
+  status_code?: number
+  path?: string
+  host?: string
+  request_id?: string
+  q?: string
+}
+
+/** `models::defense_settings::Model` — the global observation mode row. */
+export interface DefenseSettings {
+  id: number
+  /** When true, every protection detects but nothing is enforced. */
+  observation_mode: boolean
+  updated_at: string
+}
+
 /* ── Control-plane certificate ────────────────────────────────────── */
 
 export type TlsCertificateSource = 'self_signed' | 'uploaded'
@@ -1625,3 +1710,91 @@ export interface IpGroupListQuery extends PaginationQuery {
   is_global?: boolean
   enabled?: boolean
 }
+
+/* ── AI assistant ─────────────────────────────────────────────────── */
+
+/** `api::ai::AiSettingsView` — the API key comes back masked as `***`. */
+export interface AiSettings {
+  enabled: boolean
+  base_url: string
+  /** `***` when a key is stored, empty when none is. */
+  api_key: string
+  model: string
+  system_prompt: string
+  temperature: number
+  max_tool_rounds: number
+  allow_write_tools: boolean
+  updated_at: string
+}
+
+/** `api::ai::AiSettingsUpdate` — absent fields keep their stored value. */
+export interface UpdateAiSettingsRequest {
+  enabled?: boolean
+  base_url?: string
+  /** `null` keeps the stored key (the mask round-trip); `''` clears it. */
+  api_key?: string | null
+  model?: string
+  system_prompt?: string
+  temperature?: number
+  max_tool_rounds?: number
+  allow_write_tools?: boolean
+}
+
+/** `api::ai::AiTestResult` */
+export interface AiTestResult {
+  ok: boolean
+  model: string
+  reply?: string | null
+  error?: string | null
+}
+
+/** `api::ai::ConversationSummary` */
+export interface AiConversation {
+  id: string
+  /** Empty until the first message names the conversation. */
+  title: string
+  created_at: string
+  updated_at: string
+}
+
+/** One entry of an assistant message's stored `tool_calls` array. */
+export interface AiToolCallWire {
+  id: string
+  type: string
+  function: { name: string; arguments: string }
+}
+
+/** `api::ai::MessageView` */
+export interface AiMessage {
+  id: string
+  role: 'user' | 'assistant' | 'tool' | string
+  content: string
+  tool_calls?: AiToolCallWire[] | null
+  tool_call_id?: string | null
+  tool_name?: string | null
+  created_at: string
+}
+
+/** `api::ai::ConversationDetail` */
+export interface AiConversationDetail {
+  id: string
+  title: string
+  created_at: string
+  updated_at: string
+  messages: AiMessage[]
+}
+
+/** One event of a chat turn (`ai::agent::ChatEvent`, SSE `data:` payloads). */
+export type AiChatEvent =
+  | { type: 'conversation'; id: string; title: string }
+  | { type: 'delta'; text: string }
+  | { type: 'tool_call'; id: string; name: string; arguments: unknown }
+  | {
+      type: 'tool_result'
+      id: string
+      name: string
+      result: unknown
+      is_error: boolean
+    }
+  | { type: 'done'; content: string }
+  | { type: 'error'; message: string }

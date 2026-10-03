@@ -14,6 +14,9 @@ pingwaf-waf = { path = "../pingwaf-waf" }
 # Built-in pprof-style profiling endpoints (/api/v1/debug/...).
 pingwaf-pprof = { path = "../pingwaf-pprof" }
 anyhow = { workspace = true }
+# Lock-free policy swap for the control plane's self-protection middlewares,
+# which reload their settings without blocking the request path.
+arc-swap = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }
 # Encodes the stored basic-auth passwords into the `Authorization` payload the
@@ -21,17 +24,23 @@ axum = { workspace = true }
 base64 = { workspace = true }
 bcrypt = { workspace = true }
 chrono = { workspace = true }
+# Drives the provider response streams and the SSE chat endpoint.
+futures-util = { workspace = true }
 hex = { workspace = true }
 jsonwebtoken = { workspace = true }
+# Parses the API allowlist entries (addresses and CIDR ranges).
+ipnet = { workspace = true }
 # Used to encode `RuleBundle`/`SiteConfig` so their bytes can be fingerprinted
 # into the `config_hash` agents compare for delta synchronisation.
 prost = { workspace = true }
 # Needed to build the `google.protobuf.Timestamp` fields of the control plane
 # protocol; tonic-prost-build maps well-known types onto this crate by default.
 prost-types = { workspace = true }
-# HTTP client used by the Elasticsearch log shipper. In reqwest 0.13 the
-# workspace's `default-tls` already maps to rustls, so no OpenSSL is pulled in.
-reqwest = { workspace = true }
+# HTTP client used by the Elasticsearch log shipper and the AI assistant's
+# provider calls; `stream` adds `bytes_stream()` for the streaming
+# chat-completions endpoint. In reqwest 0.13 the workspace's `default-tls`
+# already maps to rustls, so no OpenSSL is pulled in.
+reqwest = { workspace = true, features = ["stream"] }
 rust-embed = { version = "8.12.0", features = ["mime-guess", "compression"], default-features = false }
 sea-orm = { workspace = true }
 sea-orm-migration = { workspace = true }

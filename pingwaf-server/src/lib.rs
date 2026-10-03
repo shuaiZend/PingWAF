@@ -8,6 +8,7 @@
 //! The public entry point is [`start_server`], which boots both listeners and
 //! blocks until a shutdown signal is received.
 
+pub mod ai;
 pub mod api;
 pub mod auth;
 pub mod config;
@@ -15,6 +16,7 @@ pub mod defaults;
 pub mod es;
 pub mod frontend;
 pub mod grpc;
+pub mod mcp;
 pub mod migration;
 pub mod models;
 pub mod monitoring;
@@ -151,7 +153,37 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
         es: es_client.clone(),
         cache_status: cache_status.clone(),
         control_tls: control_tls.clone(),
+        protection: Arc::new(api::self_protection::SelfProtection::new()),
     };
+
+    // ── 6d. Control plane self-protection ───────────────────────────────────
+    // Load the initial policy (access log, IP allowlist, WAF), start the log
+    // writer and the background refresher; the latter is what picks up edits
+    // made by another process, e.g. the `pingwaf security` CLI.
+    match api::self_protection::refresh(&db).await {
+        Ok(policy) => {
+            tracing::info!(
+                access_log_enabled = policy.access_log_enabled,
+                allowlist_enabled = policy.allowlist_enabled,
+                waf_enabled = policy.waf.is_some(),
+                "control plane self-protection loaded"
+            );
+            state.protection.store(policy);
+        },
+        Err(err) => tracing::warn!(
+            error = %err,
+            "could not load control plane protection settings; starting with protection disabled"
+        ),
+    }
+    state.protection.spawn_writer(db.clone());
+    let _protection_handle =
+        api::self_protection::start_refresh_task(state.clone());
+
+    // ── 6e. Observation mode watcher ────────────────────────────────────────
+    // Picks up `defense_settings` edits made by another process (the
+    // `pingwaf mode` CLI) and fans them out to the agents.
+    let _defense_watch_handle =
+        api::defense::start_watch_task(state.clone()).await;
 
     if control_tls.is_enabled() {
         match api::system_tls::load_active_certificate(&state).await {
@@ -501,8 +533,13 @@ async fn serve_http(
         .with_graceful_shutdown(shutdown_wait())
         .await
     } else {
-        axum::serve(listener, router)
-            .with_graceful_shutdown(shutdown_wait())
-            .await
+        // Connect info is wired here too: the self-protection middlewares
+        // need the TCP peer even when TLS is handled elsewhere.
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<tls::ConnInfo>(),
+        )
+        .with_graceful_shutdown(shutdown_wait())
+        .await
     }
 }

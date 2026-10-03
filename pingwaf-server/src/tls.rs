@@ -268,20 +268,28 @@ async fn looks_like_tls(stream: &TcpStream) -> io::Result<bool> {
 pub struct ConnInfo {
     /// Whether the connection arrived through the TLS half of the listener.
     pub tls: bool,
+    /// The TCP peer address, used by the self-protection IP allowlist and the
+    /// access log. Forwarding headers are deliberately ignored: only the
+    /// socket address cannot be spoofed by the caller.
+    pub peer_addr: SocketAddr,
 }
 
 impl Connected<IncomingStream<'_, MixedListener>> for ConnInfo {
     fn connect_info(stream: IncomingStream<'_, MixedListener>) -> Self {
         Self {
             tls: matches!(stream.io(), MaybeTlsStream::Tls(_)),
+            peer_addr: *stream.remote_addr(),
         }
     }
 }
 
 impl Connected<IncomingStream<'_, TcpListener>> for ConnInfo {
-    fn connect_info(_stream: IncomingStream<'_, TcpListener>) -> Self {
+    fn connect_info(stream: IncomingStream<'_, TcpListener>) -> Self {
         // A plain `TcpListener` only ever serves cleartext.
-        Self { tls: false }
+        Self {
+            tls: false,
+            peer_addr: *stream.remote_addr(),
+        }
     }
 }
 

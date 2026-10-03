@@ -28,6 +28,7 @@ import {
   DownloadSimple,
   LockKey,
   ShieldCheck,
+  Sparkle,
   UploadSimple,
 } from '@phosphor-icons/react'
 import { PageHeader } from '@/components/PageHeader'
@@ -65,8 +66,12 @@ import {
   renderErrorPageTemplate,
 } from '@/api/errorPages'
 import { passkeyKeys, passkeysApi } from '@/api/passkeys'
+import { apiProtectionApi, apiProtectionKeys } from '@/api/apiProtection'
+import { aiApi, aiKeys } from '@/api/ai'
+import { ipGroupKeys, ipGroupsApi } from '@/api/ipGroups'
 import { authApi } from '@/api/auth'
-import { errorMessage } from '@/api/errors'
+import { ApiError } from '@/api/client'
+import { errorMessage, handleApiError } from '@/api/errors'
 import { isPasskeyCancellation, passkeysSupported } from '@/lib/webauthn'
 import { useAuthStore } from '@/stores/authStore'
 import { useCanWrite } from '@/hooks'
@@ -74,7 +79,18 @@ import { useThemeStore, type ThemeMode } from '@/stores/themeStore'
 import { supportedLanguages } from '@/i18n'
 import { cn } from '@/lib/utils'
 import { formatDateTime, formatRelative, fromLocalInputValue, toLocalInputValue } from '@/lib/format'
-import type { ApiKey, CreateApiKeyRequest, EsTestResult, PasskeySummary } from '@/api/types'
+import type {
+  AiSettings,
+  AiTestResult,
+  ApiKey,
+  ApiProtectionView,
+  ApiProtectionWafMode,
+  CreateApiKeyRequest,
+  EsTestResult,
+  PasskeySummary,
+  UpdateAiSettingsRequest,
+  UpdateApiProtectionRequest,
+} from '@/api/types'
 import {
   ERROR_PAGE_CONTENT_TYPE_LABELS,
   ERROR_PAGE_CONTENT_TYPES,
@@ -115,6 +131,21 @@ export function SettingsPage() {
           <ControlPlaneTlsCard canWrite={canWrite} />
         ) : (
           <AdminOnlyCard title={t('pages.settings.controlPlaneTls')} />
+        )}
+        {isAdmin ? (
+          <ObservationModeCard canWrite={canWrite} />
+        ) : (
+          <AdminOnlyCard title={t('pages.settings.observationMode')} />
+        )}
+        {isAdmin ? (
+          <ApiProtectionCard canWrite={canWrite} />
+        ) : (
+          <AdminOnlyCard title={t('pages.settings.apiProtection')} />
+        )}
+        {isAdmin ? (
+          <AiAssistantCard canWrite={canWrite} />
+        ) : (
+          <AdminOnlyCard title={t('pages.settings.aiAssistant')} />
         )}
         {isAdmin ? (
           <ElasticsearchCard canWrite={canWrite} />
@@ -1878,6 +1909,666 @@ function ControlPlaneTlsCard({ canWrite }: { canWrite: boolean }) {
           </p>
         )}
       </ConfirmDialog>
+    </Card>
+  )
+}
+
+/* ── Defense: observation mode ──────────────────────────────────────── */
+
+/**
+ * The global data-plane switch (the console twin of `pingwaf mode observe`):
+ * every protection keeps detecting but only records. mTLS, basic auth and
+ * suspended sites stay enforced, which is why this is a warning-toned toggle
+ * rather than a plain setting.
+ */
+function ObservationModeCard({ canWrite }: { canWrite: boolean }) {
+  const { t } = useTranslation()
+  const toast = useToast()
+  const queryClient = useQueryClient()
+
+  const settings = useQuery({
+    queryKey: apiProtectionKeys.defense(),
+    queryFn: () => apiProtectionApi.getDefense(),
+  })
+
+  const save = useMutation({
+    mutationFn: (observation_mode: boolean) =>
+      apiProtectionApi.updateDefense(observation_mode),
+    onSuccess: (row) => {
+      queryClient.setQueryData(apiProtectionKeys.defense(), row)
+      toast.success(t('pages.settings.observationModeSaved'))
+    },
+  })
+
+  const enabled = settings.data?.observation_mode ?? false
+
+  return (
+    <Card>
+      <CardHeader
+        title={t('pages.settings.observationMode')}
+        description={t('pages.settings.observationModeDescription')}
+        action={
+          settings.data && (
+            <Badge tone={enabled ? 'warning' : 'success'} dot>
+              {enabled
+                ? t('pages.settings.observationModeOn')
+                : t('pages.settings.observationModeOff')}
+            </Badge>
+          )
+        }
+      />
+      <CardBody className="flex flex-col gap-4">
+        {settings.isError && !settings.data ? (
+          <ErrorState
+            variant="inline"
+            error={settings.error}
+            onRetry={() => settings.refetch()}
+            retrying={settings.isFetching}
+          />
+        ) : !settings.data ? (
+          <SkeletonRows rows={2} columns={2} />
+        ) : (
+          <>
+            <Switch
+              checked={enabled}
+              disabled={!canWrite || save.isPending}
+              onCheckedChange={(next) => save.mutate(next)}
+              label={t('pages.settings.observationModeToggle')}
+              description={t('pages.settings.observationModeToggleHint')}
+            />
+            {enabled && (
+              <p className="flex items-start gap-2 rounded-md border border-warning/40 bg-warning/8 px-3 py-2 text-[13px] text-fg">
+                <Warning weight="duotone" className="mt-0.5 h-4 w-4 shrink-0 text-fg-warning" />
+                {t('pages.settings.observationModeBanner')}
+              </p>
+            )}
+            <p className="flex items-start gap-2 text-xs leading-relaxed text-fg-subtle">
+              <Eye weight="duotone" className="mt-0.5 h-4 w-4 shrink-0" />
+              {t('pages.settings.observationModeHint')}
+            </p>
+          </>
+        )}
+      </CardBody>
+    </Card>
+  )
+}
+
+/* ── API protection (control plane listener) ────────────────────────── */
+
+interface ApiProtectionDraft {
+  accessLogEnabled: boolean
+  retentionDays: string
+  allowlistEnabled: boolean
+  rangesText: string
+  groupId: string
+  wafEnabled: boolean
+  wafMode: string
+}
+
+function apiProtectionDraft(view: ApiProtectionView): ApiProtectionDraft {
+  return {
+    accessLogEnabled: view.access_log_enabled,
+    retentionDays: String(view.access_log_retention_days),
+    allowlistEnabled: view.ip_allowlist_enabled,
+    rangesText: view.ip_allowlist_ranges.join('\n'),
+    groupId: view.ip_allowlist_group_id ?? '',
+    wafEnabled: view.waf_enabled,
+    wafMode: view.waf_mode,
+  }
+}
+
+/**
+ * The 9080 listener's self-protection: access log, IP allowlist and WAF.
+ *
+ * Enabling the allowlist without covering the current connection is refused
+ * by the server (422); we turn that refusal into an explicit "apply anyway"
+ * dialog instead of a toast, because the consequence — locking every operator
+ * out of the console — deserves a deliberate second click.
+ */
+function ApiProtectionCard({ canWrite }: { canWrite: boolean }) {
+  const { t } = useTranslation()
+  const toast = useToast()
+  const queryClient = useQueryClient()
+
+  const [draft, setDraft] = useState<ApiProtectionDraft | null>(null)
+  const [dirty, setDirty] = useState(false)
+  const [forceOpen, setForceOpen] = useState(false)
+
+  const settings = useQuery({
+    queryKey: apiProtectionKeys.settings(),
+    queryFn: () => apiProtectionApi.get(),
+  })
+
+  const groups = useQuery({
+    queryKey: ipGroupKeys.list(),
+    queryFn: () => ipGroupsApi.list({ page_size: 200 }),
+  })
+
+  // Render-phase reseed on new query data (identity changes only when the
+  // payload really differs — TanStack Query keeps structural sharing).
+  const loaded = settings.data
+  const [lastLoaded, setLastLoaded] = useState<typeof loaded | null>(null)
+  if (loaded && loaded !== lastLoaded) {
+    setLastLoaded(loaded)
+    setDraft(apiProtectionDraft(loaded))
+    setDirty(false)
+  }
+
+  const patch = (next: Partial<ApiProtectionDraft>) => {
+    setDraft((current) => (current ? { ...current, ...next } : current))
+    setDirty(true)
+  }
+
+  const retentionDays = Number(draft?.retentionDays ?? '')
+  const retentionValid =
+    Number.isInteger(retentionDays) &&
+    retentionDays >= MIN_RETENTION_DAYS &&
+    retentionDays <= MAX_RETENTION_DAYS
+
+  const ranges = (draft?.rangesText ?? '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+
+  const group = groups.data?.items.find((g) => g.id === draft?.groupId)
+  // A disabled group contributes nothing to the effective allowlist.
+  const groupEntries = group?.enabled ? group.ip_ranges.length : 0
+  const previewEntries = draft?.allowlistEnabled ? ranges.length + groupEntries : 0
+
+  const collect = (): UpdateApiProtectionRequest => ({
+    access_log_enabled: draft?.accessLogEnabled,
+    access_log_retention_days: retentionDays,
+    ip_allowlist_enabled: draft?.allowlistEnabled,
+    ip_allowlist_ranges: ranges,
+    ip_allowlist_group_id: draft?.groupId ?? '',
+    waf_enabled: draft?.wafEnabled,
+    waf_mode: draft?.wafMode,
+  })
+
+  const save = useMutation({
+    // The 422 lockout refusal opens a dialog instead of a toast; other
+    // failures go through the standard handler below.
+    meta: { silentToast: true },
+    mutationFn: (force: boolean) =>
+      apiProtectionApi.update({ ...collect(), force }),
+    onSuccess: (view) => {
+      queryClient.setQueryData(apiProtectionKeys.settings(), view)
+      setLastLoaded(view)
+      setDraft(apiProtectionDraft(view))
+      setDirty(false)
+      setForceOpen(false)
+      toast.success(t('pages.settings.apiProtectionSaved'))
+    },
+    onError: (err, force) => {
+      if (!force && err instanceof ApiError && err.status === 422) {
+        setForceOpen(true)
+        return
+      }
+      handleApiError(err)
+    },
+  })
+
+  const groupOptions = [
+    { value: '', label: t('pages.settings.apiProtectionGroupNone') },
+    ...(groups.data?.items ?? []).map((g) => ({
+      value: g.id,
+      label: g.enabled ? g.name : `${g.name} (${t('common.disabled')})`,
+    })),
+  ]
+
+  const wafModes: { value: ApiProtectionWafMode; label: string }[] = [
+    { value: 'block', label: t('pages.settings.apiProtectionWafModeBlock') },
+    { value: 'monitor', label: t('pages.settings.apiProtectionWafModeMonitor') },
+  ]
+
+  return (
+    <Card>
+      <CardHeader
+        title={t('pages.settings.apiProtection')}
+        description={t('pages.settings.apiProtectionDescription')}
+        action={
+          loaded && (
+            <Badge
+              tone={
+                !loaded.ip_allowlist_enabled
+                  ? 'neutral'
+                  : loaded.effective_allowlist_entries === 0
+                    ? 'warning'
+                    : 'success'
+              }
+              dot
+            >
+              {loaded.ip_allowlist_enabled
+                ? t('pages.settings.apiProtectionEffective', {
+                    count: loaded.effective_allowlist_entries,
+                  })
+                : t('common.disabled')}
+            </Badge>
+          )
+        }
+      />
+      <CardBody className="flex flex-col gap-5">
+        {settings.isError && !loaded ? (
+          <ErrorState
+            variant="inline"
+            error={settings.error}
+            onRetry={() => settings.refetch()}
+            retrying={settings.isFetching}
+          />
+        ) : !draft ? (
+          <SkeletonRows rows={4} columns={2} />
+        ) : (
+          <>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Switch
+                checked={draft.accessLogEnabled}
+                disabled={!canWrite}
+                onCheckedChange={(value) => patch({ accessLogEnabled: value })}
+                label={t('pages.settings.apiProtectionAccessLog')}
+                description={t('pages.settings.apiProtectionAccessLogHint')}
+              />
+              <Input
+                type="number"
+                label={t('pages.settings.apiProtectionRetention')}
+                value={draft.retentionDays}
+                min={MIN_RETENTION_DAYS}
+                max={MAX_RETENTION_DAYS}
+                disabled={!canWrite || !draft.accessLogEnabled}
+                onChange={(e) => patch({ retentionDays: e.target.value })}
+              />
+            </div>
+            {!retentionValid && (
+              <p className="flex items-center gap-2 text-xs text-fg-danger">
+                <Warning weight="duotone" className="h-4 w-4 shrink-0" />
+                {t('pages.settings.logRetentionRange')}
+              </p>
+            )}
+
+            <div className="flex flex-col gap-4 border-t border-line pt-4">
+              <Switch
+                checked={draft.allowlistEnabled}
+                disabled={!canWrite}
+                onCheckedChange={(value) => patch({ allowlistEnabled: value })}
+                label={t('pages.settings.apiProtectionAllowlist')}
+                description={t('pages.settings.apiProtectionAllowlistHint')}
+              />
+              <Textarea
+                label={t('pages.settings.apiProtectionRanges')}
+                hint={t('pages.settings.apiProtectionRangesHint')}
+                mono
+                rows={4}
+                value={draft.rangesText}
+                placeholder={'203.0.113.4\n10.0.0.0/8'}
+                disabled={!canWrite || !draft.allowlistEnabled}
+                onChange={(e) => patch({ rangesText: e.target.value })}
+              />
+              <div className="grid gap-4 sm:grid-cols-2">
+                <Select
+                  label={t('pages.settings.apiProtectionGroup')}
+                  value={draft.groupId}
+                  options={groupOptions}
+                  hint={t('pages.settings.apiProtectionGroupHint')}
+                  disabled={!canWrite || !draft.allowlistEnabled}
+                  onChange={(e) => patch({ groupId: e.target.value })}
+                />
+                <div className="flex items-end pb-1">
+                  <span className="text-xs text-fg-subtle">
+                    {t('pages.settings.apiProtectionEffective', {
+                      count: previewEntries,
+                    })}
+                  </span>
+                </div>
+              </div>
+              {draft.allowlistEnabled && previewEntries === 0 && (
+                <p className="flex items-start gap-2 rounded-md border border-warning/40 bg-warning/8 px-3 py-2 text-[13px] text-fg">
+                  <Warning weight="duotone" className="mt-0.5 h-4 w-4 shrink-0 text-fg-warning" />
+                  {t('pages.settings.apiProtectionEmptyWarning')}
+                </p>
+              )}
+            </div>
+
+            <div className="grid gap-4 border-t border-line pt-4 sm:grid-cols-2">
+              <Switch
+                checked={draft.wafEnabled}
+                disabled={!canWrite}
+                onCheckedChange={(value) => patch({ wafEnabled: value })}
+                label={t('pages.settings.apiProtectionWaf')}
+                description={t('pages.settings.apiProtectionWafHint')}
+              />
+              <Select
+                label={t('pages.settings.apiProtectionWafMode')}
+                value={draft.wafMode}
+                options={wafModes}
+                disabled={!canWrite || !draft.wafEnabled}
+                onChange={(e) => patch({ wafMode: e.target.value })}
+              />
+            </div>
+
+            <div className="flex items-center justify-end gap-2 border-t border-line pt-4">
+              <Button
+                variant="primary"
+                size="sm"
+                disabled={!canWrite || !dirty || !retentionValid}
+                loading={save.isPending}
+                icon={<ShieldCheck weight="duotone" className="h-4 w-4" />}
+                onClick={() => save.mutate(false)}
+              >
+                {t('common.save')}
+              </Button>
+            </div>
+          </>
+        )}
+      </CardBody>
+
+      <ConfirmDialog
+        open={forceOpen}
+        onClose={() => setForceOpen(false)}
+        onConfirm={() => save.mutate(true)}
+        title={t('pages.settings.apiProtectionLockoutTitle')}
+        description={t('pages.settings.apiProtectionLockoutDescription')}
+        confirmLabel={t('pages.settings.apiProtectionForceApply')}
+        loading={save.isPending}
+      />
+    </Card>
+  )
+}
+
+/* ── AI assistant ───────────────────────────────────────────────────── */
+
+/** Mirrors the server-side bounds in `api::ai` / `models::ai`. */
+const AI_MAX_TEMPERATURE = 2
+const AI_MAX_TOOL_ROUNDS = 10
+
+interface AiDraft {
+  enabled: boolean
+  baseUrl: string
+  apiKey: string
+  model: string
+  temperature: string
+  maxToolRounds: string
+  allowWriteTools: boolean
+  systemPrompt: string
+}
+
+function aiDraft(view: AiSettings): AiDraft {
+  return {
+    enabled: view.enabled,
+    baseUrl: view.base_url,
+    // Blank means "keep the stored key" — the `api_key: null` round-trip,
+    // same treatment as the Elasticsearch secrets.
+    apiKey: '',
+    model: view.model,
+    temperature: String(view.temperature),
+    maxToolRounds: String(view.max_tool_rounds),
+    allowWriteTools: view.allow_write_tools,
+    systemPrompt: view.system_prompt,
+  }
+}
+
+/**
+ * The AI assistant's provider — the console half of the built-in agent.
+ *
+ * The assistant shares the MCP tool registry and answers on the AI Assistant
+ * page. `allow_write_tools` hands it the site-mutating half of that registry,
+ * so an enabled switch gets an explicit warning instead of a plain label.
+ */
+function AiAssistantCard({ canWrite }: { canWrite: boolean }) {
+  const { t } = useTranslation()
+  const toast = useToast()
+  const queryClient = useQueryClient()
+
+  const [draft, setDraft] = useState<AiDraft | null>(null)
+  const [dirty, setDirty] = useState(false)
+  const [testResult, setTestResult] = useState<AiTestResult | null>(null)
+
+  const settings = useQuery({
+    queryKey: aiKeys.settings(),
+    queryFn: () => aiApi.getSettings(),
+  })
+
+  // Render-phase reseed on new query data (identity changes only when the
+  // payload really differs — TanStack Query keeps structural sharing).
+  const loaded = settings.data
+  const [lastLoaded, setLastLoaded] = useState<typeof loaded | null>(null)
+  if (loaded && loaded !== lastLoaded) {
+    setLastLoaded(loaded)
+    setDraft(aiDraft(loaded))
+    setDirty(false)
+    setTestResult(null)
+  }
+
+  const patch = (next: Partial<AiDraft>) => {
+    setDraft((d) => (d ? { ...d, ...next } : d))
+    setDirty(true)
+  }
+
+  const temperature = Number(draft?.temperature ?? '')
+  const temperatureValid =
+    Number.isFinite(temperature) &&
+    temperature >= 0 &&
+    temperature <= AI_MAX_TEMPERATURE
+  const rounds = Number(draft?.maxToolRounds ?? '')
+  const roundsValid = Number.isInteger(rounds) && rounds >= 1 && rounds <= AI_MAX_TOOL_ROUNDS
+  const baseUrl = (draft?.baseUrl ?? '').trim()
+  const baseUrlFilled = /^https?:\/\//.test(baseUrl)
+  const modelFilled = (draft?.model ?? '').trim() !== ''
+  const keyStored = loaded?.api_key === SECRET_MASK
+  const keyFilled = keyStored || (draft?.apiKey ?? '').trim() !== ''
+  // An enabled assistant must be fully reachable; the server enforces the
+  // same rule, so refuse locally first.
+  const valid =
+    temperatureValid &&
+    roundsValid &&
+    (draft?.enabled ? baseUrlFilled : baseUrl === '' || baseUrlFilled) &&
+    (draft?.enabled ? modelFilled : true) &&
+    (draft?.enabled ? keyFilled : true)
+  const testable = temperatureValid && roundsValid && baseUrlFilled && modelFilled && keyFilled
+
+  const collect = (): UpdateAiSettingsRequest => ({
+    enabled: draft?.enabled,
+    base_url: baseUrl,
+    api_key: draft?.apiKey.trim() ? draft.apiKey : null,
+    model: (draft?.model ?? '').trim(),
+    temperature,
+    max_tool_rounds: rounds,
+    allow_write_tools: draft?.allowWriteTools,
+    system_prompt: (draft?.systemPrompt ?? '').trim(),
+  })
+
+  const save = useMutation({
+    mutationFn: () => aiApi.saveSettings(collect()),
+    onSuccess: (view) => {
+      queryClient.setQueryData(aiKeys.settings(), view)
+      setTestResult(null)
+      toast.success(t('pages.settings.aiSaved'))
+    },
+  })
+
+  const testDraft = useMutation({
+    mutationFn: () => aiApi.test(collect()),
+    onSuccess: (result) => setTestResult(result),
+  })
+
+  const invalidHint = !temperatureValid
+    ? t('pages.settings.aiTemperatureRange')
+    : !roundsValid
+      ? t('pages.settings.aiMaxToolRoundsRange')
+      : draft?.enabled && !baseUrlFilled
+        ? t('pages.settings.aiBaseUrlInvalid')
+        : draft?.enabled && !modelFilled
+          ? t('pages.settings.aiModelRequired')
+          : draft?.enabled && !keyFilled
+            ? t('pages.settings.aiApiKeyRequired')
+            : null
+
+  return (
+    <Card>
+      <CardHeader
+        title={t('pages.settings.aiAssistant')}
+        description={t('pages.settings.aiAssistantDescription')}
+        action={
+          loaded && (
+            <Badge tone={loaded.enabled ? 'success' : 'neutral'} dot>
+              {loaded.enabled ? t('common.enabled') : t('common.disabled')}
+            </Badge>
+          )
+        }
+      />
+      <CardBody className="flex flex-col gap-5">
+        {settings.isError && !loaded ? (
+          <ErrorState
+            variant="inline"
+            error={settings.error}
+            onRetry={() => settings.refetch()}
+            retrying={settings.isFetching}
+          />
+        ) : !draft ? (
+          <SkeletonRows rows={4} columns={2} />
+        ) : (
+          <>
+            <Switch
+              checked={draft.enabled}
+              disabled={!canWrite}
+              onCheckedChange={(value) => patch({ enabled: value })}
+              label={t('pages.settings.aiEnabled')}
+              description={t('pages.settings.aiEnabledHint')}
+            />
+
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Input
+                label={t('pages.settings.aiBaseUrl')}
+                value={draft.baseUrl}
+                placeholder="https://api.openai.com/v1"
+                hint={t('pages.settings.aiBaseUrlHint')}
+                className="pw-mono text-[13px]"
+                disabled={!canWrite}
+                onChange={(e) => patch({ baseUrl: e.target.value })}
+              />
+              <Input
+                label={t('pages.settings.aiModel')}
+                value={draft.model}
+                placeholder="gpt-4o-mini"
+                className="pw-mono text-[13px]"
+                disabled={!canWrite}
+                onChange={(e) => patch({ model: e.target.value })}
+              />
+              <Input
+                type="password"
+                label={t('pages.settings.aiApiKey')}
+                value={draft.apiKey}
+                autoComplete="new-password"
+                placeholder={keyStored ? t('pages.settings.secretStored') : ''}
+                hint={t('pages.settings.aiApiKeyHint')}
+                disabled={!canWrite}
+                onChange={(e) => patch({ apiKey: e.target.value })}
+              />
+              <div className="grid grid-cols-2 gap-4">
+                <Input
+                  type="number"
+                  label={t('pages.settings.aiTemperature')}
+                  value={draft.temperature}
+                  min={0}
+                  max={AI_MAX_TEMPERATURE}
+                  step={0.1}
+                  hint={t('pages.settings.aiTemperatureHint')}
+                  disabled={!canWrite}
+                  onChange={(e) => patch({ temperature: e.target.value })}
+                />
+                <Input
+                  type="number"
+                  label={t('pages.settings.aiMaxToolRounds')}
+                  value={draft.maxToolRounds}
+                  min={1}
+                  max={AI_MAX_TOOL_ROUNDS}
+                  hint={t('pages.settings.aiMaxToolRoundsHint')}
+                  disabled={!canWrite}
+                  onChange={(e) => patch({ maxToolRounds: e.target.value })}
+                />
+              </div>
+            </div>
+
+            {invalidHint && (
+              <p className="flex items-center gap-2 text-xs text-fg-danger">
+                <Warning weight="duotone" className="h-4 w-4 shrink-0" />
+                {invalidHint}
+              </p>
+            )}
+
+            <Switch
+              checked={draft.allowWriteTools}
+              disabled={!canWrite}
+              onCheckedChange={(value) => patch({ allowWriteTools: value })}
+              label={t('pages.settings.aiAllowWriteTools')}
+              description={t('pages.settings.aiAllowWriteToolsHint')}
+            />
+            {draft.allowWriteTools && (
+              <p className="flex items-start gap-2 rounded-md border border-warning/40 bg-warning/8 px-3 py-2 text-[13px] text-fg">
+                <Warning weight="duotone" className="mt-0.5 h-4 w-4 shrink-0 text-fg-warning" />
+                {t('pages.settings.aiAllowWriteToolsWarning')}
+              </p>
+            )}
+
+            <Textarea
+              label={t('pages.settings.aiSystemPrompt')}
+              hint={t('pages.settings.aiSystemPromptHint')}
+              rows={4}
+              value={draft.systemPrompt}
+              placeholder={t('pages.settings.aiSystemPromptPlaceholder')}
+              disabled={!canWrite}
+              onChange={(e) => patch({ systemPrompt: e.target.value })}
+            />
+
+            {testResult && (
+              <div
+                className={cn(
+                  'rounded-md border px-3 py-2 text-[13px]',
+                  testResult.ok
+                    ? 'border-success/40 bg-success/8 text-fg'
+                    : 'border-danger/40 bg-danger/8 text-fg-danger',
+                )}
+              >
+                <p className="font-medium">
+                  {testResult.ok
+                    ? t('pages.settings.aiTestOk')
+                    : t('pages.settings.aiTestFailed')}
+                </p>
+                {testResult.error && (
+                  <p className="pw-mono mt-1 break-all text-xs">{testResult.error}</p>
+                )}
+                {testResult.reply && (
+                  <p className="mt-1 text-xs text-fg-subtle">
+                    {t('pages.settings.aiTestReply')}: {testResult.reply}
+                  </p>
+                )}
+              </div>
+            )}
+
+            <div className="flex flex-wrap items-center gap-2 border-t border-line pt-4">
+              <Button
+                variant="primary"
+                disabled={!canWrite || !dirty || !valid}
+                loading={save.isPending}
+                icon={<Sparkle weight="duotone" className="h-4 w-4" />}
+                onClick={() => save.mutate()}
+              >
+                {t('common.save')}
+              </Button>
+              <Button
+                variant="secondary"
+                disabled={!canWrite || !testable}
+                loading={testDraft.isPending}
+                icon={<PlugsConnected weight="duotone" className="h-4 w-4" />}
+                onClick={() => testDraft.mutate()}
+              >
+                {t('pages.settings.testDraft')}
+              </Button>
+              {dirty && (
+                <span className="text-xs text-fg-warning">{t('pages.settings.unsavedChanges')}</span>
+              )}
+            </div>
+          </>
+        )}
+      </CardBody>
     </Card>
   )
 }

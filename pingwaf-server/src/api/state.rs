@@ -5,6 +5,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use sea_orm::DatabaseConnection;
 
+use crate::api::self_protection::SelfProtection;
 use crate::config::ServerConfig;
 use crate::es::ElasticsearchClient;
 use crate::grpc::cache_status::CacheStatusRegistry;
@@ -32,6 +33,8 @@ pub struct AppState {
     /// Certificate the dashboard's own HTTPS listener presents. Shared with
     /// the listener so an upload takes effect without a restart.
     pub control_tls: Arc<ControlPlaneTls>,
+    /// Self-protection of the 9080 listener: access log, IP allowlist, WAF.
+    pub protection: Arc<SelfProtection>,
 }
 
 impl AppState {
@@ -47,6 +50,7 @@ impl AppState {
             es: None,
             cache_status: CacheStatusRegistry::new(),
             control_tls: Arc::new(ControlPlaneTls::new(false)),
+            protection: Arc::new(SelfProtection::new()),
         }
     }
 
@@ -65,6 +69,7 @@ impl AppState {
             es: None,
             cache_status,
             control_tls: Arc::new(ControlPlaneTls::new(false)),
+            protection: Arc::new(SelfProtection::new()),
         }
     }
 
