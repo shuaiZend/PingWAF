@@ -43,7 +43,7 @@ use pingap_core::{
     constant_time_eq, ensure_client_ip, get_host,
 };
 use pingap_util::{IpRules, base64_decode};
-use pingora::http::ResponseHeader;
+use pingora::http::{ResponseHeader, Version};
 use pingora::proxy::Session;
 use pingwaf_agent::cache::{
     BasicAuthConfig as CacheBasicAuthConfig,
@@ -335,7 +335,9 @@ impl SiteContext {
 
 /// A cached per-domain context plus the fingerprint it was built from.
 struct CachedSite {
-    fingerprint: String,
+    /// Config fingerprint the context was built from. An `Arc` so the per
+    /// request fingerprint check stays allocation-free.
+    fingerprint: Arc<str>,
     context: Arc<SiteContext>,
 }
 
@@ -357,15 +359,18 @@ static GEO_DB: LazyLock<Arc<GeoipDb>> = LazyLock::new(GeoipDb::new_embedded);
 
 /// Country code (ISO 3166-1 alpha-2) of `ip`, when the database knows it.
 pub(crate) fn lookup_country(ip: &str) -> Option<String> {
-    let addr: IpAddr = ip.parse().ok()?;
+    ip.parse().ok().and_then(lookup_country_addr)
+}
+
+/// Same as [`lookup_country`] for an already parsed address, so the request
+/// hot path parses the client ip once for every consumer.
+pub(crate) fn lookup_country_addr(addr: IpAddr) -> Option<String> {
     GEO_DB
         .lookup_country_code(addr)
         .map(|code| code.as_ref().to_string())
 }
 
-/// Autonomous system number of `ip`, when the database knows it.
-fn lookup_asn(ip: &str) -> Option<u32> {
-    let addr: IpAddr = ip.parse().ok()?;
+fn lookup_asn_addr(addr: IpAddr) -> Option<u32> {
     GEO_DB.lookup_asn(addr)
 }
 
@@ -482,8 +487,15 @@ impl AccessPolicy {
     }
 
     /// Decides whether `ip` — and the country it resolves to — may proceed.
-    fn evaluate(&self, ip: &str, country: Option<&str>) -> PolicyOutcome {
-        if let Ok(addr) = ip.parse::<IpAddr>() {
+    /// `addr` is the same address already parsed by the caller; IP rules are
+    /// skipped when it could not be parsed.
+    fn evaluate(
+        &self,
+        ip: &str,
+        addr: Option<IpAddr>,
+        country: Option<&str>,
+    ) -> PolicyOutcome {
+        if let Some(addr) = addr {
             for rule in &self.ip_rules {
                 if !rule.ranges.is_match_addr(&addr) {
                     continue;
@@ -528,8 +540,10 @@ impl AccessPolicy {
             return PolicyOutcome::NoMatch;
         };
         let asn_denied = !geo.blocked_asns.is_empty()
-            && lookup_asn(ip)
-                .is_some_and(|asn| geo.blocked_asns.contains(&asn));
+            && addr.is_some_and(|addr| {
+                lookup_asn_addr(addr)
+                    .is_some_and(|asn| geo.blocked_asns.contains(&asn))
+            });
         let country_denied = match country {
             Some(code) => {
                 geo.blocked_countries.contains(code)
@@ -641,13 +655,18 @@ impl BotPolicy {
     }
 
     /// Classifies one request. Whitelisted verified bots pass first, then real
-    /// browsers; everything else receives the configured action.
+    /// browsers; everything else receives the configured action. Matching is
+    /// ASCII case-insensitive without lowercasing, so the common
+    /// pass-through path allocates nothing.
     fn evaluate(&self, user_agent: &str) -> BotDecision {
-        let ua = user_agent.to_lowercase();
-        if self.whitelist.iter().any(|bot| ua.contains(bot)) {
+        if self
+            .whitelist
+            .iter()
+            .any(|bot| contains_ignore_case(user_agent, bot))
+        {
             return BotDecision::Pass;
         }
-        if is_browser_ua(&ua) {
+        if is_browser_ua(user_agent) {
             return BotDecision::Pass;
         }
         let denial = Denial {
@@ -673,15 +692,31 @@ impl BotPolicy {
 /// Loose fingerprint of a real browser user agent: browsers declare
 /// `Mozilla/5.0` plus a concrete engine token, while scripting clients,
 /// scanners and empty agents do not.
-fn is_browser_ua(ua_lower: &str) -> bool {
-    ua_lower.contains("mozilla/5.0")
-        && (ua_lower.contains("chrome/")
-            || ua_lower.contains("safari/")
-            || ua_lower.contains("firefox/")
-            || ua_lower.contains("trident/")
-            || ua_lower.contains("edg/")
-            || ua_lower.contains("opr/")
-            || ua_lower.contains("samsungbrowser/"))
+fn is_browser_ua(ua: &str) -> bool {
+    contains_ignore_case(ua, "mozilla/5.0")
+        && (contains_ignore_case(ua, "chrome/")
+            || contains_ignore_case(ua, "safari/")
+            || contains_ignore_case(ua, "firefox/")
+            || contains_ignore_case(ua, "trident/")
+            || contains_ignore_case(ua, "edg/")
+            || contains_ignore_case(ua, "opr/")
+            || contains_ignore_case(ua, "samsungbrowser/"))
+}
+
+/// ASCII case-insensitive `contains`: user agents are ASCII in practice, and
+/// this spares the classification path a `to_lowercase` allocation per
+/// request.
+fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
+    let haystack = haystack.as_bytes();
+    let needle = needle.as_bytes();
+    !needle.is_empty()
+        && haystack.len() >= needle.len()
+        && haystack.windows(needle.len()).any(|window| {
+            window
+                .iter()
+                .zip(needle)
+                .all(|(a, b)| a.eq_ignore_ascii_case(b))
+        })
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -987,18 +1022,19 @@ impl RateLimitPolicy {
         request_data: &RequestData,
         host: &str,
         cleared: bool,
+        client_addr: Option<IpAddr>,
     ) -> RateOutcome {
         let mut logged = Vec::new();
         if self.rules.is_empty() {
             return RateOutcome { deny: None, logged };
         }
         let now = unix_now();
-        let asn = self
-            .rules
-            .iter()
-            .any(|r| r.chars.contains(&RateChar::Asn))
-            .then(|| lookup_asn(&request_data.client_ip))
-            .flatten();
+        let asn = if self.rules.iter().any(|r| r.chars.contains(&RateChar::Asn))
+        {
+            client_addr.and_then(lookup_asn_addr)
+        } else {
+            None
+        };
         let expression_state = self
             .rules
             .iter()
@@ -1007,7 +1043,10 @@ impl RateLimitPolicy {
         for rule in &self.rules {
             if let (Some(state), Some(expr)) =
                 (expression_state.as_ref(), rule.expression.as_ref())
-                && !evaluate_expression(expr, &state.eval(request_data, host))
+                && !evaluate_expression(
+                    expr,
+                    &state.eval(request_data, host, client_addr),
+                )
             {
                 continue;
             }
@@ -1099,6 +1138,7 @@ impl ExpressionState {
         &'a self,
         request_data: &'a RequestData,
         host: &'a str,
+        parsed_ip: Option<IpAddr>,
     ) -> EvalContext<'a> {
         let user_agent = request_data
             .headers
@@ -1116,7 +1156,7 @@ impl ExpressionState {
             headers: &request_data.headers,
             cookies: &self.cookies,
             client_ip: &request_data.client_ip,
-            parsed_ip: request_data.client_ip.parse().ok(),
+            parsed_ip,
             country_code: request_data.country_code.as_deref(),
             ssl: request_data.scheme.eq_ignore_ascii_case("https"),
             waf_score: 0,
@@ -1158,10 +1198,12 @@ fn clearance_cookie(headers: &[(String, String)]) -> Option<String> {
         })
 }
 
-/// Clearance cookies of the challenge system, cached against the agent cache
-/// dir they were resolved from so a rebuilt or replaced agent re-resolves its
-/// secret instead of reusing a stale one.
-static CLEARANCE_SECRET: RwLock<Option<(PathBuf, String)>> = RwLock::new(None);
+/// Clearance cookie manager of the challenge system, cached against the agent
+/// cache dir it was resolved from so a rebuilt or replaced agent re-resolves
+/// its secret instead of reusing a stale one. Holding the constructed manager
+/// spares the hot path an HMAC key setup per validated request.
+static CLEARANCE_MANAGER: RwLock<Option<(PathBuf, CookieManager)>> =
+    RwLock::new(None);
 
 /// Whether `value` (when present) is a valid clearance cookie. A client that
 /// solved a challenge once is exempt from challenge-type rate limit rules.
@@ -1174,22 +1216,21 @@ fn clearance_valid(value: Option<String>) -> bool {
     };
     let secret_path =
         Path::new(&agent.config.cache_dir).join("challenge_cookie_secret");
-    if let Some((path, secret)) = CLEARANCE_SECRET
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .as_ref()
-        && *path == secret_path
     {
-        return CookieManager::new(secret.as_bytes(), 3600)
-            .validate_clearance(&value)
-            .is_ok();
+        let cached =
+            CLEARANCE_MANAGER.read().unwrap_or_else(|e| e.into_inner());
+        if let Some((path, manager)) = cached.as_ref()
+            && *path == secret_path
+        {
+            return manager.validate_clearance(&value).is_ok();
+        }
     }
     let secret = resolve_cookie_secret("");
-    *CLEARANCE_SECRET.write().unwrap_or_else(|e| e.into_inner()) =
-        Some((secret_path, secret.clone()));
-    CookieManager::new(secret.as_bytes(), 3600)
-        .validate_clearance(&value)
-        .is_ok()
+    let manager = CookieManager::new(secret.as_bytes(), 3600);
+    let valid = manager.validate_clearance(&value).is_ok();
+    *CLEARANCE_MANAGER.write().unwrap_or_else(|e| e.into_inner()) =
+        Some((secret_path, manager));
+    valid
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1997,8 +2038,20 @@ impl Plugin for WafPlugin {
         } else {
             "http".to_string()
         };
-        let protocol = format!("{:?}", req_header.version);
+        // Matches http::Version's Debug output without the formatting
+        // machinery on the hot path.
+        let protocol = match req_header.version {
+            Version::HTTP_09 => "HTTP/0.9",
+            Version::HTTP_10 => "HTTP/1.0",
+            Version::HTTP_11 => "HTTP/1.1",
+            Version::HTTP_2 => "HTTP/2.0",
+            Version::HTTP_3 => "HTTP/3.0",
+            // Hidden `__NonExhaustive` variant; never constructible here.
+            _ => "HTTP/1.1",
+        }
+        .to_string();
         let client_ip = ensure_client_ip(session, ctx).to_string();
+        let client_addr: Option<IpAddr> = client_ip.parse().ok();
 
         // Get or create the request id early so the access log, security
         // events and the X-Request-ID header all share one stable value.
@@ -2029,7 +2082,7 @@ impl Plugin for WafPlugin {
         // log, so it is only resolved when an agent consumes those facts.
         let agent = PingWafAgent::instance();
         let country = if agent.is_some() {
-            lookup_country(&client_ip)
+            client_addr.and_then(lookup_country_addr)
         } else {
             None
         };
@@ -2157,6 +2210,7 @@ impl Plugin for WafPlugin {
         if let Some(site) = &context {
             access = site.policy.evaluate(
                 &request_data.client_ip,
+                client_addr,
                 request_data.country_code.as_deref(),
             );
             if let Some(denial) =
@@ -2313,6 +2367,7 @@ impl Plugin for WafPlugin {
                 &request_data,
                 &host,
                 cleared,
+                client_addr,
             );
             for tripped in &outcome.logged {
                 let verdict = WafVerdict {
@@ -3541,8 +3596,8 @@ ml_threshold = 0.75
     #[tokio::test]
     async fn test_geo_rule_blocks_listed_country() {
         LazyLock::force(&GEO_DB);
-        let ip = "8.8.8.8";
-        let country = lookup_country(ip).expect("embedded db resolves 8.8.8.8");
+        let country = lookup_country_addr("8.8.8.8".parse().unwrap())
+            .expect("embedded db resolves 8.8.8.8");
 
         let (_guard, agent, _dir) = install_test_agent().await;
         agent
@@ -3575,7 +3630,8 @@ ml_threshold = 0.75
         )
         .unwrap();
 
-        let RequestPluginResult::Respond(resp) = run_request(&plugin, ip).await
+        let RequestPluginResult::Respond(resp) =
+            run_request(&plugin, "8.8.8.8").await
         else {
             panic!("expected the geo rule to answer");
         };
@@ -3989,6 +4045,25 @@ ml_threshold = 0.75
             policy.evaluate("python-requests/2.31.0"),
             BotDecision::Deny(_)
         ));
+        // Matching is case-insensitive without lowercasing the agent.
+        assert!(matches!(
+            policy.evaluate("mOzIlLa/5.0 (compatible; googlEBot/2.1)"),
+            BotDecision::Pass
+        ));
+        assert!(matches!(
+            policy.evaluate("MOZILLA/5.0 (X11; Linux) FIREFOX/128.0"),
+            BotDecision::Pass
+        ));
+    }
+
+    #[test]
+    fn contains_ignore_case_matches_substrings_only() {
+        assert!(contains_ignore_case("curl/8.4.0", "CURL/"));
+        assert!(contains_ignore_case("Curl/8.4.0", "curl/"));
+        assert!(!contains_ignore_case("curl/8.4.0", "wget/"));
+        // Needle longer than haystack, and empty needle, are not matches.
+        assert!(!contains_ignore_case("ab", "abc"));
+        assert!(!contains_ignore_case("anything", ""));
     }
 
     /// A block action answers non-browser agents with 403 even with the WAF
@@ -4392,7 +4467,13 @@ ml_threshold = 0.75
 
         assert!(
             policy
-                .evaluate(&counters, &request("1.1.1.1", "/"), "s.test", false)
+                .evaluate(
+                    &counters,
+                    &request("1.1.1.1", "/"),
+                    "s.test",
+                    false,
+                    "1.1.1.1".parse().ok(),
+                )
                 .deny
                 .is_none()
         );
@@ -4401,6 +4482,7 @@ ml_threshold = 0.75
             &request("1.1.1.1", "/"),
             "s.test",
             false,
+            "1.1.1.1".parse().ok(),
         );
         let deny = outcome.deny.expect("second request must trip");
         assert!(!deny.challenge);
@@ -4409,7 +4491,13 @@ ml_threshold = 0.75
         // A different key (IP or path dimension) keeps its own counter.
         assert!(
             policy
-                .evaluate(&counters, &request("2.2.2.2", "/"), "s.test", false)
+                .evaluate(
+                    &counters,
+                    &request("2.2.2.2", "/"),
+                    "s.test",
+                    false,
+                    "2.2.2.2".parse().ok(),
+                )
                 .deny
                 .is_none()
         );

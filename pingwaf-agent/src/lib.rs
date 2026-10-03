@@ -333,8 +333,9 @@ impl PingWafAgent {
         self.client.is_connected()
     }
 
-    /// Get the current config hash (for delta sync).
-    pub fn config_hash(&self) -> String {
+    /// Get the current config hash (for delta sync). Cheap: clones the `Arc`,
+    /// not the string.
+    pub fn config_hash(&self) -> Arc<str> {
         self.rule_cache.config_hash()
     }
 

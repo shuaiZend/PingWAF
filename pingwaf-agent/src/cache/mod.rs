@@ -30,8 +30,9 @@ pub struct CachedRules {
     pub domain_index: HashMap<String, String>,
     /// When the cache was last updated from the server
     pub updated_at: DateTime<Utc>,
-    /// Hash of the configuration (for delta sync)
-    pub config_hash: String,
+    /// Hash of the configuration (for delta sync). An `Arc` so the hot path
+    /// reads it without a heap copy.
+    pub config_hash: Arc<str>,
 }
 
 impl Default for CachedRules {
@@ -40,7 +41,7 @@ impl Default for CachedRules {
             sites: HashMap::new(),
             domain_index: HashMap::new(),
             updated_at: Utc::now(),
-            config_hash: String::new(),
+            config_hash: Arc::from(""),
         }
     }
 }
@@ -844,7 +845,7 @@ impl RuleCache {
             updated
                 .sites
                 .insert(site_id.clone(), Arc::clone(&site_rules));
-            updated.config_hash = bundle.config_hash.clone();
+            updated.config_hash = bundle.config_hash.as_str().into();
             updated.updated_at = Utc::now();
             Arc::new(updated)
         });
@@ -870,7 +871,7 @@ impl RuleCache {
     ) -> anyhow::Result<()> {
         self.inner.rcu(|current| {
             let mut updated = (**current).clone();
-            updated.config_hash = config.config_hash.clone();
+            updated.config_hash = config.config_hash.as_str().into();
             updated.updated_at = Utc::now();
 
             for site in &config.sites {
@@ -941,8 +942,9 @@ impl RuleCache {
         self.inner.load_full()
     }
 
-    /// Get current config hash for delta sync.
-    pub fn config_hash(&self) -> String {
+    /// Get current config hash for delta sync. Cheap: clones the `Arc`, not
+    /// the string.
+    pub fn config_hash(&self) -> Arc<str> {
         self.inner.load().config_hash.clone()
     }
 
@@ -1042,7 +1044,7 @@ impl RuleCache {
 
         // Write metadata
         let metadata = CacheMetadata {
-            config_hash: rules.config_hash.clone(),
+            config_hash: rules.config_hash.to_string(),
             updated_at: rules.updated_at,
             agent_id: self.agent_id.clone(),
             version: 1,
@@ -1550,7 +1552,7 @@ mod tests {
             .collect(),
             domain_index: HashMap::new(),
             updated_at: Utc::now(),
-            config_hash: "abc".to_string(),
+            config_hash: "abc".into(),
         };
         let json = serde_json::to_string(&cached).expect("serialize");
         let back: CachedRules =

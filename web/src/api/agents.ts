@@ -26,8 +26,9 @@ export const agentsApi = {
   get: (id: string) => apiClient.get<Agent>(`/agents/${id}`),
 
   /**
-   * Host probe history, newest first. The agent samples every 5 seconds and the
-   * control plane keeps a day of it, so `page_size` is the window size here.
+   * Host probe history, newest first. The agent samples every 5 seconds but the
+   * control plane persists one sample per minute and keeps a day of it, so
+   * `page_size` is the window size here.
    */
   samples: (id: string, query: AgentSamplesQuery = {}) =>
     apiClient.get<Page<HostSample>>(`/agents/${id}/samples`, {

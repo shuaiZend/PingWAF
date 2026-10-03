@@ -33,8 +33,8 @@ import {
 import type { HostSample } from '@/api/types'
 
 /**
- * Probe points drawn per chart. The agent samples every 5 seconds and heartbeats
- * every 30, so 200 points is a little over half an hour of history.
+ * Probe points drawn per chart. The control plane persists one sample per
+ * minute, so 200 points spans a little over three hours of history.
  */
 const SAMPLE_LIMIT = 200
 

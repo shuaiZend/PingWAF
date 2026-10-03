@@ -1239,7 +1239,7 @@ fn convert_operation(op: &CacheRewriteOperation) -> Option<RewriteOperation> {
 /// Per-host cache of agent-supplied compiled rules plus the fingerprint they
 /// were built from.
 struct CachedSiteRules {
-    fingerprint: String,
+    fingerprint: Arc<str>,
     rules: Arc<Vec<CompiledRewriteRule>>,
 }
 

@@ -123,7 +123,7 @@ struct SiteCacheRules {
 
 /// A cached per-site rule set plus the fingerprint it was built from.
 struct CachedSiteCacheRules {
-    fingerprint: String,
+    fingerprint: Arc<str>,
     rules: Arc<SiteCacheRules>,
 }
 

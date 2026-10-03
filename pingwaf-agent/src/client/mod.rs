@@ -560,7 +560,7 @@ impl ControlPlaneClient {
                     blocked_requests_total: system_metrics
                         .blocked_requests_total,
                     health: proto::AgentHealthStatus::AgentHealthHealthy as i32,
-                    config_hash: rule_cache.config_hash(),
+                    config_hash: rule_cache.config_hash().to_string(),
                     // Per-site edge cache disk usage, straight from the quota
                     // ledger; this is what the control plane's
                     // `/api/v1/cache/status` reports.
