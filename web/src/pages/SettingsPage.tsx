@@ -1,4 +1,4 @@
-import { useMemo, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -107,6 +107,24 @@ const MIN_PASSWORD = 8
 /** Public REST reference shipped with the repository. */
 const API_DOCS_URL = 'https://github.com/shuaiZend/PingWAF/blob/main/docs/api.md'
 
+/**
+ * Quick-navigation anchors in page order; each id must match the `id` of the
+ * section that wraps the matching card below.
+ */
+const SETTINGS_NAV = [
+  { id: 'appearance', labelKey: 'pages.settings.appearance' },
+  { id: 'account', labelKey: 'pages.settings.account' },
+  { id: 'passkeys', labelKey: 'pages.settings.passkeys' },
+  { id: 'control-plane-tls', labelKey: 'pages.settings.controlPlaneTls' },
+  { id: 'observation-mode', labelKey: 'pages.settings.observationMode' },
+  { id: 'api-protection', labelKey: 'pages.settings.apiProtection' },
+  { id: 'ai-assistant', labelKey: 'pages.settings.aiAssistant' },
+  { id: 'elasticsearch', labelKey: 'pages.settings.elasticsearch' },
+  { id: 'log-retention', labelKey: 'pages.settings.logRetention' },
+  { id: 'error-pages', labelKey: 'pages.settings.errorPages' },
+  { id: 'api-keys', labelKey: 'pages.settings.apiKeys' },
+]
+
 export function SettingsPage() {
   const { t, i18n } = useTranslation()
   const { mode, setMode } = useThemeStore()
@@ -123,48 +141,133 @@ export function SettingsPage() {
     <div className="animate-slide-up">
       <PageHeader title={t('pages.settings.title')} description={t('pages.settings.description')} />
 
-      <div className="flex max-w-4xl flex-col gap-4">
-        <AppearanceCard themeOptions={themeOptions} mode={mode} setMode={setMode} i18n={i18n} />
-        <AccountCard />
-        <PasskeysCard />
-        {isAdmin ? (
-          <ControlPlaneTlsCard canWrite={canWrite} />
-        ) : (
-          <AdminOnlyCard title={t('pages.settings.controlPlaneTls')} />
-        )}
-        {isAdmin ? (
-          <ObservationModeCard canWrite={canWrite} />
-        ) : (
-          <AdminOnlyCard title={t('pages.settings.observationMode')} />
-        )}
-        {isAdmin ? (
-          <ApiProtectionCard canWrite={canWrite} />
-        ) : (
-          <AdminOnlyCard title={t('pages.settings.apiProtection')} />
-        )}
-        {isAdmin ? (
-          <AiAssistantCard canWrite={canWrite} />
-        ) : (
-          <AdminOnlyCard title={t('pages.settings.aiAssistant')} />
-        )}
-        {isAdmin ? (
-          <ElasticsearchCard canWrite={canWrite} />
-        ) : (
-          <AdminOnlyCard title={t('pages.settings.elasticsearch')} />
-        )}
-        {isAdmin ? (
-          <LogRetentionCard canWrite={canWrite} />
-        ) : (
-          <AdminOnlyCard title={t('pages.settings.logRetention')} />
-        )}
-        {isAdmin ? (
-          <ErrorPagesCard canWrite={canWrite} />
-        ) : (
-          <AdminOnlyCard title={t('pages.settings.errorPages')} />
-        )}
-        <ApiKeysCard canWrite={canWrite} />
+      <div className="flex max-w-6xl items-start gap-8">
+        <SettingsNav />
+        <div className="flex min-w-0 max-w-4xl flex-1 flex-col gap-4">
+          <section id="appearance" className="scroll-mt-6">
+            <AppearanceCard themeOptions={themeOptions} mode={mode} setMode={setMode} i18n={i18n} />
+          </section>
+          <section id="account" className="scroll-mt-6">
+            <AccountCard />
+          </section>
+          <section id="passkeys" className="scroll-mt-6">
+            <PasskeysCard />
+          </section>
+          <section id="control-plane-tls" className="scroll-mt-6">
+            {isAdmin ? (
+              <ControlPlaneTlsCard canWrite={canWrite} />
+            ) : (
+              <AdminOnlyCard title={t('pages.settings.controlPlaneTls')} />
+            )}
+          </section>
+          <section id="observation-mode" className="scroll-mt-6">
+            {isAdmin ? (
+              <ObservationModeCard canWrite={canWrite} />
+            ) : (
+              <AdminOnlyCard title={t('pages.settings.observationMode')} />
+            )}
+          </section>
+          <section id="api-protection" className="scroll-mt-6">
+            {isAdmin ? (
+              <ApiProtectionCard canWrite={canWrite} />
+            ) : (
+              <AdminOnlyCard title={t('pages.settings.apiProtection')} />
+            )}
+          </section>
+          <section id="ai-assistant" className="scroll-mt-6">
+            {isAdmin ? (
+              <AiAssistantCard canWrite={canWrite} />
+            ) : (
+              <AdminOnlyCard title={t('pages.settings.aiAssistant')} />
+            )}
+          </section>
+          <section id="elasticsearch" className="scroll-mt-6">
+            {isAdmin ? (
+              <ElasticsearchCard canWrite={canWrite} />
+            ) : (
+              <AdminOnlyCard title={t('pages.settings.elasticsearch')} />
+            )}
+          </section>
+          <section id="log-retention" className="scroll-mt-6">
+            {isAdmin ? (
+              <LogRetentionCard canWrite={canWrite} />
+            ) : (
+              <AdminOnlyCard title={t('pages.settings.logRetention')} />
+            )}
+          </section>
+          <section id="error-pages" className="scroll-mt-6">
+            {isAdmin ? (
+              <ErrorPagesCard canWrite={canWrite} />
+            ) : (
+              <AdminOnlyCard title={t('pages.settings.errorPages')} />
+            )}
+          </section>
+          <section id="api-keys" className="scroll-mt-6">
+            <ApiKeysCard canWrite={canWrite} />
+          </section>
+        </div>
       </div>
     </div>
+  )
+}
+
+/**
+ * Sticky quick navigation for the settings column. The console scrolls inside
+ * `<main>`, so the sections are observed against the viewport with a band just
+ * below the top edge: whichever section crosses the band is the current one.
+ */
+function SettingsNav() {
+  const { t } = useTranslation()
+  const [active, setActive] = useState(SETTINGS_NAV[0].id)
+
+  useEffect(() => {
+    const elements = SETTINGS_NAV.map(({ id }) => document.getElementById(id)).filter(
+      (el): el is HTMLElement => el !== null,
+    )
+    if (elements.length === 0) return
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) setActive(entry.target.id)
+        }
+      },
+      { rootMargin: '-15% 0px -75% 0px' },
+    )
+    for (const element of elements) observer.observe(element)
+    return () => observer.disconnect()
+  }, [])
+
+  const jump = (id: string) => {
+    document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+
+  return (
+    <nav
+      aria-label={t('pages.settings.quickNav')}
+      className="sticky top-2 hidden w-44 shrink-0 xl:block"
+    >
+      <p className="mb-2 px-3 text-xs font-medium text-fg-subtle">
+        {t('pages.settings.quickNav')}
+      </p>
+      <ul className="flex flex-col border-l border-line">
+        {SETTINGS_NAV.map(({ id, labelKey }) => (
+          <li key={id}>
+            <button
+              type="button"
+              onClick={() => jump(id)}
+              className={cn(
+                '-ml-px block w-full truncate border-l-2 px-3 py-1.5 text-left text-[13px] transition-colors',
+                active === id
+                  ? 'border-brand font-medium text-fg-strong'
+                  : 'border-transparent text-fg-subtle hover:bg-recessed hover:text-fg',
+              )}
+            >
+              {t(labelKey)}
+            </button>
+          </li>
+        ))}
+      </ul>
+    </nav>
   )
 }
 
@@ -2364,6 +2467,11 @@ function AiAssistantCard({ canWrite }: { canWrite: boolean }) {
     (draft?.enabled ? keyFilled : true)
   const testable = temperatureValid && roundsValid && baseUrlFilled && modelFilled && keyFilled
 
+  // The prompt arrives prefilled with whatever is in effect — the stored
+  // override, or the built-in default. Omitting it while untouched keeps
+  // "no override" stored as no override, instead of freezing today's default
+  // text into the row.
+  const systemPrompt = (draft?.systemPrompt ?? '').trim()
   const collect = (): UpdateAiSettingsRequest => ({
     enabled: draft?.enabled,
     base_url: baseUrl,
@@ -2372,7 +2480,8 @@ function AiAssistantCard({ canWrite }: { canWrite: boolean }) {
     temperature,
     max_tool_rounds: rounds,
     allow_write_tools: draft?.allowWriteTools,
-    system_prompt: (draft?.systemPrompt ?? '').trim(),
+    system_prompt:
+      systemPrompt === (loaded?.system_prompt ?? '') ? undefined : systemPrompt,
   })
 
   const save = useMutation({

@@ -137,18 +137,19 @@ pub struct EnrollRequest {
 }
 
 /// Everything the operator needs to bring a node online: the key, the endpoint
-/// to connect to, and the commands that use both.
+/// to connect to, and the command that uses both.
 #[derive(Debug, Serialize)]
 pub struct EnrollResponse {
     pub key_id: Uuid,
-    /// Agent API key. Shown once — only its bcrypt hash is stored.
+    /// Agent API key. Returned once — only its bcrypt hash is stored. It is
+    /// already part of `install_command`; the console does not display it
+    /// separately, but API callers may build their own command from it.
     pub token: String,
     /// gRPC endpoint the agent connects to.
     pub server_url: String,
-    /// Installer one-liner, for a host with nothing installed yet.
+    /// Installer one-liner: downloads the script, installs the node and
+    /// starts its service.
     pub install_command: String,
-    /// Same thing for a host that already has the `pingwaf` binary.
-    pub binary_command: String,
 }
 
 /// Installer published with the repository root, fetched over HTTPS so a bare
@@ -203,8 +204,6 @@ async fn enroll(
         "curl -fsSL {INSTALL_SCRIPT_URL} | sudo bash -s -- --mode agent \
          --server-url {server_url} --api-key {token}"
     );
-    let binary_command =
-        format!("pingwaf agent --server-url {server_url} --api-key {token}");
 
     tracing::info!(key_id = %model.id, requested_by = %current.id, "agent enrollment created");
 
@@ -215,7 +214,6 @@ async fn enroll(
             token,
             server_url,
             install_command,
-            binary_command,
         }),
     )
         .into_response())

@@ -1002,14 +1002,17 @@ that is needed for the node to appear in `GET /agents`.
   "key_id": "uuid",
   "token": "pwk_…",
   "server_url": "waf.example.com:9090",
-  "install_command": "curl -fsSL …/install.sh | sudo bash -s -- --mode agent --server-url waf.example.com:9090 --api-key pwk_…",
-  "binary_command": "pingwaf agent --server-url waf.example.com:9090 --api-key pwk_…"
+  "install_command": "curl -fsSL …/install.sh | sudo bash -s -- --mode agent --server-url waf.example.com:9090 --api-key pwk_…"
 }
 ```
 
-`token` is shown exactly once — only its hash is stored. `server_url` is the
-caller's host plus the configured gRPC port (the bind address is not routable
-from another server). The key carries the `agent` and `read` permissions.
+`token` is returned exactly once — only its hash is stored. It is already part
+of `install_command`; API callers may build their own command from it.
+`server_url` is the caller's host plus the configured gRPC port (the bind
+address is not routable from another server). The key carries the `agent` and
+`read` permissions. Running `install_command` on a fresh host installs the
+binary, writes the node configuration and starts the service, so the node
+registers itself without further steps.
 
 ### GET /agents/{agent_id}
 
@@ -2327,7 +2330,7 @@ the defaults shown below on first read.
   "base_url": "https://api.openai.com/v1",
   "api_key": "",
   "model": "gpt-4o-mini",
-  "system_prompt": "",
+  "system_prompt": "You are the built-in assistant of PingWAF, a reverse-proxy and web application firewall console. …",
   "temperature": 0.2,
   "max_tool_rounds": 5,
   "allow_write_tools": false,
@@ -2336,7 +2339,9 @@ the defaults shown below on first read.
 ```
 
 `api_key` is `***` when a key is stored and empty when none is; the stored key
-is never returned. An empty `system_prompt` means the built-in prompt is used.
+is never returned. `system_prompt` is the prompt in effect: the saved override,
+or the full built-in default (shown abbreviated above) when no override is
+stored.
 
 ### PUT /settings/ai
 
@@ -2353,7 +2358,7 @@ with `400`.
 | `base_url` | string | OpenAI-compatible API root, at most 500 characters. |
 | `api_key` | string | Provider key; see the round-trip rules above. |
 | `model` | string | Model name, at most 200 characters. |
-| `system_prompt` | string | Replaces the built-in prompt; blank uses the default. |
+| `system_prompt` | string | Overrides the built-in prompt; `""` clears the override so the default applies again. |
 | `temperature` | number | 0–2. |
 | `max_tool_rounds` | int | Tool-calling rounds per answer, 1–10. |
 | `allow_write_tools` | bool | Let the assistant call the site-mutating tools. |

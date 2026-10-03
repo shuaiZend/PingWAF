@@ -73,6 +73,9 @@ pub struct AiSettingsView {
     /// [`SECRET_MASK`] when a key is stored, empty when none is.
     pub api_key: String,
     pub model: String,
+    /// The prompt in effect: the stored override, or the built-in default
+    /// when no override is saved. Clearing the field in the console stores
+    /// the empty override again, so the default keeps applying.
     pub system_prompt: String,
     pub temperature: f64,
     pub max_tool_rounds: i32,
@@ -90,7 +93,7 @@ fn view_of(row: &ai_setting::Model) -> AiSettingsView {
             SECRET_MASK.to_string()
         },
         model: row.model.clone(),
-        system_prompt: row.system_prompt.clone(),
+        system_prompt: ai::effective_system_prompt(row),
         temperature: row.temperature,
         max_tool_rounds: row.max_tool_rounds,
         allow_write_tools: row.allow_write_tools,
@@ -736,5 +739,16 @@ mod tests {
         let mut empty = stored();
         empty.api_key = String::new();
         assert_eq!(view_of(&empty).api_key, "");
+    }
+
+    #[test]
+    fn the_view_returns_the_prompt_in_effect() {
+        // Without a stored override the console should receive the built-in
+        // default to prefill, not an empty field.
+        assert_eq!(view_of(&stored()).system_prompt, ai::DEFAULT_SYSTEM_PROMPT);
+
+        let mut custom = stored();
+        custom.system_prompt = "  custom prompt  ".to_string();
+        assert_eq!(view_of(&custom).system_prompt, "custom prompt");
     }
 }

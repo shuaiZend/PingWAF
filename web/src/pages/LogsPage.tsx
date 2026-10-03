@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { Fragment, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery } from '@tanstack/react-query'
@@ -34,6 +34,7 @@ import { useAuthStore } from '@/stores/authStore'
 import { cn } from '@/lib/utils'
 import { buildCurlCommand } from '@/lib/curl'
 import { parseLogQuery } from '@/lib/logQuery'
+import { requestLines, responseLines, type RawLine } from '@/lib/rawHttp'
 import {
   formatDateTime,
   formatLatency,
@@ -915,19 +916,9 @@ export function LogsPage() {
                 </pre>
               </div>
             )}
-            {selectedEvent.user_agent && (
-              <div>
-                <p className="mb-1.5 text-[13px] font-medium text-fg">
-                  {t('pages.logs.userAgent')}
-                </p>
-                <p className="pw-mono break-all rounded-md border border-line bg-recessed px-3 py-2 text-xs text-fg-subtle">
-                  {selectedEvent.user_agent}
-                </p>
-              </div>
-            )}
             <div>
               <p className="mb-1.5 text-[13px] font-medium text-fg">
-                {t('pages.logs.rawRequest')}
+                {t('pages.logs.rawCapture')}
               </p>
               {rawRequestQuery.isPending ? (
                 <p className="text-xs text-fg-subtle">{t('common.loading')}</p>
@@ -1006,76 +997,25 @@ export function LogsPage() {
                     : undefined,
                 ],
                 [t('pages.logs.cacheStatus'), selectedLog.cache_status],
-                [t('pages.logs.referer'), selectedLog.referer],
                 [t('pages.logs.requestId'), selectedLog.request_id],
                 [t('pages.logs.agent'), selectedLog.agent_id],
               ]}
             />
-            {selectedLog.user_agent && (
-              <div>
-                <p className="mb-1.5 text-[13px] font-medium text-fg">
-                  {t('pages.logs.userAgent')}
-                </p>
-                <p className="pw-mono break-all rounded-md border border-line bg-recessed px-3 py-2 text-xs text-fg-subtle">
-                  {selectedLog.user_agent}
-                </p>
-              </div>
-            )}
-            {selectedLog.request_headers &&
-              Object.keys(selectedLog.request_headers).length > 0 && (
-                <div>
-                  <p className="mb-1.5 text-[13px] font-medium text-fg">
-                    {t('pages.logs.requestHeaders')}
-                  </p>
-                  <HeaderList headers={selectedLog.request_headers} />
-                </div>
-              )}
-            <div>
-              <p className="mb-1.5 flex items-center gap-2 text-[13px] font-medium text-fg">
-                {t('pages.logs.requestBody')}
-                {selectedLog.request_body_truncated && (
-                  <Badge tone="warning">{t('pages.logs.bodyTruncated')}</Badge>
-                )}
-              </p>
-              {selectedLog.request_body ? (
-                <pre className="pw-mono max-h-56 overflow-auto whitespace-pre-wrap break-all rounded-md border border-line bg-recessed px-3 py-2 text-xs text-fg-subtle">
-                  {selectedLog.request_body}
-                </pre>
-              ) : (
-                <p className="text-xs text-fg-subtle">{t('pages.logs.noRequestBody')}</p>
-              )}
-            </div>
-            {selectedLog.response_headers &&
-              Object.keys(selectedLog.response_headers).length > 0 && (
-                <div>
-                  <p className="mb-1.5 text-[13px] font-medium text-fg">
-                    {t('pages.logs.responseHeaders')}
-                  </p>
-                  <HeaderList headers={selectedLog.response_headers} />
-                </div>
-              )}
-            <div>
-              <p className="mb-1.5 flex flex-wrap items-center gap-2 text-[13px] font-medium text-fg">
-                {t('pages.logs.responseBody')}
-                {selectedLog.response_body_size != null && (
-                  <span className="text-xs font-normal text-fg-subtle">
-                    {formatSize(selectedLog.response_body_size)}
-                  </span>
-                )}
-                {selectedLog.response_body_truncated && (
-                  <Badge tone="warning">{t('pages.logs.bodyTruncated')}</Badge>
-                )}
-              </p>
-              {selectedLog.response_body ? (
-                <pre className="pw-mono max-h-56 overflow-auto whitespace-pre-wrap break-all rounded-md border border-line bg-recessed px-3 py-2 text-xs text-fg-subtle">
-                  {selectedLog.response_body}
-                </pre>
-              ) : (
-                <p className="text-xs text-fg-subtle">
-                  {t('pages.logs.noResponseBody')}
-                </p>
-              )}
-            </div>
+            <RawSection
+              title={t('pages.logs.request')}
+              truncated={selectedLog.request_body_truncated}
+              lines={requestLines(selectedLog, t('pages.logs.noRequestBody'))}
+            />
+            <RawSection
+              title={t('pages.logs.response')}
+              size={
+                selectedLog.response_body_size != null
+                  ? formatSize(selectedLog.response_body_size)
+                  : null
+              }
+              truncated={selectedLog.response_body_truncated}
+              lines={responseLines(selectedLog, t('pages.logs.noResponseBody'))}
+            />
           </div>
         )}
       </Dialog>
@@ -1200,22 +1140,48 @@ function DefinitionGrid({ rows }: { rows: [string, string | null | undefined][] 
   )
 }
 
-/** Verbatim header list; cookies and authorization stay readable for replay. */
-function HeaderList({ headers }: { headers: Record<string, string> }) {
+/**
+ * One raw HTTP message, colored per token. Every piece renders as a React text
+ * node — never markup — so bytes from the wire stay inert by construction.
+ */
+function RawMessage({ lines }: { lines: RawLine[] }) {
   return (
-    <div className="max-h-56 overflow-auto rounded-md border border-line bg-recessed px-3 py-2">
-      <dl className="flex flex-col gap-1">
-        {Object.entries(headers).map(([name, value]) => (
-          <div key={name} className="flex min-w-0 items-baseline gap-2">
-            <dt className="pw-mono shrink-0 text-xs font-medium text-fg">
-              {name}:
-            </dt>
-            <dd className="pw-mono min-w-0 break-all text-xs text-fg-subtle">
-              {value}
-            </dd>
-          </div>
-        ))}
-      </dl>
+    <pre className="pw-mono max-h-72 overflow-auto whitespace-pre-wrap break-all rounded-md border border-line bg-recessed px-3 py-2 text-xs leading-relaxed text-fg">
+      {lines.map((line, index) => (
+        <Fragment key={index}>
+          {line.map((token, tokenIndex) => (
+            <span key={tokenIndex} className={token.tone}>
+              {token.text}
+            </span>
+          ))}
+          {'\n'}
+        </Fragment>
+      ))}
+    </pre>
+  )
+}
+
+/** A captioned raw message with its capture notes (size, truncation). */
+function RawSection({
+  title,
+  size,
+  truncated,
+  lines,
+}: {
+  title: string
+  size?: string | null
+  truncated?: boolean | null
+  lines: RawLine[]
+}) {
+  const { t } = useTranslation()
+  return (
+    <div>
+      <p className="mb-1.5 flex flex-wrap items-center gap-2 text-[13px] font-medium text-fg">
+        {title}
+        {size && <span className="text-xs font-normal text-fg-subtle">{size}</span>}
+        {truncated && <Badge tone="warning">{t('pages.logs.bodyTruncated')}</Badge>}
+      </p>
+      <RawMessage lines={lines} />
     </div>
   )
 }
@@ -1244,39 +1210,17 @@ function RawRequestPanel({ log, onCopy }: { log: AccessLog; onCopy: () => void }
           {t('pages.logs.copyCurl')}
         </Button>
       </div>
-      {log.request_headers && Object.keys(log.request_headers).length > 0 && (
-        <HeaderList headers={log.request_headers} />
-      )}
-      {log.request_body ? (
-        <pre className="pw-mono max-h-40 overflow-auto whitespace-pre-wrap break-all text-xs text-fg-subtle">
-          {log.request_body}
-        </pre>
-      ) : (
-        <p className="text-xs text-fg-subtle">{t('pages.logs.noRequestBody')}</p>
-      )}
-      <div className="border-t border-line/60 pt-3">
-        <p className="mb-1.5 flex flex-wrap items-center gap-2 text-[13px] font-medium text-fg">
-          {t('pages.logs.response')}
-          {log.response_body_size != null && (
-            <span className="text-xs font-normal text-fg-subtle">
-              {formatSize(log.response_body_size)}
-            </span>
-          )}
-          {log.response_body_truncated && (
-            <Badge tone="warning">{t('pages.logs.bodyTruncated')}</Badge>
-          )}
-        </p>
-        {log.response_headers && Object.keys(log.response_headers).length > 0 && (
-          <HeaderList headers={log.response_headers} />
-        )}
-        {log.response_body ? (
-          <pre className="pw-mono mt-3 max-h-40 overflow-auto whitespace-pre-wrap break-all text-xs text-fg-subtle">
-            {log.response_body}
-          </pre>
-        ) : (
-          <p className="text-xs text-fg-subtle">{t('pages.logs.noResponseBody')}</p>
-        )}
-      </div>
+      <RawSection
+        title={t('pages.logs.request')}
+        truncated={log.request_body_truncated}
+        lines={requestLines(log, t('pages.logs.noRequestBody'))}
+      />
+      <RawSection
+        title={t('pages.logs.response')}
+        size={log.response_body_size != null ? formatSize(log.response_body_size) : null}
+        truncated={log.response_body_truncated}
+        lines={responseLines(log, t('pages.logs.noResponseBody'))}
+      />
     </div>
   )
 }

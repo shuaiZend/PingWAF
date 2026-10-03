@@ -689,37 +689,11 @@ export function AgentsPage() {
                 command={enrollResult.install_command}
                 onCopy={copyText}
               />
-              <CommandBlock
-                caption={t('pages.agents.binaryDeploy')}
-                command={enrollResult.binary_command}
-                onCopy={copyText}
-              />
 
               <p className="flex items-start gap-2 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs leading-relaxed text-fg">
                 <Warning weight="duotone" className="mt-0.5 h-4 w-4 shrink-0 text-fg-warning" />
                 <span>{t('pages.agents.enrollNeverExpires')}</span>
               </p>
-
-              <details className="rounded-md border border-line bg-recessed px-3 py-2">
-                <summary className="cursor-pointer select-none text-xs text-fg-subtle">
-                  {t('pages.agents.showToken')}
-                </summary>
-                <div className="mt-2 flex items-start gap-3">
-                  <p className="pw-mono min-w-0 flex-1 break-all text-xs text-fg-subtle">
-                    {enrollResult.token}
-                  </p>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    className="shrink-0"
-                    aria-label={`${t('pages.agents.copy')}: ${t('pages.agents.showToken')}`}
-                    icon={<Copy weight="duotone" className="h-3.5 w-3.5" />}
-                    onClick={() => copyText(enrollResult.token)}
-                  >
-                    {t('pages.agents.copy')}
-                  </Button>
-                </div>
-              </details>
             </>
           ) : (
             <>

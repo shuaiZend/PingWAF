@@ -805,13 +805,13 @@ export interface AgentEnrollRequest {
   name?: string
 }
 
-/** `api::agents::EnrollResponse` — the token is shown once and never stored. */
+/** `api::agents::EnrollResponse` — the token is returned once and never stored. */
 export interface AgentEnrollResponse {
   key_id: string
+  /** Already embedded in `install_command`; the console does not show it. */
   token: string
   server_url: string
   install_command: string
-  binary_command: string
 }
 
 /* ── Elasticsearch settings ───────────────────────────────────────── */
@@ -1720,6 +1720,7 @@ export interface AiSettings {
   /** `***` when a key is stored, empty when none is. */
   api_key: string
   model: string
+  /** The prompt in effect: the stored override, or the built-in default. */
   system_prompt: string
   temperature: number
   max_tool_rounds: number
@@ -1734,6 +1735,7 @@ export interface UpdateAiSettingsRequest {
   /** `null` keeps the stored key (the mask round-trip); `''` clears it. */
   api_key?: string | null
   model?: string
+  /** Omitted keeps the stored override; `''` clears it (default applies). */
   system_prompt?: string
   temperature?: number
   max_tool_rounds?: number
