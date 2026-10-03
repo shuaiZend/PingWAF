@@ -280,7 +280,7 @@ Build metadata.
 ```json
 {
   "name": "pingwaf-server",
-  "version": "0.18.0",
+  "version": "0.19.0",
   "api": "/api/v1",
   "registration_open": true
 }
@@ -964,7 +964,7 @@ List registered agents.
       "site_domain": "example.com",
       "hostname": "edge-01",
       "ip_address": "10.0.1.5",
-      "version": "0.18.0",
+      "version": "0.19.0",
       "os_info": "Linux 6.1.0",
       "cpu_cores": 4,
       "memory_bytes": 8589934592,
@@ -1603,6 +1603,29 @@ Time-series request data.
 
 **Query Parameters:** `site_id`, `from`, `to`, `interval` (`minute`, `hour` (default), `day` or `week`), `limit`
 
+### GET /analytics/traffic
+
+Egress bandwidth per fixed-width bucket — response bytes streamed to clients only; origin-pull traffic is never counted. Without `site_id` the call covers every site the caller may see.
+
+**Query Parameters:** `site_id`, `from`, `to`, `step` (bucket width in seconds; one of `5`, `10`, `30`, `60`, `300`, `900`, `3600`, `86400` — default `5`)
+
+**Response (200):**
+```json
+{
+  "from": "2024-01-01T00:00:00Z",
+  "to": "2024-01-01T00:10:00Z",
+  "site_id": null,
+  "step_seconds": 5,
+  "total_bytes": 536870912,
+  "buckets": [
+    {
+      "bucket": "2024-01-01T00:00:00Z",
+      "bytes": 1048576
+    }
+  ]
+}
+```
+
 ### GET /analytics/sites-over-time
 
 Request volume over time for the busiest sites — one series per site, for the dashboard's multi-line chart. Without `site_id` the top 8 sites by in-window traffic are returned; non-administrators are scoped to their own sites.
@@ -1687,6 +1710,47 @@ Bulk import IP rules (one IP or CIDR per entry).
   "action": "block",
   "note": "Imported blocklist",
   "enabled": true
+}
+```
+
+### GET /sites/{site_id}/blocked-ips
+
+Dynamic blocks the edge currently enforces for the site — WAF/rate-limit auto-blocks and server-issued block commands. Every agent reports the blocks it enforces on each heartbeat; rows are folded per IP, with the attack history folded in from the security-event log.
+
+**Response (200):**
+```json
+[
+  {
+    "ip": "203.0.113.7",
+    "reason": "waf: SQL injection in query string",
+    "blocked_at": "2024-01-01T12:00:00Z",
+    "expires_at": "2024-01-01T12:10:00Z",
+    "agent_count": 2,
+    "attack_count": 1842,
+    "last_attack_at": "2024-01-01T11:59:58Z"
+  }
+]
+```
+
+`expires_at` is `null` for permanent blocks; `reason` may be `null` for blocks reported by older agents.
+
+### POST /sites/{site_id}/blocked-ips/unblock
+
+Lift a dynamic block: an `UnblockIp` command goes to every agent still enforcing it (queued when disconnected) and the mirrored rows are removed. Requires write permission.
+
+**Request:**
+```json
+{
+  "ip": "203.0.113.7"
+}
+```
+
+**Response (202):**
+```json
+{
+  "ip": "203.0.113.7",
+  "agents": 2,
+  "delivered": 2
 }
 ```
 

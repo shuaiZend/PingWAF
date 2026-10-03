@@ -8,10 +8,27 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
-## [Unreleased]
+## [PingWAF 0.19.0] — 2026-10-04
 
 ### ⛰️ Features
 
+- *(security)* The edge auto-blocks what it refuses: a WAF block verdict
+  blocks the client for ten minutes and a tripped rate limit for its retry
+  window, so repeat requests are rejected before the engine even runs. Agents
+  report the blocks they enforce on every heartbeat, the control plane mirrors
+  them in a new `agent_blocked_ips` table, and the access-restriction page
+  gains an auto-blocked IP card — attack counts folded from security events,
+  last attack time, expected unblock time and one-click unblock fanned out to
+  every enforcing agent.
+- *(dashboard)* Traffic pages gain egress bandwidth visualization: a
+  rate chart bucketed in 5-second windows (readable as Kbps/Mbps/Gbps) and a
+  total-egress card that counts response bytes only — origin-pull traffic is
+  never included. Backed by the new `GET /analytics/traffic` endpoint.
+- *(dashboard)* The lifecycle reference page moves its numbered stage
+  introduction into a left-side quick navigation that tracks the section in
+  view, matching the Settings page layout.
+- *(dashboard)* Settings gains an About card with the project URL and the
+  running version.
 - *(cli)* The `pingwaf` binary gains break-glass maintenance commands that talk
   straight to PostgreSQL, so they keep working when the control plane is down,
   not yet seeded, or its own IP allowlist has locked the operator out:
@@ -101,6 +118,27 @@ verbatim for reference and attribution, and is not maintained here.
   dialog the rule id is now a link that opens that rule's editor on the site's
   WAF page, so a detection can be inspected without searching for the rule.
 
+### ⚡ Performance
+
+- The access log gains `(client_ip, timestamp DESC)` and partial
+  `(host, timestamp DESC)` indexes, so "what did this IP request" and
+  host-filtered log searches stop scanning the whole table.
+- `GET /analytics/sites` replaces its per-site pair of correlated subqueries
+  with two grouped queries merged in memory — one round trip per source
+  instead of two per site.
+- Agent metric series are aggregated by SQL `GROUP BY` on read instead of
+  loading every raw row and folding in memory.
+- Host samples persist one row per minute per agent instead of one per probe,
+  cutting the table to a fraction of its raw volume while the probe panel
+  (which diffs counters) stays correct.
+- The request path trims allocations: the client IP is parsed once and shared
+  by geo lookups, IP access rules, rate limiting and expressions; the logged
+  protocol comes from a static table instead of `Debug` formatting; the
+  clearance-cookie manager is cached instead of rebuilding its HMAC key per
+  validated request; config fingerprints are `Arc<str>` instead of `String`
+  copies; and bot classification matches case-insensitively without
+  lowercasing the user agent.
+
 ### 🔧 Internal
 
 - The API reference (`docs/api.md`) documents the new endpoints
@@ -112,9 +150,11 @@ verbatim for reference and attribution, and is not maintained here.
   MCP server are documented as well: the AI settings and conversation
   endpoints (including the SSE event stream), the `/mcp` JSON-RPC surface
   with its authentication rules and tool inventory, and `GET /settings/mcp`.
-  The user guide gains an "AI Assistant & MCP" chapter covering provider
-  setup, day-to-day use of the assistant page and connecting external MCP
-  clients.
+  `GET /analytics/traffic` and the blocked-IP endpoints
+  (`GET /sites/{site_id}/blocked-ips`,
+  `POST /sites/{site_id}/blocked-ips/unblock`) are documented too. The user
+  guide gains an "AI Assistant & MCP" chapter covering provider setup,
+  day-to-day use of the assistant page and connecting external MCP clients.
 
 ## [PingWAF 0.18.0] — 2026-09-30
 
