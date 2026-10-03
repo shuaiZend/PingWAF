@@ -61,6 +61,22 @@ verbatim for reference and attribution, and is not maintained here.
   protection stack (access log, IP allowlist, embedded WAF) as the rest of
   the API. The transport is stateless, with resources and prompts for common
   deployment data, and GET/DELETE answered with `405`.
+- *(dashboard)* Settings gains a quick navigation column (wide screens) that
+  tracks the card in view and smooth-scrolls to any section.
+- *(dashboard)* The AI assistant's system prompt field is prefilled with the
+  built-in default — `GET /settings/ai` returns the prompt in effect — and an
+  untouched field round-trips as "no override", so future improvements to the
+  default still reach deployments that never customised it.
+- *(dashboard)* Log detail dialogs were rebuilt around raw HTTP: request and
+  response render as complete raw messages with syntax highlighting (JSON
+  bodies are reindented for display while numbers keep their exact text), and
+  the separate user-agent/header/body blocks were removed. Everything renders
+  as escaped text nodes — never `innerHTML` — so hostile bytes in a captured
+  response or header stay inert.
+- *(install)* The Add node dialog now hands out a single command: the
+  installer starts the agent service itself (`systemctl enable --now` in agent
+  mode), the redundant binary-only command is gone, and the raw token is no
+  longer displayed — it already rides inside the command.
 
 ### 🔧 Internal
 

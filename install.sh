@@ -439,6 +439,21 @@ EOF
     $cmd systemctl daemon-reload
     success "Systemd service installed: ${SERVICE_NAME}.service"
 
+    # An agent only contributes once it is running, so start it here — this is
+    # what makes the dashboard's one-line enrolment command enough on its own.
+    # Server modes stay manual: they need PostgreSQL ready and an attended
+    # first boot.
+    if [[ "$MODE" == "agent" ]]; then
+        info "Starting the agent service..."
+        if $cmd systemctl enable --now "$SERVICE_NAME"; then
+            success "Service enabled and started: ${SERVICE_NAME}"
+        else
+            warn "The service did not start — inspect: journalctl -u ${SERVICE_NAME} -e"
+            warn "After fixing, start it with: sudo systemctl enable --now ${SERVICE_NAME}"
+        fi
+        return
+    fi
+
     info "To start PingWAF:"
     echo "  sudo systemctl enable --now ${SERVICE_NAME}"
     echo "  sudo systemctl status ${SERVICE_NAME}"
@@ -548,13 +563,14 @@ fi
 
 if [[ "$MODE" == "agent" ]]; then
     echo ""
-    echo "  Quick start:"
-    echo "    ${BINARY_NAME} agent --server-url \"${SERVER_URL}\" --api-key \"${API_KEY}\""
-    echo ""
     echo "  Next steps:"
-    echo "    1. Edit ${CONFIG_DIR}/pingwaf.toml if the control plane is elsewhere"
-    echo "    2. Start the service: sudo systemctl enable --now ${SERVICE_NAME}"
-    echo "    3. Confirm the node appears under Nodes in the dashboard"
+    echo "    1. Confirm the node appears under Nodes in the dashboard"
+    if [[ "$OS" == "linux" ]]; then
+        echo "    2. If it does not: systemctl status ${SERVICE_NAME} && journalctl -u ${SERVICE_NAME} -e"
+    else
+        echo "    2. If it does not, run the agent in the foreground to see the error"
+    fi
+    echo "    3. Point another control plane at it by editing ${CONFIG_DIR}/pingwaf.toml"
     echo ""
 else
     echo ""
