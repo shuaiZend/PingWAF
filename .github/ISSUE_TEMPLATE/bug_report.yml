@@ -34,7 +34,7 @@ body:
     attributes:
       label: PingWAF version / 版本
       description: Output of `pingwaf --version`. / `pingwaf --version` 的输出。
-      placeholder: v0.18.0
+      placeholder: v0.19.0
     validations:
       required: true
   - type: dropdown

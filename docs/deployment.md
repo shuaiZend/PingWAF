@@ -58,7 +58,7 @@ Default credentials: `admin@pingwaf.local` / value of `$ADMIN_PASSWORD`
 curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh | bash
 
 # Or specify version and mode
-./install.sh --version 0.18.0 --mode all-in-one
+./install.sh --version 0.19.0 --mode all-in-one
 ```
 
 > Prebuilt release assets are published for **Linux** (amd64/arm64) only; on
