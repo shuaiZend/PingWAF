@@ -308,6 +308,7 @@ PINGWAF_CONFIG=/etc/pingwaf/pingwaf.toml pingwaf all-in-one   # equivalent
 | [docs/quick-start.md](./docs/quick-start.md) | From zero to your first protected site |
 | [docs/deployment.md](./docs/deployment.md) | Docker, binary + systemd, distributed topologies |
 | [docs/user-guide.md](./docs/user-guide.md) | Dashboard walkthrough, sites, rules, policies |
+| [docs/http-lifecycle.md](./docs/http-lifecycle.md) | Where every feature acts in the request pipeline (WAF check order, caching, error pages) and how to debug with it |
 | [docs/api.md](./docs/api.md) | REST API reference (`https://<host>:9080/api/v1`) |
 | [docs/README.md](./docs/README.md) | Full documentation index |
 | [CONTRIBUTING.md](./CONTRIBUTING.md) | How to contribute |

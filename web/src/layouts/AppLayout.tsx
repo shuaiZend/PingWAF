@@ -46,6 +46,7 @@ const crumbKeys: Record<string, string> = {
   settings: 'pages.settings.title',
   logs: 'pages.logs.title',
   agents: 'pages.agents.title',
+  lifecycle: 'pages.lifecycle.title',
 }
 
 export function AppLayout() {
