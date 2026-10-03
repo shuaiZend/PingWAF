@@ -8,6 +8,19 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [Unreleased]
+
+### 🐛 Bug Fixes
+
+- *(agent)* Honor the heartbeat interval the control plane hands down at
+  registration. The agent built its heartbeat timer from the local
+  `heartbeat_interval_secs` and only logged the server's value, so an agent
+  configured at 30 s kept that cadence even though the control plane told it
+  to beat every 15 s — while the server's offline-detection threshold was
+  derived from the 15 s it expected. Agents now follow the server-sent
+  interval (falling back to the local setting only when the server sends
+  none), keeping liveness detection and actual heartbeat frequency aligned.
+
 ## [PingWAF 0.19.0] — 2026-10-04
 
 ### ⛰️ Features

@@ -176,7 +176,7 @@ server-side log batch size (`500`) are compiled-in constants with no override.
 | `api_key` | string | `""` | Agent authentication key (empty = auto-register over loopback in all-in-one) |
 | `cache_dir` | string | `./data/cache` | Local rule cache directory |
 | `fail_open` | bool | `true` | Allow traffic when disconnected |
-| `heartbeat_interval_secs` | int | `30` | Heartbeat frequency |
+| `heartbeat_interval_secs` | int | `30` | Fallback heartbeat frequency, used only when the control plane hands no interval down at registration |
 | `log_batch_size` | int | `100` | Log entries before flush |
 | `log_flush_interval_secs` | int | `5` | Max time between flushes |
 | `max_body_log_size` | int | `8192` | Max request body bytes to log |
@@ -207,7 +207,7 @@ are listed against it below; the dash in a table entry means the setting has no
 | `PINGWAF_SERVE_FRONTEND` | `server.serve_frontend` |
 | `PINGWAF_JWT_EXPIRATION_HOURS` | — |
 | `PINGWAF_ALLOW_REGISTRATION` | — |
-| `PINGWAF_HEARTBEAT_INTERVAL` | `agent.heartbeat_interval_secs` (also the default the control plane hands to agents) |
+| `PINGWAF_HEARTBEAT_INTERVAL` | `server.heartbeat_interval_seconds` (agents follow the value the control plane hands them; `agent.heartbeat_interval_secs` is only a fallback) |
 | `PINGWAF_DB_MAX_CONNECTIONS` | — |
 | `PINGWAF_METRIC_RETENTION_DAYS` | — |
 | `PINGWAF_TLS_ENABLED` | `server.tls_enabled` |

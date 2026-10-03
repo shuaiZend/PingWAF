@@ -45,7 +45,8 @@ serve_frontend = true
 api_key = ""
 # Local rule cache directory (persisted across restarts)
 cache_dir = "./data/cache"
-# Heartbeat interval in seconds
+# Heartbeat interval in seconds — fallback only: the control plane hands
+# agents its own interval at registration and that value takes precedence
 heartbeat_interval_secs = 30
 # Log shipping
 log_batch_size = 100
