@@ -20,6 +20,7 @@
     "agents": "节点",
     "settings": "设置",
     "ipGroups": "IP 黑白名单",
+    "lifecycle": "请求生命周期",
     "selectSiteFirst": "请先选择一个站点"
   },
   "sidebar": {
@@ -1516,6 +1517,118 @@
       "tabIpRules": "IP 规则",
       "tabGeo": "地域限制",
       "tabBasicAuth": "Basic 认证"
+    },
+    "lifecycle": {
+      "title": "请求生命周期",
+      "description": "PingWAF 各项功能在代理流水线中的执行阶段。在这里查看 WAF、IP、Bot、限流与缓存规则分别在哪一步生效，并据此调试请求为什么被放行、拦截或质询。",
+      "docLink": "完整文档",
+      "stages": {
+        "tls": {
+          "title": "TLS 与连接",
+          "desc": "TLS 握手发生在任何 HTTP 处理之前：SNI 选择证书；当任一站点启用 mTLS 时，监听层按受信 CA 并集校验客户端证书（站点级强制在 WAF 插件内完成）。"
+        },
+        "earlyRequest": {
+          "title": "早期请求",
+          "desc": "匹配 location（host + path）并创建请求上下文后，运行全部 early_request 插件：WAF 插件的完整检查链（见下方）与质询校验端点 /_pingwaf/challenge/verify。任一插件在此应答都会短路后续所有阶段。"
+        },
+        "request": {
+          "title": "请求",
+          "desc": "ACME HTTP-01 与 metrics 请求在此应答（此前已通过 WAF）；随后执行 location 路径重写与 request 步骤插件：重写插件、缓存插件（配置会话缓存、处理 PURGE）。未匹配 location 的请求直接 404，不运行任何插件。"
+        },
+        "cacheLookup": {
+          "title": "缓存查找",
+          "desc": "pingora 内置 HTTP 缓存。命中即结束请求、不触及上游——但请求已经过 WAF 与重写。未命中则继续访问上游。"
+        },
+        "upstream": {
+          "title": "上游",
+          "desc": "负载均衡选择后端（连接失败可重试），追加 X-Forwarded-* 类请求头，请求体流式转发；超限的请求体返回 413。"
+        },
+        "upstreamResponse": {
+          "title": "上游响应",
+          "desc": "上游响应头到达：pingora 判定响应能否写入缓存；错误页插件可把上游错误响应（400+，含 502/504）替换为站点的自定义错误页。"
+        },
+        "response": {
+          "title": "响应",
+          "desc": "运行 response 步骤插件：WAF 插件记录状态与大小供访问日志使用；站点 HSTS 插件添加 Strict-Transport-Security；缓存头（Age 等）在此写入。随后的响应体过滤器改写正文——101 升级之后的字节是 WebSocket 流量，不再过滤。"
+        },
+        "responseBody": {
+          "title": "响应体",
+          "desc": "流结束时 WAF 插件发出访问日志条目（响应体按站点日志设置采样）。"
+        },
+        "failure": {
+          "title": "失败",
+          "desc": "仅在出错时触发：分类为 502 上游错误 / 499 客户端断开 / 408 读取超时 / 400 非法请求头，并用错误模板渲染，可被自定义错误页覆盖。"
+        },
+        "logging": {
+          "title": "日志",
+          "desc": "pingap 最后写入自己的访问日志。PingWAF 的日志条目在做出决定的阶段就已发出：生成式响应（拦截、质询、暂停页）在请求阶段记录，正常响应在响应体结束时记录。"
+        }
+      },
+      "features": {
+        "ssl": "SSL/TLS",
+        "waf": "WAF 引擎",
+        "access": "IP 与地域规则",
+        "bot": "Bot 防护",
+        "rateLimit": "速率限制",
+        "cc": "质询 / CC 防护",
+        "caching": "缓存",
+        "rewrite": "重写规则",
+        "origin": "源站与后端",
+        "errorPages": "错误页",
+        "logs": "日志"
+      },
+      "wafTitle": "WAF 插件内部",
+      "wafDescription": "每个请求按以下顺序检查；任何一个环节做出应答，请求即告结束。",
+      "checks": {
+        "paused": {
+          "title": "站点暂停",
+          "desc": "暂停的站点立即返回暂停页，后续检查不再运行。"
+        },
+        "mtls": {
+          "title": "mTLS 客户端证书",
+          "desc": "缺失或无效的客户端证书按站点级设置直接拦截。"
+        },
+        "access": {
+          "title": "IP 与地域规则",
+          "desc": "首条匹配生效（优先级升序）。动作：block、allow、challenge、js_challenge，或 basic_auth（推迟到下一步）。"
+        },
+        "basicAuth": {
+          "title": "Basic Auth",
+          "desc": "站点级开启，或由 IP/地域规则触发。密码错误有小幅延迟，未认证返回 401 页面；hide_credentials 会移除 Authorization 头。"
+        },
+        "bot": {
+          "title": "Bot 防护",
+          "desc": "按 User-Agent 分类：放行、拒绝（拦截页）或仅记录。"
+        },
+        "rateLimit": {
+          "title": "速率限制",
+          "desc": "按规则固定窗口计数（IP、Host、路径、请求头、Cookie 等）；超限执行规则动作，challenge 可下发 clearance cookie。"
+        },
+        "engine": {
+          "title": "WAF 引擎",
+          "desc": "签名与表达式规则 + 异常分值。结论：放行、监控（仅记录）、拦截、质询。"
+        }
+      },
+      "tipsTitle": "调试提示",
+      "tipsDescription": "用生命周期顺序回答常见问题。",
+      "tips": {
+        "observation": {
+          "title": "观察模式",
+          "desc": "检测照常运行，但拦截/质询只记录为“本应拦截”。站点暂停、mTLS 与 Basic Auth 仍然强制执行。"
+        },
+        "firstMatch": {
+          "title": "顺序决定结果",
+          "desc": "IP 与地域规则自上而下、首条匹配生效——放在全量拦截之前的 allow 规则决定最终结果。"
+        },
+        "cache": {
+          "title": "缓存无法绕过 WAF",
+          "desc": "检查发生在缓存查找之前，命中缓存的请求同样经过检查，WAF 拦截始终优先于缓存响应。"
+        },
+        "customPages": {
+          "title": "自定义错误页",
+          "desc": "错误页只替换上游错误响应；WAF 的拦截/质询页在上游被联系之前生成，保持内置样式。"
+        }
+      }
     }
   },
   "challengeLevels": {

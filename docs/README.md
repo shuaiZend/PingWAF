@@ -14,6 +14,7 @@ centrally-controlled Web Application Firewall built on
 | [quick-start.md](./quick-start.md) | From zero to your first protected site: prerequisites, install, first run |
 | [deployment.md](./deployment.md) | Docker Compose, binary + systemd, and distributed (server + agents) topologies |
 | [user-guide.md](./user-guide.md) | Dashboard walkthrough — sites, rules, policies, IP access, rate limiting |
+| [http-lifecycle.md](./http-lifecycle.md) | Where every feature acts in the request pipeline — the WAF check order, caching, error pages, and how to debug with it |
 | [api.md](./api.md) | REST API reference (base URL `https://<host>:9080/api/v1`) |
 | [profiling.md](./profiling.md) | Built-in profiling: `go tool pprof` captures, SVG flame graphs, memory snapshots |
 
@@ -92,4 +93,4 @@ caveats worth knowing before you deploy it:
 
 - [acme_chart.md](./acme_chart.md) — ACME / Let's Encrypt issuance flow.
 - [modules.md](./modules.md) — module map of the workspace.
-- **Chinese translations** — [zh/](./zh/) (home, plugins, crates, guide).
+- **Chinese translations** — [zh/](./zh/) (home, plugins, crates, guide, [http-lifecycle](./zh/http-lifecycle.md)).

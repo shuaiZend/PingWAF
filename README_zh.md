@@ -303,6 +303,7 @@ PINGWAF_CONFIG=/etc/pingwaf/pingwaf.toml pingwaf all-in-one   # 等价写法
 | [docs/quick-start.md](./docs/quick-start.md) | 从零开始，保护你的第一个站点 |
 | [docs/deployment.md](./docs/deployment.md) | Docker、二进制 + systemd、分布式拓扑 |
 | [docs/user-guide.md](./docs/user-guide.md) | 控制台使用、站点、规则与策略 |
+| [docs/zh/http-lifecycle.md](./docs/zh/http-lifecycle.md) | 请求生命周期：各项功能在流水线中的执行阶段（WAF 检查顺序、缓存、错误页）与调试方法 |
 | [docs/api.md](./docs/api.md) | REST API 参考（`https://<host>:9080/api/v1`） |
 | [docs/README.md](./docs/README.md) | 完整文档索引 |
 | [CONTRIBUTING.md](./CONTRIBUTING.md) | 如何参与贡献 |

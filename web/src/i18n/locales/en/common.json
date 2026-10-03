@@ -20,6 +20,7 @@
     "agents": "Agents",
     "settings": "Settings",
     "ipGroups": "IP Groups",
+    "lifecycle": "Request lifecycle",
     "selectSiteFirst": "Select a site first"
   },
   "sidebar": {
@@ -1516,6 +1517,118 @@
       "tabIpRules": "IP rules",
       "tabGeo": "Geo restrictions",
       "tabBasicAuth": "Basic auth"
+    },
+    "lifecycle": {
+      "title": "Request lifecycle",
+      "description": "Where every PingWAF feature acts in the proxy pipeline. Use this map to see which stage your WAF, IP, bot, rate-limit and cache rules run in, and to debug why a request was allowed, blocked or challenged.",
+      "docLink": "Full documentation",
+      "stages": {
+        "tls": {
+          "title": "TLS & connection",
+          "desc": "The TLS handshake happens before any HTTP processing: SNI selects the certificate, and when any site enables mTLS the listener verifies client certificates against the union of trusted CAs (per-site enforcement runs in the WAF plugin)."
+        },
+        "earlyRequest": {
+          "title": "Early request",
+          "desc": "The location (host + path) is matched and the request context is created, then every early_request plugin runs: the WAF plugin's full check chain (below) and the challenge verify endpoint /_pingwaf/challenge/verify. A plugin answering here short-circuits every later stage."
+        },
+        "request": {
+          "title": "Request",
+          "desc": "ACME HTTP-01 and metrics requests are answered here (after passing the WAF above), then the location path rewrite and request-step plugins run: the rewrite plugin and the cache plugin (per-session cache setup, PURGE handling). A request matching no location gets a 404 without running any plugin."
+        },
+        "cacheLookup": {
+          "title": "Cache lookup",
+          "desc": "Pingora's built-in HTTP cache. A hit ends the request without contacting the upstream — but the request already passed the WAF and rewrite. A miss continues to the upstream."
+        },
+        "upstream": {
+          "title": "Upstream",
+          "desc": "The load balancer picks a backend (with retries on connect failure), X-Forwarded-* style headers are appended, and the body is streamed upstream; oversized bodies are rejected with 413."
+        },
+        "upstreamResponse": {
+          "title": "Upstream response",
+          "desc": "The upstream response headers arrive: pingora decides whether the response may be stored in the cache, and the error page plugin can replace upstream error responses (400+, including 502/504) with the site's custom pages."
+        },
+        "response": {
+          "title": "Response",
+          "desc": "Response-step plugins run: the WAF plugin records status and size for the access log, the per-site HSTS plugin adds Strict-Transport-Security, and cache headers (Age, …) are added. Response body filters then rewrite the body — except after a 101 upgrade, where the bytes are WebSocket traffic."
+        },
+        "responseBody": {
+          "title": "Response body",
+          "desc": "At end of stream the WAF plugin emits the access log entry (with the response body sampled per the site's logging settings)."
+        },
+        "failure": {
+          "title": "Failure",
+          "desc": "Only on errors: classified as 502 upstream error / 499 client gone / 408 read timeout / 400 invalid header, then rendered with an error template that the custom error pages can replace."
+        },
+        "logging": {
+          "title": "Logging",
+          "desc": "pingap writes its own access log last. PingWAF's entries were already emitted at the stage where the decision was made: generated responses (blocks, challenges, pause pages) at request time, regular responses when the body completes."
+        }
+      },
+      "features": {
+        "ssl": "SSL/TLS",
+        "waf": "WAF engine",
+        "access": "IP & geo rules",
+        "bot": "Bot protection",
+        "rateLimit": "Rate limiting",
+        "cc": "Challenge / CC",
+        "caching": "Caching",
+        "rewrite": "Rewrite rules",
+        "origin": "Origin & pools",
+        "errorPages": "Error pages",
+        "logs": "Logs"
+      },
+      "wafTitle": "Inside the WAF plugin",
+      "wafDescription": "The checks run in this order on every request; the first one that answers ends the request.",
+      "checks": {
+        "paused": {
+          "title": "Paused site",
+          "desc": "A paused site answers with the pause page immediately — nothing else runs."
+        },
+        "mtls": {
+          "title": "mTLS client certificate",
+          "desc": "A missing or invalid client certificate is blocked at the site level."
+        },
+        "access": {
+          "title": "IP & geo rules",
+          "desc": "First match wins (priority ascending). Actions: block, allow, challenge, js_challenge — or basic_auth, deferred to the next check."
+        },
+        "basicAuth": {
+          "title": "Basic Auth",
+          "desc": "Site-wide or triggered by an IP/geo rule. Failed attempts get a small delay; unauthenticated requests get the 401 page. hide_credentials strips the Authorization header."
+        },
+        "bot": {
+          "title": "Bot protection",
+          "desc": "User-agent classification: pass, deny (block page) or log only."
+        },
+        "rateLimit": {
+          "title": "Rate limiting",
+          "desc": "Fixed-window counters per rule (IP, host, path, header, cookie…). Over the threshold the rule's action runs; challenge can issue a clearance cookie."
+        },
+        "engine": {
+          "title": "WAF engine",
+          "desc": "Signature and expression rules with an anomaly score. Verdicts: pass, monitor (log only), block, challenge."
+        }
+      },
+      "tipsTitle": "Debugging tips",
+      "tipsDescription": "Common questions answered by the lifecycle order.",
+      "tips": {
+        "observation": {
+          "title": "Observation mode",
+          "desc": "Detections keep running but block/challenge verdicts are only recorded as \"would have blocked\". Paused sites, mTLS and Basic Auth are still enforced."
+        },
+        "firstMatch": {
+          "title": "Order matters",
+          "desc": "IP and geo rules evaluate top-down and the first match wins — an allow rule above a catch-all block decides the outcome."
+        },
+        "cache": {
+          "title": "Cache never bypasses the WAF",
+          "desc": "Checks run before the cache lookup, so cached hits are inspected like any other request, and a block always wins over a cached response."
+        },
+        "customPages": {
+          "title": "Custom error pages",
+          "desc": "Error pages replace upstream error responses. WAF block/challenge pages are generated before the upstream is contacted and keep their built-in design."
+        }
+      }
     }
   },
   "challengeLevels": {
