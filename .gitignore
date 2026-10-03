@@ -95,3 +95,6 @@ Thumbs.db
 # like pingwaf.toml / pingwaf.service are untouched.
 /pingwaf
 /pingap
+
+# Python bytecode from tools/waf-bench scripts
+__pycache__/
