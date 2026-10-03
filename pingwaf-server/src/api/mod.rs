@@ -23,6 +23,7 @@ pub mod ip_rules;
 pub mod keys;
 pub mod log_retention;
 pub mod logs;
+pub mod mcp;
 pub mod mtls;
 pub mod passkeys;
 pub mod rate_limiting;
@@ -89,6 +90,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(defense::routes())
         .merge(api_protection::routes())
         .merge(ai::routes())
+        .merge(mcp::routes())
         .route("/health", get(health))
         .route("/version", get(version))
         .fallback(api_not_found);

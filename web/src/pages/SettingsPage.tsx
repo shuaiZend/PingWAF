@@ -68,6 +68,7 @@ import {
 import { passkeyKeys, passkeysApi } from '@/api/passkeys'
 import { apiProtectionApi, apiProtectionKeys } from '@/api/apiProtection'
 import { aiApi, aiKeys } from '@/api/ai'
+import { mcpApi, mcpKeys } from '@/api/mcp'
 import { ipGroupKeys, ipGroupsApi } from '@/api/ipGroups'
 import { authApi } from '@/api/auth'
 import { ApiError } from '@/api/client'
@@ -119,6 +120,7 @@ const SETTINGS_NAV = [
   { id: 'observation-mode', labelKey: 'pages.settings.observationMode' },
   { id: 'api-protection', labelKey: 'pages.settings.apiProtection' },
   { id: 'ai-assistant', labelKey: 'pages.settings.aiAssistant' },
+  { id: 'mcp', labelKey: 'pages.settings.mcp' },
   { id: 'elasticsearch', labelKey: 'pages.settings.elasticsearch' },
   { id: 'log-retention', labelKey: 'pages.settings.logRetention' },
   { id: 'error-pages', labelKey: 'pages.settings.errorPages' },
@@ -180,6 +182,9 @@ export function SettingsPage() {
             ) : (
               <AdminOnlyCard title={t('pages.settings.aiAssistant')} />
             )}
+          </section>
+          <section id="mcp" className="scroll-mt-6">
+            <McpCard />
           </section>
           <section id="elasticsearch" className="scroll-mt-6">
             {isAdmin ? (
@@ -2674,6 +2679,207 @@ function AiAssistantCard({ canWrite }: { canWrite: boolean }) {
               {dirty && (
                 <span className="text-xs text-fg-warning">{t('pages.settings.unsavedChanges')}</span>
               )}
+            </div>
+          </>
+        )}
+      </CardBody>
+    </Card>
+  )
+}
+
+/* ── MCP server ─────────────────────────────────────────────────────── */
+
+/** One copyable snippet with a caption header, shared by the MCP card. */
+function SnippetBlock({
+  caption,
+  code,
+  onCopy,
+}: {
+  caption: string
+  code: string
+  onCopy: (value: string) => void
+}) {
+  const { t } = useTranslation()
+  return (
+    <div>
+      <div className="mb-1.5 flex items-center justify-between gap-2">
+        <span className="text-xs font-medium text-fg-subtle">{caption}</span>
+        <Button
+          size="sm"
+          variant="ghost"
+          aria-label={`${t('pages.settings.copy')}: ${caption}`}
+          icon={<Copy weight="duotone" className="h-3.5 w-3.5" />}
+          onClick={() => onCopy(code)}
+        >
+          {t('pages.settings.copy')}
+        </Button>
+      </div>
+      <pre className="pw-mono break-all whitespace-pre-wrap rounded-md border border-line bg-recessed px-3 py-2 text-xs text-fg">
+        {code}
+      </pre>
+    </div>
+  )
+}
+
+/**
+ * The built-in MCP endpoint, as clients see it.
+ *
+ * The catalogue is compiled into the binary, so there is no switch to flip
+ * here — the card reports what the endpoint exposes and hands out copyable
+ * client snippets whose only variable is an API key. Viewers can connect
+ * read-only, so the card is visible to everyone; key management lives in
+ * the API keys card below, hence the jump link.
+ */
+function McpCard() {
+  const { t } = useTranslation()
+  const toast = useToast()
+
+  const status = useQuery({
+    queryKey: mcpKeys.status(),
+    queryFn: () => mcpApi.status(),
+  })
+
+  const view = status.data
+  const endpoint = view ? `${window.location.origin}${view.path}` : ''
+  const writeTools = view?.tools.filter((tool) => tool.write).length ?? 0
+  const configSnippet = JSON.stringify(
+    {
+      mcpServers: {
+        pingwaf: {
+          url: endpoint,
+          headers: { Authorization: 'Bearer pwk_YOUR_KEY' },
+        },
+      },
+    },
+    null,
+    2,
+  )
+  const cliSnippet = `claude mcp add --transport http pingwaf ${endpoint} \\\n  --header "Authorization: Bearer pwk_YOUR_KEY"`
+
+  const copy = async (value: string) => {
+    try {
+      await navigator.clipboard.writeText(value)
+      toast.success(t('pages.settings.copied'))
+    } catch {
+      toast.error(t('pages.settings.copyFailed'))
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader
+        title={t('pages.settings.mcp')}
+        description={t('pages.settings.mcpDescription')}
+        action={
+          view && (
+            <Badge tone="success" dot>
+              {t('pages.settings.mcpRunning')}
+            </Badge>
+          )
+        }
+      />
+      <CardBody className="flex flex-col gap-5">
+        {status.isError && !view ? (
+          <ErrorState
+            variant="inline"
+            error={status.error}
+            onRetry={() => status.refetch()}
+            retrying={status.isFetching}
+          />
+        ) : !view ? (
+          <SkeletonRows rows={3} columns={2} />
+        ) : (
+          <>
+            <div>
+              <p className="mb-1.5 text-xs font-medium text-fg-subtle">
+                {t('pages.settings.mcpEndpoint')}
+              </p>
+              <div className="flex items-center gap-2">
+                <code className="pw-mono min-w-0 flex-1 truncate rounded-md border border-line bg-recessed px-3 py-2 text-xs text-fg">
+                  {endpoint}
+                </code>
+                <Button
+                  size="icon"
+                  variant="secondary"
+                  aria-label={`${t('pages.settings.copy')}: ${t('pages.settings.mcpEndpoint')}`}
+                  icon={<Copy weight="duotone" className="h-4 w-4" />}
+                  onClick={() => copy(endpoint)}
+                />
+              </div>
+            </div>
+
+            <dl className="grid gap-4 text-[13px] sm:grid-cols-2">
+              <div>
+                <dt className="text-xs font-medium text-fg-subtle">
+                  {t('pages.settings.mcpTransport')}
+                </dt>
+                <dd className="mt-1 text-fg">{t('pages.settings.mcpTransportValue')}</dd>
+              </div>
+              <div>
+                <dt className="text-xs font-medium text-fg-subtle">
+                  {t('pages.settings.mcpAuth')}
+                </dt>
+                <dd className="mt-1 text-fg">{t('pages.settings.mcpAuthValue')}</dd>
+              </div>
+            </dl>
+
+            <p className="text-[13px] text-fg-subtle">
+              {t('pages.settings.mcpCapabilities', {
+                tools: view.tools.length,
+                write: writeTools,
+                prompts: view.prompts,
+                resources: view.resources,
+              })}
+            </p>
+
+            <div>
+              <p className="mb-1.5 text-xs font-medium text-fg-subtle">
+                {t('pages.settings.mcpTools')}
+              </p>
+              <div className="flex flex-wrap gap-1.5">
+                {view.tools.map((tool) => (
+                  <span
+                    key={tool.name}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-line bg-elevated px-2 py-1"
+                  >
+                    <code className="pw-mono text-xs text-fg">{tool.name}</code>
+                    {tool.write && (
+                      <Badge size="sm" tone="warning">
+                        {t('pages.settings.mcpWriteTag')}
+                      </Badge>
+                    )}
+                  </span>
+                ))}
+              </div>
+            </div>
+
+            <SnippetBlock
+              caption={t('pages.settings.mcpClientConfig')}
+              code={configSnippet}
+              onCopy={copy}
+            />
+            <SnippetBlock
+              caption={t('pages.settings.mcpCli')}
+              code={cliSnippet}
+              onCopy={copy}
+            />
+
+            <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line pt-4">
+              <p className="max-w-xl text-xs leading-relaxed text-fg-subtle">
+                {t('pages.settings.mcpNote')}
+              </p>
+              <Button
+                size="sm"
+                variant="secondary"
+                icon={<Key weight="duotone" className="h-4 w-4" />}
+                onClick={() =>
+                  document
+                    .getElementById('api-keys')
+                    ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+                }
+              >
+                {t('pages.settings.mcpManageKeys')}
+              </Button>
             </div>
           </>
         )}

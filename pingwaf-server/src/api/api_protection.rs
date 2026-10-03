@@ -18,7 +18,7 @@ use axum::{Extension, Json};
 use chrono::Utc;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter,
-    QueryOrder, Set,
+    QueryOrder, Set, Unchanged,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -109,6 +109,30 @@ where
         Some(raw) => Uuid::parse_str(raw.trim())
             .map(|id| Some(Some(id)))
             .map_err(D::Error::custom),
+    }
+}
+
+/// Converts a merged row into an [`api_protection_setting::ActiveModel`] that
+/// writes every column.
+///
+/// The plain `ActiveModel::from(model)` conversion marks every field
+/// `Unchanged`, and SeaORM only writes the columns explicitly marked `Set`:
+/// with just `updated_at` set, a save would discard every edited switch while
+/// answering `Ok`. [`the_model_writer_marks_every_column_for_writing`] fails
+/// when a future column is added without updating this function.
+fn writable(
+    row: api_protection_setting::Model,
+) -> api_protection_setting::ActiveModel {
+    api_protection_setting::ActiveModel {
+        id: Unchanged(row.id),
+        access_log_enabled: Set(row.access_log_enabled),
+        access_log_retention_days: Set(row.access_log_retention_days),
+        ip_allowlist_enabled: Set(row.ip_allowlist_enabled),
+        ip_allowlist_ranges: Set(row.ip_allowlist_ranges),
+        ip_allowlist_group_id: Set(row.ip_allowlist_group_id),
+        waf_enabled: Set(row.waf_enabled),
+        waf_mode: Set(row.waf_mode),
+        updated_at: Set(row.updated_at),
     }
 }
 
@@ -219,7 +243,7 @@ async fn update(
         }
     }
 
-    let mut active: api_protection_setting::ActiveModel = prospective.into();
+    let mut active = writable(prospective);
     active.updated_at = Set(Utc::now());
     let updated = active.update(&state.db).await?;
 
@@ -338,6 +362,44 @@ async fn list_logs(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stored() -> api_protection_setting::Model {
+        api_protection_setting::Model {
+            id: 1,
+            access_log_enabled: true,
+            access_log_retention_days: 30,
+            ip_allowlist_enabled: false,
+            ip_allowlist_ranges: vec!["10.0.0.0/8".to_string()],
+            ip_allowlist_group_id: None,
+            waf_enabled: true,
+            waf_mode: waf_mode::BLOCK.to_string(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn the_model_writer_marks_every_column_for_writing() {
+        // Regression: merging edits into a `Model` and then `.into()`-ing it
+        // leaves every field `Unchanged`, so only `updated_at` (the single
+        // explicit `Set`) reached the database — every switch the operator
+        // flipped was silently discarded. All non-PK columns must be `Set`;
+        // this test fails when a new column lands without updating
+        // `writable()`.
+        use sea_orm::{ActiveValue, Iterable, PrimaryKeyToColumn};
+
+        let active = writable(stored());
+        for column in api_protection_setting::Column::iter() {
+            if api_protection_setting::PrimaryKey::from_column(column).is_some()
+            {
+                continue;
+            }
+            let value = active.get(column);
+            assert!(
+                matches!(value, ActiveValue::Set(_)),
+                "column {column:?} is {value:?}: writable() must Set it"
+            );
+        }
+    }
 
     #[test]
     fn group_reference_distinguishes_absent_null_and_clear() {

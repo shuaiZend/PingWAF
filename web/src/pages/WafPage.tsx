@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { useParams } from 'react-router-dom'
+import { useParams, useSearchParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -68,6 +68,7 @@ export function WafPage() {
   const queryClient = useQueryClient()
   const canWrite = useCanWrite()
   const { siteId = '' } = useParams<{ siteId: string }>()
+  const [searchParams, setSearchParams] = useSearchParams()
 
   const [search, setSearch] = useState('')
   const debouncedSearch = useDebouncedValue(search.trim(), 300)
@@ -256,6 +257,34 @@ export function WafPage() {
     setEditing(rule)
     setPresetTags(undefined)
     setDialogOpen(true)
+  }
+
+  const closeDialog = () => {
+    setDialogOpen(false)
+    setEditing(null)
+    setPresetTags(undefined)
+    if (searchParams.has('rule')) {
+      const next = new URLSearchParams(searchParams)
+      next.delete('rule')
+      setSearchParams(next, { replace: true })
+    }
+  }
+
+  // Deep link from the log console: /sites/:siteId/security/waf?rule=<id>
+  // opens that rule's dialog once the list has loaded. `null` until the first
+  // matching pass, so a link present at mount still opens; the param is
+  // stripped on close so revisiting the same link opens the dialog again.
+  const requestedRuleId = searchParams.get('rule')
+  const [lastRequestedRuleId, setLastRequestedRuleId] = useState<string | null>(null)
+  if (
+    canWrite &&
+    requestedRuleId &&
+    !rulesQuery.isPending &&
+    requestedRuleId !== lastRequestedRuleId
+  ) {
+    setLastRequestedRuleId(requestedRuleId)
+    const rule = allRules.find((r) => r.id === requestedRuleId)
+    if (rule) openEdit(rule)
   }
 
   /* ── Columns ─────────────────────────────────────────────────────── */
@@ -844,11 +873,7 @@ export function WafPage() {
       {/* ── Dialogs ──────────────────────────────────────────────────── */}
       <RuleDialog
         open={dialogOpen}
-        onClose={() => {
-          setDialogOpen(false)
-          setEditing(null)
-          setPresetTags(undefined)
-        }}
+        onClose={closeDialog}
         siteId={siteId}
         groups={groups}
         rule={editing}
