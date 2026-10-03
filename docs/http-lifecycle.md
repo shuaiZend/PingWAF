@@ -64,7 +64,7 @@ Client
   ▼
 ┌─ fail_to_proxy（仅出错时） ───────────────────────────────────────────────┐
 │  错误分类：502 上游错误 / 499 客户端断开 / 408 读取超时 / 400 非法头       │
-│  渲染错误页（可被站点自定义错误页覆盖）                                    │
+│  内置错误模板渲染（不运行插件，自定义错误页不生效）                        │
 └──────────────────────────────────────────────────────────────────────────┘
   ▼
 ┌─ logging ────────────────────────────────────────────────────────────────┐
@@ -83,7 +83,7 @@ Client
 | 4 | Upstream | `proxy_upstream_filter`, `upstream_peer`, `connected_to_upstream`, `upstream_request_filter`, `request_body_filter` | Plugins registered for the `proxy_upstream` step run; the load balancer picks a peer (with retries on connect failure); `X-Forwarded-*` style headers are appended; the request body is streamed upstream and oversized bodies are rejected with `413`. |
 | 5 | Upstream response | `upstream_response_filter`, `upstream_response_body_filter` | The upstream response headers arrive: pingora decides whether the response may be stored in the cache, `X-Request-Id` is set, and the error page plugin may replace upstream error responses with the site's configured pages (400 and above, including 502/504). |
 | 6 | Response | `response_filter`, `response_body_filter` | Response-step plugins run: the error page plugin gets a second chance on responses, the WAF plugin records the status/size for the access log, the per-site HSTS plugin adds `Strict-Transport-Security`, and cache headers (`Age`, …) are added. Body filters rewrite the response body — except after a `101 Switching Protocols` upgrade, where the bytes are WebSocket traffic, not an HTTP body. At end of stream the WAF plugin emits the access log entry (with response body sampled per the site's logging settings). |
-| 7 | Failure | `fail_to_proxy` | Only on errors: classified as `502` (upstream error), `499` (client gone), `408` (read timeout) or `400` (invalid header) and rendered with an error template — which the site's custom error pages can replace. |
+| 7 | Failure | `fail_to_proxy` | Only on errors: classified as `502` (upstream error), `499` (client gone), `408` (read timeout) or `400` (invalid header) and rendered with pingap's built-in error template. No plugins run here, so **custom error pages cannot replace this page** either. |
 | 8 | Logging | `logging` | pingap writes its own access log last. PingWAF's log entries were already emitted at the stage where the decision was made (see [Debugging](#debugging-with-the-lifecycle)). |
 
 Plugin **step** names map to the configuration key `step` of each plugin
@@ -138,14 +138,40 @@ site's cache rules (Site → Caching); a hit is decided in stage 3, after the
 WAF and rewrite plugins already ran, so cache hits cannot bypass security
 checks, and a WAF block always wins over a cached response.
 
+## Response modifications and the cache
+
+When a response is both cached and modified, *where* the modification happens
+decides what the cache stores:
+
+- **Upstream phase, before the cache write** — changes made by
+  `upstream_response_filter` / `upstream_response_body_filter` are part of the
+  stored copy. In stock pingap this covers the compression plugin (the
+  compressed body is cached) and `response_headers` configured with
+  `mode = "upstream"`.
+- **Response phase, after the cache write** — changes made by
+  `response_filter` / `response_body_filter` are applied **on every serve**,
+  cache hits included: a cached response still runs the response filters (only
+  the upstream filters are skipped), so the client always gets the modified
+  response while the stored copy keeps the upstream's original bytes.
+  PingWAF's rewrite response rules and the per-site HSTS header work this way,
+  so they are never baked into the cache.
+- **Error page replacements are never stored** — while replacing a response
+  the plugin sends `Cache-Control: private, no-store`, so the generated page
+  is served but not written to the cache.
+
+A practical consequence: modifying a response in the response phase (a PingWAF
+rewrite rule) does not change what is cached — the modification runs again on
+every request, including cache hits. To store a modified response, make the
+change in the upstream phase.
+
 ## Debugging with the lifecycle
 
 Start with the **Logs** page, then walk the pipeline:
 
-- **A request never reached the WAF** — it matched no location (`404` at
-  stage 2, no plugin runs), or the response came from the cache at stage 3
-  (the WAF had already inspected the request, but the entry you are looking
-  for is the cached response, not a fresh upstream call).
+- **A request has no WAF entry** — it matched no location (`404` at stage 2,
+  where no plugin runs). A cache hit is *not* a cause: the WAF inspected the
+  request at stage 1 and the access entry is still emitted — only the response
+  body comes from the cache instead of the upstream.
 - **Certificate issuance fails** — ACME HTTP-01 requests are answered at
   stage 2, but only after the `early_request` plugins: an IP or rate rule
   that blocks `/.well-known/acme-challenge/*` also blocks renewal.
@@ -158,8 +184,9 @@ Start with the **Logs** page, then walk the pipeline:
   `allow` rule ran earlier.
 - **"The custom error page isn't used"** — pages configured under Settings →
   Error pages replace *upstream* error responses (stage 5). WAF block/challenge
-  pages are generated before the upstream is contacted and keep their built-in
-  design.
+  pages are generated before the upstream is contacted, and proxy failures at
+  `fail_to_proxy` (stage 7) are rendered without running any plugin — neither
+  is replaced by custom pages, and both keep their built-in design.
 - **"Origin never saw the request"** — find the last stage in the logs: cache
   hit (stage 3), WAF answer (stage 1), or a `413` from the body size limit
   (stage 4).

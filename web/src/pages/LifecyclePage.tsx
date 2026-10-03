@@ -47,7 +47,7 @@ const STAGES: Stage[] = [
   },
   { key: 'response', hook: 'response_filter', features: ['errorPages', 'ssl', 'rewrite'] },
   { key: 'responseBody', hook: 'response_body_filter', features: ['rewrite'] },
-  { key: 'failure', hook: 'fail_to_proxy', features: ['errorPages'] },
+  { key: 'failure', hook: 'fail_to_proxy', features: [] },
   { key: 'logging', hook: 'logging', features: ['logs'] },
 ]
 
@@ -68,7 +68,13 @@ const WAF_CHECKS: WafCheck[] = [
   { key: 'engine', feature: 'waf' },
 ]
 
-const TIPS = ['observation', 'firstMatch', 'cache', 'customPages'] as const
+const TIPS = [
+  'observation',
+  'firstMatch',
+  'cache',
+  'customPages',
+  'responseCache',
+] as const
 
 /**
  * Request lifecycle reference.
