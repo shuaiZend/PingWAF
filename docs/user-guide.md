@@ -469,6 +469,44 @@ Known-bot entries are case-insensitive substrings matched against the User-Agent
 
 JavaScript detection, TLS fingerprinting and behavioral analysis appear in the console as *Coming soon* — they are roadmap items, not implemented yet.
 
+## AI Assistant
+
+```
+Settings → AI assistant · sidebar assistant icon
+```
+
+The console embeds an AI assistant that answers questions about your deployment by calling the same MCP tools external clients use (see below). Configure an OpenAI-compatible provider under **Settings → AI assistant**:
+
+| Setting | Description |
+|---------|-------------|
+| Enable assistant | Master switch; the AI Assistant page prompts for setup while it is off |
+| Base URL | OpenAI-compatible endpoint, e.g. `https://api.openai.com/v1` |
+| Model | Model name, e.g. `gpt-4o-mini` |
+| API key | Provider credential, stored server-side and shown masked afterwards |
+| Temperature | 0–2; lower answers change less between runs |
+| Max tool rounds | How many tool-call rounds one answer may take (1–10) |
+| System prompt | Prefilled with the built-in default; clear and save to reuse it |
+| Allow write tools | Off by default; enables the tools that change state (observation mode, site enable/disable) |
+
+**Test draft** verifies the provider without saving. Once enabled, ask a question on the AI Assistant page and watch tool calls appear inline as the answer streams. Conversations are stored server-side, so history survives reloads, and the assistant is administrator-only.
+
+## MCP Server
+
+```
+Settings → MCP server
+```
+
+Every deployment hosts an MCP (Model Context Protocol) endpoint at `/mcp` on the console origin, so external AI agents — Claude Code, IDE copilots, scripts — can inspect and operate the firewall. The Settings card shows the live endpoint, the tool inventory (write tools tagged), and copy-paste client snippets.
+
+To connect a client you need an API key (**Settings → API keys**) with the `read` permission; add `write`, whose owner must be an administrator, for the two tools that change state. Then paste the card's JSON into the client, or for Claude Code run:
+
+```bash
+claude mcp add --transport http pingwaf https://waf.example.com:9080/mcp \
+  --header "Authorization: Bearer pwk_YOUR_KEY"
+```
+
+Read-only credentials see only the read tools; administrators with a `write` key may also call `set_observation_mode` and `set_site_status`. The endpoint sits behind the same API protection as the console (access log, IP allowlist, WAF), so it obeys whatever **Settings → API protection** allows.
+
 ## Internationalization (i18n)
 
 The dashboard supports multiple languages:

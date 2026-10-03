@@ -1465,7 +1465,22 @@
       "aiSaved": "AI 助手设置已保存",
       "aiTestOk": "连接成功",
       "aiTestFailed": "连接失败",
-      "aiTestReply": "回复"
+      "aiTestReply": "回复",
+      "mcp": "MCP 服务",
+      "mcpDescription": "内置 MCP（Model Context Protocol）端点，Claude Code、Cursor 等 AI 客户端可直接连接控制台查询与操作。",
+      "mcpRunning": "运行中",
+      "mcpEndpoint": "接入地址",
+      "mcpTransport": "传输方式",
+      "mcpTransportValue": "Streamable HTTP · POST",
+      "mcpAuth": "鉴权",
+      "mcpAuthValue": "Bearer API 密钥（pwk_…）或控制台 JWT",
+      "mcpCapabilities": "{{tools}} 个工具（{{write}} 个写入）· {{prompts}} 个提示词 · {{resources}} 个资源",
+      "mcpTools": "可用工具",
+      "mcpWriteTag": "写",
+      "mcpClientConfig": "客户端配置（JSON）",
+      "mcpCli": "Claude Code 一条命令",
+      "mcpNote": "MCP 与控制台共用凭据，并受「API 防护」（IP 白名单、WAF）约束；写入工具需要带 write 权限且所有者为管理员的密钥。",
+      "mcpManageKeys": "管理 API 密钥"
     },
     "geo": {
       "title": "地域限制",

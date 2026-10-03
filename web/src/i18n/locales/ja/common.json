@@ -1465,7 +1465,22 @@
       "aiSaved": "AI アシスタントの設定を保存しました",
       "aiTestOk": "接続に成功しました",
       "aiTestFailed": "接続に失敗しました",
-      "aiTestReply": "応答"
+      "aiTestReply": "応答",
+      "mcp": "MCP サーバー",
+      "mcpDescription": "組み込みの Model Context Protocol エンドポイント。Claude Code や Cursor などの AI クライアントからコンソールへ直接接続できます。",
+      "mcpRunning": "稼働中",
+      "mcpEndpoint": "接続先",
+      "mcpTransport": "トランスポート",
+      "mcpTransportValue": "Streamable HTTP · POST",
+      "mcpAuth": "認証",
+      "mcpAuthValue": "Bearer API キー（pwk_…）またはコンソール JWT",
+      "mcpCapabilities": "ツール {{tools}} 件（書き込み {{write}} 件）· プロンプト {{prompts}} 件 · リソース {{resources}} 件",
+      "mcpTools": "利用可能なツール",
+      "mcpWriteTag": "書",
+      "mcpClientConfig": "クライアント設定（JSON）",
+      "mcpCli": "Claude Code ワンライナー",
+      "mcpNote": "MCP はコンソールの認証情報を共用し、API 保護（IP 許可リスト・WAF）の対象です。書き込みツールには write 権限を持ち、所有者が管理者のキーが必要です。",
+      "mcpManageKeys": "API キーを管理"
     },
     "geo": {
       "title": "地域制限",

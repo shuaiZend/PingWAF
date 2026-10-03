@@ -1,6 +1,6 @@
-import { Fragment, useMemo, useState } from 'react'
+import { Fragment, useMemo, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
-import { useSearchParams } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import {
   ShieldWarning,
@@ -900,7 +900,21 @@ export function LogsPage() {
                 [t('pages.logs.method'), selectedEvent.method],
                 [t('pages.logs.host'), selectedEvent.host],
                 [t('pages.logs.path'), selectedEvent.path],
-                [t('pages.logs.rule'), selectedEvent.rule_id],
+                [
+                  t('pages.logs.rule'),
+                  selectedEvent.rule_id ? (
+                    selectedEvent.site_id ? (
+                      <Link
+                        to={`/sites/${selectedEvent.site_id}/security/waf?rule=${selectedEvent.rule_id}`}
+                        className="text-link hover:underline"
+                      >
+                        {selectedEvent.rule_id}
+                      </Link>
+                    ) : (
+                      selectedEvent.rule_id
+                    )
+                  ) : undefined,
+                ],
                 [t('pages.logs.requestId'), selectedEvent.request_id],
                 [t('pages.logs.agent'), selectedEvent.agent_id],
                 [t('pages.logs.site'), selectedEvent.site_id],
@@ -942,8 +956,16 @@ export function LogsPage() {
         open={selectedLog !== null}
         onClose={() => setSelectedLog(null)}
         size="lg"
-        title={t('pages.logs.accessDetail')}
-        description={selectedLog ? `${selectedLog.method} ${selectedLog.path ?? ''}`.trim() : undefined}
+        title={
+          <span className="flex items-center gap-2">
+            {t('pages.logs.accessDetail')}
+            {selectedLog?.status_code != null && (
+              <Badge tone={statusTone(selectedLog.status_code)} size="sm">
+                {selectedLog.status_code}
+              </Badge>
+            )}
+          </span>
+        }
         footer={
           <div className="flex items-center justify-end gap-2">
             <Button variant="ghost" onClick={() => setSelectedLog(null)}>
@@ -961,27 +983,22 @@ export function LogsPage() {
       >
         {selectedLog && (
           <div className="flex flex-col gap-4">
-            <div className="flex flex-wrap items-center gap-2">
-              {selectedLog.status_code && (
-                <Badge tone={statusTone(selectedLog.status_code)}>{selectedLog.status_code}</Badge>
-              )}
-              {selectedLog.cache_status && (
-                <Badge tone={selectedLog.cache_status === 'hit' ? 'success' : 'neutral'}>
-                  {selectedLog.cache_status}
-                </Badge>
-              )}
-              {selectedLog.tls_version && <Badge tone="info">{selectedLog.tls_version}</Badge>}
-            </div>
+            {(selectedLog.cache_status || selectedLog.tls_version) && (
+              <div className="flex flex-wrap items-center gap-2">
+                {selectedLog.cache_status && (
+                  <Badge tone={selectedLog.cache_status === 'hit' ? 'success' : 'neutral'}>
+                    {selectedLog.cache_status}
+                  </Badge>
+                )}
+                {selectedLog.tls_version && <Badge tone="info">{selectedLog.tls_version}</Badge>}
+              </div>
+            )}
             <DefinitionGrid
               rows={[
                 [t('pages.logs.time'), formatDateTime(selectedLog.timestamp)],
                 [t('pages.logs.clientIp'), selectedLog.client_ip],
                 [t('pages.logs.country'), selectedLog.country_code?.toUpperCase()],
-                [t('pages.logs.method'), selectedLog.method],
                 [t('pages.logs.host'), selectedLog.host],
-                [t('pages.logs.path'), selectedLog.path],
-                [t('pages.logs.queryString'), selectedLog.query_string],
-                [t('pages.logs.statusCode'), selectedLog.status_code?.toString()],
                 [t('pages.logs.size'), selectedLog.response_size != null ? formatSize(selectedLog.response_size) : undefined],
                 [t('pages.logs.upstream'), selectedLog.upstream_addr],
                 [
@@ -998,7 +1015,6 @@ export function LogsPage() {
                 ],
                 [t('pages.logs.cacheStatus'), selectedLog.cache_status],
                 [t('pages.logs.requestId'), selectedLog.request_id],
-                [t('pages.logs.agent'), selectedLog.agent_id],
               ]}
             />
             <RawSection
@@ -1125,7 +1141,7 @@ export function LogsPage() {
 }
 
 /** Two-column label/value list used by both detail dialogs. */
-function DefinitionGrid({ rows }: { rows: [string, string | null | undefined][] }) {
+function DefinitionGrid({ rows }: { rows: [string, ReactNode][] }) {
   const visible = rows.filter(([, value]) => value !== null && value !== undefined && value !== '')
   if (visible.length === 0) return null
   return (

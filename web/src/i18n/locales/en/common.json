@@ -1465,7 +1465,22 @@
       "aiSaved": "AI assistant settings saved",
       "aiTestOk": "Provider reachable",
       "aiTestFailed": "Provider check failed",
-      "aiTestReply": "Reply"
+      "aiTestReply": "Reply",
+      "mcp": "MCP server",
+      "mcpDescription": "Built-in Model Context Protocol endpoint; AI clients such as Claude Code and Cursor connect straight to the console.",
+      "mcpRunning": "Running",
+      "mcpEndpoint": "Endpoint",
+      "mcpTransport": "Transport",
+      "mcpTransportValue": "Streamable HTTP · POST",
+      "mcpAuth": "Authentication",
+      "mcpAuthValue": "Bearer API key (pwk_…) or console JWT",
+      "mcpCapabilities": "{{tools}} tools ({{write}} write) · {{prompts}} prompts · {{resources}} resources",
+      "mcpTools": "Available tools",
+      "mcpWriteTag": "write",
+      "mcpClientConfig": "Client configuration (JSON)",
+      "mcpCli": "Claude Code one-liner",
+      "mcpNote": "MCP shares console credentials and rides the API protection (IP allowlist, WAF); write tools need a key carrying write whose owner is an administrator.",
+      "mcpManageKeys": "Manage API keys"
     },
     "geo": {
       "title": "Geo Restrictions",

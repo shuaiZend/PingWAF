@@ -1800,3 +1800,20 @@ export type AiChatEvent =
     }
   | { type: 'done'; content: string }
   | { type: 'error'; message: string }
+
+/* ── MCP server ───────────────────────────────────────────────────── */
+
+/** `api::mcp::McpToolInfo` — one tool the hosted MCP endpoint exposes. */
+export interface McpToolInfo {
+  name: string
+  write: boolean
+}
+
+/** `api::mcp::McpStatusView` — `GET /settings/mcp`. */
+export interface McpStatus {
+  path: string
+  transport: string
+  tools: McpToolInfo[]
+  prompts: number
+  resources: number
+}

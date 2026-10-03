@@ -2530,6 +2530,54 @@ Because the route hangs off the root router, the 9080 self-protection stack —
 access log, IP allowlist, WAF ([see API protection](#get-settingsapi-protection))
 — applies to `/mcp` exactly as it does to the REST API.
 
+### GET /settings/mcp
+
+Introspection for the MCP endpoint, used by the Settings card: where the
+endpoint lives and what this build exposes. Any authenticated console user
+(viewers included — they may connect read-only).
+
+**Response (200):**
+```json
+{
+  "path": "/mcp",
+  "transport": "streamable_http",
+  "tools": [
+    { "name": "list_sites", "write": false },
+    { "name": "set_site_status", "write": true }
+  ],
+  "prompts": 3,
+  "resources": 5
+}
+```
+
+`tools` lists the full catalogue in order, `write` marking the tools that
+require a write credential. `prompts` and `resources` count what
+`prompts/list` and `resources/list` will serve.
+
+### Connecting a client
+
+Point the client at `<console origin>/mcp` and authenticate with a `pwk_…`
+API key (create one under **Settings → API keys** with the `read` permission,
+plus `write` for the write tools). A generic Streamable HTTP client:
+
+```json
+{
+  "mcpServers": {
+    "pingwaf": {
+      "url": "https://waf.example.com:9080/mcp",
+      "headers": { "Authorization": "Bearer pwk_YOUR_KEY" }
+    }
+  }
+}
+```
+
+Claude Code takes the same settings in one command:
+
+```bash
+claude mcp add --transport http pingwaf https://waf.example.com:9080/mcp \
+  --header "Authorization: Bearer pwk_YOUR_KEY"
+```
+
 ### Tools
 
 The registry is shared with the AI assistant; `tools/list` returns only the

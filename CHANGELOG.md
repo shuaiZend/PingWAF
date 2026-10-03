@@ -77,6 +77,29 @@ verbatim for reference and attribution, and is not maintained here.
   installer starts the agent service itself (`systemctl enable --now` in agent
   mode), the redundant binary-only command is gone, and the raw token is no
   longer displayed — it already rides inside the command.
+- *(dashboard)* Settings gains an **MCP server** card: the live endpoint URL
+  with a copy button, the transport and authentication facts, the full tool
+  inventory with write tags, and copy-paste client snippets (a generic JSON
+  config and the `claude mcp add` one-liner) plus a jump to the API-keys card
+  for the credential. It is backed by a new `GET /settings/mcp` endpoint that
+  any authenticated user may read — viewers can connect read-only.
+
+### 🐛 Bug Fixes
+
+- *(api)* Fix saves of the AI settings and API protection being silent no-ops.
+  Both handlers rebuilt the row through `ActiveModel::from(model)`, where every
+  column arrives as `Unchanged`; SeaORM treats an all-unchanged model as a
+  no-op, skips the `UPDATE` and returns the stale row with `200 OK`. The
+  console therefore reported a successful save while the AI provider config —
+  and, after the API-protection write only touched `updated_at`, the whole
+  settings page — kept showing "unsaved changes" and "disabled". Both writers
+  now explicitly `Set` every column, with exhaustive tests that walk the
+  entity's column list and fail when a future column is left `Unchanged`.
+- *(dashboard)* Log detail dialogs trim the rows the raw capture already
+  shows: node, query string, path and method are removed, and the status code
+  is a badge next to the "Access log detail" title. In the security-event
+  dialog the rule id is now a link that opens that rule's editor on the site's
+  WAF page, so a detection can be inspected without searching for the rule.
 
 ### 🔧 Internal
 
@@ -87,8 +110,11 @@ verbatim for reference and attribution, and is not maintained here.
   `POST /sites/{site_id}/cache/defaults`); the `422` error code now reads
   `unprocessable_entity`, matching the implementation. The AI assistant and
   MCP server are documented as well: the AI settings and conversation
-  endpoints (including the SSE event stream) and the `/mcp` JSON-RPC surface
-  with its authentication rules and tool inventory.
+  endpoints (including the SSE event stream), the `/mcp` JSON-RPC surface
+  with its authentication rules and tool inventory, and `GET /settings/mcp`.
+  The user guide gains an "AI Assistant & MCP" chapter covering provider
+  setup, day-to-day use of the assistant page and connecting external MCP
+  clients.
 
 ## [PingWAF 0.18.0] — 2026-09-30
 

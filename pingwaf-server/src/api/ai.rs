@@ -19,7 +19,7 @@ use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter,
-    QueryOrder, QuerySelect,
+    QueryOrder, QuerySelect, Set, Unchanged,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -206,6 +206,30 @@ fn apply_update(
     })
 }
 
+/// Converts a merged row into an [`ai_setting::ActiveModel`] that writes
+/// every column.
+///
+/// The plain `ActiveModel::from(model)` conversion marks every field
+/// `Unchanged`, and SeaORM silently skips an `UPDATE` that has no values to
+/// write (`Updater::is_noop`): the call would answer `Ok` with the stored
+/// row while persisting nothing. Marking each column [`Set`] keeps saves
+/// honest; [`the_model_writer_marks_every_column_for_writing`] fails when a
+/// future column is added without updating this function.
+fn writable(row: ai_setting::Model) -> ai_setting::ActiveModel {
+    ai_setting::ActiveModel {
+        id: Unchanged(row.id),
+        enabled: Set(row.enabled),
+        base_url: Set(row.base_url),
+        api_key: Set(row.api_key),
+        model: Set(row.model),
+        system_prompt: Set(row.system_prompt),
+        temperature: Set(row.temperature),
+        max_tool_rounds: Set(row.max_tool_rounds),
+        allow_write_tools: Set(row.allow_write_tools),
+        updated_at: Set(row.updated_at),
+    }
+}
+
 /// `GET /api/v1/settings/ai` — administrators only.
 async fn show_settings(
     State(state): State<AppState>,
@@ -233,9 +257,7 @@ async fn update_settings(
         allow_write_tools = merged.allow_write_tools,
         "AI assistant settings updated"
     );
-    let updated = ai_setting::ActiveModel::from(merged)
-        .update(&state.db)
-        .await?;
+    let updated = writable(merged).update(&state.db).await?;
     Ok(Json(view_of(&updated)))
 }
 
@@ -750,5 +772,28 @@ mod tests {
         let mut custom = stored();
         custom.system_prompt = "  custom prompt  ".to_string();
         assert_eq!(view_of(&custom).system_prompt, "custom prompt");
+    }
+
+    #[test]
+    fn the_model_writer_marks_every_column_for_writing() {
+        // Regression: `ActiveModel::from(model)` leaves every field
+        // `Unchanged`, so `update()` hits SeaORM's `Updater::is_noop` short
+        // circuit — the row is read back unchanged and the API reports a
+        // successful save that never happened. Every non-PK column must be
+        // `Set`; this test fails when a new column lands without being added
+        // to `writable()`.
+        use sea_orm::{ActiveValue, Iterable, PrimaryKeyToColumn};
+
+        let active = writable(stored());
+        for column in ai_setting::Column::iter() {
+            if ai_setting::PrimaryKey::from_column(column).is_some() {
+                continue;
+            }
+            let value = active.get(column);
+            assert!(
+                matches!(value, ActiveValue::Set(_)),
+                "column {column:?} is {value:?}: writable() must Set it"
+            );
+        }
     }
 }
