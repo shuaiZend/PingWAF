@@ -11,6 +11,7 @@ import {
   Trash,
   Funnel,
   Terminal,
+  LockKey,
 } from '@phosphor-icons/react'
 import { PageHeader } from '@/components/PageHeader'
 import { Card, CardBody } from '@/components/ui/Card'
@@ -27,7 +28,9 @@ import { SkeletonRows } from '@/components/ui/Skeleton'
 import { useToast } from '@/components/ui/Toast'
 import { ErrorState } from '@/components/ErrorState'
 import { downloadJson, fileTimestamp, logKeys, logsApi } from '@/api/logs'
+import { apiProtectionApi, apiProtectionKeys } from '@/api/apiProtection'
 import { useCanWrite, useSitesList } from '@/hooks'
+import { useAuthStore } from '@/stores/authStore'
 import { cn } from '@/lib/utils'
 import { buildCurlCommand } from '@/lib/curl'
 import { parseLogQuery } from '@/lib/logQuery'
@@ -40,9 +43,15 @@ import {
   statusTone,
   toLocalInputValue,
 } from '@/lib/format'
-import type { AccessLog, LogQueryParams, SecurityEvent } from '@/api/types'
+import type {
+  AccessLog,
+  ControlPlaneAccessLog,
+  ControlPlaneLogQuery,
+  LogQueryParams,
+  SecurityEvent,
+} from '@/api/types'
 
-type Tab = 'security' | 'access'
+type Tab = 'security' | 'access' | 'control'
 
 const RANGE_PRESETS = [
   { value: '1', label: '1h' },
@@ -67,6 +76,14 @@ const ACTION_TONE: Record<string, 'danger' | 'warning' | 'info' | 'success' | 'n
   pass: 'success',
 }
 
+/** Decisions recorded on `control_plane_access_logs.action`. */
+const CONTROL_ACTION_TONE: Record<string, 'danger' | 'warning' | 'info' | 'success' | 'neutral'> = {
+  allowed: 'success',
+  blocked_allowlist: 'danger',
+  blocked_waf: 'danger',
+  observed_waf: 'warning',
+}
+
 /** Time window used when the URL carries none: the trailing 24 hours. */
 function defaultWindow(): { from: string; to: string } {
   const to = new Date()
@@ -78,13 +95,22 @@ export function LogsPage() {
   const { t } = useTranslation()
   const toast = useToast()
   const canWrite = useCanWrite()
+  const isAdmin = useAuthStore((s) => s.user?.role) === 'admin'
   const [searchParams, setSearchParams] = useSearchParams()
 
   // The URL is the source of truth for the query (tab/q/site/from/to), so a
   // drill-down link or a browser reload restores the exact result set. The
   // text box keeps a local draft until Enter commits it.
   const [window] = useState(defaultWindow)
-  const tab: Tab = searchParams.get('tab') === 'access' ? 'access' : 'security'
+  const tabParam = searchParams.get('tab')
+  // The control plane tab is administrators-only (the endpoint is too); a
+  // viewer landing on a shared link silently falls back to the default tab.
+  const tab: Tab =
+    tabParam === 'access'
+      ? 'access'
+      : tabParam === 'control' && isAdmin
+        ? 'control'
+        : 'security'
   const searchText = searchParams.get('q') ?? ''
   const siteId = searchParams.get('site_id') ?? ''
   const fromValue = searchParams.get('from') ?? window.from
@@ -98,6 +124,7 @@ export function LogsPage() {
   const [pageSize, setPageSize] = useState(50)
   const [selectedEvent, setSelectedEvent] = useState<SecurityEvent | null>(null)
   const [selectedLog, setSelectedLog] = useState<AccessLog | null>(null)
+  const [selectedControl, setSelectedControl] = useState<ControlPlaneAccessLog | null>(null)
   const [purgeOpen, setPurgeOpen] = useState(false)
   const [purgeDays, setPurgeDays] = useState(30)
 
@@ -136,6 +163,18 @@ export function LogsPage() {
     return base
   }, [parsedQuery, page, pageSize, fromValue, toValue, siteId])
 
+  // Control plane rows are cross-tenant and carry no site column, so the site
+  // filter is dropped (and hidden) on that tab.
+  const controlParams = useMemo<ControlPlaneLogQuery>(() => {
+    const { site_id: _siteId, ...rest } = parsedQuery.params
+    return {
+      ...rest,
+      page,
+      page_size: pageSize,
+      from: fromLocalInputValue(fromValue),
+      to: fromLocalInputValue(toValue),
+    }
+  }, [parsedQuery, page, pageSize, fromValue, toValue])
 
   const securityQuery = useQuery({
     queryKey: logKeys.security(params),
@@ -151,7 +190,15 @@ export function LogsPage() {
     placeholderData: (prev) => prev,
   })
 
-  const active = tab === 'security' ? securityQuery : accessQuery
+  const controlQuery = useQuery({
+    queryKey: apiProtectionKeys.logs(controlParams),
+    queryFn: () => apiProtectionApi.logs(controlParams),
+    enabled: tab === 'control',
+    placeholderData: (prev) => prev,
+  })
+
+  const active =
+    tab === 'security' ? securityQuery : tab === 'access' ? accessQuery : controlQuery
   const total = active.data?.total ?? 0
   const rows = active.data?.items ?? []
 
@@ -470,9 +517,117 @@ export function LogsPage() {
     },
   ]
 
+  const controlColumns: Column<ControlPlaneAccessLog>[] = [
+    {
+      key: 'timestamp',
+      header: t('pages.logs.time'),
+      accessor: (r) => r.timestamp,
+      sortable: true,
+      width: '1%',
+      cell: (r) => (
+        <span className="pw-mono whitespace-nowrap text-xs text-fg-subtle">
+          {formatDateTime(r.timestamp)}
+        </span>
+      ),
+    },
+    {
+      key: 'client_ip',
+      header: t('pages.logs.clientIp'),
+      accessor: (r) => r.client_ip,
+      sortable: true,
+      cell: (r) => (
+        <div className="min-w-0">
+          <p className="pw-mono truncate text-[13px] text-fg">{r.client_ip}</p>
+          {r.reason && (
+            <p className="truncate text-[11px] text-fg-subtle">{r.reason}</p>
+          )}
+        </div>
+      ),
+    },
+    {
+      key: 'method',
+      header: t('pages.logs.method'),
+      accessor: (r) => r.method,
+      width: '1%',
+      cell: (r) => <span className="pw-mono text-xs text-fg-subtle">{r.method}</span>,
+    },
+    {
+      key: 'path',
+      header: t('pages.logs.path'),
+      accessor: (r) => r.path,
+      cell: (r) => (
+        <div className="min-w-0">
+          <p className="pw-mono truncate text-[13px]">
+            {r.path}
+            {r.query_string ? `?${r.query_string}` : ''}
+          </p>
+          {r.host && <p className="truncate text-[11px] text-fg-subtle">{r.host}</p>}
+        </div>
+      ),
+    },
+    {
+      key: 'user_email',
+      header: t('pages.logs.userEmail'),
+      accessor: (r) => r.user_email ?? '',
+      cell: (r) =>
+        r.user_email ? (
+          <span className="truncate text-[13px]">{r.user_email}</span>
+        ) : (
+          <span className="text-fg-subtle">—</span>
+        ),
+    },
+    {
+      key: 'action',
+      header: t('pages.logs.action'),
+      accessor: (r) => r.action,
+      width: '1%',
+      cell: (r) => (
+        <Badge tone={CONTROL_ACTION_TONE[r.action] ?? 'neutral'}>
+          {t(`actions.${r.action}`, r.action)}
+        </Badge>
+      ),
+    },
+    {
+      key: 'status_code',
+      header: t('pages.logs.statusCode'),
+      accessor: (r) => r.status_code ?? 0,
+      sortable: true,
+      align: 'center',
+      width: '1%',
+      cell: (r) =>
+        r.status_code ? (
+          <Badge tone={statusTone(r.status_code)}>{r.status_code}</Badge>
+        ) : (
+          <span className="text-fg-subtle">—</span>
+        ),
+    },
+    {
+      key: 'latency',
+      header: t('pages.logs.latency'),
+      accessor: (r) => r.latency_ms ?? 0,
+      sortable: true,
+      align: 'right',
+      width: '1%',
+      cell: (r) => (
+        <span className="tabular-nums text-[13px]">
+          {r.latency_ms != null ? formatLatency(r.latency_ms) : '—'}
+        </span>
+      ),
+    },
+  ]
+
   const tabs: { value: Tab; label: string; icon: typeof ShieldWarning; count?: number }[] = [
     { value: 'security', label: t('pages.logs.securityTab'), icon: ShieldWarning },
     { value: 'access', label: t('pages.logs.accessTab'), icon: ListDashes },
+    ...(isAdmin
+      ? [
+          {
+            value: 'control' as Tab,
+            label: t('pages.logs.controlTab'),
+            icon: LockKey,
+          },
+        ]
+      : []),
   ]
 
   return (
@@ -498,7 +653,7 @@ export function LogsPage() {
             >
               {t('pages.logs.export')}
             </Button>
-            {canWrite && (
+            {canWrite && tab !== 'control' && (
               <Button
                 variant="ghost"
                 className="hover:text-fg-danger"
@@ -612,6 +767,8 @@ export function LogsPage() {
               value={siteId}
               options={siteOptions}
               onChange={(e) => updateQuery({ site_id: e.target.value })}
+              disabled={tab === 'control'}
+              hint={tab === 'control' ? t('pages.logs.controlNoSite') : undefined}
             />
           </div>
 
@@ -645,12 +802,18 @@ export function LogsPage() {
                 icon={
                   tab === 'security' ? (
                     <ShieldWarning weight="duotone" className="h-8 w-8" />
-                  ) : (
+                  ) : tab === 'access' ? (
                     <ListDashes weight="duotone" className="h-8 w-8" />
+                  ) : (
+                    <LockKey weight="duotone" className="h-8 w-8" />
                   )
                 }
                 title={t('pages.logs.empty')}
-                description={t('pages.logs.emptyDescription')}
+                description={
+                  tab === 'control'
+                    ? t('pages.logs.controlEmptyDescription')
+                    : t('pages.logs.emptyDescription')
+                }
                 action={
                   <Button variant="secondary" onClick={resetQuery}>
                     {t('common.reset')}
@@ -667,13 +830,21 @@ export function LogsPage() {
                     dense
                     onRowClick={(r) => setSelectedEvent(r)}
                   />
-                ) : (
+                ) : tab === 'access' ? (
                   <Table
                     columns={accessColumns}
                     data={rows as AccessLog[]}
                     rowKey={(r) => String(r.id)}
                     dense
                     onRowClick={(r) => setSelectedLog(r)}
+                  />
+                ) : (
+                  <Table
+                    columns={controlColumns}
+                    data={rows as ControlPlaneAccessLog[]}
+                    rowKey={(r) => String(r.id)}
+                    dense
+                    onRowClick={(r) => setSelectedControl(r)}
                   />
                 )}
                 <Pagination
@@ -905,6 +1076,80 @@ export function LogsPage() {
                 </p>
               )}
             </div>
+          </div>
+        )}
+      </Dialog>
+
+      {/* Control plane request detail */}
+      <Dialog
+        open={selectedControl !== null}
+        onClose={() => setSelectedControl(null)}
+        size="lg"
+        title={t('pages.logs.controlDetail')}
+        description={
+          selectedControl
+            ? `${selectedControl.method} ${selectedControl.path}`.trim()
+            : undefined
+        }
+        footer={
+          <Button variant="ghost" onClick={() => setSelectedControl(null)}>
+            {t('common.close')}
+          </Button>
+        }
+      >
+        {selectedControl && (
+          <div className="flex flex-col gap-4">
+            <div className="flex flex-wrap items-center gap-2">
+              {selectedControl.status_code && (
+                <Badge tone={statusTone(selectedControl.status_code)}>
+                  {selectedControl.status_code}
+                </Badge>
+              )}
+              <Badge tone={CONTROL_ACTION_TONE[selectedControl.action] ?? 'neutral'}>
+                {t(`actions.${selectedControl.action}`, selectedControl.action)}
+              </Badge>
+            </div>
+            <DefinitionGrid
+              rows={[
+                [t('pages.logs.time'), formatDateTime(selectedControl.timestamp)],
+                [t('pages.logs.clientIp'), selectedControl.client_ip],
+                [t('pages.logs.method'), selectedControl.method],
+                [t('pages.logs.host'), selectedControl.host],
+                [t('pages.logs.path'), selectedControl.path],
+                [t('pages.logs.queryString'), selectedControl.query_string],
+                [t('pages.logs.statusCode'), selectedControl.status_code?.toString()],
+                [
+                  t('pages.logs.latency'),
+                  selectedControl.latency_ms != null
+                    ? formatLatency(selectedControl.latency_ms)
+                    : undefined,
+                ],
+                [t('pages.logs.userEmail'), selectedControl.user_email],
+                [t('pages.logs.userId'), selectedControl.user_id],
+                [t('pages.logs.requestId'), selectedControl.request_id],
+                [t('pages.logs.referer'), selectedControl.referer],
+              ]}
+            />
+            {selectedControl.reason && (
+              <div>
+                <p className="mb-1.5 text-[13px] font-medium text-fg">
+                  {t('pages.logs.reason')}
+                </p>
+                <p className="pw-mono break-all rounded-md border border-line bg-recessed px-3 py-2 text-xs text-fg-subtle">
+                  {selectedControl.reason}
+                </p>
+              </div>
+            )}
+            {selectedControl.user_agent && (
+              <div>
+                <p className="mb-1.5 text-[13px] font-medium text-fg">
+                  {t('pages.logs.userAgent')}
+                </p>
+                <p className="pw-mono break-all rounded-md border border-line bg-recessed px-3 py-2 text-xs text-fg-subtle">
+                  {selectedControl.user_agent}
+                </p>
+              </div>
+            )}
           </div>
         )}
       </Dialog>

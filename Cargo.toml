@@ -36,6 +36,7 @@ arc-swap = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }
 cfg-if = { workspace = true }
+chrono = { workspace = true }
 clap = { version = "4.6.6", features = [
     "derive",
     "std",
@@ -80,6 +81,7 @@ rust-embed = { version = "8.12.0", features = [
     "mime-guess",
     "compression",
 ], default-features = false }
+sea-orm = { workspace = true }
 serde_qs = { workspace = true }
 sysinfo = { workspace = true }
 
@@ -92,6 +94,7 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "
 toml = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
 url = { workspace = true }
 urlencoding = { workspace = true }
 kdl = { workspace = true }

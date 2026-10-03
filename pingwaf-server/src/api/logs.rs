@@ -87,6 +87,9 @@ fn default_retention_days() -> i64 {
 pub struct PurgeResult {
     pub deleted_security_events: u64,
     pub deleted_access_logs: u64,
+    /// Rows removed from the control plane's own access log; `0` when the
+    /// sweep was narrowed to one site.
+    pub deleted_control_plane_logs: u64,
     pub cutoff: DateTime<Utc>,
 }
 
@@ -159,7 +162,7 @@ fn split_multi(value: &str) -> Vec<String> {
 }
 
 /// Escapes LIKE metacharacters so a user-supplied value matches literally.
-fn escape_like(value: &str) -> String {
+pub(crate) fn escape_like(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for ch in value.chars() {
         if matches!(ch, '\\' | '%' | '_') {
@@ -181,7 +184,7 @@ fn like_pattern(value: &str) -> Option<String> {
 
 /// Builds the condition for one text filter: comma-separated values become an
 /// IN list, `*` turns the match into a LIKE, and everything else is exact.
-fn text_filter(column: impl ColumnTrait, raw: &str) -> Condition {
+pub(crate) fn text_filter(column: impl ColumnTrait, raw: &str) -> Condition {
     let parts = split_multi(raw);
     if parts.is_empty() {
         // "`,`" and friends: match nothing rather than silently dropping the
@@ -199,7 +202,7 @@ fn text_filter(column: impl ColumnTrait, raw: &str) -> Condition {
 }
 
 /// Free-text search: the needle must appear in the request target or host.
-fn free_text_filter(
+pub(crate) fn free_text_filter(
     path_column: impl ColumnTrait,
     host_column: impl ColumnTrait,
     needle: &str,
@@ -211,7 +214,7 @@ fn free_text_filter(
 }
 
 /// Resolves and validates the `from`/`to` window.
-fn resolve_window(
+pub(crate) fn resolve_window(
     from: &Option<String>,
     to: &Option<String>,
 ) -> Result<(DateTime<Utc>, DateTime<Utc>), ApiError> {
@@ -485,11 +488,22 @@ async fn purge(
 
     let outcome = purge_logs(&state.db, days, days, site_filter).await?;
 
+    // Control plane log rows carry no site, so a site-scoped sweep leaves
+    // them alone.
+    let deleted_control = if site_filter.is_none() {
+        crate::api::self_protection::purge_access_logs(&state.db, days)
+            .await
+            .map_err(ApiError::from)?
+    } else {
+        0
+    };
+
     tracing::info!(
         cutoff = %cutoff,
         site_id = ?site_filter,
         security_events = outcome.deleted_security_events,
         access_logs = outcome.deleted_access_logs,
+        control_plane_logs = deleted_control,
         requested_by = %current.id,
         "log retention sweep completed"
     );
@@ -497,6 +511,7 @@ async fn purge(
     Ok(Json(PurgeResult {
         deleted_security_events: outcome.deleted_security_events,
         deleted_access_logs: outcome.deleted_access_logs,
+        deleted_control_plane_logs: deleted_control,
         cutoff,
     }))
 }
@@ -543,7 +558,20 @@ async fn run_retention_sweep(state: &AppState) -> Result<(), ApiError> {
     )
     .await?;
 
-    if outcome.deleted_access_logs == 0 && outcome.deleted_security_events == 0
+    // The control plane's own access log keeps its own window.
+    let protection = crate::api::self_protection::load_settings(&state.db)
+        .await
+        .map_err(ApiError::from)?;
+    let deleted_control = crate::api::self_protection::purge_access_logs(
+        &state.db,
+        i64::from(protection.access_log_retention_days),
+    )
+    .await
+    .map_err(ApiError::from)?;
+
+    if outcome.deleted_access_logs == 0
+        && outcome.deleted_security_events == 0
+        && deleted_control == 0
     {
         tracing::debug!(
             "scheduled log retention sweep found nothing to delete"
@@ -553,6 +581,7 @@ async fn run_retention_sweep(state: &AppState) -> Result<(), ApiError> {
     tracing::info!(
         access_logs = outcome.deleted_access_logs,
         security_events = outcome.deleted_security_events,
+        control_plane_logs = deleted_control,
         access_days = settings.access_log_retention_days,
         security_days = settings.security_event_retention_days,
         "scheduled log retention sweep completed"

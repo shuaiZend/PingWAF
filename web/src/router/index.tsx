@@ -15,6 +15,7 @@ import { WafPage } from '@/pages/WafPage'
 import { RateLimitingPage } from '@/pages/RateLimitingPage'
 import { LogsPage } from '@/pages/LogsPage'
 import { AgentsPage } from '@/pages/AgentsPage'
+import { AssistantPage } from '@/pages/AssistantPage'
 import { SettingsPage } from '@/pages/SettingsPage'
 import { BotPage as BotProtectionPage } from '@/pages/sites/BotPage'
 import { CcProtectionPage } from '@/pages/sites/CcProtectionPage'
@@ -104,6 +105,7 @@ export const router = createBrowserRouter([
         ],
       },
       { path: 'logs', element: <LogsPage /> },
+      { path: 'assistant', element: <AssistantPage /> },
       { path: 'agents', element: <AgentsPage /> },
       { path: 'ip-groups', element: <IpGroupsPage /> },
       { path: 'lifecycle', element: <LifecyclePage /> },

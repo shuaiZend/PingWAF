@@ -153,6 +153,10 @@ fn extract_port(addr: &str) -> &str {
 }
 
 /// Build the `RunMode` from the parsed CLI.
+///
+/// The maintenance commands never reach this: [`main`] routes them to
+/// [`crate::admin::run`] before a run mode is built, and a panic here means
+/// that routing was broken.
 pub fn build_run_mode(cli: PingWafCli) -> RunMode {
     match cli.command {
         PingWafCommand::Server(ref opts) => {
@@ -165,6 +169,11 @@ pub fn build_run_mode(cli: PingWafCli) -> RunMode {
             let server_config = server_config_from_all_in_one(opts);
             let agent_config = agent_config_from_all_in_one(opts);
             RunMode::AllInOne(server_config, agent_config)
+        },
+        PingWafCommand::User { .. }
+        | PingWafCommand::Mode { .. }
+        | PingWafCommand::Security { .. } => {
+            unreachable!("maintenance commands do not build a run mode")
         },
     }
 }
@@ -1365,14 +1374,27 @@ pub fn main() {
     init_tracing();
 
     let cli = crate::cli::parse_pingwaf_cli();
-    let mode = build_run_mode(cli);
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("failed to create tokio runtime");
 
-    if let Err(e) = rt.block_on(run(mode)) {
+    // Maintenance commands run against the database and exit; only the three
+    // run modes start the long-running process.
+    let is_maintenance = matches!(
+        &cli.command,
+        PingWafCommand::User { .. }
+            | PingWafCommand::Mode { .. }
+            | PingWafCommand::Security { .. }
+    );
+    let result = if is_maintenance {
+        rt.block_on(crate::admin::run(cli))
+    } else {
+        rt.block_on(run(build_run_mode(cli)))
+    };
+
+    if let Err(e) = result {
         error!(error = %e, "PingWAF exited with error");
         eprintln!("PingWAF error: {e}");
         std::process::exit(1);
@@ -1462,6 +1484,7 @@ mod tests {
             routes: vec![],
             bot_protection: None,
             basic_auth: None,
+            observation_mode: false,
         }
     }
 

@@ -273,6 +273,10 @@ struct SiteContext {
     rule_names: HashMap<String, String>,
     /// Site paused from the dashboard: every request gets the maintenance page.
     paused: bool,
+    /// Observation mode: every protection keeps detecting but only records —
+    /// WAF, IP/geo rules, bot protection and rate limiting stop enforcing.
+    /// Access control (mTLS, basic auth, a paused site) is never downgraded.
+    observation_mode: bool,
 }
 
 impl SiteContext {
@@ -311,6 +315,7 @@ impl SiteContext {
                 })
                 .unwrap_or_default(),
             paused: site_rules.is_paused(),
+            observation_mode: site_rules.observation_mode,
         }
     }
 
@@ -1791,6 +1796,48 @@ impl WafPlugin {
         });
     }
 
+    /// Records an access restriction (IP/geo rule, bot or rate limit) that
+    /// observation mode refused to enforce. The security event is written as a
+    /// `monitor` verdict — nothing was actually blocked or challenged — while
+    /// the server log names what enforcement would have done.
+    #[allow(clippy::too_many_arguments)]
+    fn log_observed(
+        site_id: &str,
+        request_id: &str,
+        host: &str,
+        request_data: &RequestData,
+        would_have: WafAction,
+        rule_id: &str,
+        detail: &str,
+        rule_name: &str,
+    ) {
+        tracing::info!(
+            site_id,
+            request_id,
+            rule = rule_id,
+            would_have = ?would_have,
+            "[observation] detection recorded without enforcing"
+        );
+        let verdict = WafVerdict {
+            action: WafAction::Monitor,
+            score: 0,
+            matched_rules: (!rule_id.is_empty())
+                .then(|| rule_id.to_string())
+                .into_iter()
+                .collect(),
+            details: detail.to_string(),
+            breakdown: ScoreBreakdown::clean(),
+        };
+        Self::log_event(
+            site_id,
+            request_id,
+            host,
+            request_data,
+            &verdict,
+            rule_name,
+        );
+    }
+
     /// Answers a request stopped by an access restriction: security event,
     /// access log with the real status, then the block page or the challenge.
     #[allow(clippy::too_many_arguments)]
@@ -1972,6 +2019,10 @@ impl Plugin for WafPlugin {
         let site_id = resolved.site_id.clone();
         let context = resolved.context.clone();
         let choice = resolved.choice;
+        // Observation mode: detections keep running but nothing is enforced.
+        // Access control (mTLS, basic auth, a paused site) is never downgraded.
+        let observe =
+            context.as_ref().is_some_and(|site| site.observation_mode);
 
         // Country of the client: it feeds geo restrictions, the
         // `ip.src.country` rule variable and the flag shown with the access
@@ -2111,21 +2162,38 @@ impl Plugin for WafPlugin {
             if let Some(denial) =
                 access.denial().filter(|denial| !denial.basic_auth)
             {
-                let original_url = if query.is_empty() {
-                    path
+                if observe {
+                    Self::log_observed(
+                        &site_id,
+                        &request_id,
+                        &host,
+                        &request_data,
+                        if denial.challenge {
+                            WafAction::Challenge
+                        } else {
+                            WafAction::Block
+                        },
+                        &denial.rule_id,
+                        &denial.detail,
+                        &denial.rule_name,
+                    );
                 } else {
-                    format!("{path}?{query}")
-                };
-                return Ok(Self::deny_request(
-                    agent.as_ref(),
-                    &site_id,
-                    &request_id,
-                    &host,
-                    &request_data,
-                    denial,
-                    &original_url,
-                    self.pow_difficulty,
-                ));
+                    let original_url = if query.is_empty() {
+                        path
+                    } else {
+                        format!("{path}?{query}")
+                    };
+                    return Ok(Self::deny_request(
+                        agent.as_ref(),
+                        &site_id,
+                        &request_id,
+                        &host,
+                        &request_data,
+                        denial,
+                        &original_url,
+                        self.pow_difficulty,
+                    ));
+                }
             }
         }
 
@@ -2175,24 +2243,41 @@ impl Plugin for WafPlugin {
         // ── Bot protection: UA classification runs after IP/geo and before
         // the engine, applying whether or not the WAF engine is enabled ──
         if let Some(bot) = context.as_ref().and_then(|ctx| ctx.bot.as_ref()) {
-            let original_url = if query.is_empty() {
-                path.clone()
-            } else {
-                format!("{path}?{query}")
-            };
             match bot.evaluate(&user_agent) {
                 BotDecision::Pass => {},
                 BotDecision::Deny(denial) => {
-                    return Ok(Self::deny_request(
-                        agent.as_ref(),
-                        &site_id,
-                        &request_id,
-                        &host,
-                        &request_data,
-                        &denial,
-                        &original_url,
-                        self.pow_difficulty,
-                    ));
+                    if observe {
+                        Self::log_observed(
+                            &site_id,
+                            &request_id,
+                            &host,
+                            &request_data,
+                            if denial.challenge {
+                                WafAction::Challenge
+                            } else {
+                                WafAction::Block
+                            },
+                            &denial.rule_id,
+                            &denial.detail,
+                            &denial.rule_name,
+                        );
+                    } else {
+                        let original_url = if query.is_empty() {
+                            path.clone()
+                        } else {
+                            format!("{path}?{query}")
+                        };
+                        return Ok(Self::deny_request(
+                            agent.as_ref(),
+                            &site_id,
+                            &request_id,
+                            &host,
+                            &request_data,
+                            &denial,
+                            &original_url,
+                            self.pow_difficulty,
+                        ));
+                    }
                 },
                 BotDecision::LogOnly(denial) => {
                     let verdict = WafVerdict {
@@ -2247,47 +2332,68 @@ impl Plugin for WafPlugin {
                 );
             }
             if let Some(tripped) = outcome.deny {
-                let original_url = if query.is_empty() {
-                    path.clone()
-                } else {
-                    format!("{path}?{query}")
-                };
-                let verdict = WafVerdict {
-                    action: if tripped.challenge {
-                        WafAction::Challenge
-                    } else {
-                        WafAction::Block
-                    },
-                    score: 0,
-                    matched_rules: vec![tripped.rule_id.clone()],
-                    details: tripped.detail.clone(),
-                    breakdown: ScoreBreakdown::clean(),
-                };
-                Self::log_event(
-                    &site_id,
-                    &request_id,
-                    &host,
-                    &request_data,
-                    &verdict,
-                    &tripped.rule_name,
-                );
-                let response = if tripped.challenge {
-                    build_challenge_response(
-                        &request_id,
-                        &original_url,
+                if observe {
+                    Self::log_observed(
                         &site_id,
-                        self.pow_difficulty,
-                        ChallengeKind::Js,
-                    )
-                } else {
-                    rate_limit_page(
                         &request_id,
+                        &host,
+                        &request_data,
+                        if tripped.challenge {
+                            WafAction::Challenge
+                        } else {
+                            WafAction::Block
+                        },
+                        &tripped.rule_id,
                         &tripped.detail,
-                        tripped.retry_after,
-                    )
-                };
-                emit_generated_access(agent.as_ref(), &request_id, &response);
-                return Ok(RequestPluginResult::Respond(response));
+                        &tripped.rule_name,
+                    );
+                } else {
+                    let original_url = if query.is_empty() {
+                        path.clone()
+                    } else {
+                        format!("{path}?{query}")
+                    };
+                    let verdict = WafVerdict {
+                        action: if tripped.challenge {
+                            WafAction::Challenge
+                        } else {
+                            WafAction::Block
+                        },
+                        score: 0,
+                        matched_rules: vec![tripped.rule_id.clone()],
+                        details: tripped.detail.clone(),
+                        breakdown: ScoreBreakdown::clean(),
+                    };
+                    Self::log_event(
+                        &site_id,
+                        &request_id,
+                        &host,
+                        &request_data,
+                        &verdict,
+                        &tripped.rule_name,
+                    );
+                    let response = if tripped.challenge {
+                        build_challenge_response(
+                            &request_id,
+                            &original_url,
+                            &site_id,
+                            self.pow_difficulty,
+                            ChallengeKind::Js,
+                        )
+                    } else {
+                        rate_limit_page(
+                            &request_id,
+                            &tripped.detail,
+                            tripped.retry_after,
+                        )
+                    };
+                    emit_generated_access(
+                        agent.as_ref(),
+                        &request_id,
+                        &response,
+                    );
+                    return Ok(RequestPluginResult::Respond(response));
+                }
             }
         }
 
@@ -2351,6 +2457,34 @@ impl Plugin for WafPlugin {
                 &host,
                 &request_data,
                 &verdict,
+                &rule_name,
+            );
+            return Ok(RequestPluginResult::Continue);
+        }
+
+        // Observation mode: a Block/Challenge verdict is recorded as a
+        // monitor event — nothing was actually blocked — and the request
+        // proceeds.
+        if observe {
+            let rule_name = rule_name_of(&verdict);
+            tracing::info!(
+                site_id = %site_id,
+                request_id = %request_id,
+                path = %request_data.path,
+                would_have = ?verdict.action,
+                score = verdict.score,
+                "[observation] WAF verdict recorded without enforcing"
+            );
+            let observed = WafVerdict {
+                action: WafAction::Monitor,
+                ..verdict.clone()
+            };
+            Self::log_event(
+                &site_id,
+                &request_id,
+                &host,
+                &request_data,
+                &observed,
                 &rule_name,
             );
             return Ok(RequestPluginResult::Continue);

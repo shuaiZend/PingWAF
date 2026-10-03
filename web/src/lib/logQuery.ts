@@ -1,6 +1,6 @@
 import type { LogQueryParams } from '@/api/types'
 
-export type LogTab = 'security' | 'access'
+export type LogTab = 'security' | 'access' | 'control'
 
 export interface LogSearch {
   /** Backend params derived from the search text (page/from/to flow in too). */
@@ -73,12 +73,14 @@ export function parseLogQuery(input: string, tab: LogTab): LogSearch {
         break
       case 'country':
       case 'country_code':
-        params.country_code = value.toUpperCase()
+        if (tab === 'control') unknown.push(token)
+        else params.country_code = value.toUpperCase()
         break
       case 'status': {
         // `4xx` selects the whole class; a three-digit code matches exactly.
         if (/^[1-5]xx$/.test(value)) {
-          params.status_class = Number(value[0])
+          if (tab === 'control') unknown.push(token)
+          else params.status_class = Number(value[0])
         } else if (/^\d{3}$/.test(value)) {
           params.status_code = Number(value)
         } else {
@@ -94,7 +96,7 @@ export function parseLogQuery(input: string, tab: LogTab): LogSearch {
         break
       }
       case 'action':
-        if (tab === 'security') params.action = value
+        if (tab === 'security' || tab === 'control') params.action = value
         else unknown.push(token)
         break
       case 'rule':
@@ -103,7 +105,7 @@ export function parseLogQuery(input: string, tab: LogTab): LogSearch {
         else unknown.push(token)
         break
       case 'method':
-        if (tab === 'access') params.method = value.toUpperCase()
+        if (tab === 'access' || tab === 'control') params.method = value.toUpperCase()
         else unknown.push(token)
         break
       case 'cache':
@@ -150,6 +152,7 @@ export function formatLogQuery(params: LogQueryParams, tab: LogTab): string {
   } else {
     if (params.action) parts.push(`action:${params.action}`)
     if (params.rule_id) parts.push(`rule:${quote(params.rule_id)}`)
+    if (tab === 'control' && params.method) parts.push(`method:${params.method}`)
   }
   if (params.country_code) parts.push(`country:${params.country_code}`)
   if (params.request_id) parts.push(`request_id:${params.request_id}`)

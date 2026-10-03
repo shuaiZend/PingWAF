@@ -21,8 +21,10 @@ use clap::{Parser, Subcommand};
 
 /// PingWAF top-level CLI wrapper.
 ///
-/// When the first positional argument is one of `server`, `agent`, or
-/// `all-in-one`, the binary switches to PingWAF mode.
+/// When the first positional argument is one of the PingWAF subcommand
+/// names — the three run modes (`server`, `agent`, `all-in-one`) or a
+/// maintenance command (`user`, `mode`, `security`) — the binary switches to
+/// PingWAF mode.
 #[derive(Parser, Debug)]
 #[command(
     name = "pingwaf",
@@ -42,6 +44,21 @@ pub enum PingWafCommand {
     Agent(AgentOpts),
     /// Run both control plane and data plane in a single process
     AllInOne(AllInOneOpts),
+    /// Dashboard user administration
+    User {
+        #[command(subcommand)]
+        command: UserSubcommand,
+    },
+    /// Observation mode: run every detection, enforce nothing
+    Mode {
+        #[command(subcommand)]
+        command: ModeCommand,
+    },
+    /// Control plane (9080) self-protection switches
+    Security {
+        #[command(subcommand)]
+        command: SecurityCommand,
+    },
 }
 
 /// Options shared by all PingWAF modes.
@@ -272,12 +289,113 @@ pub struct AllInOneOpts {
     pub metrics_ship_interval_secs: u64,
 }
 
-/// The PingWAF subcommand names.
-const MODES: [&str; 3] = ["server", "agent", "all-in-one"];
+/// Database connection options of the maintenance commands.
+///
+/// Those commands talk straight to PostgreSQL instead of the REST API, so
+/// they keep working when the control plane is down or its IP allowlist has
+/// locked the operator out. A running control plane notices their writes
+/// within a few seconds.
+#[derive(clap::Args, Debug, Clone)]
+pub struct DbOpts {
+    /// PostgreSQL connection string
+    #[arg(
+        long,
+        env = "PINGWAF_DB_URL",
+        default_value = "postgres://pingwaf:pingwaf@localhost:5432/pingwaf"
+    )]
+    pub db_url: String,
+}
+
+/// `user` — dashboard account administration.
+#[derive(Subcommand, Debug)]
+pub enum UserSubcommand {
+    /// List dashboard accounts
+    List(DbOpts),
+    /// Create an administrator account
+    AddAdmin(AddAdminOpts),
+    /// Set a new password for an account
+    ResetPassword(ResetPasswordOpts),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct AddAdminOpts {
+    #[command(flatten)]
+    pub db: DbOpts,
+
+    /// E-mail address of the new administrator
+    #[arg(long)]
+    pub email: String,
+    /// Display name
+    #[arg(long)]
+    pub name: Option<String>,
+    /// Password; when omitted a random one is generated and printed
+    #[arg(long)]
+    pub password: Option<String>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct ResetPasswordOpts {
+    #[command(flatten)]
+    pub db: DbOpts,
+
+    /// E-mail address of the account
+    #[arg(long)]
+    pub email: String,
+    /// New password; when omitted a random one is generated and printed
+    #[arg(long)]
+    pub password: Option<String>,
+}
+
+/// `mode` — the observation mode switch.
+#[derive(Subcommand, Debug)]
+pub enum ModeCommand {
+    /// Turn observation mode on: detect everything, block nothing
+    Observe(DbOpts),
+    /// Turn observation mode off: protections enforce again
+    Enforce(DbOpts),
+    /// Print the current observation mode
+    Status(DbOpts),
+}
+
+/// `security` — quick switches for the control plane's own protection.
+#[derive(Subcommand, Debug)]
+pub enum SecurityCommand {
+    /// Print the 9080 protection settings and the effective allowlist
+    Status(DbOpts),
+    /// Turn the API IP allowlist on or off (the break-glass switch when the
+    /// console is unreachable)
+    Allowlist(AllowlistOpts),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct AllowlistOpts {
+    #[command(flatten)]
+    pub db: DbOpts,
+
+    /// New state of the allowlist
+    #[arg(value_enum)]
+    pub state: OnOff,
+    /// Enable even when the allowlist is empty (refuses every API caller)
+    #[arg(long)]
+    pub force: bool,
+}
+
+/// An `on` / `off` command line value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum OnOff {
+    On,
+    Off,
+}
+
+/// The run modes: the subcommands that start a long-running process.
+pub const RUN_MODES: [&str; 3] = ["server", "agent", "all-in-one"];
+
+/// The maintenance commands: they run against the database and exit.
+const MAINTENANCE_MODES: [&str; 3] = ["user", "mode", "security"];
 
 /// Whether `value` names a PingWAF subcommand.
 fn is_mode(value: &str) -> bool {
-    MODES.contains(&value)
+    RUN_MODES.contains(&value) || MAINTENANCE_MODES.contains(&value)
 }
 
 /// The mode named by `PINGWAF_MODE`, when it names one.
@@ -428,8 +546,8 @@ mod tests {
     }
 
     #[test]
-    fn every_mode_accepts_a_config_file() {
-        for mode in MODES {
+    fn every_run_mode_accepts_a_config_file() {
+        for mode in RUN_MODES {
             let path = format!("--config=/{mode}.toml");
             let args = ["pingwaf", mode, path.as_str()];
             let cli = PingWafCli::try_parse_from(args).unwrap();
@@ -437,12 +555,59 @@ mod tests {
                 PingWafCommand::Server(opts) => opts.config,
                 PingWafCommand::Agent(opts) => opts.config,
                 PingWafCommand::AllInOne(opts) => opts.config,
+                _ => panic!("{mode} is not a run mode"),
             };
             assert_eq!(
                 config.as_deref(),
                 Some(format!("/{mode}.toml").as_str())
             );
         }
+    }
+
+    #[test]
+    fn maintenance_commands_parse_with_their_database_options() {
+        let PingWafCommand::User { command } = parse(&[
+            "pingwaf",
+            "user",
+            "add-admin",
+            "--email=ops@example.com",
+            "--db-url=postgres://other/db",
+        ]) else {
+            panic!("expected the user command");
+        };
+        let UserSubcommand::AddAdmin(opts) = command else {
+            panic!("expected add-admin");
+        };
+        assert_eq!(opts.email, "ops@example.com");
+        assert_eq!(opts.db.db_url, "postgres://other/db");
+        assert!(opts.password.is_none());
+
+        let PingWafCommand::Mode { command } =
+            parse(&["pingwaf", "mode", "observe"])
+        else {
+            panic!("expected the mode command");
+        };
+        assert!(matches!(command, ModeCommand::Observe(_)));
+
+        let PingWafCommand::Security { command } =
+            parse(&["pingwaf", "security", "allowlist", "off"])
+        else {
+            panic!("expected the security command");
+        };
+        let SecurityCommand::Allowlist(opts) = command else {
+            panic!("expected allowlist");
+        };
+        assert_eq!(opts.state, OnOff::Off);
+        assert!(!opts.force);
+    }
+
+    #[test]
+    fn maintenance_commands_are_recognised_as_pingwaf_invocations() {
+        for mode in RUN_MODES.into_iter().chain(MAINTENANCE_MODES) {
+            assert!(is_mode(mode), "{mode} must select PingWAF mode");
+        }
+        assert!(!is_mode("reset-password"));
+        assert!(!is_mode(""));
     }
 
     #[test]

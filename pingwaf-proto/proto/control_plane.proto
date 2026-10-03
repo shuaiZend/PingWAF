@@ -242,6 +242,10 @@ message RuleBundle {
 
   // Site-wide basic authentication gate
   BasicAuthConfig basic_auth = 22;
+
+  // Observation mode: every protection (WAF, IP/geo rules, bot protection,
+  // rate limiting) keeps detecting but only records; the request proceeds.
+  bool observation_mode = 23;
 }
 
 // Site-wide HTTP basic authentication. Enforced by the WAF plugin, which sits
