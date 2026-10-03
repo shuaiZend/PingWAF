@@ -24,6 +24,7 @@ import {
   ArrowRight,
   Lightning,
   Clock,
+  UploadSimple,
 } from '@phosphor-icons/react'
 import { PageHeader } from '@/components/PageHeader'
 import { Card, CardBody, CardHeader } from '@/components/ui/Card'
@@ -39,11 +40,13 @@ import { agentsApi, agentKeys } from '@/api/agents'
 import { useSitesList } from '@/hooks'
 import { cn } from '@/lib/utils'
 import {
+  formatBitrate,
   formatBucket,
   formatCompactNumber,
   formatLatency,
   formatNumber,
   formatPercent,
+  formatSize,
 } from '@/lib/format'
 import type { RangeQuery, TopIp, TopPath, TopRule } from '@/api/types'
 
@@ -93,6 +96,15 @@ function intervalFor(hours: number): 'minute' | 'hour' | 'day' {
   return 'day'
 }
 
+/** Bucket width for the egress chart: fine 5s steps for short windows only. */
+function trafficStepFor(hours: number): number {
+  if (hours <= 2) return 5
+  if (hours <= 6) return 30
+  if (hours <= 24) return 300
+  if (hours <= 168) return 900
+  return 3600
+}
+
 export function DashboardPage() {
   const { t } = useTranslation()
   const [hours, setHours] = useState(24)
@@ -122,6 +134,12 @@ export function DashboardPage() {
   const traffic = useQuery({
     queryKey: analyticsKeys.traffic(range),
     queryFn: () => analyticsApi.requestsOverTime(range),
+    refetchInterval: REFRESH_MS,
+  })
+
+  const bandwidth = useQuery({
+    queryKey: analyticsKeys.bandwidth({ ...range, step: trafficStepFor(hours) }),
+    queryFn: () => analyticsApi.traffic({ ...range, step: trafficStepFor(hours) }),
     refetchInterval: REFRESH_MS,
   })
 
@@ -216,6 +234,9 @@ export function DashboardPage() {
   const s = summary.data
   const onlineAgents = (agents.data ?? []).filter((a) => a.status === 'online').length
   const totalAgents = agents.data?.length ?? 0
+  const egress = bandwidth.data
+  const egressAvg =
+    egress && spanMs > 0 ? (egress.total_bytes * 8) / (spanMs / 1000) : undefined
 
   const stats = [
     {
@@ -224,6 +245,17 @@ export function DashboardPage() {
       value: s ? formatCompactNumber(s.requests) : undefined,
       sub: s ? t('pages.dashboard.uniqueIps', { count: formatCompactNumber(s.unique_ips) }) : undefined,
       icon: ArrowsDownUp,
+      tone: 'text-link bg-focus/10',
+    },
+    {
+      key: 'egress',
+      label: t('pages.dashboard.egressWindow'),
+      value: egress ? formatSize(egress.total_bytes) : undefined,
+      sub:
+        egressAvg !== undefined
+          ? `${t('pages.traffic.avgBitrate')}: ${formatBitrate(egressAvg)}`
+          : undefined,
+      icon: UploadSimple,
       tone: 'text-link bg-focus/10',
     },
     {

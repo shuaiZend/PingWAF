@@ -75,6 +75,21 @@ message AgentHeartbeat {
   repeated HostSample host_samples = 12;
   string public_ip = 13;
   string private_ip = 14;
+
+  // Dynamic IP blocks currently enforced by this agent: server-issued
+  // block commands plus auto-blocks triggered by WAF/rate-limit verdicts.
+  // The control plane reconciles its copy of the list against this report.
+  repeated BlockedIp blocked_ips = 15;
+}
+
+// One dynamically blocked IP as enforced at the edge.
+message BlockedIp {
+  string ip = 1;
+  string site_id = 2;
+  string reason = 3;
+  google.protobuf.Timestamp blocked_at = 4;
+  // Absent = permanent block (no automatic expiry).
+  google.protobuf.Timestamp expires_at = 5;
 }
 
 enum AgentHealthStatus {

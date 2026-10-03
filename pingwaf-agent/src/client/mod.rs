@@ -13,7 +13,7 @@ use pingwaf_proto::control_plane::{
     self as proto, control_plane_client::ControlPlaneClient as ProtoClient,
 };
 
-use crate::cache::RuleCache;
+use crate::cache::{BlockedIpEntry, RuleCache};
 use crate::cert_events::cert_event_buffer;
 use crate::config::AgentConfig;
 use crate::heartbeat::{MetricsCollector, SystemMetrics};
@@ -63,6 +63,9 @@ pub struct LogEntry {
 /// Host callback invoked when the server requests a cache purge:
 /// `(site_id, urls, tags)`.
 type PurgeCacheFn = Box<dyn Fn(&str, &[String], &[String]) + Send + Sync>;
+
+/// How often expired dynamic IP blocks are swept from the rule cache.
+const BLOCK_SWEEP_INTERVAL_SECS: u64 = 60;
 
 /// Callback types for server commands that affect the host application.
 #[derive(Default)]
@@ -286,6 +289,28 @@ impl ControlPlaneClient {
         let this = Arc::clone(self);
         let handle = tokio::spawn(async move {
             this.connection_loop().await;
+        });
+        handles.push(handle);
+
+        // Expired dynamic IP blocks are dropped on read too, but sweeping on a
+        // timer keeps the map, its disk copy and the heartbeat report in sync
+        // even on agents that see no traffic for a while.
+        let rule_cache = Arc::clone(&self.rule_cache);
+        let shutdown = Arc::clone(&self.shutdown_signal);
+        let handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(
+                BLOCK_SWEEP_INTERVAL_SECS,
+            ));
+            interval.set_missed_tick_behavior(
+                tokio::time::MissedTickBehavior::Delay,
+            );
+            loop {
+                interval.tick().await;
+                if shutdown.load(Ordering::Relaxed) {
+                    break;
+                }
+                rule_cache.cleanup_expired_blocks();
+            }
         });
         handles.push(handle);
 
@@ -574,6 +599,13 @@ impl ControlPlaneClient {
                         .collect(),
                     public_ip: addresses.public_ip,
                     private_ip: addresses.private_ip,
+                    // Dynamic IP blocks in force at this tick; the control
+                    // plane reconciles its copy against every heartbeat.
+                    blocked_ips: rule_cache
+                        .blocked_ips_snapshot()
+                        .iter()
+                        .map(to_proto_blocked_ip)
+                        .collect(),
                 };
 
                 if hb_tx.send(hb).await.is_err() {
@@ -1010,6 +1042,23 @@ fn to_proto_sample(sample: &HostSample) -> proto::HostSample {
         process_count: sample.process_count,
         tcp_connections: sample.tcp_connections,
         uptime_secs: sample.uptime_secs,
+    }
+}
+
+/// Convert a dynamic IP block into its wire representation.
+fn to_proto_blocked_ip(entry: &BlockedIpEntry) -> proto::BlockedIp {
+    proto::BlockedIp {
+        ip: entry.ip.clone(),
+        site_id: entry.site_id.clone(),
+        reason: entry.reason.clone(),
+        blocked_at: Some(prost_types::Timestamp {
+            seconds: entry.blocked_at.timestamp(),
+            nanos: 0,
+        }),
+        expires_at: entry.expires_at.map(|exp| prost_types::Timestamp {
+            seconds: exp.timestamp(),
+            nanos: 0,
+        }),
     }
 }
 

@@ -32,6 +32,7 @@ import {
   parseIpList,
 } from '@/api/ipRules'
 import { ipGroupsApi, ipGroupKeys } from '@/api/ipGroups'
+import { AutoBlockedIpsCard } from '@/pages/sites/AutoBlockedIpsCard'
 import { useCanWrite } from '@/hooks'
 import { formatDateTime } from '@/lib/format'
 import {
@@ -447,8 +448,10 @@ export function IpRulesPanel() {
           retrying={rulesQuery.isFetching}
         />
       ) : (
-        <Card>
-          <CardHeader title={t('pages.ipRules.rulesTitle')} />
+        <>
+          <AutoBlockedIpsCard siteId={siteId} />
+          <Card className="mt-4">
+            <CardHeader title={t('pages.ipRules.rulesTitle')} />
           <CardBody className="p-0">
             {rulesQuery.isPending ? (
               <SkeletonRows rows={5} columns={7} />
@@ -489,6 +492,7 @@ export function IpRulesPanel() {
             )}
           </CardBody>
         </Card>
+        </>
       )}
 
       <Dialog

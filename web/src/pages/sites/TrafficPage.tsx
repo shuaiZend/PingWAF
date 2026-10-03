@@ -26,6 +26,7 @@ import {
   Users,
   ShieldSlash,
   Timer,
+  UploadSimple,
 } from '@phosphor-icons/react'
 import { PageHeader } from '@/components/PageHeader'
 import { Card, CardBody, CardHeader } from '@/components/ui/Card'
@@ -35,15 +36,17 @@ import { Table, type Column } from '@/components/ui/Table'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { SkeletonStat } from '@/components/ui/Skeleton'
 import { ErrorState } from '@/components/ErrorState'
-import { trafficApi, trafficKeys, RANGE_HOURS, groupStatusCodes } from '@/api/traffic'
+import { trafficApi, trafficKeys, RANGE_HOURS, TRAFFIC_STEP, groupStatusCodes } from '@/api/traffic'
 import { countryFlag } from '@/api/geo'
 import { cn } from '@/lib/utils'
 import {
+  formatBitrate,
   formatBucket,
   formatCompactNumber,
   formatLatency,
   formatNumber,
   formatPercent,
+  formatSize,
 } from '@/lib/format'
 import { TRAFFIC_RANGES, type TopIp, type TopRule, type TrafficRange } from '@/api/types'
 
@@ -108,6 +111,19 @@ export function TrafficPanels({ siteId }: { siteId?: string }) {
       })),
     [data, spanMs],
   )
+
+  // Egress per bucket, converted to a bit rate so the axis reads as Mbps/Kbps.
+  const egress = data?.egress
+  const egressData = useMemo(() => {
+    const step = egress?.step_seconds ?? TRAFFIC_STEP[range]
+    return (egress?.buckets ?? []).map((b) => ({
+      label: formatBucket(b.bucket, spanMs),
+      bps: (b.bytes * 8) / step,
+    }))
+  }, [egress, spanMs, range])
+
+  const avgBitrate =
+    egress && spanMs > 0 ? (egress.total_bytes * 8) / (spanMs / 1000) : 0
 
   const pathData = useMemo(
     () => (data?.topPaths ?? []).map((p) => ({ path: p.path, requests: p.requests })),
@@ -243,9 +259,10 @@ export function TrafficPanels({ siteId }: { siteId?: string }) {
       </div>
 
       {/* Summary */}
-      <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-5">
         {overviewQuery.isPending && !data ? (
           <>
+            <SkeletonStat />
             <SkeletonStat />
             <SkeletonStat />
             <SkeletonStat />
@@ -257,6 +274,11 @@ export function TrafficPanels({ siteId }: { siteId?: string }) {
               icon={<ChartLine weight="duotone" className="h-4 w-4" />}
               label={t('pages.traffic.totalRequests')}
               value={formatCompactNumber(summary?.requests ?? 0)}
+            />
+            <SummaryCard
+              icon={<UploadSimple weight="duotone" className="h-4 w-4" />}
+              label={t('pages.traffic.totalEgress')}
+              value={formatSize(egress?.total_bytes ?? 0)}
             />
             <SummaryCard
               icon={<Users weight="duotone" className="h-4 w-4" />}
@@ -335,6 +357,83 @@ export function TrafficPanels({ siteId }: { siteId?: string }) {
                     </AreaChart>
                   </ResponsiveContainer>
                 </div>
+              )}
+            </CardBody>
+          </Card>
+
+          {/* Egress bandwidth */}
+          <Card>
+            <CardHeader
+              title={t('pages.traffic.bandwidth')}
+              description={t('pages.traffic.egressHint')}
+            />
+            <CardBody>
+              {egressData.length === 0 ? (
+                <EmptyState
+                  className="border-0 py-10"
+                  icon={<UploadSimple weight="duotone" className="h-8 w-8" />}
+                  title={t('pages.traffic.noTraffic')}
+                />
+              ) : (
+                <>
+                  <div className="mb-4 flex flex-wrap gap-x-10 gap-y-3">
+                    <div>
+                      <p className="text-xs font-medium uppercase tracking-wide text-fg-subtle">
+                        {t('pages.traffic.totalEgress')}
+                      </p>
+                      <p className="mt-1 text-xl font-semibold tabular-nums text-fg-strong">
+                        {formatSize(egress?.total_bytes ?? 0)}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs font-medium uppercase tracking-wide text-fg-subtle">
+                        {t('pages.traffic.avgBitrate')}
+                      </p>
+                      <p className="mt-1 text-xl font-semibold tabular-nums text-fg-strong">
+                        {formatBitrate(avgBitrate)}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="h-56 w-full">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <AreaChart data={egressData} margin={{ top: 8, right: 8, left: -8, bottom: 0 }}>
+                        <defs>
+                          <linearGradient id="trafficEgress" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="0%" stopColor="#2f6fed" stopOpacity={0.35} />
+                            <stop offset="100%" stopColor="#2f6fed" stopOpacity={0} />
+                          </linearGradient>
+                        </defs>
+                        <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border-line)" vertical={false} />
+                        <XAxis
+                          dataKey="label"
+                          tick={{ fontSize: 11, fill: 'var(--color-text-subtle)' }}
+                          tickLine={false}
+                          axisLine={{ stroke: 'var(--color-border-line)' }}
+                          minTickGap={24}
+                        />
+                        <YAxis
+                          tick={{ fontSize: 11, fill: 'var(--color-text-subtle)' }}
+                          tickLine={false}
+                          axisLine={false}
+                          width={64}
+                          tickFormatter={(v: number) => formatBitrate(v)}
+                        />
+                        <Tooltip
+                          contentStyle={tooltipStyle}
+                          formatter={(v) => formatBitrate(Number(v ?? 0))}
+                        />
+                        <Area
+                          type="monotone"
+                          dataKey="bps"
+                          name={t('pages.traffic.bandwidth')}
+                          stroke="#2f6fed"
+                          strokeWidth={2}
+                          fill="url(#trafficEgress)"
+                        />
+                      </AreaChart>
+                    </ResponsiveContainer>
+                  </div>
+                </>
               )}
             </CardBody>
           </Card>

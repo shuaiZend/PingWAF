@@ -12,8 +12,8 @@ use std::sync::{Arc, LazyLock, Mutex};
 use chrono::{DateTime, Utc};
 use pingwaf_proto::control_plane::{
     control_plane_server::ControlPlane as ControlPlaneTrait, AgentHeartbeat,
-    CertEventAck, CertEventEntry, GetSiteConfigRequest, HostSample, LogAck,
-    LogEntry, Metric, MetricAck, MetricBatch, RegisterAgentRequest,
+    BlockedIp, CertEventAck, CertEventEntry, GetSiteConfigRequest, HostSample,
+    LogAck, LogEntry, Metric, MetricAck, MetricBatch, RegisterAgentRequest,
     RegisterAgentResponse, RuleBundle, ServerCommand, SiteConfig, SiteStatus,
     SyncRulesRequest,
 };
@@ -40,8 +40,9 @@ use crate::grpc::config::{
 };
 use crate::grpc::registry::{AgentRegistry, COMMAND_CHANNEL_CAPACITY};
 use crate::models::{
-    access_log, action, agent, agent_metric, agent_status, api_key,
-    certificate_events, host_sample, security_event, site, site_certificates,
+    access_log, action, agent, agent_blocked_ip, agent_metric, agent_status,
+    api_key, certificate_events, host_sample, security_event, site,
+    site_certificates,
 };
 
 /// Stream type returned by the server-streaming RPCs.
@@ -359,6 +360,7 @@ impl ControlPlaneTrait for ControlPlaneService {
         tokio::spawn(async move {
             persist_heartbeat(&db, agent_id, &first).await;
             persist_host_samples(&db, agent_id, &first.host_samples).await;
+            persist_blocked_ips(&db, agent_id, &first.blocked_ips).await;
             while let Some(message) = match inbound.message().await {
                 Ok(Some(message)) => Some(message),
                 Ok(None) => None,
@@ -373,6 +375,7 @@ impl ControlPlaneTrait for ControlPlaneService {
                 persist_heartbeat(&db, agent_id, &message).await;
                 persist_host_samples(&db, agent_id, &message.host_samples)
                     .await;
+                persist_blocked_ips(&db, agent_id, &message.blocked_ips).await;
             }
             mark_offline(&db, agent_id).await;
             registry.disconnect(&agent_id).await;
@@ -917,6 +920,102 @@ async fn sweep_host_samples(db: &DatabaseConnection) {
         Err(err) => {
             tracing::warn!(error = %err, "could not prune host samples");
         },
+    }
+}
+
+/// Reconciles the control plane's mirror of one agent's dynamic IP blocks.
+///
+/// The heartbeat carries the agent's *complete* list, so the ingest replaces
+/// rather than appends: rows the agent no longer reports are deleted, known
+/// keys are refreshed in place, and new keys inserted. Entries whose site id
+/// does not parse as a UUID are skipped — the edge only blocks synced sites.
+async fn persist_blocked_ips(
+    db: &DatabaseConnection,
+    agent_id: Uuid,
+    blocked_ips: &[BlockedIp],
+) {
+    use std::collections::HashSet;
+
+    let now = Utc::now();
+    let mut reported: HashSet<(Uuid, String)> = HashSet::new();
+    let mut rows: Vec<agent_blocked_ip::ActiveModel> = Vec::new();
+    for entry in blocked_ips {
+        let Ok(site_id) = Uuid::parse_str(entry.site_id.trim()) else {
+            continue;
+        };
+        if site_id.is_nil()
+            || entry.ip.trim().is_empty()
+            || !reported.insert((site_id, entry.ip.clone()))
+        {
+            continue;
+        }
+        rows.push(agent_blocked_ip::ActiveModel {
+            agent_id: Set(agent_id),
+            site_id: Set(site_id),
+            ip: Set(entry.ip.trim().chars().take(MAX_CLIENT_IP).collect()),
+            reason: Set(Some(
+                entry.reason.trim().chars().take(500).collect::<String>(),
+            )),
+            blocked_at: Set(from_timestamp(entry.blocked_at.as_ref())),
+            expires_at: Set(entry
+                .expires_at
+                .as_ref()
+                .map(|exp| from_timestamp(Some(exp)))),
+            created_at: Set(now),
+            updated_at: Set(now),
+            ..Default::default()
+        });
+    }
+
+    let existing = match agent_blocked_ip::Entity::find()
+        .filter(agent_blocked_ip::Column::AgentId.eq(agent_id))
+        .all(db)
+        .await
+    {
+        Ok(rows) => rows,
+        Err(err) => {
+            tracing::warn!(%agent_id, error = %err, "could not load blocked IPs");
+            return;
+        },
+    };
+
+    let stale: Vec<i64> = existing
+        .iter()
+        .filter(|row| !reported.contains(&(row.site_id, row.ip.clone())))
+        .map(|row| row.id)
+        .collect();
+    if !stale.is_empty() {
+        if let Err(err) = agent_blocked_ip::Entity::delete_many()
+            .filter(agent_blocked_ip::Column::Id.is_in(stale))
+            .exec(db)
+            .await
+        {
+            tracing::warn!(%agent_id, error = %err, "could not prune blocked IPs");
+        }
+    }
+
+    if rows.is_empty() {
+        return;
+    }
+    if let Err(err) = agent_blocked_ip::Entity::insert_many(rows)
+        .on_conflict(
+            sea_orm::sea_query::OnConflict::columns([
+                agent_blocked_ip::Column::AgentId,
+                agent_blocked_ip::Column::SiteId,
+                agent_blocked_ip::Column::Ip,
+            ])
+            .update_columns([
+                agent_blocked_ip::Column::Reason,
+                agent_blocked_ip::Column::BlockedAt,
+                agent_blocked_ip::Column::ExpiresAt,
+                agent_blocked_ip::Column::UpdatedAt,
+            ])
+            .to_owned(),
+        )
+        .exec(db)
+        .await
+    {
+        tracing::warn!(%agent_id, error = %err, "could not persist blocked IPs");
     }
 }
 

@@ -207,6 +207,21 @@ impl PingWafAgent {
         self.rule_cache.is_ip_blocked(site_id, ip)
     }
 
+    /// Dynamically block an IP for a site. Called by the WAF plugin when a
+    /// block verdict fires so the edge keeps refusing the client before the
+    /// engine even runs; the block is reported to the control plane on the
+    /// next heartbeat.
+    #[inline]
+    pub fn block_ip(
+        &self,
+        site_id: &str,
+        ip: &str,
+        duration: Option<std::time::Duration>,
+        reason: &str,
+    ) {
+        self.rule_cache.block_ip(site_id, ip, duration, reason)
+    }
+
     /// Log a security event (non-blocking, queued for batch shipping).
     pub fn log_security_event(&self, event: SecurityEvent) {
         let entry = client::LogEntry {

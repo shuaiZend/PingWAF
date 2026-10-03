@@ -212,6 +212,7 @@
       "activeAgents": "在线节点",
       "agentsOnline": "{{count}} 个在线",
       "requestsWindow": "请求数",
+      "egressWindow": "出站流量",
       "blockedWindow": "拦截数",
       "blocked": "已拦截请求",
       "blockedShort": "已拦截",
@@ -701,7 +702,22 @@
       "ruleUpdated": "IP 规则已更新",
       "ruleDeleted": "IP 规则已删除",
       "deleteTitle": "删除 IP 规则",
-      "deleteDescription": "此操作无法撤销。"
+      "deleteDescription": "此操作无法撤销。",
+      "autoBlocked": {
+        "title": "自动拦截 IP",
+        "description": "WAF 或限流判定后边缘节点当前拒绝访问本站点的 IP，列表随节点心跳自动刷新。",
+        "ip": "IP 地址",
+        "attacks": "攻击次数",
+        "lastAttack": "最后攻击时间",
+        "expiresAt": "预计自动解封",
+        "permanent": "永久",
+        "unblock": "快速解封",
+        "unblockTitle": "解封 IP",
+        "unblockDescription": "所有执行封禁的节点将立即停止拒绝该 IP。",
+        "unblocked": "IP 已解封",
+        "empty": "暂无自动拦截 IP",
+        "emptyDescription": "被 WAF 或 CC 防护拦截的 IP 会连同攻击记录显示在这里。"
+      }
     },
     "caching": {
       "title": "缓存",
@@ -944,6 +960,9 @@
       "description": "请求分析、延迟与响应构成。",
       "requests": "请求",
       "bandwidth": "带宽",
+      "egressHint": "发送到客户端的出站速率，不含回源流量。",
+      "totalEgress": "出站流量",
+      "avgBitrate": "平均速率",
       "statusCodes": "状态码",
       "totalRequests": "总请求数",
       "uniqueIps": "独立 IP",
@@ -1480,7 +1499,15 @@
       "mcpClientConfig": "客户端配置（JSON）",
       "mcpCli": "Claude Code 一条命令",
       "mcpNote": "MCP 与控制台共用凭据，并受「API 防护」（IP 白名单、WAF）约束；写入工具需要带 write 权限且所有者为管理员的密钥。",
-      "mcpManageKeys": "管理 API 密钥"
+      "mcpManageKeys": "管理 API 密钥",
+      "about": "关于",
+      "aboutDescription": "当前 PingWAF 安装的版本与项目信息。",
+      "aboutProduct": "产品",
+      "aboutUpstream": "上游项目",
+      "aboutUpstreamValue": "基于 Tree Xie 的 pingap（Apache-2.0 许可证）。",
+      "aboutProject": "项目地址",
+      "aboutOpenProject": "打开项目页面",
+      "aboutNote": "版本发布、文档与问题跟踪均在上面的仓库中进行。"
     },
     "geo": {
       "title": "地域限制",
@@ -1636,6 +1663,7 @@
       "title": "请求生命周期",
       "description": "PingWAF 各项功能在代理流水线中的执行阶段。在这里查看 WAF、IP、Bot、限流与缓存规则分别在哪一步生效，并据此调试请求为什么被放行、拦截或质询。",
       "docLink": "完整文档",
+      "quickNav": "快速导航",
       "stages": {
         "tls": {
           "title": "TLS 与连接",

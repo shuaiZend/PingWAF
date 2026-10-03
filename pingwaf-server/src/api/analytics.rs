@@ -38,6 +38,9 @@ const INTERVALS: [&str; 4] = ["minute", "hour", "day", "week"];
 /// Sites tracked by the per-site traffic chart.
 const TOP_SITES_LIMIT: i64 = 8;
 
+/// Fixed bucket widths (seconds) accepted by `/analytics/traffic`.
+const TRAFFIC_STEPS: [i64; 8] = [5, 10, 30, 60, 300, 900, 3600, 86_400];
+
 #[derive(Debug, Deserialize)]
 pub struct RangeQuery {
     pub site_id: Option<String>,
@@ -56,6 +59,20 @@ fn default_interval() -> String {
 
 fn default_limit() -> i64 {
     10
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TrafficQuery {
+    pub site_id: Option<String>,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    /// Bucket width in seconds; one of [`TRAFFIC_STEPS`] (default 5).
+    #[serde(default = "default_traffic_step")]
+    pub step: i64,
+}
+
+fn default_traffic_step() -> i64 {
+    5
 }
 
 /// Resolved query parameters shared by every endpoint below.
@@ -172,11 +189,31 @@ pub struct SiteTrafficBucket {
     pub requests: i64,
 }
 
+#[derive(Debug, Serialize)]
+pub struct TrafficBucket {
+    pub bucket: DateTime<Utc>,
+    pub bytes: i64,
+}
+
+/// Egress bandwidth for one window, bucketed at a fixed width. Only response
+/// bytes sent to clients are counted — origin-pull traffic is never included.
+#[derive(Debug, Serialize)]
+pub struct Traffic {
+    pub from: DateTime<Utc>,
+    pub to: DateTime<Utc>,
+    pub site_id: Option<Uuid>,
+    pub step_seconds: i64,
+    /// Sum of `bytes` across the whole window, i.e. the total egress.
+    pub total_bytes: i64,
+    pub buckets: Vec<TrafficBucket>,
+}
+
 /// Routes contributed to `/api/v1`.
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/analytics/summary", get(summary))
         .route("/analytics/requests-over-time", get(requests_over_time))
+        .route("/analytics/traffic", get(traffic))
         .route("/analytics/sites-over-time", get(sites_over_time))
         .route("/analytics/top-rules", get(top_rules))
         .route("/analytics/top-ips", get(top_ips))
@@ -416,6 +453,74 @@ async fn requests_over_time(
     }
 
     Ok(Json(buckets))
+}
+
+/// `GET /api/v1/analytics/traffic` — egress bytes per fixed-width bucket.
+///
+/// `response_size` records the bytes streamed to the client, so summing it
+/// measures outbound traffic only; upstream (origin-pull) bytes are never
+/// recorded and cannot leak into the totals.
+async fn traffic(
+    State(state): State<AppState>,
+    current: AuthUser,
+    Query(query): Query<TrafficQuery>,
+) -> Result<Json<Traffic>, ApiError> {
+    // Site visibility and the from/to window are validated by `resolve`; the
+    // interval/limit fields it also fills in do not apply to this endpoint.
+    let range = RangeQuery {
+        site_id: query.site_id,
+        from: query.from,
+        to: query.to,
+        interval: default_interval(),
+        limit: default_limit(),
+    };
+    let resolved = resolve(&state, &current, &range).await?;
+
+    if !TRAFFIC_STEPS.contains(&query.step) {
+        return Err(ApiError::BadRequest(format!(
+            "step must be one of {}",
+            TRAFFIC_STEPS.map(|s| s.to_string()).join(", ")
+        )));
+    }
+    let span = (resolved.to - resolved.from).num_seconds().max(1);
+    if span / query.step > MAX_BUCKETS {
+        return Err(ApiError::BadRequest(format!(
+            "the requested range would produce too many {0}s buckets; widen the step",
+            query.step
+        )));
+    }
+
+    // `step` comes from the validated whitelist above, so inlining it is safe.
+    let (where_sql, values) = resolved.filter("access_logs");
+    let sql = format!(
+        "SELECT to_timestamp(floor(extract(epoch FROM timestamp) / {0}) * {0}) AS bucket, \
+                COALESCE(SUM(response_size), 0)::BIGINT AS bytes \
+         FROM access_logs WHERE {where_sql} \
+         GROUP BY bucket ORDER BY bucket ASC",
+        query.step
+    );
+
+    let rows = query_all(&state.db, &sql, values).await?;
+    let mut total_bytes: i64 = 0;
+    let mut buckets = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let bytes = get_value::<i64>(row, "bytes");
+        total_bytes += bytes;
+        buckets.push(TrafficBucket {
+            bucket: try_get::<DateTime<Utc>>(row, "bucket")
+                .unwrap_or_else(Utc::now),
+            bytes,
+        });
+    }
+
+    Ok(Json(Traffic {
+        from: resolved.from,
+        to: resolved.to,
+        site_id: resolved.site_id,
+        step_seconds: query.step,
+        total_bytes,
+        buckets,
+    }))
 }
 
 /// `GET /api/v1/analytics/sites-over-time` — request volume over time for the
@@ -796,5 +901,14 @@ mod tests {
         }
         assert_eq!(bucket_seconds("minute"), 60);
         assert_eq!(bucket_seconds("week"), 604_800);
+    }
+
+    #[test]
+    fn traffic_steps_are_whitelisted() {
+        assert!(TRAFFIC_STEPS.contains(&5));
+        assert!(TRAFFIC_STEPS.contains(&3_600));
+        assert!(!TRAFFIC_STEPS.contains(&7));
+        assert!(!TRAFFIC_STEPS.contains(&86_401));
+        assert_eq!(default_traffic_step(), 5);
     }
 }

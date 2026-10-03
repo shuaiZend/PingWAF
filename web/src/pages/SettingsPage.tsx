@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useMemo, useState, type FormEvent } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -30,9 +30,12 @@ import {
   ShieldCheck,
   Sparkle,
   UploadSimple,
+  GithubLogo,
+  ArrowSquareOut,
 } from '@phosphor-icons/react'
 import { PageHeader } from '@/components/PageHeader'
 import { Card, CardBody, CardFooter, CardHeader } from '@/components/ui/Card'
+import { QuickNav } from '@/components/ui/QuickNav'
 import { Switch } from '@/components/ui/Switch'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
@@ -71,6 +74,7 @@ import { aiApi, aiKeys } from '@/api/ai'
 import { mcpApi, mcpKeys } from '@/api/mcp'
 import { ipGroupKeys, ipGroupsApi } from '@/api/ipGroups'
 import { authApi } from '@/api/auth'
+import { systemApi } from '@/api/system'
 import { ApiError } from '@/api/client'
 import { errorMessage, handleApiError } from '@/api/errors'
 import { isPasskeyCancellation, passkeysSupported } from '@/lib/webauthn'
@@ -108,6 +112,9 @@ const MIN_PASSWORD = 8
 /** Public REST reference shipped with the repository. */
 const API_DOCS_URL = 'https://github.com/shuaiZend/PingWAF/blob/main/docs/api.md'
 
+/** Public project repository shown in the About card. */
+const PROJECT_URL = 'https://github.com/shuaiZend/PingWAF'
+
 /**
  * Quick-navigation anchors in page order; each id must match the `id` of the
  * section that wraps the matching card below.
@@ -125,6 +132,7 @@ const SETTINGS_NAV = [
   { id: 'log-retention', labelKey: 'pages.settings.logRetention' },
   { id: 'error-pages', labelKey: 'pages.settings.errorPages' },
   { id: 'api-keys', labelKey: 'pages.settings.apiKeys' },
+  { id: 'about', labelKey: 'pages.settings.about' },
 ]
 
 export function SettingsPage() {
@@ -139,12 +147,17 @@ export function SettingsPage() {
     { value: 'system', label: t('theme.system'), icon: Monitor },
   ]
 
+  const navItems = useMemo(
+    () => SETTINGS_NAV.map(({ id, labelKey }) => ({ id, label: t(labelKey) })),
+    [t],
+  )
+
   return (
     <div className="animate-slide-up">
       <PageHeader title={t('pages.settings.title')} description={t('pages.settings.description')} />
 
       <div className="flex max-w-6xl items-start gap-8">
-        <SettingsNav />
+        <QuickNav ariaLabel={t('pages.settings.quickNav')} items={navItems} />
         <div className="flex min-w-0 max-w-4xl flex-1 flex-col gap-4">
           <section id="appearance" className="scroll-mt-6">
             <AppearanceCard themeOptions={themeOptions} mode={mode} setMode={setMode} i18n={i18n} />
@@ -210,69 +223,12 @@ export function SettingsPage() {
           <section id="api-keys" className="scroll-mt-6">
             <ApiKeysCard canWrite={canWrite} />
           </section>
+          <section id="about" className="scroll-mt-6">
+            <AboutCard />
+          </section>
         </div>
       </div>
     </div>
-  )
-}
-
-/**
- * Sticky quick navigation for the settings column. The console scrolls inside
- * `<main>`, so the sections are observed against the viewport with a band just
- * below the top edge: whichever section crosses the band is the current one.
- */
-function SettingsNav() {
-  const { t } = useTranslation()
-  const [active, setActive] = useState(SETTINGS_NAV[0].id)
-
-  useEffect(() => {
-    const elements = SETTINGS_NAV.map(({ id }) => document.getElementById(id)).filter(
-      (el): el is HTMLElement => el !== null,
-    )
-    if (elements.length === 0) return
-    const observer = new IntersectionObserver(
-      (entries) => {
-        for (const entry of entries) {
-          if (entry.isIntersecting) setActive(entry.target.id)
-        }
-      },
-      { rootMargin: '-15% 0px -75% 0px' },
-    )
-    for (const element of elements) observer.observe(element)
-    return () => observer.disconnect()
-  }, [])
-
-  const jump = (id: string) => {
-    document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-  }
-
-  return (
-    <nav
-      aria-label={t('pages.settings.quickNav')}
-      className="sticky top-2 hidden w-44 shrink-0 xl:block"
-    >
-      <p className="mb-2 px-3 text-xs font-medium text-fg-subtle">
-        {t('pages.settings.quickNav')}
-      </p>
-      <ul className="flex flex-col border-l border-line">
-        {SETTINGS_NAV.map(({ id, labelKey }) => (
-          <li key={id}>
-            <button
-              type="button"
-              onClick={() => jump(id)}
-              className={cn(
-                '-ml-px block w-full truncate border-l-2 px-3 py-1.5 text-left text-[13px] transition-colors',
-                active === id
-                  ? 'border-brand font-medium text-fg-strong'
-                  : 'border-transparent text-fg-subtle hover:bg-recessed hover:text-fg',
-              )}
-            >
-              {t(labelKey)}
-            </button>
-          </li>
-        ))}
-      </ul>
-    </nav>
   )
 }
 
@@ -3206,6 +3162,96 @@ function ApiKeysCard({ canWrite }: { canWrite: boolean }) {
           </div>
         )}
       </ConfirmDialog>
+    </Card>
+  )
+}
+
+/* ── About ──────────────────────────────────────────────────────────── */
+
+function AboutCard() {
+  const { t } = useTranslation()
+  const toast = useToast()
+
+  const version = useQuery({
+    queryKey: ['system', 'version'],
+    queryFn: () => systemApi.version(),
+  })
+
+  const view = version.data
+
+  const copy = async (value: string) => {
+    try {
+      await navigator.clipboard.writeText(value)
+      toast.success(t('pages.settings.copied'))
+    } catch {
+      toast.error(t('pages.settings.copyFailed'))
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader title={t('pages.settings.about')} description={t('pages.settings.aboutDescription')} />
+      <CardBody className="flex flex-col gap-5">
+        {version.isError && !view ? (
+          <ErrorState
+            variant="inline"
+            error={version.error}
+            onRetry={() => version.refetch()}
+            retrying={version.isFetching}
+          />
+        ) : !view ? (
+          <SkeletonRows rows={3} columns={2} />
+        ) : (
+          <>
+            <dl className="grid gap-4 text-[13px] sm:grid-cols-2">
+              <div>
+                <dt className="text-xs font-medium text-fg-subtle">{t('pages.settings.aboutProduct')}</dt>
+                <dd className="mt-1 flex items-center gap-2 text-fg">
+                  <ShieldCheck weight="duotone" className="h-4 w-4 text-brand" />
+                  PingWAF
+                  <Badge tone="brand">{view.version}</Badge>
+                </dd>
+              </div>
+              <div>
+                <dt className="text-xs font-medium text-fg-subtle">{t('pages.settings.aboutUpstream')}</dt>
+                <dd className="mt-1 text-fg">{t('pages.settings.aboutUpstreamValue')}</dd>
+              </div>
+            </dl>
+
+            <div>
+              <p className="mb-1.5 text-xs font-medium text-fg-subtle">
+                {t('pages.settings.aboutProject')}
+              </p>
+              <div className="flex items-center gap-2">
+                <code className="pw-mono min-w-0 flex-1 truncate rounded-md border border-line bg-recessed px-3 py-2 text-xs text-fg">
+                  {PROJECT_URL}
+                </code>
+                <Button
+                  size="icon"
+                  variant="secondary"
+                  aria-label={`${t('pages.settings.copy')}: ${t('pages.settings.aboutProject')}`}
+                  icon={<Copy weight="duotone" className="h-4 w-4" />}
+                  onClick={() => copy(PROJECT_URL)}
+                />
+                <Button
+                  size="icon"
+                  variant="secondary"
+                  aria-label={t('pages.settings.aboutOpenProject')}
+                  icon={<ArrowSquareOut weight="duotone" className="h-4 w-4" />}
+                  onClick={() => window.open(PROJECT_URL, '_blank', 'noopener,noreferrer')}
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 border-t border-line pt-4">
+              <GithubLogo weight="duotone" className="h-4 w-4 shrink-0 text-fg-subtle" />
+              <p className="text-xs leading-relaxed text-fg-subtle">
+                {t('pages.settings.aboutNote')}
+              </p>
+            </div>
+          </>
+        )}
+      </CardBody>
     </Card>
   )
 }

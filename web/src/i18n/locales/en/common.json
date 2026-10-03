@@ -212,6 +212,7 @@
       "activeAgents": "Active agents",
       "agentsOnline": "{{count}} online",
       "requestsWindow": "Requests",
+      "egressWindow": "Egress",
       "blockedWindow": "Blocked",
       "blocked": "Blocked requests",
       "blockedShort": "Blocked",
@@ -701,7 +702,22 @@
       "ruleUpdated": "IP rule updated",
       "ruleDeleted": "IP rule deleted",
       "deleteTitle": "Delete IP rule",
-      "deleteDescription": "This cannot be undone."
+      "deleteDescription": "This cannot be undone.",
+      "autoBlocked": {
+        "title": "Auto-blocked IPs",
+        "description": "IPs the edge currently refuses for this site after WAF or rate-limit verdicts. The list refreshes from agent heartbeats.",
+        "ip": "IP address",
+        "attacks": "Attacks",
+        "lastAttack": "Last attack",
+        "expiresAt": "Auto unblock",
+        "permanent": "Permanent",
+        "unblock": "Unblock",
+        "unblockTitle": "Unblock IP",
+        "unblockDescription": "The edge stops refusing this IP immediately on every enforcing node.",
+        "unblocked": "IP unblocked",
+        "empty": "No auto-blocked IPs",
+        "emptyDescription": "IPs blocked by WAF or CC defenses will appear here with their attack history."
+      }
     },
     "caching": {
       "title": "Caching",
@@ -944,6 +960,9 @@
       "description": "Request analytics, latency and response breakdowns.",
       "requests": "Requests",
       "bandwidth": "Bandwidth",
+      "egressHint": "Outbound bit rate sent to clients; origin-pull traffic is excluded.",
+      "totalEgress": "Total egress",
+      "avgBitrate": "Avg bitrate",
       "statusCodes": "Status codes",
       "totalRequests": "Total requests",
       "uniqueIps": "Unique IPs",
@@ -1480,7 +1499,15 @@
       "mcpClientConfig": "Client configuration (JSON)",
       "mcpCli": "Claude Code one-liner",
       "mcpNote": "MCP shares console credentials and rides the API protection (IP allowlist, WAF); write tools need a key carrying write whose owner is an administrator.",
-      "mcpManageKeys": "Manage API keys"
+      "mcpManageKeys": "Manage API keys",
+      "about": "About",
+      "aboutDescription": "Version and project information for this PingWAF installation.",
+      "aboutProduct": "Product",
+      "aboutUpstream": "Upstream",
+      "aboutUpstreamValue": "Based on pingap by Tree Xie, licensed under Apache-2.0.",
+      "aboutProject": "Project",
+      "aboutOpenProject": "Open project page",
+      "aboutNote": "Releases, documentation and issue tracking all live in the repository above."
     },
     "geo": {
       "title": "Geo Restrictions",
@@ -1636,6 +1663,7 @@
       "title": "Request lifecycle",
       "description": "Where every PingWAF feature acts in the proxy pipeline. Use this map to see which stage your WAF, IP, bot, rate-limit and cache rules run in, and to debug why a request was allowed, blocked or challenged.",
       "docLink": "Full documentation",
+      "quickNav": "On this page",
       "stages": {
         "tls": {
           "title": "TLS & connection",
