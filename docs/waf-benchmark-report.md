@@ -276,3 +276,52 @@ G1 主基线的恶意样本（black）按类目拦截情况：
 - **配置方式**（静态 TOML，插件段）：`level = "normal" | "strict"`；`stacks = ["java", ...]`（可选，默认全栈）。托管的 1061 号规则仅 Strict 装配；栈过滤同时作用于签名与托管规则（含 allow 类）。
 
 复现：`tools/waf-bench/conf/level-normal.toml` 与 `level-strict.toml`，回放命令见 `tools/waf-bench/README.md`。
+
+## 10. P0 覆盖面修复与实测（§9 之后的第二轮）
+
+复盘报告（`waf-engine-review.md`）定位的 P0 缺陷级修复已全部落地，共四项：
+
+1. **`+` 按空格解码（form 语义）**：`id=%27+OR+1%3D1--` 与 form body 中的 `waitfor+delay` 此前不解码即漏报；query 与 form body 的 value 按表单语义把 `+` 解为空格后再走解码链（key/cookie/header/path 不受影响，`C++` 类字面量保留）。
+2. **needle 补齐与 sev 升级**：
+   - 补无前导斜杠变体 PT-013 `etc/passwd`、PT-014 `etc/shadow`、PT-015 `proc/self`（sev5/5/4）——Aho-Corasick 非重叠消费使 `../` 吃掉 `/etc/passwd` 起始的 `/`，PT-003/004/005 在「前缀遍历 + 敏感文件」复合形态下永远无法命中，与 §9 修复的 `${` 遮蔽 `${jndi:` 同构；
+   - 时间盲注/文件读写 needle SQL-004~009（`benchmark(`/`pg_sleep(`/`waitfor delay`/`load_file(`/`into outfile`/`into dumpfile`）sev 4→5——单命中从 4 分（远低于阈值 40）变为 critical fast-path 拦截；
+   - 补语言级调用 CI-026~031（`os.system`/`__import__`/`shell_exec(`/`passthru(`/`proc_open(` sev5、`subprocess.` sev4）与 CRLF-003/004（`\r\nset-cookie`、`\r\nlocation:` sev5——裸 `\r\n` 不能升 sev5（JSON body 整扫误报），特异头名则无歧义）。
+3. **静态模式受控 body 检测**：`pingap-plugin/src/waf.rs` 的 body 读取门控原为 `agent.is_some() && (body_limit > 0 || inspect_body)`，静态部署（无 agent）从不读 body，POST 类攻击全漏；现改为「日志采集仍需 agent，检测只需 `inspect_body = true`」。
+4. **JS 括号调用结构检测（Strict-only）**：`detect_js_call` 识别 `parent['\x65val'](…)` / `this["constructor"]["constructor"](…)` 形态（被调名藏在括号内且常 hex 转义，关键词 needle 天然不可见），命中按表达式注入同路径升级 critical。
+
+配套的误报治理（body 检测开启后白样本误报归因驱动）：
+
+- **Normal 下 body 中反射类家族（SQLi/XSS/命令注入）降为弱信号**（sev 上限 2、不 critical）：JSON/HTML 报文里的 `<!DOCTYPE`、`javascript:`、引号+关键词串（libinjection quote-keyword）是常见良性内容，一票 critical 造成白样本 xss 类 46%、xxe 类 100% 误报；降为弱信号后需 3+ 独立信号才可能过 family 门。Strict 不降级（该档设计即激进）。结构性家族（XXE/反序列化/CRLF/SSRF）不受影响。
+- **XXE-001 `<!doctype` sev 5→3**：DOCTYPE 是所有 HTML/XML 的样板，真实 XXE 需 `<!ENTITY`（XXE-002，保持 sev5）。
+- libinjection 对 body 的命中与 needle 同口径降权。
+
+### 10.1 实测结果（同参数全量回放，XFF 独享 IP）
+
+| 配置 | 拦截率（严格口径） | 误报率 | 对比 §9 |
+|---|---|---|---|
+| Normal | **36.5%（240/658）** | 0.21%（69 条） | +3.4pp / +0.04pp |
+| Normal + `inspect_body` | **38.1%（251/658）** | **0.23%（75 条）** | 再 +1.6pp / +0.02pp |
+| Strict | **51.1%（336/658）** | 0.35%（115 条） | +13.3pp / +0.05pp |
+| Strict + `inspect_body` | **63.8%（420/658）** | 1.98%（658 条） | 再 +12.7pp / +1.63pp |
+
+类别拦截率（黑样本，修复前 → 修复后）：
+
+| 类别 | Normal 前→后 | Strict 前→后 | 主因 |
+|---|---|---|---|
+| lfi | 32.0% → **68.0%** | 36.0% → **72.0%** | PT-013/014 解除遮蔽 |
+| sqli | 70.0% → **85.0%** | 70.0% → **85.0%** | 时间盲注 sev5 + `+` 解码 |
+| xss | 33.3% → 33.3% | 33.3% → **80.0%** | detect_js_call（14 条 hex 转义括号调用） |
+| rce | 16.7% → 16.7% | 66.7% → 66.7% | body 开启后 33.3% / 75.0% |
+| ssrf | 7.7% → 7.7% | 7.7% → 7.7% | body 开启后 23.1% / 46.2% |
+| deser | 0% → 0% | 0% → 0% | body 开启后 0% / 83.3% |
+| crlf | 0% → 0% | 60.0% → 60.0% | body 开启后 0% / 100% |
+
+其余类目两档持平。Normal 档误报分布与 §9 基本一致（主体仍是 query/path 本身含攻击串的白样本，如搜索词 `union select`）；body 开启后新增误报仅 6 条（含 1 条 body 含 `file://` 的白样本——真实 SSRF 探测确常走 body，保留 sev5）。
+
+### 10.2 结论与取舍
+
+- **Normal 是默认推荐档**：不开 body 检测时 36.5%/0.21%，开 `inspect_body` 后 38.1%/0.23%，误报几乎零代价；本数据集中反射类家族的 body 增益本就趋近于零（见上表），降权策略不损失真实拦截。
+- **Strict + `inspect_body` 是极限拦截档**：63.8% 拦截的代价是 1.98% 误报（主体为含裸 CRLF 的白样本 94.5%、引号+关键词 JSON body 等），适合内网影子部署/观察模式或可承受人工放行的场景；`stacks` 收窄与 allow 规则可进一步压误报。
+- **时延**：不开 body 检测两档 p95 仍为 2-4ms；开启后 p95 ≈3s 是回放客户端 `sendall` 大 body 与 WAF「上传中途拦截」的固有交互（拦截后客户端仍在发送），非引擎匹配开销。
+- **复现**：`tools/waf-bench/conf/level-{normal,strict}{,-body}.toml`，`-body` 变体多一行 `inspect_body = true`；回放命令见 `tools/waf-bench/README.md`。
+- **未竟事项**（P1，见 `waf-engine-review.md`）：JSON 递归解包（当前对 `{"body":"payload"}` 类嵌套串不展开）、deser 黑样本在 Normal+body 档仍依赖偶然信号（Strict 档 83.3% 由 critical 直拦）。
