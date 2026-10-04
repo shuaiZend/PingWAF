@@ -5480,13 +5480,13 @@ dependencies = [
  "ahash",
  "aho-corasick",
  "anyhow",
+ "base64 0.23.1",
  "ipnet",
  "once_cell",
  "regex",
  "serde",
  "serde_json",
  "tracing",
- "urlencoding",
 ]
 
 [[package]]

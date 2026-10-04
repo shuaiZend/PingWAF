@@ -4,22 +4,74 @@
 //! double- or triple-encoded to slip past naive filters, so we keep decoding
 //! until the value stops changing (bounded by `max_layers`).
 
+/// Percent-decode into raw bytes (`None` when there is nothing to decode).
+fn percent_to_bytes(s: &str) -> Option<Vec<u8>> {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    let mut any = false;
+    while i < b.len() {
+        if b[i] == b'%'
+            && i + 2 < b.len()
+            && b[i + 1].is_ascii_hexdigit()
+            && b[i + 2].is_ascii_hexdigit()
+        {
+            out.push(u8::from_str_radix(&s[i + 1..i + 3], 16).unwrap_or(b'%'));
+            i += 3;
+            any = true;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    any.then_some(out)
+}
+
+/// Bytes to text, restoring overlong UTF-8 sequences first: `C0 AF` is an
+/// overlong encoding of `/`, `C0 BC` of `<` — a classic filter-evasion
+/// encoding that exploits decoders which reject or mangle invalid UTF-8.
+/// Surviving invalid bytes map through Latin-1 so the payload *after* the
+/// bad byte (…`script>` behind `%C0%BC`) still becomes scannable text.
+fn bytes_to_scannable(bytes: &[u8]) -> String {
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return s.to_string();
+    }
+    let mut fixed: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if (0xC0..=0xC1).contains(&b)
+            && i + 1 < bytes.len()
+            && (bytes[i + 1] & 0xC0) == 0x80
+        {
+            fixed.push(((b & 0x1F) << 6) | (bytes[i + 1] & 0x3F));
+            i += 2;
+        } else {
+            fixed.push(b);
+            i += 1;
+        }
+    }
+    fixed.iter().map(|&b| b as char).collect()
+}
+
 /// Apply percent-decoding repeatedly until the string is stable or the layer
 /// budget is exhausted. Returns the input unchanged when there is nothing to
 /// decode.
 ///
-/// Invalid UTF-8 sequences halt the loop and return the most recent valid
-/// form rather than failing — the WAF still has the previous layer to scan.
+/// Unlike `urlencoding::decode`, decoding is byte-wise: an invalid UTF-8
+/// sequence (overlong-UTF-8 obfuscation such as `%C0%BCscript%3E`) does not
+/// abort the pass — it is restored through [`bytes_to_scannable`] so the
+/// payload behind it stays visible to the detectors.
 pub fn multi_decode(input: &str, max_layers: usize) -> String {
     if max_layers == 0 || !input.contains('%') {
         return input.to_string();
     }
     let mut current = input.to_string();
     for _ in 0..max_layers {
-        let decoded = match urlencoding::decode(&current) {
-            Ok(cow) => cow.into_owned(),
-            Err(_) => break,
+        let Some(bytes) = percent_to_bytes(&current) else {
+            break;
         };
+        let decoded = bytes_to_scannable(&bytes);
         if decoded == current {
             break;
         }
