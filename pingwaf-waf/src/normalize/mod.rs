@@ -390,6 +390,22 @@ fn parse_query(
         let key_decoded = multi_decode(k, max_decode_layers);
         let val_decoded =
             decode_value_form(v, max_decode_layers, decode_escapes);
+        // A query value that is itself serialized JSON (`?id={"id":"…"}`) is
+        // unpacked in place, same as form fields — the container shape hides
+        // the member payloads from every detector otherwise.
+        if !val_decoded.is_empty()
+            && unpack_string_json(
+                &val_decoded,
+                0,
+                &key_decoded,
+                max_decode_layers,
+                decode_escapes,
+                decoded_values,
+            )
+        {
+            out.push((key_decoded.clone(), val_decoded));
+            continue;
+        }
         out.push((key_decoded.clone(), val_decoded.clone()));
         decoded_values.push(DecodedValue {
             source: ValueSource::QueryParam,
@@ -575,6 +591,13 @@ fn expand_base64(
             let Some(mut decoded) = b64_decode_value(&value) else {
                 continue;
             };
+            // Transport-wrapped payloads often carry a second obfuscation
+            // layer inside (`\u0074…` JavaScript/Java escapes); the decoded
+            // value is already a deliberately encoded surface, so the escape
+            // pass runs regardless of level.
+            if decoded.contains("\\u") || decoded.contains("\\x") {
+                decoded = decode_escapes_owned(&decoded);
+            }
             if decoded.contains('%') {
                 decoded =
                     decode_value(&decoded, max_decode_layers, decode_escapes);
@@ -598,6 +621,28 @@ fn expand_base64(
                 )
             {
                 continue;
+            }
+            // Obfuscated transports sometimes carry bare control characters
+            // in JSON structure positions (stray CR between key and colon,
+            // NUL before the closing brace) — a strict parse refuses those,
+            // so strip them and retry once. Losing control bytes inside a
+            // string value is acceptable here: the detectors need the
+            // members visible, and every dropped byte is whitespace-class.
+            if looks_like_json(&decoded) {
+                let stripped: String =
+                    decoded.chars().filter(|c| !c.is_ascii_control()).collect();
+                if stripped.len() != decoded.len()
+                    && unpack_string_json(
+                        &stripped,
+                        0,
+                        &name,
+                        max_decode_layers,
+                        decode_escapes,
+                        decoded_values,
+                    )
+                {
+                    continue;
+                }
             }
             decoded_values.push(DecodedValue {
                 source,
@@ -1074,5 +1119,85 @@ mod tests {
             .find(|v| v.name == "k")
             .expect("param k");
         assert_eq!(v.decoded, "+");
+    }
+
+    #[test]
+    fn json_valued_query_param_is_unpacked() {
+        // `?j={"id":"1 and 1=2"}` — the container shape hides the member
+        // from the detectors unless the query parser unpacks it like form
+        // fields do. URL-encoded form: %7B%22id%22%3A%221%20and%201%3D2%22%7D
+        let req = normalize_request(
+            "GET",
+            "/",
+            "j=%7B%22id%22%3A%221%20and%201%3D2%22%7D",
+            &[],
+            None,
+            3,
+            false,
+        );
+        let member = req
+            .decoded_values
+            .iter()
+            .find(|v| v.name == "j.id")
+            .expect("unpacked JSON member");
+        assert_eq!(member.decoded, "1 and 1=2");
+        assert!(member.field);
+        // The container itself is replaced by its members (its `"k":v`
+        // shape trips quote-keyword on benign payloads).
+        assert!(!req.decoded_values.iter().any(|v| v.name == "j"));
+    }
+
+    #[test]
+    fn base64_json_with_unicode_escapes_is_expanded() {
+        // b64 of `{"id":"1 un\u0069on select password from users"}` — the
+        // transport-decoded text carries literal `\u` escapes that would
+        // leave the union keyword invisible behind the escape sequence.
+        use base64::Engine as _;
+        let inner = r#"{"id":"1 un\u0069on select password from users"}"#;
+        let wrapped =
+            base64::engine::general_purpose::STANDARD.encode(inner.as_bytes());
+        let req = normalize_request(
+            "GET",
+            "/",
+            &format!("q={wrapped}"),
+            &[],
+            None,
+            3,
+            false,
+        );
+        let member = req
+            .decoded_values
+            .iter()
+            .find(|v| v.name == "q.b64.id")
+            .expect("expanded b64 JSON member");
+        assert_eq!(member.decoded, "1 union select password from users");
+    }
+
+    #[test]
+    fn base64_json_with_bare_control_chars_is_unpacked() {
+        // b64 of a JSON container with bare control bytes in structure
+        // positions (stray CR after a key, NUL before the closing brace):
+        // the strict parse refuses them, so the unpack must strip and
+        // retry — and the member value here is itself base64 (layer 2),
+        // `` ; echo `/bin/cat /etc/hosts` ``.
+        use base64::Engine as _;
+        let inner = "{\r\t\"trajectory\"\r:false,\"policy\":\t\"OyBlY2hvIGAvYmluL2NhdCAvZXRjL2hvc3RzYA==\"\x00} ";
+        let wrapped =
+            base64::engine::general_purpose::STANDARD.encode(inner.as_bytes());
+        let req = normalize_request(
+            "GET",
+            "/",
+            &format!("q={wrapped}"),
+            &[],
+            None,
+            3,
+            false,
+        );
+        let layer2 = req
+            .decoded_values
+            .iter()
+            .find(|v| v.name == "q.b64.policy.b64")
+            .expect("layer-2 expansion");
+        assert_eq!(layer2.decoded, "; echo `/bin/cat /etc/hosts`");
     }
 }

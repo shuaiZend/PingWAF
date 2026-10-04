@@ -234,6 +234,20 @@ fn builtin_patterns() -> Vec<SignaturePattern> {
             "windows win.ini access",
             "win.ini",
         );
+        push(
+            "PT-017",
+            AttackCategory::PathTraversal,
+            5,
+            "WEB-INF deployment descriptor dir",
+            "web-inf",
+        );
+        push(
+            "PT-018",
+            AttackCategory::PathTraversal,
+            5,
+            "Cisco ASA +CSCOE+ traversal",
+            "portal_inc.lua",
+        );
 
         // ---- Command injection ----
         push(
@@ -547,6 +561,205 @@ fn builtin_patterns() -> Vec<SignaturePattern> {
             5,
             "Jenkins Groovy sandbox endpoint",
             "securegroovy",
+        );
+        // Spaced command separators: `; whoami`, `| curl` — the tight
+        // needles above only see the no-space form. The trailing space on
+        // network commands keeps `;id` matrix-parameter paths (`/foo;id=x`)
+        // out of these hits.
+        push(
+            "CI-045",
+            AttackCategory::CommandInjection,
+            4,
+            "spaced command separator",
+            "; whoami",
+        );
+        push(
+            "CI-046",
+            AttackCategory::CommandInjection,
+            4,
+            "spaced command separator",
+            "; uname",
+        );
+        push(
+            "CI-047",
+            AttackCategory::CommandInjection,
+            4,
+            "spaced command separator",
+            "; ping ",
+        );
+        push(
+            "CI-048",
+            AttackCategory::CommandInjection,
+            4,
+            "spaced command separator",
+            "; curl ",
+        );
+        push(
+            "CI-049",
+            AttackCategory::CommandInjection,
+            4,
+            "spaced command separator",
+            "; wget ",
+        );
+        push(
+            "CI-04a",
+            AttackCategory::CommandInjection,
+            4,
+            "spaced command separator",
+            "; sleep ",
+        );
+        push(
+            "CI-04b",
+            AttackCategory::CommandInjection,
+            4,
+            "spaced command separator",
+            "; echo ",
+        );
+        push(
+            "CI-050",
+            AttackCategory::CommandInjection,
+            4,
+            "piped spaced command",
+            "| whoami",
+        );
+        push(
+            "CI-051",
+            AttackCategory::CommandInjection,
+            4,
+            "piped spaced command",
+            "| uname",
+        );
+        push(
+            "CI-052",
+            AttackCategory::CommandInjection,
+            4,
+            "piped spaced command",
+            "| ping ",
+        );
+        push(
+            "CI-053",
+            AttackCategory::CommandInjection,
+            4,
+            "piped spaced command",
+            "| curl ",
+        );
+        push(
+            "CI-054",
+            AttackCategory::CommandInjection,
+            4,
+            "piped spaced command",
+            "| wget ",
+        );
+        push(
+            "CI-055",
+            AttackCategory::CommandInjection,
+            4,
+            "piped spaced command",
+            "| sleep ",
+        );
+        push(
+            "CI-060",
+            AttackCategory::CommandInjection,
+            4,
+            "double-pipe spaced command",
+            "|| whoami",
+        );
+        push(
+            "CI-061",
+            AttackCategory::CommandInjection,
+            4,
+            "double-pipe spaced command",
+            "|| uname",
+        );
+        push(
+            "CI-062",
+            AttackCategory::CommandInjection,
+            4,
+            "double-pipe spaced command",
+            "|| ping ",
+        );
+        push(
+            "CI-063",
+            AttackCategory::CommandInjection,
+            4,
+            "double-pipe spaced command",
+            "|| curl ",
+        );
+        push(
+            "CI-064",
+            AttackCategory::CommandInjection,
+            4,
+            "double-pipe spaced command",
+            "|| wget ",
+        );
+        push(
+            "CI-065",
+            AttackCategory::CommandInjection,
+            4,
+            "double-pipe spaced command",
+            "|| sleep ",
+        );
+        // Backtick-wrapped network/utility commands (exfil/beacon probes):
+        // `` `ping collab` ``, `` `curl …` ``. Complements CI-041 (uname).
+        push(
+            "CI-070",
+            AttackCategory::CommandInjection,
+            4,
+            "backtick command",
+            "`ping ",
+        );
+        push(
+            "CI-071",
+            AttackCategory::CommandInjection,
+            4,
+            "backtick command",
+            "`curl ",
+        );
+        push(
+            "CI-072",
+            AttackCategory::CommandInjection,
+            4,
+            "backtick command",
+            "`wget ",
+        );
+        push(
+            "CI-078",
+            AttackCategory::CommandInjection,
+            5,
+            "eval(atob()) payload wrapper",
+            "eval(atob(",
+        );
+        // LDAP filter injection: the `)(uid=` / `)(|(` breaks are pure
+        // filter-grammar, never benign query text.
+        push(
+            "CI-080",
+            AttackCategory::CommandInjection,
+            5,
+            "LDAP filter injection break",
+            ")(uid=",
+        );
+        push(
+            "CI-081",
+            AttackCategory::CommandInjection,
+            5,
+            "LDAP filter injection break",
+            ")(|(",
+        );
+        push(
+            "CI-082",
+            AttackCategory::CommandInjection,
+            5,
+            "LDAP filter injection break",
+            "*)(objectclass=",
+        );
+        // JSFuck / Harley-Davidson style pure-symbol JS: the prefix
+        // `[(+{}+[])` only occurs inside obfuscated execution payloads.
+        push(
+            "XSS-022",
+            AttackCategory::Xss,
+            5,
+            "JSFuck invocation prefix",
+            "[(+{}+[])",
         );
 
         // ---- SSRF ----
@@ -1071,6 +1284,15 @@ fn builtin_patterns() -> Vec<SignaturePattern> {
             5,
             "utl_inaddr error-based probe",
             "utl_inaddr",
+        );
+        // Postgres COPY ... TO PROGRAM — never a legitimate search phrase,
+        // the quoted program name only occurs in an exfiltration statement.
+        push(
+            "SQL-021",
+            AttackCategory::SqlInjection,
+            5,
+            "COPY TO PROGRAM exfiltration",
+            "to program '",
         );
 
         // ---- XSS (literal needles; detect_xss catches structured payloads) ----
@@ -2251,6 +2473,18 @@ pub fn sqli_union_statement_shaped(input: &str) -> bool {
     SQLI_UNION_BREAK.is_match(input)
         || SQLI_UNION_CONST.is_match(input)
         || SQLI_STMT_MARKER.is_match(input)
+}
+
+static SQLI_INTO_FILE_TARGET: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"(?i)into\s+(?:out|dump)file\s*['\"`]"#).unwrap()
+});
+
+/// Does an `INTO OUTFILE` / `INTO DUMPFILE` occurrence look like an actual
+/// statement (a quoted file target follows) rather than a search phrase
+/// quoting the keywords (`…how to use into outfile`)? A real exfiltration
+/// needs a destination path, which is virtually always quoted.
+pub fn sqli_into_file_statement_shaped(input: &str) -> bool {
+    SQLI_INTO_FILE_TARGET.is_match(input)
 }
 
 static CRLF_HEADER_SHAPE: Lazy<Regex> =
