@@ -226,3 +226,53 @@ G1 主基线的恶意样本（black）按类目拦截情况：
 | 默认信任 XFF | pingap-core/src/http_header.rs:415-424 |
 | 控制面 PL= max(severity)、ml/threshold TODO | pingwaf-server/src/grpc/config.rs:669-694 |
 | 控制面播种 11 条默认规则 | pingwaf-server/src/defaults.rs:111-202 |
+
+## 9. 拦截级别落地与实测（Normal / Strict）
+
+§7 的建议已在引擎层落地为**三维级别设计**：拦截级别（`WafLevel`：Normal/Strict）× 后端技术栈分类（`StackSet`：generic/java/php/python/node）× 语义化表达注入检测。默认值安全性优先：未配置时 Normal 级别 + 全栈覆盖，行为不缩水。
+
+### 9.1 设计要点
+
+| 维度 | Normal（默认） | Strict |
+|---|---|---|
+| 静态签名 | 内置 needle 全量（stack 过滤后） | 额外 10 条 strict-only 签名（CI-101..106 命令替换、TI-101..104 Java 表达式） |
+| Referer/UA 降权 | SQLi/XSS/命令注入类命中 sev 5→2、不 critical（§7 第二档 1） | 同左 |
+| CRLF/命令注入/反序列化命中 | 进评分 | 直接 critical（fast-path Block） |
+| 表达式注入（语义检测） | 识别但不升级 | `add_expr_hit`（rce 子评分 +48）并 critical |
+| 托管规则阈值 | 子评分 ≥60 / 聚合 ≥80 | 子评分 ≥50 / 聚合 ≥70，且新增 1061（`cf.waf.score.rce ge 40`） |
+| 有效 paranoia | 配置值 | max(配置值, 3)（激活 1011/1051 等 PL3 规则） |
+
+- **栈分类**：每个静态签名与托管规则标注所属技术栈（如 log4shell→java、`/etc/passwd` 等通用型→generic）。站点按 `stacks` 配置只加载相关栈（如纯 Java 后端配置 `stacks=["java"]` 后不再对 PHP/Node 特征做匹配），automaton 规模与扫描耗时随配置收窄；未配置则全栈兜底。
+- **语义检测**：`detect_expr_injection` 只在**结构容器**（`${}`/`{{ }}`/`{% %}`/`<%= %>`）内识别计算特征（运算、方法调用、多段访问链、`new` 关键字），`${filename}` 等裸标识符不报——对应 §7 第一档 1 的 SSTI 扩面但避免关键词堆砌。
+- **automaton 匹配语义修复**：签名扫描从 Standard 改为 `LeftmostLongest`。Standard 语义下同起点的短 needle（`${`）以非重叠方式先被报告，使前缀更长的 critical needle（`${jndi:`）永远不触发——这正是基线中 log4shell 样本漏报的根因，修复后该样本两档均 100% 拦截。
+- **内存零拷贝**：静态模式规则/签名全部驻留内存（`&'static str`），hit 仅 `u32` 索引 + Copy 字段；请求规范化借用 headers/body（method 为 Cow），Pass 判决路径零字符串构建；扫描缓冲跨请求复用。
+
+### 9.2 两档实测（同参数全量回放，XFF 独享 IP）
+
+| 指标 | 基线 G1（§2） | Normal | Strict |
+|---|---|---|---|
+| 拦截率（严格口径） | 34.0% | 33.1%（218/658） | **37.8%（249/658）** |
+| 误报率 | 0.41%（137 条） | **0.17%（55 条）** | 0.30%（101 条） |
+| p50 / p95 | 1 / 2 ms | 1 / 2 ms | 1 / 2 ms |
+| log4shell 样本 | 漏报 | 100% | 100% |
+
+类别拦截率对比（黑样本，Normal → Strict）：
+
+| 类别 | Normal | Strict | 说明 |
+|---|---|---|---|
+| rce | 16.7% | **66.7%**（2→8） | strict-only 命令替换签名 + critical fast-path |
+| crlf | 0% | **60%**（0→3） | Strict 直接 critical |
+| ssti | 40% | **80%**（2→4） | 语义表达式检测升级 |
+| xxe | 0% | **50%**（0→1） | 同上 |
+| sqli | 70% | 70% | needle 主导，两档一致 |
+| xss | 33.3% | 33.3% | 同上 |
+| log4shell | 100% | 100% | LeftmostLongest 修复后由 query/头即触发 |
+
+### 9.3 结论与取舍
+
+- **Normal 是低误报档**：误报 0.41%→0.17%（-60%），代价仅 -0.9pp 拦截（Referer/UA 降权后，原靠 Referer 命中拦下的黑样本回到评分路径）。剩余 55 条误报的触发点绝大多数在 query/path 本身（如搜索词 `union select`、遥测 URL），与 Referer 降权无关，进一步压降需要 needle 信任度分级（如把 "union select" 从 sev5 降为仅 Strict 生效）。
+- **Strict 换取高危类目拦截倍增**：RCE/CRLF/SSTI/XXE 四类从 0-40% 提升到 50-80%，拦截率净增 +4.7pp；代价是误报 0.30%（+0.13pp，主要来自子评分门槛 50 与 PL3 规则）。适合源站无二次防护、或已知后端栈可用 `stacks` 收窄降低误报的场景。
+- **两档时延无差异**（p95 均 2ms）：级别差异全部体现在规则装配期（automaton 规模、托管规则条数），不在请求路径的分支密度。
+- **配置方式**（静态 TOML，插件段）：`level = "normal" | "strict"`；`stacks = ["java", ...]`（可选，默认全栈）。托管的 1061 号规则仅 Strict 装配；栈过滤同时作用于签名与托管规则（含 allow 类）。
+
+复现：`tools/waf-bench/conf/level-normal.toml` 与 `level-strict.toml`，回放命令见 `tools/waf-bench/README.md`。
