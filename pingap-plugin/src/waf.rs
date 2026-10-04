@@ -61,8 +61,8 @@ use pingwaf_waf::rules::{
     EvalContext, Expression, evaluate as evaluate_expression, parse_expression,
 };
 use pingwaf_waf::{
-    CompiledRule, RequestData, RuleAction, ScoreBreakdown, WafAction,
-    WafEngine, WafEngineConfig, WafMode, WafVerdict,
+    CompiledRule, RequestData, RuleAction, ScoreBreakdown, StackSet, WafAction,
+    WafEngine, WafEngineConfig, WafLevel, WafMode, WafVerdict,
 };
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -1162,6 +1162,7 @@ impl ExpressionState {
             waf_score: 0,
             waf_score_sqli: 0,
             waf_score_xss: 0,
+            waf_score_rce: 0,
         }
     }
 }
@@ -1719,6 +1720,8 @@ fn build_site_engine(cfg: &CacheWafConfig) -> WafEngine {
 
     let engine_config = WafEngineConfig {
         mode,
+        level: WafLevel::default(),
+        stacks: StackSet::default(),
         threshold: if cfg.anomaly_threshold > 0 {
             cfg.anomaly_threshold
         } else {
@@ -1938,6 +1941,14 @@ impl TryFrom<&PluginConf> for WafPlugin {
         let category = PluginCategory::Waf.to_string();
 
         let mode = parse_mode(&get_str_conf(value, "mode"));
+        let level =
+            WafLevel::parse(&get_str_conf(value, "level")).unwrap_or_default();
+        let stack_names = get_str_slice_conf(value, "stacks");
+        let stacks = if stack_names.is_empty() {
+            StackSet::default()
+        } else {
+            StackSet::from_names(stack_names.iter().map(String::as_str))
+        };
         let paranoia_level =
             (get_int_conf_or_default(value, "paranoia_level", 2) as u8)
                 .clamp(1, 4);
@@ -1972,6 +1983,8 @@ impl TryFrom<&PluginConf> for WafPlugin {
 
         let engine_config = WafEngineConfig {
             mode,
+            level,
+            stacks,
             threshold: anomaly_threshold,
             paranoia_level,
             max_decode_layers: 3,

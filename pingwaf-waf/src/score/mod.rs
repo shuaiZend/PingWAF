@@ -132,17 +132,31 @@ impl AnomalyScorer {
                 breakdown.xss_score = breakdown.xss_score.saturating_add(bump);
             },
             AttackCategory::CommandInjection
-            | AttackCategory::Deserialization
-            | AttackCategory::TemplateInjection => {
+            | AttackCategory::Deserialization => {
                 breakdown.rce_score = breakdown.rce_score.saturating_add(bump);
             },
-            AttackCategory::PathTraversal
+            // Template-injection openers (`{{`, `${`, …) are weak signals on
+            // their own — they stay out of the RCE sub-score so the Strict
+            // RCE gate only trips on confirmed structure. Structural hits
+            // feed the sub-score through [`AnomalyScorer::add_expr_hit`].
+            AttackCategory::TemplateInjection
+            | AttackCategory::PathTraversal
             | AttackCategory::Ssrf
             | AttackCategory::CrlfInjection
             | AttackCategory::Xxe => {
                 // Non-family attacks contribute to the aggregate only.
             },
         }
+        breakdown.overall_class = self.classify(breakdown.total);
+    }
+
+    /// Add a structural expression-injection hit — a `${…}` / `{{…}}` /
+    /// `{%…%}` container whose content shows interpreter-facing shape
+    /// (see `detect_expr_injection`). Confirmed template evaluation is RCE
+    /// territory, so this feeds the RCE sub-score directly.
+    pub fn add_expr_hit(&self, breakdown: &mut ScoreBreakdown) {
+        breakdown.total = breakdown.total.saturating_add(4);
+        breakdown.rce_score = breakdown.rce_score.saturating_add(48);
         breakdown.overall_class = self.classify(breakdown.total);
     }
 

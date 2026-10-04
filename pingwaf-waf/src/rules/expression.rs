@@ -63,6 +63,7 @@ pub enum FieldKind {
     WafScore,
     WafScoreSqli,
     WafScoreXss,
+    WafScoreRce,
     Ssl,
     UserAgent,
     Unknown(String),
@@ -98,6 +99,7 @@ impl FieldKind {
             "cf.waf.score" | "waf.score" => FieldKind::WafScore,
             "cf.waf.score.sqli" | "waf.score.sqli" => FieldKind::WafScoreSqli,
             "cf.waf.score.xss" | "waf.score.xss" => FieldKind::WafScoreXss,
+            "cf.waf.score.rce" | "waf.score.rce" => FieldKind::WafScoreRce,
             "ssl" | "https" => FieldKind::Ssl,
             "user_agent" | "http.user_agent" | "http.useragent" => {
                 FieldKind::UserAgent
@@ -627,6 +629,7 @@ pub struct EvalContext<'a> {
     pub waf_score: u32,
     pub waf_score_sqli: u8,
     pub waf_score_xss: u8,
+    pub waf_score_rce: u8,
 }
 
 impl EvalContext<'_> {
@@ -680,6 +683,7 @@ fn resolve_field<'a>(field: &Field, ctx: &'a EvalContext) -> FieldValue<'a> {
         FieldKind::WafScore => FieldValue::Num(ctx.waf_score as i64),
         FieldKind::WafScoreSqli => FieldValue::Num(ctx.waf_score_sqli as i64),
         FieldKind::WafScoreXss => FieldValue::Num(ctx.waf_score_xss as i64),
+        FieldKind::WafScoreRce => FieldValue::Num(ctx.waf_score_rce as i64),
         FieldKind::RequestHeader => {
             match field.index.as_deref().and_then(|n| ctx.header(n)) {
                 Some(v) => FieldValue::Str(v),
@@ -900,6 +904,7 @@ mod tests {
                 waf_score: 25,
                 waf_score_sqli: 30,
                 waf_score_xss: 10,
+                waf_score_rce: 0,
             }
         }
     }

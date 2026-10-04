@@ -46,7 +46,8 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use pingwaf_waf::{
-    RequestData, WafAction, WafEngine, WafEngineConfig, WafMode,
+    RequestData, StackSet, WafAction, WafEngine, WafEngineConfig, WafLevel,
+    WafMode,
 };
 
 use crate::api::error::error_response;
@@ -337,6 +338,8 @@ pub async fn refresh(
             } else {
                 WafMode::Monitor
             },
+            level: WafLevel::default(),
+            stacks: StackSet::default(),
             threshold: 40,
             paranoia_level: 2,
             max_decode_layers: 3,

