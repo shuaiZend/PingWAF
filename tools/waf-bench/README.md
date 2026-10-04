@@ -100,3 +100,4 @@ python3 tools/waf-bench/replay.py /tmp/waf-bench/only-black \
 | G3-pl1 / pl3 | PL 1 / 3 | 灵敏度曲线（PL3 激活空-UA 质询与超长 URI 规则） |
 | G3-th30 / th60 | threshold 30 / 60 | 聚合阈值敏感性 |
 | G4 | agent 离线复刻控制面默认 11 条 + PL4 | 产品默认规则集 + auto-block 行为 |
+| level-normal / level-strict | block / PL2 / threshold 40 / `level` 二档 | 拦截级别对比（报告 §9）：Strict 装配 strict-only 签名、收紧托管阈值并激活 PL3；插件段可配 `stacks` 按后端技术栈收窄签名加载 |
