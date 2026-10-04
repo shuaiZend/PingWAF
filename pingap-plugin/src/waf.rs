@@ -2117,8 +2117,10 @@ impl Plugin for WafPlugin {
         );
         let mut log_body_prefix = LogBodyPrefix::new(body_limit);
         let mut inspect_buf = BytesMut::new();
-        if agent.is_some()
-            && (body_limit > 0 || self.inspect_body)
+        // Log capture only matters when an agent consumes it; body inspection
+        // works standalone — a static deployment blocks POST payloads just
+        // the same.
+        if (agent.is_some() && body_limit > 0 || self.inspect_body)
             && !(method == "POST" && path == VERIFY_ENDPOINT)
         {
             let mut interrupted = false;

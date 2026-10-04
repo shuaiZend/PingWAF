@@ -257,6 +257,28 @@ pub fn decode_value(
     }
 }
 
+/// `decode_value` with form-encoding semantics: a bare `+` means space, the
+/// way every mainstream runtime (nginx, PHP, Tomcat, …) parses query strings
+/// and `application/x-www-form-urlencoded` bodies. Without it a payload like
+/// `' OR 1=1--` sent as `%27+OR+1%3D1--` keeps its `+` separators and every
+/// whitespace-sensitive detector (fingerprinting, regexes) sees one token and
+/// walks past. Literal `+` stays reachable via `%2B`, and header / cookie /
+/// path values use plain [`decode_value`] because there `+` is a literal.
+fn decode_value_form(
+    input: &str,
+    max_decode_layers: usize,
+    decode_escapes: bool,
+) -> String {
+    if input.contains('+') {
+        return decode_value(
+            &input.replace('+', " "),
+            max_decode_layers,
+            decode_escapes,
+        );
+    }
+    decode_value(input, max_decode_layers, decode_escapes)
+}
+
 /// Resolve `\xHH` and `\uHHHH` escape sequences. Returns the input untouched
 /// (borrowed) when it contains no escape marker, so the Normal-level path
 /// never allocates for this.
@@ -335,7 +357,8 @@ fn parse_query(
             None => (pair, ""),
         };
         let key_decoded = multi_decode(k, max_decode_layers);
-        let val_decoded = decode_value(v, max_decode_layers, decode_escapes);
+        let val_decoded =
+            decode_value_form(v, max_decode_layers, decode_escapes);
         out.push((key_decoded.clone(), val_decoded.clone()));
         decoded_values.push(DecodedValue {
             source: ValueSource::QueryParam,
@@ -368,7 +391,8 @@ fn parse_form_body(
             None => (pair, ""),
         };
         let key_decoded = multi_decode(k, max_decode_layers);
-        let val_decoded = decode_value(v, max_decode_layers, decode_escapes);
+        let val_decoded =
+            decode_value_form(v, max_decode_layers, decode_escapes);
         decoded_values.push(DecodedValue {
             source: ValueSource::Body,
             name: key_decoded,
@@ -533,5 +557,64 @@ mod tests {
         // Incomplete / invalid escapes stay verbatim.
         assert_eq!(decode_escapes(r"\xzz"), r"\xzz");
         assert_eq!(decode_escapes(r"\uD83D"), r"\uD83D");
+    }
+
+    #[test]
+    fn plus_is_space_in_query_and_form_body() {
+        let req = normalize_request(
+            "GET",
+            "/",
+            "id=%27+OR+1%3D1--",
+            &[],
+            None,
+            3,
+            false,
+        );
+        let v = req
+            .decoded_values
+            .iter()
+            .find(|v| v.name == "id")
+            .expect("param id");
+        assert_eq!(v.decoded, "' OR 1=1--");
+
+        let headers = vec![(
+            "content-type".to_string(),
+            "application/x-www-form-urlencoded".to_string(),
+        )];
+        let req = normalize_request(
+            "POST",
+            "/",
+            "",
+            &headers,
+            Some(b"q=waitfor+delay+%270:0:10%27".as_slice()),
+            3,
+            false,
+        );
+        let v = req
+            .decoded_values
+            .iter()
+            .find(|v| v.name == "q")
+            .expect("body param q");
+        assert_eq!(v.decoded, "waitfor delay '0:0:10'");
+    }
+
+    #[test]
+    fn plus_stays_literal_in_headers_and_encoded_plus() {
+        let headers =
+            vec![("User-Agent".to_string(), "C++_runtime".to_string())];
+        let req =
+            normalize_request("GET", "/a+b", "k=%2B", &headers, None, 3, false);
+        let ua = req
+            .decoded_values
+            .iter()
+            .find(|v| v.name.eq_ignore_ascii_case("user-agent"))
+            .expect("ua value");
+        assert_eq!(ua.decoded, "C++_runtime");
+        let v = req
+            .decoded_values
+            .iter()
+            .find(|v| v.name == "k")
+            .expect("param k");
+        assert_eq!(v.decoded, "+");
     }
 }
