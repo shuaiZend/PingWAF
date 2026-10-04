@@ -204,6 +204,29 @@ fn builtin_patterns() -> Vec<SignaturePattern> {
             "double-encoded traversal",
             "....//",
         );
+        // Slash-less variants: Aho-Corasick consumes non-overlapping matches,
+        // so a leading "../" can swallow the "/" that PT-003/004/005 need.
+        push(
+            "PT-013",
+            AttackCategory::PathTraversal,
+            5,
+            "etc/passwd access (no leading slash)",
+            "etc/passwd",
+        );
+        push(
+            "PT-014",
+            AttackCategory::PathTraversal,
+            5,
+            "etc/shadow access (no leading slash)",
+            "etc/shadow",
+        );
+        push(
+            "PT-015",
+            AttackCategory::PathTraversal,
+            4,
+            "proc/self enumeration (no leading slash)",
+            "proc/self",
+        );
 
         // ---- Command injection ----
         push(
@@ -381,6 +404,48 @@ fn builtin_patterns() -> Vec<SignaturePattern> {
             "newline before /bin/",
             "\n/bin/",
         );
+        push(
+            "CI-026",
+            AttackCategory::CommandInjection,
+            5,
+            "python os.system call",
+            "os.system",
+        );
+        push(
+            "CI-027",
+            AttackCategory::CommandInjection,
+            5,
+            "python __import__ call",
+            "__import__",
+        );
+        push(
+            "CI-028",
+            AttackCategory::CommandInjection,
+            5,
+            "php shell_exec call",
+            "shell_exec(",
+        );
+        push(
+            "CI-029",
+            AttackCategory::CommandInjection,
+            5,
+            "php passthru call",
+            "passthru(",
+        );
+        push(
+            "CI-030",
+            AttackCategory::CommandInjection,
+            5,
+            "php proc_open call",
+            "proc_open(",
+        );
+        push(
+            "CI-031",
+            AttackCategory::CommandInjection,
+            4,
+            "python subprocess call",
+            "subprocess.",
+        );
 
         // ---- SSRF ----
         push(
@@ -548,10 +613,13 @@ fn builtin_patterns() -> Vec<SignaturePattern> {
         );
 
         // ---- XXE ----
+        // A DOCTYPE alone is boilerplate on every HTML page and benign XML
+        // payload — the attack needs an ENTITY (XXE-002+) or a file://
+        // SYSTEM id, so the opener itself must not be a critical hit.
         push(
             "XXE-001",
             AttackCategory::Xxe,
-            5,
+            3,
             "DOCTYPE declaration",
             "<!doctype",
         );
@@ -598,6 +666,23 @@ fn builtin_patterns() -> Vec<SignaturePattern> {
             4,
             "raw CR in value",
             "\r",
+        );
+        // Header-name variants: bare "\r\n" cannot be raised to sev 5 (JSON
+        // bodies contain many benign CRLFs), but "\r\n" followed by a header
+        // name is unambiguous response-splitting intent.
+        push(
+            "CRLF-003",
+            AttackCategory::CrlfInjection,
+            5,
+            "CRLF before set-cookie header",
+            "\r\nset-cookie",
+        );
+        push(
+            "CRLF-004",
+            AttackCategory::CrlfInjection,
+            5,
+            "CRLF before location header",
+            "\r\nlocation:",
         );
 
         // ---- Template injection ----
@@ -683,42 +768,42 @@ fn builtin_patterns() -> Vec<SignaturePattern> {
         push(
             "SQL-004",
             AttackCategory::SqlInjection,
-            4,
+            5,
             "BENCHMARK function",
             "benchmark(",
         );
         push(
             "SQL-005",
             AttackCategory::SqlInjection,
-            4,
+            5,
             "pg_sleep function",
             "pg_sleep(",
         );
         push(
             "SQL-006",
             AttackCategory::SqlInjection,
-            4,
+            5,
             "waitfor delay",
             "waitfor delay",
         );
         push(
             "SQL-007",
             AttackCategory::SqlInjection,
-            4,
+            5,
             "load_file function",
             "load_file(",
         );
         push(
             "SQL-008",
             AttackCategory::SqlInjection,
-            4,
+            5,
             "INTO OUTFILE",
             "into outfile",
         );
         push(
             "SQL-009",
             AttackCategory::SqlInjection,
-            4,
+            5,
             "INTO DUMPFILE",
             "into dumpfile",
         );
@@ -1771,6 +1856,20 @@ fn is_structural_expr(inner: &str) -> bool {
     false
 }
 
+static JS_BRACKET_CALL: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\b\w+\[[^\]\r\n]{1,48}\]\s*[\[(]").unwrap());
+
+/// Detect JavaScript bracket-call invocation (`parent['eval'](…)`,
+/// `this["constructor"]["constructor"](…)`), a shape plain keyword needles
+/// never see because the callee name sits inside brackets and is frequently
+/// hex-escaped (`\x65val`). Structural, not lexical: an identifier followed
+/// by a bracketed name and then another bracket (chain) or a call paren.
+///
+/// Strict-only: honest HTTP traffic essentially never carries this shape.
+pub fn detect_js_call(input: &str) -> bool {
+    JS_BRACKET_CALL.is_match(input)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1786,6 +1885,26 @@ mod tests {
         assert!(hits
             .iter()
             .any(|h| h.category == AttackCategory::PathTraversal));
+    }
+
+    #[test]
+    fn engine_finds_slash_less_traversal_when_masked() {
+        // "../../" consumes the "/" that "/etc/passwd" would need; the
+        // slash-less PT-013 variant is what survives the overlap.
+        let e = SignatureEngine::new();
+        let hits = e.scan("../../../etc/passwd%00.png");
+        assert!(hits.iter().any(|h| e.pattern_id(h.pattern) == "PT-013"));
+    }
+
+    #[test]
+    fn js_call_detector_fires_on_bracket_invocation() {
+        assert!(detect_js_call("parent['eval'](payload)"));
+        assert!(detect_js_call(
+            "this[\"constructor\"][\"constructor\"](atob('..'))()"
+        ));
+        assert!(detect_js_call("global[\\x65val](cmd)"));
+        assert!(!detect_js_call("rows[0].name"));
+        assert!(!detect_js_call("list[a] and list[b]"));
     }
 
     #[test]

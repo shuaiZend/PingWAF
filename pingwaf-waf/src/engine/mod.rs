@@ -25,8 +25,8 @@ use crate::normalize::{normalize_request, NormalizedRequest};
 use crate::rules::expression::{evaluate, EvalContext};
 use crate::rules::managed::default_managed_rules;
 use crate::rules::signatures::{
-    detect_expr_injection, detect_sqli, detect_xss, AttackCategory,
-    SignatureEngine, SignatureHit,
+    detect_expr_injection, detect_js_call, detect_sqli, detect_xss,
+    AttackCategory, SignatureEngine, SignatureHit,
 };
 use crate::rules::{CompiledRule, RuleAction};
 use crate::score::{AnomalyScorer, ScoreBreakdown, ScoreClass};
@@ -335,15 +335,26 @@ impl WafEngine {
             for hit in &hits {
                 let mut severity = hit.severity;
                 let mut critical = severity >= 5;
-                if is_meta_header
-                    && matches!(
-                        hit.category,
-                        AttackCategory::SqlInjection
-                            | AttackCategory::Xss
-                            | AttackCategory::CommandInjection
-                    )
-                {
+                let reflected_family = matches!(
+                    hit.category,
+                    AttackCategory::SqlInjection
+                        | AttackCategory::Xss
+                        | AttackCategory::CommandInjection
+                );
+                if is_meta_header && reflected_family {
                     severity = 2;
+                    critical = false;
+                } else if value.source == ValueSource::Body
+                    && reflected_family
+                    && !self.level.is_strict()
+                {
+                    // Bulk body content (JSON/XML/HTML payloads) carries the
+                    // same strings benignly; a lone reflected-family needle
+                    // there is a weak signal — same tier as reflected
+                    // metadata headers. Corroboration (3+ distinct hits
+                    // crossing a family gate) or the Strict level restores
+                    // enforcement.
+                    severity = severity.min(2);
                     critical = false;
                 } else if self.level.is_strict()
                     && matches!(
@@ -387,11 +398,11 @@ impl WafEngine {
             }
             let (is_sqli, sqli_fp) = detect_sqli(needle);
             if is_sqli {
-                let (severity, critical) = if is_meta_header {
-                    (2, false)
-                } else {
-                    (5, true)
-                };
+                let weak = is_meta_header
+                    || (value.source == ValueSource::Body
+                        && !self.level.is_strict());
+                let (severity, critical) =
+                    if weak { (2, false) } else { (5, true) };
                 if critical {
                     critical_hit = true;
                 }
@@ -409,11 +420,11 @@ impl WafEngine {
             }
             let (is_xss, xss_fp) = detect_xss(needle);
             if is_xss {
-                let (severity, critical) = if is_meta_header {
-                    (2, false)
-                } else {
-                    (5, true)
-                };
+                let weak = is_meta_header
+                    || (value.source == ValueSource::Body
+                        && !self.level.is_strict());
+                let (severity, critical) =
+                    if weak { (2, false) } else { (5, true) };
                 if critical {
                     critical_hit = true;
                 }
@@ -439,6 +450,14 @@ impl WafEngine {
                     critical_hit = true;
                     recs.push(HitRec::Expr {
                         container,
+                        source: value.source.as_str(),
+                        name: &value.name,
+                    });
+                } else if detect_js_call(needle) {
+                    self.scorer.add_expr_hit(&mut breakdown);
+                    critical_hit = true;
+                    recs.push(HitRec::Expr {
+                        container: "js-call",
                         source: value.source.as_str(),
                         name: &value.name,
                     });
@@ -1058,6 +1077,55 @@ mod tests {
             "login=$(ping${IFS}-nc${IFS}2${IFS}`whoami`.)",
         ));
         assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn blocks_traversal_masked_by_prefix_match() {
+        // Regression guard: Aho-Corasick consumes non-overlapping matches,
+        // so "../" swallowed the "/" that "/etc/passwd" needed. The
+        // slash-less variant PT-013 must still fire.
+        let e = engine();
+        let v = e.inspect(&req(
+            "GET",
+            "/download",
+            "page=../../../etc/passwd%00.png",
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn blocks_time_based_blind_sqli() {
+        // Regression guard: time-based payloads carried only a sev-4 needle
+        // and scored 4 — far below the anomaly threshold — so they passed.
+        let e = engine();
+        let v = e.inspect(&req(
+            "GET",
+            "/api/login",
+            "u=admin';WAITFOR DELAY '0:0:10'--",
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn strict_blocks_js_bracket_call() {
+        // Bracket-call invocation hides the callee name (often hex-escaped)
+        // from keyword needles; caught structurally at Strict.
+        let e = strict_engine();
+        let v = e.inspect(&req(
+            "GET",
+            "/render",
+            "tpl=parent['eval'](atob('YWxlcnQoMSk='))",
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn normal_passes_plain_bracket_access() {
+        // Bracket text alone is not a call — Normal must stay quiet, and the
+        // JS-call detector is Strict-only anyway.
+        let e = engine();
+        let v = e.inspect(&req("GET", "/items", "filter=rows[0].name"));
+        assert_eq!(v.action, WafAction::Pass, "details: {}", v.details);
     }
 
     #[test]
