@@ -253,6 +253,8 @@ pub fn normalize_request<'a>(
         }
     }
 
+    expand_base64(&mut decoded_values, max_decode_layers, decode_escapes);
+
     NormalizedRequest {
         method,
         path: normalized_path,
@@ -535,6 +537,118 @@ fn unpack_string_json(
     decoded_values.len() > before
 }
 
+/// Upper bounds for the base64 value-unwrapping pass: nesting depth (a value
+/// that is base64 of base64 of a payload) and the byte size above which a
+/// value is bulk content, not a transport-wrapped parameter.
+const B64_MAX_DEPTH: usize = 2;
+const B64_MAX_VALUE_LEN: usize = 4096;
+
+/// Expand values whose entire content is base64 (`eyJpZCI6IjEgYW5kIDE9MiJ9`
+/// is `{"id":"1 and 1=2"}`): whole payloads get wrapped in a transport
+/// encoding the backend is known to unwrap, and no detector can see through
+/// it from the wire form. For every discrete field that decodes as base64
+/// into printable text an additional decoded value (`<name>.b64`) is pushed
+/// and scanned like any other field — including a JSON unpack when the
+/// decoded text is structured, and one URL-decode when it carries `%`
+/// escapes. Values that decode to non-text (hashes, binary tokens) stay
+/// untouched. Bounded by [`B64_MAX_DEPTH`] and [`B64_MAX_VALUE_LEN`].
+fn expand_base64(
+    decoded_values: &mut Vec<DecodedValue>,
+    max_decode_layers: usize,
+    decode_escapes: bool,
+) {
+    let mut layer_start = 0usize;
+    let mut layer_end = decoded_values.len();
+    let mut depth = 0usize;
+    while layer_start < layer_end && depth < B64_MAX_DEPTH {
+        // Snapshot the layer: expanding pushes into the same vector.
+        let layer: Vec<(ValueSource, String, String)> = decoded_values
+            [layer_start..layer_end]
+            .iter()
+            .filter(|v| v.field)
+            .map(|v| (v.source, v.name.clone(), v.decoded.clone()))
+            .collect();
+        for (source, name, value) in layer {
+            if value.len() < 16 || value.len() > B64_MAX_VALUE_LEN {
+                continue;
+            }
+            let Some(mut decoded) = b64_decode_value(&value) else {
+                continue;
+            };
+            if decoded.contains('%') {
+                decoded =
+                    decode_value(&decoded, max_decode_layers, decode_escapes);
+            }
+            if decoded.is_empty() || decoded.len() > B64_MAX_VALUE_LEN {
+                continue;
+            }
+            let name = if name.is_empty() {
+                "b64".to_string()
+            } else {
+                format!("{name}.b64")
+            };
+            if looks_like_json(&decoded)
+                && unpack_string_json(
+                    &decoded,
+                    0,
+                    &name,
+                    max_decode_layers,
+                    decode_escapes,
+                    decoded_values,
+                )
+            {
+                continue;
+            }
+            decoded_values.push(DecodedValue {
+                source,
+                name,
+                decoded,
+                field: true,
+            });
+        }
+        layer_start = layer_end;
+        layer_end = decoded_values.len();
+        depth += 1;
+    }
+}
+
+/// Decode a value that is *entirely* base64 into text. `None` when the value
+/// carries anything outside the base64 alphabet (data URIs, signed tokens,
+/// hex hashes decode to binary and fail the printability gate anyway).
+fn b64_decode_value(s: &str) -> Option<String> {
+    use base64::Engine as _;
+    if !s.bytes().all(|b| {
+        b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'='
+    }) {
+        return None;
+    }
+    let core = s.trim_end_matches('=');
+    if core.len() < 12 {
+        return None;
+    }
+    let pad = (4 - core.len() % 4) % 4;
+    if pad == 3 {
+        return None;
+    }
+    let mut buf = String::with_capacity(core.len() + pad);
+    buf.push_str(core);
+    for _ in 0..pad {
+        buf.push('=');
+    }
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(buf.as_bytes())
+        .ok()?;
+    let text = String::from_utf8(raw).ok()?;
+    let printable = text
+        .bytes()
+        .filter(|b| b.is_ascii_graphic() || b.is_ascii_whitespace())
+        .count();
+    if printable * 10 < text.len() * 9 {
+        return None;
+    }
+    Some(text)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn walk_json(
     value: &serde_json::Value,
@@ -737,6 +851,104 @@ mod tests {
             .iter()
             .any(|v| v.source == ValueSource::Header
                 && v.name == "authorization"));
+    }
+
+    #[test]
+    fn overlong_utf8_is_restored() {
+        // `%C0%BC` is the overlong encoding of `<`; the byte-wise decoder
+        // must restore it and keep scanning the payload behind it.
+        let req = normalize_request(
+            "GET",
+            "/",
+            "q=%C0%BCscript%3Ealert(1)%3C/script%3E",
+            &[],
+            None,
+            3,
+            false,
+        );
+        let v = req
+            .decoded_values
+            .iter()
+            .find(|v| v.name == "q")
+            .expect("param q");
+        assert_eq!(v.decoded, "<script>alert(1)</script>");
+    }
+
+    #[test]
+    fn base64_wrapped_json_payload_is_expanded() {
+        // `eyJpZCI6IjEgYW5kIDE9MiJ9` = `{"id":"1 and 1=2"}`: the b64 pass
+        // must surface the decoded container's members as scannable fields.
+        let req = normalize_request(
+            "GET",
+            "/",
+            "name=eyJpZCI6IjEgYW5kIDE9MiJ9",
+            &[],
+            None,
+            3,
+            false,
+        );
+        let b64 = req
+            .decoded_values
+            .iter()
+            .find(|v| v.name == "name.b64.id")
+            .expect("expanded b64 JSON member");
+        assert_eq!(b64.decoded, "1 and 1=2");
+        assert!(b64.field);
+        // The container itself is replaced by its members (the `"k":v`
+        // shape trips quote-keyword), so only the member is present.
+        assert!(!req.decoded_values.iter().any(|v| v.name == "name.b64"));
+    }
+
+    #[test]
+    fn base64_double_wrap_is_expanded() {
+        // b64(b64("1 union select password from users"))
+        let inner = "1 union select password from users";
+        use base64::Engine as _;
+        let once =
+            base64::engine::general_purpose::STANDARD.encode(inner.as_bytes());
+        let twice =
+            base64::engine::general_purpose::STANDARD.encode(once.as_bytes());
+        let query = format!("q={twice}");
+        let req = normalize_request("GET", "/", &query, &[], None, 3, false);
+        let expanded = req
+            .decoded_values
+            .iter()
+            .find(|v| v.name == "q.b64.b64")
+            .expect("second-layer expansion");
+        assert_eq!(expanded.decoded, inner);
+    }
+
+    #[test]
+    fn base64_binary_and_hex_stay_untouched() {
+        // An md5 hex string is base64-alphabet-compatible but decodes to
+        // binary — it must not surface as an expanded value.
+        let req = normalize_request(
+            "GET",
+            "/",
+            "h=d41d8cd98f00b204e9800998ecf8427e",
+            &[],
+            None,
+            3,
+            false,
+        );
+        assert!(!req
+            .decoded_values
+            .iter()
+            .any(|v| v.name.starts_with("h.b64")));
+        // Data-URI prefixes carry ':'/';' and never match the alphabet.
+        let req = normalize_request(
+            "GET",
+            "/",
+            "d=data%3Aimage%2Fpng%3Bbase64%2CiVBORw0KGgoAAAANSUhEUg",
+            &[],
+            None,
+            3,
+            false,
+        );
+        assert!(!req
+            .decoded_values
+            .iter()
+            .any(|v| v.name.starts_with("d.b64")));
     }
 
     #[test]

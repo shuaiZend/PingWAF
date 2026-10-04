@@ -227,6 +227,13 @@ fn builtin_patterns() -> Vec<SignaturePattern> {
             "proc/self enumeration (no leading slash)",
             "proc/self",
         );
+        push(
+            "PT-016",
+            AttackCategory::PathTraversal,
+            5,
+            "windows win.ini access",
+            "win.ini",
+        );
 
         // ---- Command injection ----
         push(
@@ -488,6 +495,59 @@ fn builtin_patterns() -> Vec<SignaturePattern> {
             "C/PHP system() call",
             "system(",
         );
+        push(
+            "CI-038",
+            AttackCategory::CommandInjection,
+            5,
+            "shell pipe to whoami",
+            "|whoami",
+        );
+        push(
+            "CI-039",
+            AttackCategory::CommandInjection,
+            4,
+            "semicolon chained whoami",
+            ";whoami",
+        );
+        push(
+            "CI-040",
+            AttackCategory::CommandInjection,
+            4,
+            "shell pipe to uname",
+            "|uname",
+        );
+        push(
+            "CI-041",
+            AttackCategory::CommandInjection,
+            4,
+            "backtick command (uname)",
+            "`uname`",
+        );
+        push(
+            "CI-042",
+            AttackCategory::CommandInjection,
+            4,
+            "semicolon chained uname",
+            ";uname",
+        );
+        // Java/OGNL/SpEL runtime exec chain — the payload core of every
+        // Struts2/SpringEL RCE exploit, critical even at Normal.
+        push(
+            "CI-043",
+            AttackCategory::CommandInjection,
+            5,
+            "Java runtime exec chain",
+            "getruntime().exec",
+        );
+        // Jenkins sandbox-bypass endpoint (descriptorByName/…SecureGroovyScript)
+        // — the class name is exploit-specific, never a benign path token.
+        push(
+            "CI-044",
+            AttackCategory::CommandInjection,
+            5,
+            "Jenkins Groovy sandbox endpoint",
+            "securegroovy",
+        );
 
         // ---- SSRF ----
         push(
@@ -691,6 +751,51 @@ fn builtin_patterns() -> Vec<SignaturePattern> {
             4,
             "YAML unsafe_load",
             "yaml.unsafe_load",
+        );
+        // Struts2 / OGNL attack surface: static-class invocations and the
+        // s2-* value-stack references. `@java.lang.` is unambiguous OGNL;
+        // the `#ref` shapes are the Struts context lookup pattern.
+        // Severity 4 rather than 5: the Normal level only scores deser
+        // hits; strict treats the whole Deserialization category as
+        // critical, so the higher grade would be redundant there and
+        // would force a Normal-level block instead.
+        push(
+            "DZ-012",
+            AttackCategory::Deserialization,
+            4,
+            "OGNL static class call",
+            "@java.lang.",
+        );
+        push(
+            "DZ-013",
+            AttackCategory::Deserialization,
+            4,
+            "Struts2 context reference",
+            "#context=",
+        );
+        push(
+            "DZ-014",
+            AttackCategory::Deserialization,
+            4,
+            "Struts2 attr reference",
+            "#attr[",
+        );
+        push(
+            "DZ-015",
+            AttackCategory::Deserialization,
+            4,
+            "Struts2 application reference",
+            "#application",
+        );
+        // EL/SpEL/Jexl gadget-chain idiom: `"".getClass().forName(
+        // 'java.lang.Runtime')` (Nexus CVE-2020-10199/10204 family). Only
+        // ever a web-parameter value inside an exploit.
+        push(
+            "DZ-016",
+            AttackCategory::Deserialization,
+            5,
+            "getClass().forName gadget chain",
+            "getclass().forname",
         );
 
         // ---- XXE ----
@@ -958,6 +1063,15 @@ fn builtin_patterns() -> Vec<SignaturePattern> {
             "exec xp_cmdshell",
             "xp_cmdshell",
         );
+        // Oracle error-based injection helper — only ever appears inside an
+        // exploit (utl_inaddr.get_host_name), critical at Normal.
+        push(
+            "SQL-020",
+            AttackCategory::SqlInjection,
+            5,
+            "utl_inaddr error-based probe",
+            "utl_inaddr",
+        );
 
         // ---- XSS (literal needles; detect_xss catches structured payloads) ----
         push("XSS-001", AttackCategory::Xss, 5, "<script tag", "<script");
@@ -1051,6 +1165,25 @@ fn builtin_patterns() -> Vec<SignaturePattern> {
         );
         push("XSS-018", AttackCategory::Xss, 4, "eval() call", "eval(");
         push("XSS-019", AttackCategory::Xss, 3, "alert() call", "alert(");
+        // Chained prototype traversal is the DOM-clobbering / client-side
+        // gadget shape (`toString.constructor.prototype.toString=…`); plain
+        // `.prototype` on its own is ordinary JS, the two-token chain is not.
+        push(
+            "XSS-020",
+            AttackCategory::Xss,
+            4,
+            "constructor.prototype chain",
+            "constructor.prototype",
+        );
+        // JSFuck alphabet (`+!![]`, `!+[]`): array-coercion arithmetic only
+        // appears in self-obfuscating JS payloads.
+        push(
+            "XSS-021",
+            AttackCategory::Xss,
+            4,
+            "JSFuck alphabet",
+            "+!![]",
+        );
     }
 
     // Stack scoping: deserialization and EL-lookup markers only matter to the
@@ -1613,22 +1746,82 @@ static SQLI_DANGEROUS_FN: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)\b(?:sleep|benchmark|pg_sleep|waitfor|load_file|extractvalue|updatexml|xp_cmdshell|sp_executesql)\s*\(").unwrap()
 });
 static SQLI_TAUTOLOGY: Lazy<Regex> = Lazy::new(|| {
-    // Classic tautology forms: `or 1=1`, `or 'a'='a`, `and 1<>0`, `|| 1`, etc.
-    Regex::new(r#"(?i)(?:\bor\b|\band\b|\|\||&&)\s*(?:['"`]?[\w.]+['"`]?\s*(?:=|<>|!=|<=>|<|>)\s*['"`]?[\w.]+['"`]?|['"`][^'"`]*['"`]\s*=\s*['"`][^'"`]*['"`]|1\s*=\s*1|0\s*=\s*0)"#).unwrap()
+    // Tautology shapes only: numeric self-equality (`or 1=1`, `1='1'`),
+    // quoted-token equality (`or 'a'='a'`, `"1"="1"`) and the classic blind
+    // inequalities. A generic `word = string` comparison — Lucene/API filter
+    // syntax like `author=="CT Stack"` or `title="sql" && product="x"` — is
+    // not an injection signal.
+    Regex::new(
+        r#"(?i)(?:\bor\b|\band\b|\|\||&&)\s*(?:['"`][\w.\- ]{0,32}['"`]\s*=\s*['"`][\w.\- ]{0,32}['"`]?|['"`]?\d+['"`]?\s*=\s*['"`]?\d+['"`]?|\b1\s*<>\s*0\b|\b1\s*>\s*0\b)"#,
+    )
+    .unwrap()
 });
 static SQLI_COMMENT_TERM: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?:--\s|--$|#\s|#$|/\*[\s\S]*?\*/)").unwrap());
 static SQLI_QUOTE_KEYWORD: Lazy<Regex> = Lazy::new(|| {
-    // Quote followed by a *SQL-specific* keyword. `or`/`and` are deliberately
-    // excluded — they are far too common in ordinary prose and the tautology
-    // regex below already covers the `or 1=1` family.
-    Regex::new(r#"(?i)['"][\s\S]*\b(?:union|select|insert|update|delete|drop|alter|create|truncate|exec|execute)\b"#).unwrap()
+    // Quote immediately followed by a *SQL-specific* keyword (whitespace,
+    // a stray `)`/`;` between them is allowed) — the `') union` / `'; drop`
+    // quote-break family. `or`/`and` are deliberately excluded (prose) and
+    // the keyword must sit directly behind the quote: an apostrophe inside
+    // a word ("couldn't select a favorite") or a quote whose keyword appears
+    // much later in a long word list must not fire.
+    Regex::new(
+        r#"(?i)['"][\s);]{0,4}\b(?:union|select|insert|update|delete|drop|alter|create|truncate|exec|execute)\b"#,
+    )
+    .unwrap()
 });
 static SQLI_INFO_SCHEMA: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)information_schema|\bsqlite_master\b|\bpg_catalog\b|\bsysobjects\b|\bsyscolumns\b").unwrap()
 });
 static SQLI_INTO_FILE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)\binto\s+(?:out|dump)file\b").unwrap());
+// Bare statement shape without a quote break: `SELECT * FROM all_tables`,
+// `SELECT id,name FROM users`. The column list must carry statement markers
+// (a star or a comma list) so prose like "select a gift from our store"
+// cannot fire, and a *complete* query (WHERE/GROUP BY/ORDER BY/LIMIT/…)
+// passed as a parameter is treated as the legitimate-query class and skipped
+// — lexically indistinguishable, same tradeoff as the prose union-select pin.
+static SQLI_BARE_SELECT: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"(?i)\bselect\s+(?:\*|\w+\s*,\s*[\w.\'"()]+\s*(?:,\s*[\w.\'"()]+)*)\s+from\s+[\w."']"#)
+        .unwrap()
+});
+static SQLI_FULL_QUERY_CLAUSE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"(?i)\b(?:where|group\s+by|order\s+by|having|limit|offset|join)\b",
+    )
+    .unwrap()
+});
+// Blind-probe dictionary shapes: `SELECT CASE WHEN (…) THEN …`, Oracle error
+// probing `TO_CHAR(1/0)`, and the generic CASE…WHEN…THEN skeleton behind an
+// SQL operator (`select/and/or/||/;/quote/(` prefix). The operator prefix
+// keeps prose like "in the case when you feel chest pain … then" clean.
+static SQLI_BLIND_PROBE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r#"(?i)\bselect\s+case\s+when\b|(?:\bselect\b|\b(?:and|or)\b|\|\||;|['"`(])\s*case\s+when\b[\s\S]{0,80}\bthen\b|\bto_char\s*\(\s*[\w'"]+\s*/\s*[\w'"]+\s*\)"#,
+    )
+    .unwrap()
+});
+// Quote-unbalanced tautology tail: `1' or ''=`, `1' or ''='` — the value was
+// truncated mid-injection but the tautology attempt is explicit. Innocent
+// prose does not end in `or '<empty>=`.
+static SQLI_TRUNCATED_TAUTOLOGY: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"(?i)(?:\bor\b|\band\b|\|\|)\s*['"`]{1,2}\s*=\s*['"`]{0,2}\s*(?:--|#)?\s*$"#)
+        .unwrap()
+});
+// Inline SQL comments used as keyword splitter: `OR/**/"1"="1"`.
+static SQLI_INLINE_COMMENT: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"/\*[\s\S]*?\*/").unwrap());
+// Boolean-context subquery — PortSwigger-style blind SQLi:
+// `and (select …)='a'`, `or 1=(select cast((select …) as int))--`,
+// `where 1=(select 'secret')`. An operator-prefixed subquery or a bare
+// `N=(SELECT` comparison never occurs in prose; `and select`/`or select`
+// alone is deliberately NOT matched (ordinary prose imperative).
+static SQLI_BOOL_SUBQUERY: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r#"(?i)\b(?:and|or)\b\s*(?:\(\s*select\b|\d+\s*=\s*(?:\(\s*)?(?:cast\s*\(\s*\(?\s*)?select\b)|\b\d+\s*=\s*\(\s*select\b"#,
+    )
+    .unwrap()
+});
 
 /// Needles for the SQLi prefilter. Every input that matches one of the
 /// strong regexes above contains at least one of these substrings
@@ -1668,6 +1861,8 @@ static SQLI_PREFILTER_NEEDLES: &[&str] = &[
     "sysobjects",
     "syscolumns",
     "into",
+    "case",
+    "to_char",
 ];
 
 static SQLI_PREFILTER: Lazy<AhoCorasick> = Lazy::new(|| {
@@ -1676,6 +1871,48 @@ static SQLI_PREFILTER: Lazy<AhoCorasick> = Lazy::new(|| {
         .build(SQLI_PREFILTER_NEEDLES)
         .expect("aho-corasick build cannot fail with valid UTF-8 needles")
 });
+
+/// Strong (block-worthy) SQLi checks, run against lowercased text. Shared by
+/// the direct pass and the comment-stripped rescan (`OR/**/"1"="1"`).
+fn sqli_strong_checks(lower: &str) -> Vec<&'static str> {
+    let mut strong: Vec<&'static str> = Vec::with_capacity(4);
+    if SQLI_UNION_SELECT.is_match(lower) {
+        strong.push("union-select");
+    }
+    if SQLI_STACKED.is_match(lower) {
+        strong.push("stacked-query");
+    }
+    if SQLI_DANGEROUS_FN.is_match(lower) {
+        strong.push("dangerous-function");
+    }
+    if SQLI_TAUTOLOGY.is_match(lower) {
+        strong.push("tautology");
+    }
+    if SQLI_TRUNCATED_TAUTOLOGY.is_match(lower) {
+        strong.push("truncated-tautology");
+    }
+    if SQLI_QUOTE_KEYWORD.is_match(lower) {
+        strong.push("quote-keyword");
+    }
+    if SQLI_BARE_SELECT.is_match(lower)
+        && !SQLI_FULL_QUERY_CLAUSE.is_match(lower)
+    {
+        strong.push("bare-select");
+    }
+    if SQLI_BLIND_PROBE.is_match(lower) {
+        strong.push("blind-probe");
+    }
+    if SQLI_BOOL_SUBQUERY.is_match(lower) {
+        strong.push("bool-subquery");
+    }
+    if SQLI_INFO_SCHEMA.is_match(lower) {
+        strong.push("info-schema");
+    }
+    if SQLI_INTO_FILE.is_match(lower) {
+        strong.push("into-file");
+    }
+    strong
+}
 
 /// Detect SQL injection using token fingerprinting plus targeted regex checks.
 ///
@@ -1701,30 +1938,21 @@ pub fn detect_sqli(input: &str) -> (bool, String) {
     let lower = input.to_ascii_lowercase();
     let fp = fingerprint_sql(&lower);
 
-    let mut strong: Vec<&'static str> = Vec::with_capacity(4);
+    let mut strong = sqli_strong_checks(&lower);
     let mut weak: Vec<&'static str> = Vec::with_capacity(2);
 
-    if SQLI_UNION_SELECT.is_match(&lower) {
-        strong.push("union-select");
+    // Comment-split injection (`OR/**/"1"="1"`): when the raw text carries an
+    // inline SQL comment and nothing fired, re-run the strong checks on the
+    // comment-stripped text. The prefilter already guaranteed an interesting
+    // keyword, so this only runs on inputs the first pass could not confirm.
+    if strong.is_empty() && lower.contains("/*") && lower.contains("*/") {
+        let stripped = SQLI_INLINE_COMMENT.replace_all(&lower, " ");
+        strong = sqli_strong_checks(&stripped);
+        if !strong.is_empty() {
+            strong.push("comment-stripped");
+        }
     }
-    if SQLI_STACKED.is_match(&lower) {
-        strong.push("stacked-query");
-    }
-    if SQLI_DANGEROUS_FN.is_match(&lower) {
-        strong.push("dangerous-function");
-    }
-    if SQLI_TAUTOLOGY.is_match(&lower) {
-        strong.push("tautology");
-    }
-    if SQLI_QUOTE_KEYWORD.is_match(&lower) {
-        strong.push("quote-keyword");
-    }
-    if SQLI_INFO_SCHEMA.is_match(&lower) {
-        strong.push("info-schema");
-    }
-    if SQLI_INTO_FILE.is_match(&lower) {
-        strong.push("into-file");
-    }
+
     if SQLI_COMMENT_TERM.is_match(&lower) {
         weak.push("comment-terminator");
     }
@@ -1781,6 +2009,15 @@ static XSS_HTML_COMMENT_BREAK: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)<\s*/\s*(?:style|title|textarea|noscript|comment)\b")
         .unwrap()
 });
+static XSS_DOM_CHAIN: Lazy<Regex> = Lazy::new(|| {
+    // Prototype-gadget traversal: `ctor.prototype…`, `ctor.constructor(…)`,
+    // `ctor["constructor"]` — chains used to reach Function/eval from an
+    // ordinary object. A single `x.constructor.name` read is not a chain.
+    Regex::new(
+        r#"(?i)constructor\s*(?:\.\s*prototype|\.\s*constructor|\[\s*['"]constructor|\[\s*['"]prototype)"#,
+    )
+    .unwrap()
+});
 
 /// Needles for the XSS prefilter, with the same guarantee as the SQLi set:
 /// every input matching one of the XSS regexes above contains at least one
@@ -1795,6 +2032,7 @@ static XSS_PREFILTER_NEEDLES: &[&str] = &[
     "data",
     "expression",
     "url",
+    "constructor",
 ];
 
 static XSS_PREFILTER: Lazy<AhoCorasick> = Lazy::new(|| {
@@ -1858,6 +2096,9 @@ pub fn detect_xss(input: &str) -> (bool, String) {
     if XSS_HTML_COMMENT_BREAK.is_match(&lower) {
         hits.push("html-context-break");
     }
+    if XSS_DOM_CHAIN.is_match(&lower) {
+        hits.push("dom-chain");
+    }
 
     let is_xss = !hits.is_empty();
     let fingerprint = if hits.is_empty() {
@@ -1866,6 +2107,40 @@ pub fn detect_xss(input: &str) -> (bool, String) {
         format!("xss|{}", hits.join(","))
     };
     (is_xss, fingerprint)
+}
+
+static DESER_PHP_OBJECT: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"\bO:\s*\d+\s*:\s*["']"#).unwrap());
+static DESER_PHP_PAIR: Lazy<Regex> = Lazy::new(|| {
+    // Two consecutive serialized members (`s:11:"avatar_link";s:16:"…"`) —
+    // a single `s:N:"…"` can appear inside logged/quoted content, the pair
+    // is the serialized record shape.
+    Regex::new(r#"\b[sia]\s*:\s*\d+\s*:\s*["'][^"']{0,256}["']\s*;\s*[sia]\s*:\s*\d+\s*:\s*["']"#)
+        .unwrap()
+});
+static DESER_OGNL_CALL: Lazy<Regex> = Lazy::new(|| {
+    // Static-class invocation `@java.lang.Runtime@getRuntime(…)` or a
+    // value-stack assignment into one (`#ctx=@java.lang.System@…`).
+    Regex::new(r#"@[A-Za-z][\w.]*@[A-Za-z_]\w*\s*\("#).unwrap()
+});
+
+/// Structural deserialization / expression-language shapes that carry no
+/// single literal: PHP serialized records and OGNL static calls. Returns the
+/// shape name for logging.
+pub fn detect_deser_shape(input: &str) -> Option<&'static str> {
+    if input.len() < 8 {
+        return None;
+    }
+    if DESER_OGNL_CALL.is_match(input) {
+        return Some("ognl-static-call");
+    }
+    if DESER_PHP_OBJECT.is_match(input) {
+        return Some("php-serialized-object");
+    }
+    if DESER_PHP_PAIR.is_match(input) {
+        return Some("php-serialized-record");
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -2172,6 +2447,167 @@ mod tests {
     fn detect_sqli_numeric_id() {
         let (hit, _fp) = detect_sqli("12345");
         assert!(!hit);
+    }
+
+    #[test]
+    fn detect_sqli_truncated_tautology() {
+        // `1' or ''='` — quote-unbalanced tautology tail (right value never
+        // closes), the form the DVWA-style bench samples carry.
+        let (hit, fp) = detect_sqli("1' or ''='");
+        assert!(hit, "truncated tautology should fire");
+        assert!(fp.contains("truncated-tautology"));
+    }
+
+    #[test]
+    fn detect_sqli_bare_select_from() {
+        let (hit, fp) = detect_sqli("SELECT * FROM all_tables");
+        assert!(hit);
+        assert!(fp.contains("bare-select"));
+        let (hit2, fp2) = detect_sqli("select id,name from users");
+        assert!(hit2);
+        assert!(fp2.contains("bare-select"));
+    }
+
+    #[test]
+    fn detect_sqli_prose_select_from_stays_clean() {
+        // Prose with select/from but no column-list markers must not fire.
+        let (hit, _fp) =
+            detect_sqli("select your favourite item from our store");
+        assert!(!hit, "prose select/from should stay clean");
+    }
+
+    #[test]
+    fn detect_sqli_blind_probe_dictionary() {
+        let payload = "SELECT CASE WHEN (YOUR-CONDITION-HERE) THEN \
+                       TO_CHAR(1/0) ELSE NULL END FROM dual";
+        let (hit, fp) = detect_sqli(payload);
+        assert!(hit);
+        assert!(fp.contains("blind-probe"));
+    }
+
+    #[test]
+    fn detect_sqli_comment_split_tautology() {
+        let (hit, fp) =
+            detect_sqli("userN\") # calendar \nOR /* areasth */\"1\"=\"1\"--");
+        assert!(hit);
+        assert!(fp.contains("tautology") || fp.contains("comment-stripped"));
+    }
+
+    #[test]
+    fn blind_probe_prose_stays_clean() {
+        // "in the case when … then" prose must not fire the generic
+        // CASE…WHEN alternative; it lacks an SQL operator prefix.
+        let (hit, _fp) = detect_sqli(
+            "in the case when you feel chest pain, seek medical help \
+             immediately. then, we can address the issue promptly.",
+        );
+        assert!(!hit, "prose case/when/then should stay clean");
+    }
+
+    #[test]
+    fn bare_select_full_query_stays_clean() {
+        // A complete query (WHERE/LIMIT) passed as a parameter value is the
+        // legitimate-query class — lexically indistinguishable, skipped.
+        let (hit, _fp) = detect_sqli(
+            "SELECT * FROM users WHERE users.slug = 'user411' LIMIT 1;",
+        );
+        assert!(!hit, "complete WHERE query should stay clean");
+    }
+
+    #[test]
+    fn tautology_lucene_filter_stays_clean() {
+        // word = string comparisons (API/Lucene filter syntax) are not
+        // tautologies; only numeric self-equality and quoted-token pairs.
+        let (hit, _fp) = detect_sqli(
+            "title=\"sql\" && product=\"wordpress\" || author==\"CT Stack\"",
+        );
+        assert!(!hit, "filter equality should stay clean");
+    }
+
+    #[test]
+    fn tautology_quoted_pair_still_detected() {
+        let (hit, fp) = detect_sqli("or \"1\"=\"1\"--");
+        assert!(hit);
+        assert!(fp.contains("tautology"));
+    }
+
+    #[test]
+    fn quote_keyword_contraction_stays_clean() {
+        // Apostrophe inside a word followed by a keyword much later in a
+        // long list must not fire; the keyword must sit behind the quote.
+        let (hit, _fp) =
+            detect_sqli("could n't select a favorite color from the list");
+        assert!(!hit, "contraction + keyword should stay clean");
+    }
+
+    #[test]
+    fn quote_keyword_quote_break_still_detected() {
+        let (hit, fp) = detect_sqli("x'); exec('id')");
+        assert!(hit);
+        assert!(fp.contains("quote-keyword") || fp.contains("stacked-query"));
+    }
+
+    #[test]
+    fn bool_subquery_blind_sqli_detected() {
+        // PortSwigger boolean-blind family recovered after the tautology
+        // tightening: operator-prefixed subqueries and `N=(SELECT …)`.
+        for payload in [
+            "xyz' AND (SELECT 'a' FROM users LIMIT 1)='a",
+            "x' AND 1=CAST((SELECT password FROM users LIMIT 1) AS int)--",
+            "1 AND 1=(SELECT CAST((SELECT version()) AS integer)) -- ') = true",
+            "SELECT 'foo' WHERE 1 = (SELECT 'secret')",
+        ] {
+            let (hit, _fp) = detect_sqli(payload);
+            assert!(hit, "bool-subquery should fire: {payload}");
+        }
+    }
+
+    #[test]
+    fn bool_subquery_prose_stays_clean() {
+        // `and select` / `or select` alone is an ordinary imperative and
+        // must not fire; only paren- or comparison-bound subqueries count.
+        let (hit, _fp) = detect_sqli(
+            "go to settings and select the item, or select everything",
+        );
+        assert!(!hit, "prose and/or select should stay clean");
+    }
+
+    #[test]
+    fn detect_xss_dom_chain() {
+        let (hit, fp) = detect_xss(
+            "toString.constructor.prototype.toString=toString.constructor.\
+             prototype.call;[\"a\",\"alert(1)\"].sort(toString.constructor)",
+        );
+        assert!(hit);
+        assert!(fp.contains("dom-chain"));
+    }
+
+    #[test]
+    fn detect_xss_constructor_name_read_stays_clean() {
+        let (hit, _fp) = detect_xss("x.constructor.name");
+        assert!(!hit, "a single constructor read is not a chain");
+    }
+
+    #[test]
+    fn detect_deser_php_and_ognl() {
+        assert_eq!(
+            detect_deser_shape("O:8:\"stdClass\":2:{s:3:\"foo\";i:1;}"),
+            Some("php-serialized-object")
+        );
+        assert_eq!(
+            detect_deser_shape(
+                "s:11:\"avatar_link\";s:16:\"L2V0Yy9wYXNzd2Q=\""
+            ),
+            Some("php-serialized-record")
+        );
+        assert_eq!(
+            detect_deser_shape(
+                "#url=(@java.lang.System@getProperty('\\u0075'))"
+            ),
+            Some("ognl-static-call")
+        );
+        assert_eq!(detect_deser_shape("a normal value"), None);
+        assert_eq!(detect_deser_shape("x.constructor.name"), None);
     }
 
     #[test]

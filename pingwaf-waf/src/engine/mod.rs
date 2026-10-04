@@ -25,8 +25,8 @@ use crate::normalize::{normalize_request, NormalizedRequest};
 use crate::rules::expression::{evaluate, EvalContext};
 use crate::rules::managed::default_managed_rules;
 use crate::rules::signatures::{
-    crlf_header_injection_shaped, detect_expr_injection, detect_js_call,
-    detect_sqli, detect_xss, sqli_union_statement_shaped,
+    crlf_header_injection_shaped, detect_deser_shape, detect_expr_injection,
+    detect_js_call, detect_sqli, detect_xss, sqli_union_statement_shaped,
     xss_script_uri_html_shaped, AttackCategory, SignatureEngine, SignatureHit,
 };
 use crate::rules::{CompiledRule, RuleAction};
@@ -501,6 +501,41 @@ impl WafEngine {
                         name: &value.name,
                     });
                 }
+            }
+
+            // Structural PHP-serialization / OGNL shapes: no single literal,
+            // so they live beside the libinjection detectors. Weak signals
+            // (meta headers, body blobs, oversized values) score instead of
+            // blocking; Strict treats any such shape as a critical hit —
+            // these shapes are only produced by serializers and expression
+            // interpreters, which are exactly the surfaces being attacked.
+            if let Some(shape) = detect_deser_shape(needle) {
+                let weak = is_meta_header
+                    || (value.source == ValueSource::Body
+                        && (!value.field
+                            || value.decoded.len() > FIELD_STRONG_MAX_LEN)
+                        && !self.level.is_strict());
+                let (severity, critical) = if weak {
+                    (2, false)
+                } else if self.level.is_strict() {
+                    (5, true)
+                } else {
+                    (4, false)
+                };
+                if critical {
+                    critical_hit = true;
+                }
+                self.scorer.add_category_hit(
+                    &mut breakdown,
+                    AttackCategory::Deserialization,
+                    severity,
+                );
+                recs.push(HitRec::Lib {
+                    kind: "deser-shape",
+                    fingerprint: shape.to_string(),
+                    source: value.source.as_str(),
+                    name: &value.name,
+                });
             }
 
             // Strict level: structural EL / SSTI detection over the decoded
@@ -1271,6 +1306,136 @@ mod tests {
     fn powershell_encoded_command_blocked() {
         let e = engine();
         let v = e.inspect(&req("GET", "/deploy", "c=powershell+-enc+SQBFAFgA"));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn truncated_tautology_blocked_at_normal() {
+        // `1' or ''='` — quote-unbalanced tautology, previously invisible to
+        // the six strong regexes.
+        let e = engine();
+        let v = e.inspect(&req(
+            "GET",
+            "/vulnerabilities/sqli/",
+            "id=1%27+or+%27%27%3D%27&Submit=Submit",
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn bare_select_from_blocked_at_normal() {
+        let e = engine();
+        let v = e.inspect(&req(
+            "GET",
+            "/vulnerabilities/sqli/",
+            "id=SELECT+*+FROM+all_tables&Submit=Submit",
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn base64_wrapped_payload_blocked_at_normal() {
+        // b64(`{"id":"1 and 1=2"}`) — the wire form hides every literal; the
+        // b64 expansion must surface the tautology to the libinjection gate.
+        let e = engine();
+        let v = e.inspect(&req(
+            "GET",
+            "/vulnerabilities/xss_r/",
+            "name=eyJpZCI6IjEgYW5kIDE9MiJ9",
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn win_ini_and_whoami_pipe_blocked_at_normal() {
+        let e = engine();
+        let v = e.inspect(&req(
+            "GET",
+            "/common/download/resource",
+            "resource=/profile/../../../../Windows/win.ini",
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+        let mut r = req("POST", "/password_change.cgi", "");
+        r.headers.push((
+            "Content-Type".into(),
+            "application/x-www-form-urlencoded".into(),
+        ));
+        r.body = Some(
+            b"user=rootxx&pam=&expired=2&old=test|whoami&new1=test2&new2=test2"
+                .to_vec(),
+        );
+        let v = e.inspect(&r);
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn overlong_utf8_xss_blocked_at_normal() {
+        let e = engine();
+        let v = e.inspect(&req(
+            "GET",
+            "/vulnerabilities/xss_r/",
+            "name=%C0%BCscript%3Ealert(1)%3C/script%3E",
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn dom_prototype_chain_blocked_at_normal() {
+        let e = engine();
+        let v = e.inspect(&req(
+            "GET",
+            "/vulnerabilities/xss_r/",
+            "name=toString.constructor.prototype.toString%3DtoString.\
+             constructor.prototype.call",
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn ognl_shape_scores_at_normal_blocks_at_strict() {
+        let payload = "#url=(@java.lang.System@getProperty('user.dir'))";
+        let e = engine();
+        let v = e.inspect(&req("GET", "/action", &format!("q={payload}")));
+        assert_ne!(
+            v.action,
+            WafAction::Block,
+            "Normal should only score OGNL: {}",
+            v.details
+        );
+        let s = strict_engine();
+        let v = s.inspect(&req("GET", "/action", &format!("q={payload}")));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn ognl_runtime_exec_blocked_at_normal() {
+        // The exec-carrying OGNL exploit core (Struts2 S2-057 family) is
+        // unambiguous RCE: CI-043 must block it even at Normal, while the
+        // property-reading shape above stays score-only.
+        let payload = "q=(#context=#attr['struts.valueStack'].context).\
+                       (@java.lang.Runtime@getRuntime().exec('cat%20/etc/passwd'))";
+        let e = engine();
+        let v = e.inspect(&req("GET", "/action", payload));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn utl_inaddr_error_based_blocked_at_normal() {
+        // Oracle error-based helper (UTL_INADDR.GET_HOST_NAME) is
+        // exploit-only vocabulary; SQL-020 blocks it at Normal.
+        let payload = "q=0.05)))%20FROM%20%22T%22%20where%20(select%20\
+                       utl_inaddr.get_host_name((SELECT%20user%20FROM%20DUAL))\
+                       %20from%20dual)%20is%20not%20null%20--";
+        let e = engine();
+        let v = e.inspect(&req("GET", "/vuln2/", payload));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn php_serialized_record_blocks_at_strict() {
+        let payload = "data=s%3A11%3A%22avatar_link%22%3Bs%3A16%3A%22abc%22";
+        let s = strict_engine();
+        let v = s.inspect(&req("POST", "/api/import", payload));
         assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
     }
 

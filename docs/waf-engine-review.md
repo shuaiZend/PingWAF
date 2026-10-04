@@ -99,12 +99,23 @@ Stage 2：14 条托管规则（Cloudflare 风格 DSL）
 9. **弱信号评分语义修正** ✅：两轮实测迭代后的最终形态——(a) 降权命中仍进 family 子评分（sev2→24），**三轮实测证明完全脱离 family 会漏掉 Referer/UA 承载的真实反射攻击**（DVWA 型 3 个独立弱特征过门样本，拦截率 -6pp）；(b) 无语句结构的 `union select` 短语命中改为**零分跳过**（needle 与 libinjection 指纹同现只描述同一字符串，镜像多面不放大，Pass 快路径零开销）；(c) `FIELD_STRONG_MAX_LEN`（256B）：离散 body 字段解码值超长按 bulk 内容弱信号化——粘贴的代码/文档（mathb.in 7KB 数学文档、StackBlitz 源码文件）常含 `<script>`/引号关键词/CRLF 样板，短载荷（真实注入 <256B）不受影响。
 10. **script-URI HTML 上下文门 + 分源语义** ✅：`xss_script_uri_html_shaped` 判定值内是否具备 HTML 标签结构（`<svg onload=…>`、`"><img …>`）——真注入需要标签上下文执行，遥测埋点把 DOM 属性原样序列化进 JSON（`{"href":"javascript: void(0);"}`，beacon 类 16 条误报全部此形态）。语义：**body 源**无标签结构的 `javascript:` 命中（XSS-007 + libinjection js-uri 指纹）在 Normal 零分跳过——blob 与解包成员的镜像不能靠弱信号累加踩过 XSS family 门（PINGWAF-1003）；**query/cookie/header 源**的裸 `javascript:` 保留 critical（`?url=javascript:alert(1)` 是真实反射形态）。Strict 不设门。
 
-### P2 语义架构演进（高性能高命中低误报的地基）
+### P2/P3 确定性扩面（第三轮实测驱动）——已落地 ✅
 
-8. **token 归一化语义评分**（SafeLine 思路的确定性近似）：解码后对每个值做轻量词法切分（复用 SQL 指纹器），按语法角色计分：`union+select`（两个 keyword 相邻）> `union`（孤立）> 普通词。`union select` 搜索词误报（当前 FP 大头）可用"关键词组合需要动词/对象结构"过滤——比信任度分级更通用，且 O(n)。
-9. **label 化管道 + count 灰度**（AWS/CF 模式）：DSL 增加 `label("...")`/`count` 动作，规则命中只打标不判决，管道末端按 label 组合统一裁决；新规则默认 count 上线观察。这是后续所有规则扩张的误报保险。
-10. **参数名感知排除**：站点/规则级 `exclude`（按参数名/路径），CRS `ctl:ruleRemoveTargetById` 的静态版；把误报治理从改规则变成加白名单。
-11. **Vectorscan 预留**：托管正则规则超 ~500 条时把 `matches` 编进 Vectorscan 数据库做第二层（AC 粗筛 + 正则精确认证）；当前 15 条正则的 regexset 路径不动。
+对 Strict+body 档 238 条漏报全量归因（b64 递归解码 + URL 双轮 + `\u` 反转义三轮脚本迭代 + 6 个疑问样本 spot 回放确认引擎缺口）后落地的确定性方案：
+
+11. **SQL 强正则扩面 + comment-stripped 重扫** ✅：10 个强检查抽为 `sqli_strong_checks` 共享函数（直接 pass 与注释剥离重扫复用）。新增 bare-select（裸 `SELECT … FROM` 表枚举，列名清单形态要求，散文 `select a gift from our store` 不触发）、blind-probe（`SELECT CASE WHEN (…) THEN …`/`TO_CHAR(1/0)` Oracle 盲注词典）、truncated-tautology（`1' or ''='` 截断恒真尾）、inline-comment 重扫（`OR/**/"1"="1"` 关键词注释切分）。三个新正则各带语义门：blind-probe 的泛化 `case when…then` 备选**要求 SQL 操作符前缀**（select/and/or/`||`/`;`/引号/括号）——散文 "in the case when … then"（waf-bench 白样本 7 条）不触发；bare-select **跳过完整查询子句**（WHERE/GROUP BY/ORDER BY/HAVING/LIMIT/OFFSET/JOIN）——词法上不可分的合法查询类（`q=SELECT * FROM users WHERE slug='x' LIMIT 1`）保持通过，与 P1 散文 union-select pin 同一取舍。
+12. **base64 值级展开**（normalize）✅：charset 快检 → core≥12 → 补 padding → STANDARD 解码 → UTF-8+可打印率 >90% 门（md5 hex 解码为二进制被拒），解码值含 `%` 再走一层 `decode_value`，形似 JSON 则 `unpack_string_json` 替换容器（quote-keyword FP 防线语义复用），否则以 `name.b64` 附加值进扫描面（blob/超长弱信号门自然兜底）。双层递归（`B64_MAX_DEPTH=2`）覆盖 JSON+\u 嵌套的 b64 包装家族。
+13. **overlong UTF-8 字节级还原** ✅：`urlencoding::decode` 遇 `%C0%BC`（无效 UTF-8）整体 Err 导致后续载荷不可见；重写 `multi_decode` 为字节级 percent 还原 + `bytes_to_scannable`（C0/C1 lead 按双字节规则折叠，剩余 Latin-1 映射），`<C0%BCscript%3E` 类绕过面闭合。UTF-7 明确不做（现代浏览器已废弃，收益面为零）。
+14. **needle/正则扩面** ✅：PT-016 `win.ini` sev5；CI-038~042（`|whoami` sev5、`;whoami`/`|uname`/`` `uname` ``/`;uname` sev4）；DZ-012~015 OGNL/Struts2（sev4，配合 deser-shape 分级）；XSS-020/021 prototype 链/JSFuck + `XSS_DOM_CHAIN` 正则（`constructor.prototype` 调用链）；CI-043 `getruntime().exec` sev5——OGNL/SpEL RCE 的载荷核心（`@java.lang.Runtime@getRuntime().exec(`、`T(java.lang.Runtime).getRuntime().exec(`），Normal 即 critical。
+15. **deser/OGNL 形态分级** ✅：`detect_deser_shape`（OGNL 静态调用 `@class@method(`/PHP 序列化 `O:\d+:"`/`s:\d+:"…";s:\d+:"` 记录形态）在 Normal sev4 评分（OGNL 对非 Java 站点无解释面）、Strict sev5 critical（deser 家族在 strict 档整体 critical）；弱信号门（meta header/body blob/超长）与 needle/lib 门一致。
+16. **P2 实测驱动的语义门回修**（两轮 bench FP/回退归因后）✅：SQLI_TAUTOLOGY 收紧为「数字自等/引号对/1<>0」三形态——`word = string` 比较（Lucene/API 过滤语法 `author=="CT Stack"`）不再是注入信号；SQLI_QUOTE_KEYWORD 从「任意距离引号+关键词」收紧为**邻接判定**（引号后 `\s);` 容差内直接跟关键词）——缩写撇号（"couldn't select"）与 b64 词表长距误触发闭合。收紧连带暴露两类 P1 靠宽松 quote-keyword「误打误撞」拦截的攻击面，补确定性检测承接：**bool-subquery 强检查**（操作符前缀子查询 `and (select …` / `N=(SELECT …)` 比较，PortSwigger 布尔盲注家族）、**SQL-020 `utl_inaddr`**（Oracle 报错注入）、**CI-043 `getruntime().exec`**（OGNL/SpEL RCE 载荷核心，承接 6 条 b64 包裹 OGNL 黑样本在 Normal 的拦截）、**CI-044 `securegroovy`**（Jenkins 沙箱绕过端点）、**DZ-016 `getclass().forname`**（EL/SpEL 反射 gadget 链，Nexus CVE-2020-10199/10204 家族）。回修后 16 条新增误报全部消除、59 条新增拦截零回退、8 条 PortSwigger 盲注重新拦截，并顺带压掉 18 条 P1 遗留遥测类误报。
+
+### P3 语义架构演进（高性能高命中低误报的地基）
+
+17. **token 归一化语义评分**（SafeLine 思路的确定性近似）：解码后对每个值做轻量词法切分（复用 SQL 指纹器），按语法角色计分：`union+select`（两个 keyword 相邻）> `union`（孤立）> 普通词。比信任度分级更通用，且 O(n)；P2-11 的语句结构门已覆盖其最高价值场景（union select 搜索短语 FP），剩余收益面在深层混淆样本。
+18. **label 化管道 + count 灰度**（AWS/CF 模式）：DSL 增加 `label("...")`/`count` 动作，规则命中只打标不判决，管道末端按 label 组合统一裁决；新规则默认 count 上线观察。这是后续所有规则扩张的误报保险，也是 strict 档 2.38% 误报的正解。
+19. **参数名感知排除**：站点/规则级 `exclude`（按参数名/路径），CRS `ctl:ruleRemoveTargetById` 的静态版；把误报治理从改规则变成加白名单。
+20. **Vectorscan 预留**：托管正则规则超 ~500 条时把 `matches` 编进 Vectorscan 数据库做第二层（AC 粗筛 + 正则精确认证）；当前 15 条正则的 regexset 路径不动。
 
 ### 收益矩阵（基于 bench 归因的保守估算）
 
@@ -114,11 +125,12 @@ Stage 2：14 条托管规则（Cloudflare 风格 DSL）
 | P0-2 body 检测 | ✅ 已落地（+1.6pp Normal / +12.7pp Strict） | 已治理（+0.02pp Normal；Strict 1.98% 为档位设计） | 1 天内 |
 | P0-3 needle 补齐 | ✅ 已落地（lfi +36pp、sqli +15pp） | 极低（sev5 均为强特征） | 小时级 |
 | P1-4~10 | ✅ 已落地（Normal+body 38.1→44.1%，+6.0pp；crlf 0→40%、deser 0→33%） | **正向**（Normal 档 FP 0.23%→0.18% 全程最低；Strict 档 2.38% 为成员级检测的档位代价） | 2-3 天 |
+| P2/P3-11~16（第三轮实测驱动） | ✅ 已落地（Normal+body 44.1→55.5%，+11.4pp；deser 33.3→100%、xss 33.3→40%、other 42.8→54.8%） | **正向**（回修后 Normal 档 FP 0.18%→0.13%；18 条 P1 遗留 FP 顺带消除；Strict+body 仅 2 条新增 FP） | 2-3 天 |
 | P2-8/9/10 | 间接（支撑 FP <0.1% + 规则扩容） | **正向（FP 治理基建）** | 1-2 周 |
 
-P0 全落地实测：Normal 36.5% / 0.21%，Normal+body 38.1% / 0.23%，Strict 51.1% / 0.35%，Strict+body 63.8% / 1.98%。P1 全落地实测：Normal 36.8% / 0.15%，Normal+body **44.1% / 0.18%**，Strict 51.4% / 0.35%，Strict+body 63.8% / 2.38%——主档（Normal+body）拦截 +6.0pp、误报同时下降，语义引擎（SQL 语句结构门、script-URI HTML 上下文门、字符串 JSON 再解包、CRLF 头名形态分源）首次实现拦截与误报同向改善。P2 落地后具备向 60%+（对齐 CRS PL2 水平）扩张规则面的吞吐与误报基建。
+P0 全落地实测：Normal 36.5% / 0.21%，Normal+body 38.1% / 0.23%，Strict 51.1% / 0.35%，Strict+body 63.8% / 1.98%。P1 全落地实测：Normal 36.8% / 0.15%，Normal+body **44.1% / 0.18%**，Strict 51.4% / 0.35%，Strict+body 63.8% / 2.38%——主档（Normal+body）拦截 +6.0pp、误报同时下降，语义引擎（SQL 语句结构门、script-URI HTML 上下文门、字符串 JSON 再解包、CRLF 头名形态分源）首次实现拦截与误报同向改善。P2/P3 全落地实测（四轮迭代后）：Normal 46.8% / **0.10%**，Normal+body **55.5% / 0.13%**，Strict 63.8% / 0.32%，Strict+body **77.7% / 2.17%**——四配置零回退，三档零新增 FP；主档累计 +17.4pp（P0 38.1% 起），编码展开（b64 递归 + overlong UTF-8）+ 强正则扩面 + 形态分级把 strict+body 推到 77.7%（对齐 CRS PL3 上限水平）。strict 档剩余误报治理归 P3 label/count 灰度基建。
 
 ## 5. 明确不做
 
 - 内嵌 ML 模型（SafeLine NLP/CF attack score）：样本内收益低于确定性组合信号，且引入模型分发/漂移维护成本；ScoreClass 分档结构已预留未来接入点。
-- 全量正则换 Vectorscan：当前规模无收益，113 needle 的 AC 已在 GB/s 级；仅在规则面破千时启用（P2-11 预留）。
+- 全量正则换 Vectorscan：当前规模无收益，113 needle 的 AC 已在 GB/s 级；仅在规则面破千时启用（P3-20 预留）。
