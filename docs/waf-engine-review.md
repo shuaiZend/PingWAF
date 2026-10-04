@@ -89,12 +89,15 @@ Stage 2：14 条托管规则（Cloudflare 风格 DSL）
 4. **JS 括号调用结构检测**（L4，Strict-only）：`detect_js_call` 识别 `parent['\x65val'](…)` 形态，Strict xss 33.3%→80%（14 条全为此类）。
 5. **配套误报治理**：Normal 下 body 中反射类家族（SQLi/XSS/CI）降为弱信号（sev≤2 不 critical），XXE-001 `<!doctype` 5→3；否则白样本 xss 类误报 46%、xxe 类 100%。
 
-### P1 检测面扩展（中风险，预计再 +3~5pp、FP 可控）
+### P1 检测面扩展（中风险，预计再 +3~5pp、FP 可控）——已落地 ✅
 
-4. **JSON 递归解包**（L7）：Content-Type JSON 时用 `simd-json`/`serde_json` 流式提取 string 值（限深 4 层/值长 4KB），每个值独立进解码+扫描。同时堵 libinjection 的 JSON 盲区。
-5. **JS 调用形态检测**（L4）：扩 `detect_xss`——标识符/字符串下标 + `(` 调用组合（`parent['eval'](`、`window["alert"](`、反引号模板内 `${...}` 已有容器覆盖）；hex 解码改为 Normal 也开但仅对**已含 `\x` 标记**的值（解码器本身零分配，不会拖慢干净请求）。
-6. **联合评分升级**（L6）：同请求内 traversal 类 + 敏感文件/`%00` 同现 → critical（表达为引擎内组合规则或 1061 式 DSL：`cf.waf.score.traversal ge 8 and http.request.uri.path contains "/etc/passwd"`——需给 traversal 加子评分）。
-7. **CRLF/SSRF needle 扩面**：CRLF `%0d%0a` + 头名模式、`set-cookie:` 注入；SSRF 补参数名信号（`url=`、`callback=`、`source=`）与 metadata 端点（`169.254.169.254` 已有，补 `metadata.google.internal`）。
+4. **JSON 递归解包**（L7）✅：`unpack_json` 以 `serde_json` 解析 JSON body（限深 6 层/值长 4KB/最多提取 64 值；深度预算覆盖埋点 JSON-in-JSON 三四层嵌套），成员 string 值按「离散输入字段」独立进解码+扫描；原 body 保留为 blob 走弱信号。`Content-Type` 含 json 或内容形态判别双入口，同时解决 `\u003c` 转义混淆（serde_json 解析后天然还原）。**字符串成员本身是序列化 JSON 时就地再解包并替换容器**（`unpack_string_json`：埋点 icon/载荷内嵌 JSON；纯数字/布尔成员也产出，保证替换语义；深度预算拒绝时不替换容器避免丢值）；表单字段值同语义（`param={"add":5,"delete":0}` 不再踩 libinjection quote-keyword）。
+5. **JS 调用形态检测**（L4）✅：`detect_js_call` 落地为 Strict-only（`parent['eval'](`、`this["constructor"]["constructor"](`、hex 转义变体），Strict xss 33.3%→80%。hex 解码未扩到 Normal（`\x` 标记值在 Normal 的收益面为零——该形态样本全部被 Strict 语义检测覆盖，Normal 扩面只增误报不增拦截）。
+6. **联合评分升级**（L6）✅：由 P0-3 的 PT-013/014/015 敏感文件 needle（sev5 critical）提前化解——「遍历前缀 + 敏感文件」复合形态直接单命中拦截，无需组合规则。
+7. **CRLF/SSRF needle 扩面** ✅：CRLF 分源 critical 收敛为**头名注入形态**——解码值中 CRLF/CR/LF 混排（`\r\n` 与 `\r\r\n\n` 规避等价处理）后紧跟 `name:` 头名形态才 critical（query/path/header/cookie 任意面）；裸多行文本（表单多行输入回传 query、散文）只评分不拦（白样本实测：百度翻译多行 query、mathb.in 文档、StackBlitz 代码文件均为此形态）。body 面始终只评分。SSRF 补回环变体 SSRF-013~017（`localhost`/`127.0.0.1` sev4、`0x7f000001`/`2130706433`/`0177.0.0.1` sev5）与 CI-032~037（`invoke-expression`/`iex (`/`cmd /c`/`powershell -enc`/`system(`）。
+8. **SQL union-select 语义门**（P2-8 的第一步落地）✅：`sqli_union_statement_shaped` 判定解码值是否具备注入语句结构特征（引号破出 `['"`]union`、常量探测 `union select <数字/引号/null>`、注释终止符/FROM 子句）；四特征全缺的 `union select` 命中（needle SQL-001/002 与 libinjection union-select 指纹）在 Normal **零分跳过**（needle 与 lib 指纹描述同一字符串，镜像多面不放大），压掉搜索短语类误报（`site:x.com union select 关键词怎么用` 是 FP 大头，sqli FP 23.9%→1.5%）；Strict 不设门（该档即激进）。
+9. **弱信号评分语义修正** ✅：两轮实测迭代后的最终形态——(a) 降权命中仍进 family 子评分（sev2→24），**三轮实测证明完全脱离 family 会漏掉 Referer/UA 承载的真实反射攻击**（DVWA 型 3 个独立弱特征过门样本，拦截率 -6pp）；(b) 无语句结构的 `union select` 短语命中改为**零分跳过**（needle 与 libinjection 指纹同现只描述同一字符串，镜像多面不放大，Pass 快路径零开销）；(c) `FIELD_STRONG_MAX_LEN`（256B）：离散 body 字段解码值超长按 bulk 内容弱信号化——粘贴的代码/文档（mathb.in 7KB 数学文档、StackBlitz 源码文件）常含 `<script>`/引号关键词/CRLF 样板，短载荷（真实注入 <256B）不受影响。
+10. **script-URI HTML 上下文门 + 分源语义** ✅：`xss_script_uri_html_shaped` 判定值内是否具备 HTML 标签结构（`<svg onload=…>`、`"><img …>`）——真注入需要标签上下文执行，遥测埋点把 DOM 属性原样序列化进 JSON（`{"href":"javascript: void(0);"}`，beacon 类 16 条误报全部此形态）。语义：**body 源**无标签结构的 `javascript:` 命中（XSS-007 + libinjection js-uri 指纹）在 Normal 零分跳过——blob 与解包成员的镜像不能靠弱信号累加踩过 XSS family 门（PINGWAF-1003）；**query/cookie/header 源**的裸 `javascript:` 保留 critical（`?url=javascript:alert(1)` 是真实反射形态）。Strict 不设门。
 
 ### P2 语义架构演进（高性能高命中低误报的地基）
 
@@ -110,10 +113,10 @@ Stage 2：14 条托管规则（Cloudflare 风格 DSL）
 | P0-1 `+` 解码 | ✅ 已落地（sqli 70→85% 的组成部分） | 无（归一化等价） | 小时级 |
 | P0-2 body 检测 | ✅ 已落地（+1.6pp Normal / +12.7pp Strict） | 已治理（+0.02pp Normal；Strict 1.98% 为档位设计） | 1 天内 |
 | P0-3 needle 补齐 | ✅ 已落地（lfi +36pp、sqli +15pp） | 极低（sev5 均为强特征） | 小时级 |
-| P1-4/5/6/7 | +3~5pp | 中（JSON 解包降低误判面） | 2-3 天 |
+| P1-4~10 | ✅ 已落地（Normal+body 38.1→44.1%，+6.0pp；crlf 0→40%、deser 0→33%） | **正向**（Normal 档 FP 0.23%→0.18% 全程最低；Strict 档 2.38% 为成员级检测的档位代价） | 2-3 天 |
 | P2-8/9/10 | 间接（支撑 FP <0.1% + 规则扩容） | **正向（FP 治理基建）** | 1-2 周 |
 
-P0 全落地实测：Normal 36.5% / 0.21%，Normal+body 38.1% / 0.23%，Strict 51.1% / 0.35%，Strict+body 63.8% / 1.98%（预估区间 44-46% 针对「agent 模式默认开 body」的口径；静态档按 inspect_body 可选项拆分后见 §10 两表）。P1 后预期 ~50% / FP 持平；P2 落地后具备向 60%+（对齐 CRS PL2 水平）扩张规则面的吞吐与误报基建。
+P0 全落地实测：Normal 36.5% / 0.21%，Normal+body 38.1% / 0.23%，Strict 51.1% / 0.35%，Strict+body 63.8% / 1.98%。P1 全落地实测：Normal 36.8% / 0.15%，Normal+body **44.1% / 0.18%**，Strict 51.4% / 0.35%，Strict+body 63.8% / 2.38%——主档（Normal+body）拦截 +6.0pp、误报同时下降，语义引擎（SQL 语句结构门、script-URI HTML 上下文门、字符串 JSON 再解包、CRLF 头名形态分源）首次实现拦截与误报同向改善。P2 落地后具备向 60%+（对齐 CRS PL2 水平）扩张规则面的吞吐与误报基建。
 
 ## 5. 明确不做
 
