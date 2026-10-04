@@ -662,8 +662,8 @@ impl WafEngine {
             // score: the family sub-score alone would re-block through
             // PINGWAF-1003 what the critical gate let through.
             let pid = self.signatures.pattern_id(hit.pattern);
-            let search_phrase =
-                pid == "XSS-001" && !xss_script_tag_shaped(&normalized.path, true);
+            let search_phrase = pid == "XSS-001"
+                && !xss_script_tag_shaped(&normalized.path, true);
             if search_phrase {
                 continue;
             }
@@ -2059,12 +2059,7 @@ mod tests {
             "/newview/search/for%20power%2C%20binary%3Cscript%20is%20incorrect",
             "",
         ));
-        assert_ne!(
-            v.action,
-            WafAction::Block,
-            "details: {}",
-            v.details
-        );
+        assert_ne!(v.action, WafAction::Block, "details: {}", v.details);
     }
 
     #[test]
@@ -2102,8 +2097,9 @@ mod tests {
             "Content-Type".into(),
             "application/x-www-form-urlencoded".into(),
         ));
-        form.body =
-            Some(b"ip=x%7C%7Cping+-c+10+127.0.0.1%7C%7C&Submit=Submit".to_vec());
+        form.body = Some(
+            b"ip=x%7C%7Cping+-c+10+127.0.0.1%7C%7C&Submit=Submit".to_vec(),
+        );
         let v = e.inspect(&form);
         assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
     }
