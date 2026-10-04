@@ -17,11 +17,13 @@ pub use expression::{
 };
 pub use managed::default_managed_rules;
 pub use signatures::{
-    detect_sqli, detect_xss, AttackCategory, SignatureEngine, SignatureHit,
-    SignaturePattern,
+    detect_expr_injection, detect_sqli, detect_xss, AttackCategory,
+    SignatureEngine, SignatureHit, SignaturePattern,
 };
 
 use serde::{Deserialize, Serialize};
+
+use crate::StackSet;
 
 /// What the engine should do when a rule matches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,6 +61,9 @@ pub struct CompiledRule {
     pub enabled: bool,
     /// Minimum paranoia level (1-4) at which the rule is active.
     pub paranoia_level: u8,
+    /// Backend stacks the rule targets; the engine skips it unless its
+    /// configured stack set covers this.
+    pub stacks: StackSet,
 }
 
 impl CompiledRule {
@@ -82,6 +87,7 @@ impl CompiledRule {
             tags,
             enabled: true,
             paranoia_level: 1,
+            stacks: StackSet::GENERIC,
         })
     }
 }
@@ -101,6 +107,11 @@ pub struct RuleSpec {
     pub enabled: bool,
     #[serde(default = "default_paranoia")]
     pub paranoia_level: u8,
+    /// Backend stacks the rule targets. Empty = generic (always active).
+    /// Unrecognized names are ignored rather than rejected so a control plane
+    /// newer than the agent can add stacks without breaking compilation.
+    #[serde(default)]
+    pub stacks: Vec<String>,
 }
 
 fn default_severity() -> u8 {
@@ -125,6 +136,8 @@ impl RuleSpec {
         )?;
         rule.enabled = self.enabled;
         rule.paranoia_level = self.paranoia_level.clamp(1, 4);
+        rule.stacks =
+            StackSet::from_names(self.stacks.iter().map(String::as_str));
         Ok(rule)
     }
 }

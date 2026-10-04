@@ -728,6 +728,7 @@ impl Plugin for Cache {
                 waf_score: 0,
                 waf_score_sqli: 0,
                 waf_score_xss: 0,
+                waf_score_rce: 0,
             };
             site.rules
                 .iter()
@@ -1203,6 +1204,7 @@ purge_ip_list = ["192.168.1.1"]
             waf_score: 0,
             waf_score_sqli: 0,
             waf_score_xss: 0,
+            waf_score_rce: 0,
         }
     }
 

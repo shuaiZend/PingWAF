@@ -1,13 +1,20 @@
-//! Input normalization: URL decoding, HTML entity decoding, path collapsing,
-//! query string and cookie parsing.
+//! Input normalization: URL decoding, HTML entity decoding, escape-sequence
+//! decoding, path collapsing, query string and cookie parsing.
 //!
 //! Everything the detection stages look at flows through here first so that
 //! signature matching and libinjection always see attacker-decoded payloads
 //! rather than their obfuscated wire form.
+//!
+//! The normalized view *borrows* the request's headers and body instead of
+//! copying them — the wire-format data already lives in [`RequestData`]
+//! upstream, and duplicating it per request was the engine's largest
+//! avoidable allocation cost.
 
 pub mod html;
 pub mod path;
 pub mod url;
+
+use std::borrow::Cow;
 
 use crate::normalize::html::decode_entities;
 use crate::normalize::path::normalize as normalize_path;
@@ -42,37 +49,44 @@ pub struct DecodedValue {
     pub source: ValueSource,
     /// Parameter / header / cookie name (empty for the path itself).
     pub name: String,
-    /// Wire-format value as the client sent it.
-    pub original: String,
-    /// Value after URL-decoding (multi-pass) and HTML entity decoding.
+    /// Value after URL-decoding, entity decoding and (optionally) escape
+    /// decoding.
     pub decoded: String,
 }
 
-/// Fully normalized view of an inbound HTTP request.
+/// Fully normalized view of an inbound HTTP request. Borrows the request's
+/// headers and body; only decoded/parsed material is owned.
 #[derive(Debug, Clone)]
-pub struct NormalizedRequest {
-    pub method: String,
+pub struct NormalizedRequest<'a> {
+    /// Uppercased method — borrowed when the wire form was already uppercase
+    /// (the common case), owned otherwise.
+    pub method: Cow<'a, str>,
     pub path: String,
     /// Path plus `?query`, with the path portion normalized.
     pub full_uri: String,
     pub query_params: Vec<(String, String)>,
-    /// Lower-cased header names paired with their original-cased values.
-    pub headers: Vec<(String, String)>,
-    pub body: Option<Vec<u8>>,
-    /// Body decoded as UTF-8 when possible (used for body-aware rules).
-    pub body_str: Option<String>,
+    /// The request's own header list, borrowed verbatim. Header lookups are
+    /// ASCII case-insensitive.
+    pub headers: &'a [(String, String)],
+    pub body: Option<&'a [u8]>,
     pub cookies: Vec<(String, String)>,
     /// Flat list of every decoded value the detectors should scan.
     pub decoded_values: Vec<DecodedValue>,
 }
 
-impl NormalizedRequest {
+impl NormalizedRequest<'_> {
+    /// Body decoded as UTF-8 when possible. A borrow, not a copy — the
+    /// previous `Option<String>` field cloned the entire body on every
+    /// request that carried one.
+    pub fn body_str(&self) -> Option<&str> {
+        self.body.and_then(|b| std::str::from_utf8(b).ok())
+    }
+
     /// Case-insensitive header lookup; returns the first match.
     pub fn header(&self, name: &str) -> Option<&str> {
-        let needle = name.to_ascii_lowercase();
         self.headers
             .iter()
-            .find(|(k, _)| *k == needle)
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
             .map(|(_, v)| v.as_str())
     }
 
@@ -104,15 +118,18 @@ const SKIP_HEADERS: &[&str] = &[
 ///
 /// `max_decode_layers` caps how many URL-decoding passes are applied to defend
 /// against double / triple-encoded payloads without opening a CPU DoS.
+/// `decode_escapes` additionally resolves `\xHH` / `\uHHHH` sequences — a
+/// Strict-level extra pass, off by default to keep the Normal hot path lean.
 #[allow(clippy::too_many_arguments)]
-pub fn normalize_request(
-    method: &str,
+pub fn normalize_request<'a>(
+    method: &'a str,
     raw_path: &str,
     raw_query: &str,
-    headers: &[(String, String)],
-    body: Option<&[u8]>,
+    headers: &'a [(String, String)],
+    body: Option<&'a [u8]>,
     max_decode_layers: usize,
-) -> NormalizedRequest {
+    decode_escapes: bool,
+) -> NormalizedRequest<'a> {
     let decoded_path_raw = multi_decode(raw_path, max_decode_layers);
     let normalized_path = normalize_path(&decoded_path_raw);
 
@@ -120,15 +137,18 @@ pub fn normalize_request(
     decoded_values.push(DecodedValue {
         source: ValueSource::Path,
         name: String::new(),
-        original: raw_path.to_string(),
         decoded: decoded_path_raw.clone(),
     });
 
-    // NOTE: the raw query is split on `&`/`;` *before* decoding so that an
+    // NOTE: the raw query is split on `&` *before* decoding so that an
     // encoded `%26` inside a value is not mistaken for a separator. Each
     // key/value is then multi-decoded individually inside `parse_query`.
-    let query_params =
-        parse_query(raw_query, max_decode_layers, &mut decoded_values);
+    let query_params = parse_query(
+        raw_query,
+        max_decode_layers,
+        decode_escapes,
+        &mut decoded_values,
+    );
     let full_uri = if query_params.is_empty() {
         normalized_path.clone()
     } else {
@@ -145,90 +165,157 @@ pub fn normalize_request(
         format!("{}?{}", normalized_path, qs.join("&"))
     };
 
-    // Lower-case header names once so downstream lookups stay cheap.
-    let normalized_headers: Vec<(String, String)> = headers
-        .iter()
-        .map(|(k, v)| (k.to_ascii_lowercase(), v.clone()))
-        .collect();
+    // The method only needs re-allocating when the wire form was not already
+    // uppercase; proxy stacks hand us uppercase methods ~always.
+    let method = if method.bytes().any(|b| b.is_ascii_lowercase()) {
+        Cow::Owned(method.to_ascii_uppercase())
+    } else {
+        Cow::Borrowed(method)
+    };
 
     let mut cookies = Vec::new();
-    for (k, v) in &normalized_headers {
-        if k == "cookie" {
+    for (k, v) in headers {
+        if k.eq_ignore_ascii_case("cookie") {
             parse_cookies(
                 v,
                 max_decode_layers,
+                decode_escapes,
                 &mut cookies,
                 &mut decoded_values,
             );
             continue;
         }
-        if SKIP_HEADERS.contains(&k.as_str()) {
+        if SKIP_HEADERS.iter().any(|s| k.eq_ignore_ascii_case(s)) {
             continue;
         }
-        let decoded = decode_value(v, max_decode_layers);
+        let decoded = decode_value(v, max_decode_layers, decode_escapes);
         decoded_values.push(DecodedValue {
             source: ValueSource::Header,
             name: k.clone(),
-            original: v.clone(),
             decoded,
         });
     }
 
-    let body_owned = body.map(<[u8]>::to_vec);
-    let body_str = body_owned
-        .as_ref()
-        .and_then(|b| String::from_utf8(b.clone()).ok());
-
-    if let Some(text) = body_str.as_ref() {
+    if let Some(body_bytes) = body {
         // Form-encoded bodies are split into parameters so each value is
         // inspected separately; anything else is scanned as a single blob.
-        let ctype = normalized_headers
+        let ctype = headers
             .iter()
-            .find(|(k, _)| k == "content-type")
+            .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
             .map(|(_, v)| v.to_ascii_lowercase())
             .unwrap_or_default();
-        if ctype.contains("application/x-www-form-urlencoded") {
-            parse_form_body(text, max_decode_layers, &mut decoded_values);
-        } else {
-            let decoded = decode_value(text, max_decode_layers);
-            decoded_values.push(DecodedValue {
-                source: ValueSource::Body,
-                name: String::new(),
-                original: text.clone(),
-                decoded,
-            });
+        if let Ok(text) = std::str::from_utf8(body_bytes) {
+            if ctype.contains("application/x-www-form-urlencoded") {
+                parse_form_body(
+                    text,
+                    max_decode_layers,
+                    decode_escapes,
+                    &mut decoded_values,
+                );
+            } else {
+                let decoded =
+                    decode_value(text, max_decode_layers, decode_escapes);
+                decoded_values.push(DecodedValue {
+                    source: ValueSource::Body,
+                    name: String::new(),
+                    decoded,
+                });
+            }
         }
     }
 
     NormalizedRequest {
-        method: method.to_ascii_uppercase(),
+        method,
         path: normalized_path,
         full_uri,
         query_params,
-        headers: normalized_headers,
-        body: body_owned,
-        body_str,
+        headers,
+        body,
         cookies,
         decoded_values,
     }
 }
 
 /// Run URL multi-decoding plus HTML entity decoding, returning a stable form
-/// safe for signature matching.
-pub fn decode_value(input: &str, max_decode_layers: usize) -> String {
+/// safe for signature matching. With `decode_escapes`, `\xHH` / `\uHHHH`
+/// sequences are resolved as well.
+pub fn decode_value(
+    input: &str,
+    max_decode_layers: usize,
+    decode_escapes: bool,
+) -> String {
     let url_decoded = multi_decode(input, max_decode_layers);
-    if url_decoded.contains('&') {
+    let out = if url_decoded.contains('&') {
         decode_entities(&url_decoded)
     } else {
         url_decoded
+    };
+    if decode_escapes {
+        decode_escapes_owned(&out)
+    } else {
+        out
     }
 }
 
-/// Split a query string on `&`/`;` and decode each key/value pair, pushing
+/// Resolve `\xHH` and `\uHHHH` escape sequences. Returns the input untouched
+/// (borrowed) when it contains no escape marker, so the Normal-level path
+/// never allocates for this.
+pub fn decode_escapes(input: &str) -> Cow<'_, str> {
+    let has_marker = input.contains("\\x")
+        || input.contains("\\X")
+        || input.contains("\\u")
+        || input.contains("\\U");
+    if !has_marker {
+        return Cow::Borrowed(input);
+    }
+    let bytes = input.as_bytes();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'\\'
+            && i + 1 < bytes.len()
+            && matches!(bytes[i + 1], b'x' | b'X' | b'u' | b'U')
+        {
+            let width = if matches!(bytes[i + 1], b'x' | b'X') {
+                2
+            } else {
+                4
+            };
+            let hex_end = (i + 2 + width).min(bytes.len());
+            if hex_end == i + 2 + width
+                && bytes[i + 2..hex_end].iter().all(|b| b.is_ascii_hexdigit())
+            {
+                let n = u32::from_str_radix(&input[i + 2..hex_end], 16)
+                    .unwrap_or(0);
+                if let Some(c) = char::from_u32(n) {
+                    out.push(c);
+                    i = hex_end;
+                    continue;
+                }
+            }
+        }
+        // Copy one full UTF-8 scalar (not one byte) so multi-byte sequences
+        // pass through verbatim.
+        let ch_len = input[i..].chars().next().map_or(1, char::len_utf8);
+        out.push_str(&input[i..i + ch_len]);
+        i += ch_len;
+    }
+    Cow::Owned(out)
+}
+
+fn decode_escapes_owned(input: &str) -> String {
+    match decode_escapes(input) {
+        Cow::Borrowed(s) => s.to_string(),
+        Cow::Owned(s) => s,
+    }
+}
+
+/// Split a query string on `&` and decode each key/value pair, pushing
 /// every value into `decoded_values` for downstream scanning.
 fn parse_query(
     query: &str,
     max_decode_layers: usize,
+    decode_escapes: bool,
     decoded_values: &mut Vec<DecodedValue>,
 ) -> Vec<(String, String)> {
     if query.is_empty() {
@@ -248,12 +335,11 @@ fn parse_query(
             None => (pair, ""),
         };
         let key_decoded = multi_decode(k, max_decode_layers);
-        let val_decoded = decode_value(v, max_decode_layers);
+        let val_decoded = decode_value(v, max_decode_layers, decode_escapes);
         out.push((key_decoded.clone(), val_decoded.clone()));
         decoded_values.push(DecodedValue {
             source: ValueSource::QueryParam,
             name: key_decoded,
-            original: v.to_string(),
             decoded: val_decoded,
         });
     }
@@ -266,6 +352,7 @@ fn parse_query(
 fn parse_form_body(
     body: &str,
     max_decode_layers: usize,
+    decode_escapes: bool,
     decoded_values: &mut Vec<DecodedValue>,
 ) {
     if body.is_empty() {
@@ -281,11 +368,10 @@ fn parse_form_body(
             None => (pair, ""),
         };
         let key_decoded = multi_decode(k, max_decode_layers);
-        let val_decoded = decode_value(v, max_decode_layers);
+        let val_decoded = decode_value(v, max_decode_layers, decode_escapes);
         decoded_values.push(DecodedValue {
             source: ValueSource::Body,
             name: key_decoded,
-            original: v.to_string(),
             decoded: val_decoded,
         });
     }
@@ -295,6 +381,7 @@ fn parse_form_body(
 fn parse_cookies(
     header: &str,
     max_decode_layers: usize,
+    decode_escapes: bool,
     cookies: &mut Vec<(String, String)>,
     decoded_values: &mut Vec<DecodedValue>,
 ) {
@@ -308,12 +395,11 @@ fn parse_cookies(
             None => (pair, ""),
         };
         let key_decoded = multi_decode(k, max_decode_layers);
-        let val_decoded = decode_value(v, max_decode_layers);
+        let val_decoded = decode_value(v, max_decode_layers, decode_escapes);
         cookies.push((key_decoded.clone(), val_decoded.clone()));
         decoded_values.push(DecodedValue {
             source: ValueSource::Cookie,
             name: key_decoded,
-            original: v.to_string(),
             decoded: val_decoded,
         });
     }
@@ -336,6 +422,7 @@ mod tests {
             &headers,
             None,
             3,
+            false,
         );
         assert_eq!(req.method, "GET");
         assert_eq!(req.path, "/foo/bar");
@@ -360,6 +447,7 @@ mod tests {
             &[],
             None,
             3,
+            false,
         );
         let v = req
             .decoded_values
@@ -373,11 +461,77 @@ mod tests {
     fn skips_authorization_header() {
         let headers =
             vec![("Authorization".to_string(), "Bearer xyz".to_string())];
-        let req = normalize_request("GET", "/", "", &headers, None, 3);
+        let req = normalize_request("GET", "/", "", &headers, None, 3, false);
         assert!(!req
             .decoded_values
             .iter()
             .any(|v| v.source == ValueSource::Header
                 && v.name == "authorization"));
+    }
+
+    #[test]
+    fn headers_are_borrowed_not_copied() {
+        let headers = vec![("X-Custom".to_string(), "probe".to_string())];
+        let body = b"payload".to_vec();
+        let req =
+            normalize_request("GET", "/", "", &headers, Some(&body), 3, false);
+        assert_eq!(req.headers.len(), 1);
+        assert_eq!(req.body, Some(body.as_slice()));
+        assert_eq!(req.body_str(), Some("payload"));
+    }
+
+    #[test]
+    fn method_borrowed_when_uppercase() {
+        let req = normalize_request("GET", "/", "", &[], None, 3, false);
+        assert!(matches!(req.method, Cow::Borrowed("GET")));
+        let req = normalize_request("get", "/", "", &[], None, 3, false);
+        assert!(matches!(req.method, Cow::Owned(_)));
+        assert_eq!(req.method, "GET");
+    }
+
+    #[test]
+    fn escapes_decoded_only_when_enabled() {
+        let headers = vec![];
+        let req = normalize_request(
+            "GET",
+            "/x",
+            r"p=%5Cx3cscript%3E",
+            &headers,
+            None,
+            3,
+            false,
+        );
+        let v = req
+            .decoded_values
+            .iter()
+            .find(|v| v.name == "p")
+            .expect("param p");
+        assert_eq!(v.decoded, r"\x3cscript>");
+        assert!(!v.decoded.contains("<script"));
+
+        let req = normalize_request(
+            "GET",
+            "/x",
+            r"p=%5Cx3cscript%3E",
+            &headers,
+            None,
+            3,
+            true,
+        );
+        let v = req
+            .decoded_values
+            .iter()
+            .find(|v| v.name == "p")
+            .expect("param p");
+        assert_eq!(v.decoded, "<script>");
+    }
+
+    #[test]
+    fn unicode_escape_decoded() {
+        assert_eq!(decode_escapes(r"a\u003cb"), "a<b");
+        assert_eq!(decode_escapes("no escapes"), "no escapes");
+        // Incomplete / invalid escapes stay verbatim.
+        assert_eq!(decode_escapes(r"\xzz"), r"\xzz");
+        assert_eq!(decode_escapes(r"\uD83D"), r"\uD83D");
     }
 }
