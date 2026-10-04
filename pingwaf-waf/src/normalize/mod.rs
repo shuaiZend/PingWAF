@@ -52,6 +52,13 @@ pub struct DecodedValue {
     /// Value after URL-decoding, entity decoding and (optionally) escape
     /// decoding.
     pub decoded: String,
+    /// `true` when the value is a discrete input field (query param, cookie,
+    /// header, form member, JSON member) rather than an opaque body blob.
+    /// Typed fields are the classic injection surface and carry full
+    /// severity; bulk blobs (analytics JSON dumps, pasted HTML) often
+    /// contain the same strings benignly, so the engine weights blob hits
+    /// as weak signals.
+    pub field: bool,
 }
 
 /// Fully normalized view of an inbound HTTP request. Borrows the request's
@@ -138,6 +145,7 @@ pub fn normalize_request<'a>(
         source: ValueSource::Path,
         name: String::new(),
         decoded: decoded_path_raw.clone(),
+        field: true,
     });
 
     // NOTE: the raw query is split on `&` *before* decoding so that an
@@ -193,6 +201,7 @@ pub fn normalize_request<'a>(
             source: ValueSource::Header,
             name: k.clone(),
             decoded,
+            field: true,
         });
     }
 
@@ -212,6 +221,25 @@ pub fn normalize_request<'a>(
                     decode_escapes,
                     &mut decoded_values,
                 );
+            } else if ctype.contains("json") || looks_like_json(text) {
+                // Structured bodies: keep the raw blob (bulk content can be
+                // benign), then add every string member as a *field* so the
+                // detectors see typed inputs — with JSON escape handling
+                // (`\u003c`) resolved by the parser itself.
+                let decoded =
+                    decode_value(text, max_decode_layers, decode_escapes);
+                decoded_values.push(DecodedValue {
+                    source: ValueSource::Body,
+                    name: String::new(),
+                    decoded,
+                    field: false,
+                });
+                unpack_json(
+                    text,
+                    max_decode_layers,
+                    decode_escapes,
+                    &mut decoded_values,
+                );
             } else {
                 let decoded =
                     decode_value(text, max_decode_layers, decode_escapes);
@@ -219,6 +247,7 @@ pub fn normalize_request<'a>(
                     source: ValueSource::Body,
                     name: String::new(),
                     decoded,
+                    field: false,
                 });
             }
         }
@@ -364,6 +393,7 @@ fn parse_query(
             source: ValueSource::QueryParam,
             name: key_decoded,
             decoded: val_decoded,
+            field: true,
         });
     }
     out
@@ -393,11 +423,226 @@ fn parse_form_body(
         let key_decoded = multi_decode(k, max_decode_layers);
         let val_decoded =
             decode_value_form(v, max_decode_layers, decode_escapes);
+        // A form field whose value is itself serialized JSON (APIs that
+        // embed `param={"add":5,"delete":0}`) is unpacked in place — the
+        // `"key":value` container shape trips libinjection's quote-keyword
+        // fingerprint on completely benign payloads.
+        if !val_decoded.is_empty()
+            && unpack_string_json(
+                &val_decoded,
+                0,
+                &key_decoded,
+                max_decode_layers,
+                decode_escapes,
+                decoded_values,
+            )
+        {
+            continue;
+        }
         decoded_values.push(DecodedValue {
             source: ValueSource::Body,
             name: key_decoded,
             decoded: val_decoded,
+            field: true,
         });
+    }
+}
+
+/// Upper bounds that keep JSON unpacking a bounded operation regardless of
+/// what the client sends: recursion depth, per-value byte length and the
+/// total number of extracted members. The depth budget covers a nested
+/// serialized-JSON string (telemetry beacons embed JSON-in-JSON three to
+/// four levels deep), so the walk may descend into a string member's own
+/// object tree as well.
+const JSON_MAX_DEPTH: usize = 6;
+const JSON_MAX_VALUE_LEN: usize = 4096;
+const JSON_MAX_VALUES: usize = 64;
+
+/// A JSON-looking body: JSON content type or an object/array opening brace
+/// after leading whitespace. The sniff only *enables* the parse — a parse
+/// failure falls back to blob-only scanning.
+fn looks_like_json(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    trimmed.starts_with('{') || trimmed.starts_with('[')
+}
+
+/// Recursively extract string members of a JSON body as typed fields. The
+/// parser resolves JSON escape sequences (`\u003c`, `\/`) for us, closing
+/// the escape-obfuscation gap without turning on the Strict escape pass.
+/// Bounded by [`JSON_MAX_DEPTH`], [`JSON_MAX_VALUE_LEN`] and
+/// [`JSON_MAX_VALUES`]; a parse failure simply yields nothing.
+fn unpack_json(
+    body: &str,
+    max_decode_layers: usize,
+    decode_escapes: bool,
+    decoded_values: &mut Vec<DecodedValue>,
+) {
+    if body.len() > JSON_MAX_VALUE_LEN * 64 {
+        return;
+    }
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(body) else {
+        return;
+    };
+    let mut count = 0usize;
+    walk_json(
+        &root,
+        0,
+        String::new(),
+        max_decode_layers,
+        decode_escapes,
+        decoded_values,
+        &mut count,
+    );
+}
+
+/// Parse a string value that is itself serialized JSON and unpack its
+/// members into `decoded_values` under `path`. Returns `true` when the value
+/// was replaced by its unpacked members — the caller must then *not* push
+/// the container string itself (the `"key":value` shape trips libinjection's
+/// quote-keyword fingerprint on benign structured payloads). Depth shares
+/// the [`JSON_MAX_DEPTH`] budget of the surrounding walk.
+fn unpack_string_json(
+    s: &str,
+    depth: usize,
+    path: &str,
+    max_decode_layers: usize,
+    decode_escapes: bool,
+    decoded_values: &mut Vec<DecodedValue>,
+) -> bool {
+    if depth >= JSON_MAX_DEPTH
+        || s.is_empty()
+        || s.len() > JSON_MAX_VALUE_LEN
+        || !looks_like_json(s)
+    {
+        return false;
+    }
+    let Ok(nested) = serde_json::from_str::<serde_json::Value>(s) else {
+        return false;
+    };
+    let before = decoded_values.len();
+    let mut count = 0usize;
+    walk_json(
+        &nested,
+        depth + 1,
+        path.to_string(),
+        max_decode_layers,
+        decode_escapes,
+        decoded_values,
+        &mut count,
+    );
+    // Replace the container only when members were actually extracted —
+    // a value the depth budget rejected stays put rather than vanishing.
+    decoded_values.len() > before
+}
+
+#[allow(clippy::too_many_arguments)]
+fn walk_json(
+    value: &serde_json::Value,
+    depth: usize,
+    path: String,
+    max_decode_layers: usize,
+    decode_escapes: bool,
+    decoded_values: &mut Vec<DecodedValue>,
+    count: &mut usize,
+) {
+    if *count >= JSON_MAX_VALUES {
+        return;
+    }
+    match value {
+        serde_json::Value::String(s) => {
+            if s.is_empty() || s.len() > JSON_MAX_VALUE_LEN {
+                return;
+            }
+            // A string member that is itself serialized JSON (nested
+            // telemetry payloads, icons, embedded config blobs) is unpacked
+            // in place instead of being scanned as a container — see
+            // [`unpack_string_json`].
+            if unpack_string_json(
+                s,
+                depth,
+                &path,
+                max_decode_layers,
+                decode_escapes,
+                decoded_values,
+            ) {
+                *count += 1;
+                return;
+            }
+            let decoded = decode_value(s, max_decode_layers, decode_escapes);
+            decoded_values.push(DecodedValue {
+                source: ValueSource::Body,
+                name: path,
+                decoded,
+                field: true,
+            });
+            *count += 1;
+        },
+        serde_json::Value::Array(items) => {
+            if depth >= JSON_MAX_DEPTH {
+                return;
+            }
+            for (i, item) in items.iter().enumerate() {
+                walk_json(
+                    item,
+                    depth + 1,
+                    format!("{path}[{i}]"),
+                    max_decode_layers,
+                    decode_escapes,
+                    decoded_values,
+                    count,
+                );
+            }
+        },
+        serde_json::Value::Object(map) => {
+            if depth >= JSON_MAX_DEPTH {
+                return;
+            }
+            for (k, v) in map {
+                let child = if path.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{path}.{k}")
+                };
+                walk_json(
+                    v,
+                    depth + 1,
+                    child,
+                    max_decode_layers,
+                    decode_escapes,
+                    decoded_values,
+                    count,
+                );
+            }
+        },
+        // Scalars become scannable strings so a nested container made only
+        // of numbers/booleans still yields members (keeping the
+        // container-replacement rule honest). Scalar values carry no
+        // injection payload on their own.
+        serde_json::Value::Number(n) => {
+            if *count >= JSON_MAX_VALUES {
+                return;
+            }
+            decoded_values.push(DecodedValue {
+                source: ValueSource::Body,
+                name: path,
+                decoded: n.to_string(),
+                field: true,
+            });
+            *count += 1;
+        },
+        serde_json::Value::Bool(b) => {
+            if *count >= JSON_MAX_VALUES {
+                return;
+            }
+            decoded_values.push(DecodedValue {
+                source: ValueSource::Body,
+                name: path,
+                decoded: b.to_string(),
+                field: true,
+            });
+            *count += 1;
+        },
+        _ => {},
     }
 }
 
@@ -425,6 +670,7 @@ fn parse_cookies(
             source: ValueSource::Cookie,
             name: key_decoded,
             decoded: val_decoded,
+            field: true,
         });
     }
 }
