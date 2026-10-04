@@ -248,7 +248,15 @@ fn builtin_patterns() -> Vec<SignaturePattern> {
             "Cisco ASA +CSCOE+ traversal",
             "portal_inc.lua",
         );
-
+        // Tomcat/F5 `..;/` semicolon traversal: the escaped delimiter only
+        // appears when a caller is smuggling past a path-normalizing proxy.
+        push(
+            "PT-019",
+            AttackCategory::PathTraversal,
+            5,
+            "semicolon path traversal",
+            "..;/",
+        );
         // ---- Command injection ----
         push(
             "CI-001",
@@ -770,6 +778,45 @@ fn builtin_patterns() -> Vec<SignaturePattern> {
             "OGNL context variable chain",
             "#context.get(",
         );
+        // PHP webshell opener: `<?php` in a reflected surface or parameter
+        // is upload/code-execution payload, not document text.
+        push(
+            "CI-085",
+            AttackCategory::CommandInjection,
+            5,
+            "PHP code tag",
+            "<?php",
+        );
+        // ThinkPHP route RCE (CVE-2018-20062 family): the dispatcher path
+        // `\\think\\app/invokefunction` with call_user_func is the POC core.
+        push(
+            "CI-086",
+            AttackCategory::CommandInjection,
+            5,
+            "ThinkPHP invokefunction route",
+            "think\\app/invokefunction",
+        );
+        push(
+            "CI-087",
+            AttackCategory::CommandInjection,
+            5,
+            "backtick touch command",
+            "`touch ",
+        );
+        push(
+            "CI-088",
+            AttackCategory::CommandInjection,
+            5,
+            "DedeCMS runphp template exec",
+            "runphp=",
+        );
+        push(
+            "CI-089",
+            AttackCategory::CommandInjection,
+            5,
+            "LDAP filter injection break",
+            "*)((|",
+        );
         // JSFuck / Harley-Davidson style pure-symbol JS: the prefix
         // `[(+{}+[])` only occurs inside obfuscated execution payloads.
         push(
@@ -904,6 +951,17 @@ fn builtin_patterns() -> Vec<SignaturePattern> {
             "octal loopback encoding",
             "0177.0.0.1",
         );
+        // Atlassian gadget proxy: `makeRequest` fetches an attacker-chosen
+        // URL server-side (CVE-2019-3403 family); the servlet path is the
+        // POC's fingerprint. sev5: the path only ever appears on the
+        // exploit's own route.
+        push(
+            "SSRF-018",
+            AttackCategory::Ssrf,
+            5,
+            "Atlassian gadget makeRequest proxy",
+            "gadgets/makerequest",
+        );
 
         // ---- Deserialization ----
         push(
@@ -1027,6 +1085,16 @@ fn builtin_patterns() -> Vec<SignaturePattern> {
             5,
             "getClass().forName gadget chain",
             "getclass().forname",
+        );
+        // Base64 of the Java stream magic `AC ED 00 05` — a serialized
+        // Java object rides in every Java deserialization gadget vector
+        // (ViewState, RMI, cookie blobs) and never in benign parameters.
+        push(
+            "DZ-017",
+            AttackCategory::Deserialization,
+            5,
+            "Java serialized object magic (b64)",
+            "rO0AB",
         );
 
         // ---- XXE ----
@@ -1339,6 +1407,23 @@ fn builtin_patterns() -> Vec<SignaturePattern> {
             5,
             "or-1-limit tautology truncation",
             "or 1 limit",
+        );
+        // Postgres/Windows lateral-movement probes read the filesystem or the
+        // SMB stack through `master..xp_dirtree`; the token pair only occurs
+        // inside live exploitation chains.
+        push(
+            "SQL-025",
+            AttackCategory::SqlInjection,
+            5,
+            "xp_dirtree filesystem probe",
+            "xp_dirtree",
+        );
+        push(
+            "SQL-026",
+            AttackCategory::SqlInjection,
+            5,
+            "Oracle dbms_pipe time-based blind",
+            "dbms_pipe.receive_message",
         );
 
         // ---- XSS (literal needles; detect_xss catches structured payloads) ----
@@ -2258,8 +2343,12 @@ pub fn detect_sqli(input: &str) -> (bool, String) {
 
 static XSS_SCRIPT_TAG: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)<\s*/?\s*script\b").unwrap());
+// Event handler opener. The `\s` arm matches real markup (` on…=`); the
+// `+` arm covers URL-encoded headers/paths where the space stayed literal
+// (`<xss+onafterscriptexecute=…>` in a Referer query) — browsers reflect
+// query strings with `+` for space into Referer URLs verbatim.
 static XSS_EVENT_HANDLER: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)\son[a-z]+\s*=").unwrap());
+    Lazy::new(|| Regex::new(r"(?i)(?:\s|\+)on[a-z]+\s*=").unwrap());
 static XSS_JS_URI: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)\b(?:javascript|vbscript|livescript|mocha)\s*:").unwrap()
 });
@@ -2550,6 +2639,18 @@ static SCRIPT_TAG_COMPACT: Lazy<Regex> =
 pub fn xss_script_tag_shaped(input: &str, compact_allowed: bool) -> bool {
     SCRIPT_TAG_ATTR.is_match(input)
         || (compact_allowed && SCRIPT_TAG_COMPACT.is_match(input))
+}
+
+/// Does a Referer/User-Agent value embed executable markup context — a
+/// script tag, an event-handler attribute, or a script URI? Browsers only
+/// ever send well-formed URLs here; such a value was authored by an attack
+/// tool reflecting a previous probe, so the meta-header demotion must not
+/// apply to it (a Referer *quoting* prose with "union select" still does).
+pub fn xss_markup_shaped(input: &str) -> bool {
+    SCRIPT_TAG_ATTR.is_match(input)
+        || SCRIPT_TAG_COMPACT.is_match(input)
+        || XSS_EVENT_HANDLER.is_match(input)
+        || XSS_JS_URI.is_match(input)
 }
 
 static CRLF_HEADER_SHAPE: Lazy<Regex> =

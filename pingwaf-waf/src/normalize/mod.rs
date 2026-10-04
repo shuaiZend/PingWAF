@@ -598,7 +598,12 @@ fn expand_base64(
             .map(|v| (v.source, v.name.clone(), v.decoded.clone()))
             .collect();
         for (source, name, value) in layer {
-            if value.len() < 16 || value.len() > B64_MAX_VALUE_LEN {
+            // 10B floor: `MSBhbmQgMT0y` (`1 and 1=2`, 12B) rides inside JSON
+            // members and falls between the old 16B gate and the 12B core
+            // gate inside `b64_decode_value`. The charset + printability
+            // gates there remain the real quality filter; this length check
+            // only bounds work.
+            if value.len() < 10 || value.len() > B64_MAX_VALUE_LEN {
                 continue;
             }
             let Some(mut decoded) = b64_decode_value(&value) else {

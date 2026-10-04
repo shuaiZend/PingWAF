@@ -27,7 +27,7 @@ use crate::rules::managed::default_managed_rules;
 use crate::rules::signatures::{
     crlf_header_injection_shaped, detect_deser_shape, detect_expr_injection,
     detect_js_call, detect_sqli, detect_xss, sqli_into_file_statement_shaped,
-    sqli_union_statement_shaped, xss_script_tag_shaped,
+    sqli_union_statement_shaped, xss_markup_shaped, xss_script_tag_shaped,
     xss_script_uri_html_shaped, AttackCategory, SignatureEngine, SignatureHit,
 };
 use crate::rules::{CompiledRule, RuleAction};
@@ -338,7 +338,8 @@ impl WafEngine {
             // because a JVM parses *every* header it receives.
             let is_meta_header = value.source == ValueSource::Header
                 && (value.name.eq_ignore_ascii_case("referer")
-                    || value.name.eq_ignore_ascii_case("user-agent"));
+                    || value.name.eq_ignore_ascii_case("user-agent"))
+                && !xss_markup_shaped(needle);
 
             self.signatures.scan_into(needle, &mut hits, &mut seen);
             // A CRLF hit is only response-splitting material on its own
@@ -2101,6 +2102,102 @@ mod tests {
             b"ip=x%7C%7Cping+-c+10+127.0.0.1%7C%7C&Submit=Submit".to_vec(),
         );
         let v = e.inspect(&form);
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn p7_monitor_and_zero_signal_forms_block() {
+        // Deterministic coverage for post11 strict-body Monitor/Pass
+        // clusters; each case maps to one attribution bucket.
+        let e = engine();
+        // ThinkPHP dispatcher RCE route.
+        let v = e.inspect(&req(
+            "GET",
+            "/index.php/",
+            "s=index/%5Cthink%5Capp/invokefunction&function=call_user_func&vars%5B0%5D=md5&vars%5B1%5D=x",
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+        // Short b64 tautology inside a JSON member (12B, under the old 16B
+        // floor): `{"id":"MSBhbmQgMT0y"}` is `{"id":"1 and 1=2"}`.
+        let v = e.inspect(&req(
+            "GET",
+            "/sqli",
+            "id=%7B%22id%22%3A%22MSBhbmQgMT0y%22%7D",
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+        // PHP webshell opener after JSON+b64 transport.
+        let v = e.inspect(&req(
+            "GET",
+            "/sqli",
+            "id=%7B%22id%22%3A%22PD9waHAgJF9QT1NUW2NtZF07%22%7D",
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+        // Java serialized object magic inside ViewState (b64 of AC ED 00 05).
+        let v = e.inspect(&req(
+            "GET",
+            "/res/login.jsf",
+            "javax.faces.ViewState=rO0ABXNyABFqYXZhLnV0aWwuSGFzaE1hcAUH2sHDFmDR",
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+        // Tomcat/F5 `..;/` path smuggling.
+        let v = e.inspect(&req("GET", "/xxx/..;/admin/", ""));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+        // DedeCMS template execution.
+        let v = e.inspect(&req(
+            "GET",
+            "/tag_test_action.php",
+            "partcode=%7Bdede:field%20name%3D%27source%27%20runphp%3D%27yes%27%7Decho%201%7B/dede:field%7D",
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+        // LDAP blind-injection break variant `*)((|`.
+        let v = e.inspect(&req(
+            "GET",
+            "/",
+            "f=admin%2A%29%28%28%7Cuserpassword%3D%2A%29",
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+        // Cacti poller backtick command execution.
+        let v = e.inspect(&req(
+            "GET",
+            "/remote_agent.php",
+            "action=polldata&local_data_ids%5B0%5D=6&host_id=1&poller_id=%60touch%20/tmp/success%60",
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+        // Atlassian gadget SSRF proxy path.
+        let v = e.inspect(&req(
+            "GET",
+            "/plugins/servlet/gadgets/makeRequest",
+            "url=https://evil.example/x",
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+        // SQL filesystem/time-based probes.
+        let v = e.inspect(&req(
+            "GET",
+            "/sqli",
+            "id=exec+master..xp_dirtree+%27//host/a%27",
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+        let v = e.inspect(&req(
+            "GET",
+            "/sqli",
+            "id=dbms_pipe.receive_message%28%28%27a%27%29%2C10%29",
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn plus_encoded_event_handler_in_referer_blocks() {
+        // Referer reflects a previous probe with `+` for space; the event
+        // handler opener must match the `+on…=` shape (strict mode —
+        // Referer hits are demoted one severity below critical).
+        let e = strict_engine();
+        let mut r = req("GET", "/vulnerabilities/xss_r/", "name=");
+        r.headers.push((
+            "Referer".into(),
+            "http://t/vuln?name=%3Cxss+onafterscriptexecute%3Dalert%281%29%3E"
+                .into(),
+        ));
+        let v = e.inspect(&r);
         assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
     }
 

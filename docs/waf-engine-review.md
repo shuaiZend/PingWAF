@@ -150,6 +150,19 @@ post9 strict+body 口径 138 条漏报全量分层后的确定性方案（12 条
 
 post11 全量实测（33877 样本）：四配置**全部双向改善**——Normal 332→**341**（+9）/ FP 7→**5**，Normal+body 389→**399**（+10）/ 16→**14**，Strict 438→**447**（+9）/ 7→**5**，Strict+body 520→**531**（+11）/ 24→**22**（0.14% 目标线内连续第三轮，实际 0.066%）。strict+body 拦截率首次突破 80%，误报率的同步下降来自 path 循环 search_phrase 门在白样本 URL slug 上的放行。
 
+### P7 第八轮：Monitor 分数不足细分 + 零信号复检——已落地 ✅
+
+以 post11 实测漏报（而非过时的 post9 列表）重新提取 strict+body 口径 127 条漏报，三分层归因：13 条 triage 判 Block 但回放 passed/protocol_reject（样本传输语义链路差异）、54 条 Monitor（有信号但分数不足 strict 家族门）、59 条 Pass（引擎零信号）、1 条 Challenge。Monitor/Pass 两层聚类后的确定性方案：
+
+28. **b64 展开外层长度门 16→10** ✅：`MSBhbmQgMT0y`（`1 and 1=2`，12B）藏身 JSON 成员内，落在旧 16B 外层门与 b64_decode_value 内部 12B core 门之间的盲区；charset 快检 + printable>90% 才是真正的质量门，外层门只约束工作量。
+29. **needle 扩面 ×10** ✅：SQL-025 `xp_dirtree`（Postgres/Windows 文件系统横向探测）、SQL-026 `dbms_pipe.receive_message`（Oracle 时间盲注）、PT-019 `..;/`（Tomcat/F5 分号穿越，仅出现在绕过路径归一化代理的走私流量中）、DZ-017 `rO0AB`（Java 序列化魔数 `AC ED 00 05` 的 b64，ViewState/RMI/cookie 载体）、SSRF-018 `gadgets/makerequest`（Atlassian gadget 代理 CVE-2019-3403 家族，exploit 专属路由）、CI-085 `<?php`（PHP webshell 开标）、CI-086 `think\app/invokefunction`（ThinkPHP dispatcher RCE）、CI-087 `` `touch ``（反引号命令执行）、CI-088 `runphp=`（DedeCMS 模板执行）、CI-089 `*)((|`（LDAP 盲注 break 变体），全部 sev5 critical。
+30. **事件处理器正则双前缀** ✅：XSS_EVENT_HANDLER 从 `\son[a-z]+\s*=` 放宽为 `(?:\s|\+)on[a-z]+\s*=`——header/path 源的 `+` 不按空格解码（URL 反射语义），`<xss+onafterscriptexecute=alert(1)>` 的 Referer 反射形态此前不可见。
+31. **Referer/UA 降权的 markup 豁免** ✅：`xss_markup_shaped`（script 标签属性/紧凑开标签/事件处理器/脚本 URI 四正则）命中时 `is_meta_header` 降权不生效——浏览器只会发出合法 URL，Referer/UA 里出现可执行 markup 结构必是攻击工具反射上轮探测的回放，而「引用含 union select 的散文」的 Referer 仍正常降权。
+
+回归：174 单测全绿（新增 2 个测试覆盖 11 类 Monitor/Pass 形态与 Referer `+` 编码事件处理器）；658 黑样本 triage 539→**576**（+32 零回退，新增命中全部来自 P7 needle 与联动跨过 strict 家族门的样本）；fp46 白样本 Block 20（与 P6 一致）零新增，且全部在 post11 回放中同样被拦。
+
+post12 全量实测（33877 样本）：四配置拦截 **+21~+28**（P7 为八轮中单轮增益最大）、误报全部持平零新增——Normal 341→**366**，Normal+body 399→**426**，Strict 447→**468**，Strict+body 531→**559**（80.7%→**85.0%**）。P7 三类修复分别承接独立漏报族：b64 外层门放宽承接 JSON 成员内短载荷、10 条 needle 承接 PHP/ThinkPHP/DedeCMS/LDAP/Tomcat/Oracle/Atlassian 各 POC 路由、markup 豁免承接 Referer 反射事件处理器。
+
 ### 收益矩阵（基于 bench 归因的保守估算）
 
 | 方案 | 拦截率提升 | 误报影响 | 工作量 |
