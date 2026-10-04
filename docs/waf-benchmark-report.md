@@ -325,3 +325,80 @@ G1 主基线的恶意样本（black）按类目拦截情况：
 - **时延**：不开 body 检测两档 p95 仍为 2-4ms；开启后 p95 ≈3s 是回放客户端 `sendall` 大 body 与 WAF「上传中途拦截」的固有交互（拦截后客户端仍在发送），非引擎匹配开销。
 - **复现**：`tools/waf-bench/conf/level-{normal,strict}{,-body}.toml`，`-body` 变体多一行 `inspect_body = true`；回放命令见 `tools/waf-bench/README.md`。
 - **未竟事项**（P1，见 `waf-engine-review.md`）：JSON 递归解包（当前对 `{"body":"payload"}` 类嵌套串不展开）、deser 黑样本在 Normal+body 档仍依赖偶然信号（Strict 档 83.3% 由 critical 直拦）。
+
+## 11. P1 语义增强与实测（§10 之后的第三轮）
+
+P1 覆盖面扩展与语义误报治理（`waf-engine-review.md` §4 P1 项 4-8）已全部落地：
+
+1. **JSON 递归解包 + 输入字段语义**：JSON body 由 serde_json 解析（限深 6/值长 4KB/最多 64 值），成员 string 值按 JSON 路径（`a.b[0]`）独立进解码+扫描——`{"body":"…union select…"}` 类嵌套载荷不再依赖 blob 整体判定，`\u003c` 类转义由解析器天然还原。**字符串成员本身是序列化 JSON 时（埋点内嵌载荷、`value="{\"icon\":\"\\n<svg…\"}"`）就地再解包并替换容器**：容器形态（`"key":value`）会踩 libinjection quote-keyword 指纹，且展开后 icon 类长成员受 256B 分级保护；纯数字/布尔成员也产出字符串值（不构成攻击面，但保证容器替换语义成立）。配套引入 `DecodedValue.field` 语义标记：**离散输入字段**（query/header/cookie/表单字段/JSON 成员）是注入面，走完整 severity；**opaque blob**（非结构化 body）视为 bulk 内容，反射类家族降弱信号（Normal）。表单字段值同样适用 JSON 再解包（`param={"add":5,"delete":0}` 类 API 载荷不再踩 quote-keyword）。
+2. **CRLF 头名形态 critical**：解码值中 CRLF（含 `\r\r\n\n` 混排规避）后紧跟 `name:` 头名形态才在 query/path/header/cookie 面一票拦截（黑样本 `%0D%0AX-Pen-Test:` 形态）；裸多行文本（表单单行输入回传 query 换行、粘贴文档）只评分不拦——实测白样本中该形态普遍存在（百度翻译多行 query、mathb.in 文档、StackBlitz 代码内容），「query 不含换行」的假设不成立。body 面始终只评分。
+3. **弱信号评分语义修正**（两轮实测迭代）：`union select` 搜索短语命中改为**零分跳过**——needle 与 libinjection 指纹描述同一字符串，镜像多面不放大，Pass 快路径零开销；`FIELD_STRONG_MAX_LEN`（256B）——离散 body 字段解码值超长按 bulk 弱信号化（粘贴代码/文档含 `<script>`、引号关键词样板），短载荷不受影响；反射类弱信号保留 family 计分（三个独立弱特征过门是 P0 验证的拦截路径，完全脱离 family 的版本实测丢 6pp 拦截率）。
+4. **SSRF/命令注入 needle 扩面**：回环变体 SSRF-013~017（`localhost`/`127.0.0.1` sev4、`0x7f000001`/`2130706433`/`0177.0.0.1` sev5）与 CI-032~037（`invoke-expression`/`iex (`/`cmd /c`/`cmd.exe /c`/`powershell -enc`/`system(`）。
+5. **SQL union-select 语义门**：`sqli_union_statement_shaped` 判定解码值是否具备注入语句结构特征——引号破出（`' union`）、常量探测（`union select 1`/`null`）、注释终止符（`--`/`/*`/`#`）、FROM 子句，四特征全缺的 `union select` 命中（needle SQL-001/002 与 libinjection union-select 指纹）在 Normal **零分跳过**（needle 与 lib 指纹描述同一字符串，镜像多面不放大）。白样本归因显示 FP 大头是搜索短语（`/AS/Suggestions?bq=site:x.com+union+select+关键词怎么用` 等 16 条 sqli 误报全部此形态）；真注入语句（含 from/引号/常量/注释任一）不受影响。Strict 不设门。已知取舍：散文含完整 `union select … from …` 句式（92/49 样本）在词法上无法区分，保持拦截并 pin 测试。
+6. **script-URI 的 HTML 上下文门 + 分源语义**：`xss_script_uri_html_shaped` 判定值内是否具备 HTML 标签结构（`<svg onload=…>`、`"><img …>`）——真注入载荷需要标签上下文才能执行，而遥测埋点会把 DOM 属性原样序列化进 JSON（`{"href":"javascript: void(0);"}`，beacon 类上报 16 条误报全部此形态），JSON 解包后进一步以 `attributes.href` 短成员形态出现。语义：**body 源**无标签结构的 `javascript:` 命中（needle XSS-007 与 libinjection js-uri 指纹）在 Normal 零分跳过——blob 与解包成员的镜像不能靠弱信号累加踩过 family 门；**query/cookie/header 源**的裸 `javascript:` 保留 critical（`?url=javascript:alert(1)` 是真实反射型 XSS 形态）。Strict 不设门。
+7. **CRLF 头名形态 critical 分源**（补全第 2 条语义）：`crlf_header_injection_shaped` 要求 CRLF 后紧跟 `name:` 头名形态才在非 body 面一票拦截；body 面无论形态只评分。
+
+### P1 实测（post6 全量回放，33877 样本）
+
+| 配置 | 拦截率 | 误报率 | 拦截 vs P0 | 误报 vs P0 |
+|---|---|---|---|---|
+| Normal | 36.8%（242/658） | 0.15%（51） | +0.3pp | 69→51（-18） |
+| Normal + body | **44.1%（290/658）** | **0.18%（61）** | **+6.0pp** | 75→61（-14） |
+| Strict | 51.4%（338/658） | 0.35%（115） | +0.3pp | 持平（115） |
+| Strict + body | 63.8%（420/658） | 2.38%（792） | 持平 | 658→792（+134） |
+
+拦截增量归因（Normal+body，+39 条黑样本）：other 36.2%→42.8%（needle 扩面 + JSON 嵌套解包，+37 条）、deser 0%→33.3%（+2）、crlf 0%→40%（头名形态 critical，+2）。
+
+误报收敛归因（Normal+body，-14 条）：
+
+- **sqli 16→1**：union-select 语义门压掉全部搜索短语误报（`site:x.com union select 关键词怎么用` 类），sqli 白样本 FP 率 23.9%→1.5%；唯一遗留是含完整 `union select … from …` 句式的散文（词法不可分，pin 测试）。
+- **xss 1→3（净 +2）**：P1 的 JSON 成员 typed 检测曾让埋点类误报涨到 20（beacon `javascript: void(0)` DOM 采集 16 条 + CSP report 2 条 + 其他），HTML 上下文门 + 字符串 JSON 再解包把 20 条压回 3 条——遗留 2 条为 P0 已有（非 js-uri 形态），1 条为截断内嵌 JSON（`__logs__.value` 被日志系统截断后内层 parse 失败、容器保留命中，53/8d）。
+- **other 51→49**：form 字段 JSON 再解包（`param={"add":5,"delete":0}` 类）压掉 libinjection quote-keyword 误报，crlf 分源把裸多行文本从 critical 降回评分。
+- **rce 4→5（+1）**：`commands` 字段合法携带 `/bin/sh` 的 CI 类 API 载荷（CI-019 sev5，词法上与命令注入同形）。
+
+Strict+body 误报 +134 条（1.98%→2.38%）的构成：JSON 成员 typed 检测把埋点/遥测类 body（FullStory 会话回放、CSP report、云控制台埋点）的成员值以完整 severity 检出，而 Strict 档**不设语义门**（弱信号机制也是 Normal-only）。这是档位设计代价：Strict 面向安全敏感场景，2.38% 的误报率换成员级检测深度；Normal 档（0.18%）才是误报敏感场景的推荐配置。后续 P2 的 label/count 灰度基建（§10 建议）是 strict 档误报治理的正解。
+
+**已知取舍（有意保留的误报）**：① 散文含完整 `union select … from …` 句式（1 条，词法不可分）；② 截断的内嵌 JSON 容器（1 条，日志系统截断致内层 parse 失败）；③ `commands` 字段携带 `/bin/sh` 的 CI API 载荷（1 条）；④ 2 条 P0 遗留非 js-uri XSS 形态。合计约 5 条/33219 白样本（0.015pp）由形态学不可分导致，其余 56 条为评分累积过门，属 P2 label/count 基建的治理范围。
+
+## 12. 各版本拦截率/通过率对比总表
+
+黑样本 658 / 白样本 33219，严格口径（blocked = WAF 判决 403/503）。**通过率** = 黑样本未被拦截的比例（漏报面）；白样本通过率 = 100% − 误报率。
+
+| 版本 | 配置 | 拦截率 | 黑样本通过率 | 误报率 | 白样本通过率 | p95 |
+|---|---|---|---|---|---|---|
+| G1 出厂默认 | block / PL2 / th40 | 34.0%（224/658） | 66.0% | 0.41%（137） | 99.59% | 2ms |
+| 级别落地 v1 | Normal | 33.1%（218/658） | 66.9% | 0.17%（55） | 99.83% | 2ms |
+| 级别落地 v1 | Strict | 37.8%（249/658） | 62.2% | 0.30%（101） | 99.70% | 2ms |
+| P0 覆盖面修复 | Normal | 36.5%（240/658） | 63.5% | 0.21%（69） | 99.79% | 4ms |
+| P0 覆盖面修复 | Normal + body | 38.1%（251/658） | 61.9% | 0.23%（75） | 99.77% | ~3s¹ |
+| P0 覆盖面修复 | Strict | 51.1%（336/658） | 48.9% | 0.35%（115） | 99.65% | 4ms |
+| P0 覆盖面修复 | Strict + body | 63.8%（420/658） | 36.2% | 1.98%（658） | 98.02% | ~3s¹ |
+| P1 语义增强 | Normal | 36.8%（242/658） | 63.2% | **0.15%（51）** | 99.85% | 4ms |
+| P1 语义增强 | Normal + body | **44.1%（290/658）** | 55.9% | **0.18%（61）** | 99.82% | ~3s¹ |
+| P1 语义增强 | Strict | 51.4%（338/658） | 48.6% | 0.35%（115） | 99.65% | 4ms |
+| P1 语义增强 | Strict + body | 63.8%（420/658） | 36.2% | 2.38%（792） | 97.62% | ~3s¹ |
+
+¹ p95 ≈3s 是回放客户端 `sendall` 大 body 与「上传中途拦截」的固有交互，非引擎开销（§10.2）。
+
+**主档结论（Normal + body，agent 模式推荐配置）**：P1 语义增强把拦截率从 P0 的 38.1% 提到 **44.1%（+6.0pp）**，同时把误报率从 0.23% 压到 **0.18%（61 条，全程最低）**——拦截与误报首次同向改善。Normal（静态档）误报 0.15% 亦为全程最低。Strict 档拦截率持平（51.4%/63.8%），Strict+body 误报 +0.4pp（埋点类 body 的成员级 critical 检测，strict 无弱信号缓解，属档位设计代价，归因见 §11）。
+
+类目拦截率对比（黑样本）：
+
+| 类目 | n | G1 | v1 Normal | v1 Strict | P0 Normal(+body) | P0 Strict(+body) | P1 Normal | P1 Normal+body | P1 Strict | P1 Strict+body |
+|---|---|---|---|---|---|---|---|---|---|---|
+| sqli | 20 | 75.0% | 70.0% | 70.0% | 85.0% (85.0%) | 85.0% (85.0%) | 85.0% | 85.0% | 85.0% | 85.0% |
+| xss | 30 | 33.3% | 33.3% | 33.3% | 33.3% (33.3%) | 80.0% (83.3%) | 33.3% | 33.3% | 80.0% | 83.3% |
+| lfi | 25 | 32.0% | 32.0% | 36.0% | 68.0% (72.0%) | 72.0% (84.0%) | 68.0% | 72.0% | 72.0% | 84.0% |
+| rce | 12 | 16.7% | 16.7% | 66.7% | 16.7% (33.3%) | 66.7% (75.0%) | 16.7% | 33.3% | 66.7% | 75.0% |
+| ssrf | 13 | 7.7% | 7.7% | 7.7% | 7.7% (23.1%) | 7.7% (46.2%) | 7.7% | 23.1% | 7.7% | 46.2% |
+| deser | 6 | 0% | 0% | 0% | 0% (0%) | 0% (83.3%) | 0% | 33.3% | 0% | 83.3% |
+| crlf | 5 | 0% | 0% | 60.0% | 0% (0%) | 60.0% (100%) | 40.0% | 40.0% | 60.0% | 100% |
+| ssti | 5 | 0% | 40.0% | 80.0% | 40.0% (40.0%) | 80.0% (80.0%) | 40.0% | 40.0% | 80.0% | 80.0% |
+| xxe | 2 | 0% | 0% | 50.0% | 0% (50.0%) | 50.0% (50.0%) | 0% | 50.0% | 50.0% | 50.0% |
+| other | 538 | 34.9% | 33.5% | 36.8% | 35.3% (36.2%) | 48.1% (60.4%) | 35.3% | 42.8% | 48.5% | 60.4% |
+| log4shell | 1 | 0% | 100% | 100% | 100% | 100% | 100% | 100% | 100% | 100% |
+
+P1 相对 P0 的类目增量（Normal+body 口径）：**crlf 0%→40%**（头名形态 critical，query 面生效使 Normal 静态档同样受益）、**deser 0%→33.3%**（needle 扩面 + JSON 成员 typed 检测）、**other 36.2%→42.8%**（needle 扩面 + 嵌套 JSON 解包）；sqli/ssrf/rce/lfi/xss 持平或一致。Strict+body 逐类目与 P0 持平（other 60.4%→60.4%）。
+
+
+
