@@ -27,8 +27,8 @@ use crate::rules::managed::default_managed_rules;
 use crate::rules::signatures::{
     crlf_header_injection_shaped, detect_deser_shape, detect_expr_injection,
     detect_js_call, detect_sqli, detect_xss, sqli_into_file_statement_shaped,
-    sqli_union_statement_shaped, xss_script_uri_html_shaped, AttackCategory,
-    SignatureEngine, SignatureHit,
+    sqli_union_statement_shaped, xss_script_tag_shaped,
+    xss_script_uri_html_shaped, AttackCategory, SignatureEngine, SignatureHit,
 };
 use crate::rules::{CompiledRule, RuleAction};
 use crate::score::{AnomalyScorer, ScoreBreakdown, ScoreClass};
@@ -382,10 +382,17 @@ impl WafEngine {
                 // script URI stays critical: `?url=javascript:…` is a real
                 // reflected-XSS shape. Same gate on every level — a
                 // body-borne `javascript:` without tag context cannot
-                // execute in any of the shapes it actually appears in.
-                let collected_js_uri = pid == "XSS-007"
+                // execute in any of the shapes it actually appears in. An
+                // unclosed `<script` (search prose quoting the word) is
+                // likewise zero value on every surface.
+                let collected_js_uri = (pid == "XSS-007"
                     && value.source == ValueSource::Body
-                    && !xss_script_uri_html_shaped(needle);
+                    && !xss_script_uri_html_shaped(needle))
+                    || (pid == "XSS-001"
+                        && !xss_script_tag_shaped(
+                            needle,
+                            value.source != ValueSource::Body,
+                        ));
                 let weak = (is_meta_header && reflected_family)
                     || (value.source == ValueSource::Body
                         && (!value.field
@@ -501,11 +508,20 @@ impl WafEngine {
                 // Same zero-score rule as the needle gate: a union-select
                 // or into-file fingerprint without statement structure is
                 // a search phrase, and the needle hit for it is skipped
-                // as well.
+                // as well. Tautology / quote-keyword fingerprints over
+                // long values are prose that quotes the tokens ("1 and 1=1
+                // is a basic operation", keyword-list documents) — real
+                // tautology probes are tiny, and long quote-keyword attacks
+                // carry a UNION clause that has its own gate.
                 let search_phrase = (sqli_fp.contains("union-select")
                     && !sqli_union_statement_shaped(needle))
                     || (sqli_fp.contains("into-file")
-                        && !sqli_into_file_statement_shaped(needle));
+                        && !sqli_into_file_statement_shaped(needle))
+                    || (sqli_fp.contains("tautology")
+                        && needle.len() > 32
+                        && !sqli_fp.contains("comment-terminator"))
+                    || (sqli_fp.contains("quote-keyword")
+                        && needle.len() > 256);
                 let (severity, critical) =
                     if weak { (2, false) } else { (5, true) };
                 if critical && !search_phrase {
@@ -530,9 +546,16 @@ impl WafEngine {
                 // Mirrors the needle gate: a js-uri fingerprint on body
                 // markup without tag structure is collected data — skipped
                 // entirely, and the needle hit for it is skipped as well.
-                let collected_js_uri = xss_fp.contains("js-uri")
+                // A script-tag fingerprint over an unclosed `<script` is
+                // prose quoting the word.
+                let collected_js_uri = (xss_fp.contains("js-uri")
                     && value.source == ValueSource::Body
-                    && !xss_script_uri_html_shaped(needle);
+                    && !xss_script_uri_html_shaped(needle))
+                    || (xss_fp.contains("script-tag")
+                        && !xss_script_tag_shaped(
+                            needle,
+                            value.source != ValueSource::Body,
+                        ));
                 let weak = is_meta_header
                     || (value.source == ValueSource::Body
                         && (!value.field
@@ -631,7 +654,20 @@ impl WafEngine {
         self.signatures
             .scan_into(&normalized.path, &mut hits, &mut seen);
         for hit in &hits {
-            let critical = hit.severity >= 5
+            // Mirror of the decoded-value search-phrase gate: the path is a
+            // reflected surface, so a compact or attribute `<script>` tag is
+            // real attack material, while prose quoting the word
+            // (`…binary<script is incorrect` as a URL slug) must not
+            // one-shot through the sev-5 fast path. The gate also skips the
+            // score: the family sub-score alone would re-block through
+            // PINGWAF-1003 what the critical gate let through.
+            let pid = self.signatures.pattern_id(hit.pattern);
+            let search_phrase =
+                pid == "XSS-001" && !xss_script_tag_shaped(&normalized.path, true);
+            if search_phrase {
+                continue;
+            }
+            let critical = (hit.severity >= 5)
                 || (self.level.is_strict()
                     && hit.category == AttackCategory::CrlfInjection);
             if critical {
@@ -1922,6 +1958,177 @@ mod tests {
         let v = e.inspect(&r);
         assert_ne!(v.action, WafAction::Block, "details: {}", v.details);
         let v = e.inspect(&req("POST", "/w", "tpl=win['constructor'](1)"));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn tautology_prose_passes_but_probe_blocks() {
+        // A tautology fingerprint over a long value is prose quoting the
+        // tokens ("1 and 1=1 is a very basic mathematical operation");
+        // real probes are tiny, and long comment-bearing ones keep their
+        // comment-terminator fingerprint.
+        for e in [engine(), strict_engine()] {
+            let v = e.inspect(&req(
+                "GET",
+                "/chat",
+                "msg=1%20and%201%3D1%20is%20a%20very%20basic%20mathematical%20operation",
+            ));
+            assert_ne!(v.action, WafAction::Block, "details: {}", v.details);
+        }
+        let v = strict_engine().inspect(&req("GET", "/id", "id=1+and+1%3D1"));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+        let v = strict_engine().inspect(&req(
+            "GET",
+            "/id",
+            "id=111%27+and+1%3D2+union+select+1,schema_name+from+information_schema.schemata--+",
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn long_quote_keyword_prose_passes_but_union_blocks() {
+        // Keyword-list documents trip the quote-keyword fingerprint via a
+        // distant apostrophe; values past 256B are prose. A real long
+        // exfiltration carries UNION SELECT, which stays critical.
+        let prose = format!(
+            "words=can't+{}+didn't+select+a+favorite+from+the+catalog",
+            "lorem+ipsum+dolor+sit+amet+".repeat(10)
+        );
+        assert!(prose.len() > 256);
+        let v = strict_engine().inspect(&req("GET", "/help", &prose));
+        assert_ne!(v.action, WafAction::Block, "details: {}", v.details);
+        let v = strict_engine().inspect(&req(
+            "GET",
+            "/vuln",
+            "id=%27+UNION+SELECT+%27abcdef%27,NULL,NULL--",
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn unclosed_script_prose_passes_but_tag_blocks() {
+        // `<script` that never closes (`1<script`, "binary<script is
+        // incorrect") is a search phrase quoting the word; a real tag —
+        // including `+`-spaced URL forms — stays critical.
+        for e in [engine(), strict_engine()] {
+            for q in [
+                "q=1%3Cscript",
+                "keyword=for+power,+binary%3Cscript+is+incorrect",
+            ] {
+                let v = e.inspect(&req("GET", "/search", q));
+                assert_ne!(
+                    v.action,
+                    WafAction::Block,
+                    "query {q}: {}",
+                    v.details
+                );
+            }
+        }
+        let v = strict_engine().inspect(&req(
+            "GET",
+            "/x",
+            "q=%3Cscript%3Ealert(1)%3C/script%3E",
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+        let v = strict_engine().inspect(&req(
+            "GET",
+            "/x",
+            "q=%3Cscript+src%3Ddata:text/javascript%3Bbase64,YWxlcnQoMSk%3D%3E%3C/script%3E",
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn compact_script_tag_blocks_on_reflected_sources() {
+        // `<script>alert(1)</script>` opens a tag with no attributes — the
+        // compact opener is a real payload on reflected surfaces (query).
+        let v = engine().inspect(&req(
+            "GET",
+            "/x",
+            "q=%3Cscript%3Ealert(1)%3C/script%3E",
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn script_prose_in_path_passes() {
+        // Search prose quoted into a request path (`…binary<script is
+        // incorrect`) never opens a tag — no `>` terminator exists.
+        let v = engine().inspect(&req(
+            "GET",
+            "/newview/search/for%20power%2C%20binary%3Cscript%20is%20incorrect",
+            "",
+        ));
+        assert_ne!(
+            v.action,
+            WafAction::Block,
+            "details: {}",
+            v.details
+        );
+    }
+
+    #[test]
+    fn post9_missed_payload_forms_block() {
+        // Deterministic coverage for shapes that replayed as real misses
+        // (verdict=passed) at P5: each case below maps to one attribution.
+        let e = engine();
+        // PortSwigger nested-cast exfiltration (8d/78).
+        let v = e.inspect(&req(
+            "GET",
+            "/sqli",
+            "id=SELECT+CAST%28%28SELECT+password+FROM+users+LIMIT+1%29+AS+int%29",
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+        // Oracle XPATH error-based probe (9d/63).
+        let v = e.inspect(&req(
+            "GET",
+            "/sqli",
+            "q=1'+AND+extractvalue(xmltype('<x/>'),'/l')+FROM+dual--",
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+        // Truncated tautology tail (3e/ba).
+        let v = e.inspect(&req("GET", "/sqli", "id=%27+or+1+limit+1+--"));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+        // Struts2 OGNL context-variable chain (ff/67).
+        let v = e.inspect(&req(
+            "GET",
+            "/index.action",
+            "redirect:%24%7B%23a%3D%23context.get('com.opensymphony.xwork2.dispatcher.HttpServletRequest')%7D",
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+        // Chained ping probe (64/b5) — form body, `+` is space.
+        let mut form = req("POST", "/exec", "");
+        form.headers.push((
+            "Content-Type".into(),
+            "application/x-www-form-urlencoded".into(),
+        ));
+        form.body =
+            Some(b"ip=x%7C%7Cping+-c+10+127.0.0.1%7C%7C&Submit=Submit".to_vec());
+        let v = e.inspect(&form);
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn base64_html_entity_inner_payload_blocks() {
+        // b64 transport wrapping an HTML-entity-encoded meta-refresh with a
+        // javascript: target (05/4a): the b64 expansion must entity-decode
+        // the inner layer so the script URI becomes visible with its tag
+        // context.
+        let e = engine();
+        let mut form = req("POST", "/page", "");
+        form.headers.push((
+            "Content-Type".into(),
+            "application/x-www-form-urlencoded".into(),
+        ));
+        form.body = Some(
+            concat!(
+                "depreciation=PG1ldGEgaHR0cC1lcXVpdj0icmVmcmVzaCIgY29udGVudD0i",
+                "MjsgdXJsPScmI3g0YTthdmFzY3JpcHQ6YWxlcnQoMSknIj4=&Submit=x",
+            )
+            .as_bytes()
+            .to_vec(),
+        );
+        let v = e.inspect(&form);
         assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
     }
 

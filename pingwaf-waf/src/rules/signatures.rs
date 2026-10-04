@@ -752,6 +752,24 @@ fn builtin_patterns() -> Vec<SignaturePattern> {
             "LDAP filter injection break",
             "*)(objectclass=",
         );
+        // `ping -c N` chained into a parameter (`ip=x||ping -c 10 …`) is a
+        // blind-RCE probe; the flag pair never appears as benign text.
+        push(
+            "CI-083",
+            AttackCategory::CommandInjection,
+            5,
+            "chained ping probe",
+            "ping -c ",
+        );
+        // Struts2/OGNL: `redirect:${#a=#context.get('…')}` — the `#`-variable
+        // context lookup is OGNL grammar, never a benign search phrase.
+        push(
+            "CI-084",
+            AttackCategory::CommandInjection,
+            5,
+            "OGNL context variable chain",
+            "#context.get(",
+        );
         // JSFuck / Harley-Davidson style pure-symbol JS: the prefix
         // `[(+{}+[])` only occurs inside obfuscated execution payloads.
         push(
@@ -1293,6 +1311,34 @@ fn builtin_patterns() -> Vec<SignaturePattern> {
             5,
             "COPY TO PROGRAM exfiltration",
             "to program '",
+        );
+        // PortSwigger boolean-blind cast family: `SELECT CAST((SELECT …) AS
+        // int)` exfiltrates through a type error; the nested cast-open-select
+        // sequence never occurs in prose.
+        push(
+            "SQL-022",
+            AttackCategory::SqlInjection,
+            5,
+            "nested CAST((SELECT exfiltration",
+            "cast((select",
+        );
+        // Oracle XPATH error-based injection (extractvalue/xmltype) — the
+        // function pair is exploit-specific.
+        push(
+            "SQL-023",
+            AttackCategory::SqlInjection,
+            5,
+            "extractvalue XPATH error-based probe",
+            "extractvalue(",
+        );
+        // Truncated-tautology tail: `' or 1 limit 1 --` closes a quote and
+        // forces row truncation; bare prose never chains "or 1 limit".
+        push(
+            "SQL-024",
+            AttackCategory::SqlInjection,
+            5,
+            "or-1-limit tautology truncation",
+            "or 1 limit",
         );
 
         // ---- XSS (literal needles; detect_xss catches structured payloads) ----
@@ -2485,6 +2531,25 @@ static SQLI_INTO_FILE_TARGET: Lazy<Regex> = Lazy::new(|| {
 /// needs a destination path, which is virtually always quoted.
 pub fn sqli_into_file_statement_shaped(input: &str) -> bool {
     SQLI_INTO_FILE_TARGET.is_match(input)
+}
+
+static SCRIPT_TAG_ATTR: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)<script[\s+][^>]*>").unwrap());
+static SCRIPT_TAG_COMPACT: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)<script>").unwrap());
+
+/// Does a `<script` occurrence in `input` actually open a tag? Two real-tag
+/// shapes exist: with attributes (`<script src=…>`, `<script+src=…>`) and the
+/// compact opener (`<script>alert(…)`). A `<script` glued to punctuation or
+/// end-of-value (`1<script`, `"binary<script" is incorrect`) is a search
+/// phrase or an escaped telemetry value, not markup an interpreter runs.
+/// The compact opener is only reported when `compact_allowed` — reflected
+/// surfaces (query/path/header/cookie). Body payloads carrying a bare
+/// `<script>` are overwhelmingly legitimate HTML uploads (playground files,
+/// stored pages), which the attribute shape still covers.
+pub fn xss_script_tag_shaped(input: &str, compact_allowed: bool) -> bool {
+    SCRIPT_TAG_ATTR.is_match(input)
+        || (compact_allowed && SCRIPT_TAG_COMPACT.is_match(input))
 }
 
 static CRLF_HEADER_SHAPE: Lazy<Regex> =

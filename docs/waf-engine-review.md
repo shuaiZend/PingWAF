@@ -127,6 +127,29 @@ post7 归因（strict+body 漏报 147 条 + strict 档 105 条 FP 全量脚本�
 19. **参数名感知排除**：站点/规则级 `exclude`（按参数名/路径），CRS `ctl:ruleRemoveTargetById` 的静态版；把误报治理从改规则变成加白名单。
 20. **Vectorscan 预留**：托管正则规则超 ~500 条时把 `matches` 编进 Vectorscan 数据库做第二层（AC 粗筛 + 正则精确认证）；当前 15 条正则的 regexset 路径不动。
 
+### P5 第六轮：libinjection 指纹长度门 + script 闭合标签门——已落地 ✅
+
+post9 残余 46 条 strict+body 误报逐条归因（libinjection tautology/quote-keyword ×15、XSS 反射 ×13、同伴门反噬 ×6、收集 HTML/playground ×8）后落地的两道确定性语义门：
+
+21. **libinjection 指纹长度门** ✅：`tautology` 指纹 + 值 >32B 且无 `comment-terminator` 指纹 → 搜索短语零分（真实恒真探测极短，散文引用 "1 and 1=1 is a very basic mathematical operation" 不拦；带注释终止符的长盲注保留 critical）；`quote-keyword` 指纹 + 值 >256B → 搜索短语零分（词表文档远距撇号误触发，真实长 exfiltration 带 UNION 子句自有关键指纹）。658 黑样本全量 triage 回归：第一版门误伤 11 条（`tautology,comment-terminator` 指纹长盲注 ×9、`<script+…>` 的 `+` 未解码 ×2），收紧后 **527 条拦截全部保持**。
+22. **`<script` 开标签形态门** ✅：`xss_script_tag_shaped` 区分真实标签与文字引用——XSS-001 needle 与 libinjection `script-tag` 指纹两侧同语义。`1<script`、"binary<script is incorrect" 是搜索词/文章标题而非可执行标签，全档零分跳过；属性形态 `<script src=…>`（含 `+` 代空格的 URL 形态）与紧凑开标签保持 critical（P6 修正：紧凑 `<script>alert(1)</script>` 是真攻击形态，见第 23 条）。
+
+预期效果：strict+body 误报 46→22（0.14%→**0.07%**），全部四配置 FP 压到 0.07% 量级；剩余 22 条为 xray POC 定义模板、嵌套 URL 埋点、HTML playground body 等载荷定义/收集类，归 P6+ 语义与 label/count 灰度基建。
+
+### P6 第七轮：拦截侧确定性扩面（138 漏报全量归因驱动）——已落地 ✅
+
+post9 strict+body 口径 138 条漏报全量分层后的确定性方案（12 条链路差异定性 + 57 条 Monitor 复核 + 68 条零信号解码聚类）：
+
+23. **`<script` 开标签双形态语义（P5 门缺陷修正）** ✅：P5 门正则 `<script[\s+>]…>` 的 `[^>]*>` 闭合要求使紧凑 `<script>alert(1)</script>` 全零分跳过（XSS-001 与 libinjection 两侧同时漏）。重写为双正则：`SCRIPT_TAG_ATTR = <script[\s+][^>]*>`（属性形态，全源）+ `SCRIPT_TAG_COMPACT = <script>`（紧凑开标签，仅 `compact_allowed` 反射源 query/path/header/cookie）——body 源紧凑 `<script>` 是合法 HTML 上传（playground 白样本类），属性形态仍覆盖。
+24. **SQL/CI needle 扩面 ×5** ✅：SQL-022 `cast((select`（PortSwigger 嵌套 CAST 外带，8d/78）、SQL-023 `extractvalue(`（Oracle XPATH 报错注入，9d/63）、SQL-024 `or 1 limit`（截断恒真尾，3e/ba）、CI-083 `ping -c `（链式 ping 探测，64/b5）、CI-084 `#context.get(`（Struts2 OGNL 上下文变量链，ff/67），全部 sev5 critical。
+25. **query key 进扫描面** ✅：`?redirect:%24%7B%23a%3D%23context.get(...)` 的 `%3D` 编码 `=` 不算 pair 分隔符——整串是 key、value 为空，OGNL 载荷对全部检测器不可见。解码 key（≤512B 上限防词表键镜像）以 `field` 形态加入 `decoded_values`。
+26. **b64 展开实体解码扩面** ✅：expand_base64 的二级解码条件 `%` 扩为 `%` 或 `&#`——b64 内 HTML 实体 meta-refresh（05/4a）payload 可见。
+27. **path 独立扫描循环补 search_phrase 门** ✅：P5 门只覆盖 decoded_values 循环，`normalized.path` 的独立 sev5 fast-path 循环漏加，`binary<script is incorrect` 作为 URL slug 会经 XSS-001 sev5 直接 critical。补门且 search_phrase 命中时 `continue` 零分跳过——否则 XSS family 子分 48 会经 PINGWAF-1003 兜底重新拦截（豁免必须零分跳过原则的又一实例）。
+
+回归：172 单测全绿（新增 4 个确定性覆盖：紧凑标签反射面拦截、path 散文通过、五类 post9 漏报形态、b64 实体包裹）；658 黑样本 triage 527→539（+12 零回退）；fp46 白样本 Block 22→20（多修 2 条、零新增）。12 条 triage/回放差异定性为样本传输语义缺陷（11 条 POST 无 Content-Length，HTTP/1.1 下 body 为空，payload 无法到达服务器；1 条 GET 400），非引擎缺口。
+
+post11 全量实测（33877 样本）：四配置**全部双向改善**——Normal 332→**341**（+9）/ FP 7→**5**，Normal+body 389→**399**（+10）/ 16→**14**，Strict 438→**447**（+9）/ 7→**5**，Strict+body 520→**531**（+11）/ 24→**22**（0.14% 目标线内连续第三轮，实际 0.066%）。strict+body 拦截率首次突破 80%，误报率的同步下降来自 path 循环 search_phrase 门在白样本 URL slug 上的放行。
+
 ### 收益矩阵（基于 bench 归因的保守估算）
 
 | 方案 | 拦截率提升 | 误报影响 | 工作量 |

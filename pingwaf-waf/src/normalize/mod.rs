@@ -407,6 +407,19 @@ fn parse_query(
             continue;
         }
         out.push((key_decoded.clone(), val_decoded.clone()));
+        // The key itself is request input too: `?redirect:%24%7B%23a%3D%23…`
+        // carries the whole OGNL payload in an *encoded* key with an empty
+        // value, invisible to the detectors unless the key joins the scan
+        // surface. Bounded so a pathological word-list key cannot mirror a
+        // value-sized blob.
+        if !key_decoded.is_empty() && key_decoded.len() <= 512 {
+            decoded_values.push(DecodedValue {
+                source: ValueSource::QueryParam,
+                name: String::new(),
+                decoded: key_decoded.clone(),
+                field: true,
+            });
+        }
         decoded_values.push(DecodedValue {
             source: ValueSource::QueryParam,
             name: key_decoded,
@@ -598,7 +611,7 @@ fn expand_base64(
             if decoded.contains("\\u") || decoded.contains("\\x") {
                 decoded = decode_escapes_owned(&decoded);
             }
-            if decoded.contains('%') {
+            if decoded.contains('%') || decoded.contains("&#") {
                 decoded =
                     decode_value(&decoded, max_decode_layers, decode_escapes);
             }
@@ -863,8 +876,8 @@ mod tests {
                 ("b".to_string(), "hello world".to_string()),
             ]
         );
-        // path + 2 query + UA + 2 cookies
-        assert_eq!(req.decoded_values.len(), 6);
+        // path + 2 query keys + 2 query values + UA + 2 cookies
+        assert_eq!(req.decoded_values.len(), 8);
     }
 
     #[test]
