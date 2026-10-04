@@ -26,8 +26,9 @@ use crate::rules::expression::{evaluate, EvalContext};
 use crate::rules::managed::default_managed_rules;
 use crate::rules::signatures::{
     crlf_header_injection_shaped, detect_deser_shape, detect_expr_injection,
-    detect_js_call, detect_sqli, detect_xss, sqli_union_statement_shaped,
-    xss_script_uri_html_shaped, AttackCategory, SignatureEngine, SignatureHit,
+    detect_js_call, detect_sqli, detect_xss, sqli_into_file_statement_shaped,
+    sqli_union_statement_shaped, xss_script_uri_html_shaped, AttackCategory,
+    SignatureEngine, SignatureHit,
 };
 use crate::rules::{CompiledRule, RuleAction};
 use crate::score::{AnomalyScorer, ScoreBreakdown, ScoreClass};
@@ -340,6 +341,22 @@ impl WafEngine {
                     || value.name.eq_ignore_ascii_case("user-agent"));
 
             self.signatures.scan_into(needle, &mut hits, &mut seen);
+            // A CRLF hit is only response-splitting material on its own
+            // surface shape; on strict it also escalates when the same value
+            // carries an injection-family companion — that combination is
+            // real CRLF-injection traffic (command / traversal / SSRF
+            // payload smuggled past the line break), while multi-line log
+            // or telemetry text has none.
+            let injection_company = self.level.is_strict()
+                && hits.iter().any(|h| {
+                    matches!(
+                        h.category,
+                        AttackCategory::CommandInjection
+                            | AttackCategory::PathTraversal
+                            | AttackCategory::Deserialization
+                            | AttackCategory::Ssrf
+                    )
+                });
             for hit in &hits {
                 let mut severity = hit.severity;
                 let mut critical = severity >= 5;
@@ -363,54 +380,91 @@ impl WafEngine {
                 // pile weak features onto the XSS family gate. On
                 // URL-facing surfaces (query / cookie / headers) a bare
                 // script URI stays critical: `?url=javascript:…` is a real
-                // reflected-XSS shape. Strict has no gate.
+                // reflected-XSS shape. Same gate on every level — a
+                // body-borne `javascript:` without tag context cannot
+                // execute in any of the shapes it actually appears in.
                 let collected_js_uri = pid == "XSS-007"
                     && value.source == ValueSource::Body
-                    && !self.level.is_strict()
                     && !xss_script_uri_html_shaped(needle);
                 let weak = (is_meta_header && reflected_family)
                     || (value.source == ValueSource::Body
                         && (!value.field
-                            || value.decoded.len() > FIELD_STRONG_MAX_LEN)
-                        && reflected_family
-                        && !self.level.is_strict());
+                            || (value.decoded.len() > FIELD_STRONG_MAX_LEN
+                                && !self.level.is_strict()))
+                        && reflected_family);
                 // A bare "union select" without statement structure is a
                 // search phrase: the needle and its libinjection twin
                 // describe the same string, so neither scores — zero value,
-                // mirrored across query/Referer/body or not.
-                let search_phrase = !self.level.is_strict()
-                    && ((matches!(pid, "SQL-001" | "SQL-002")
-                        && !sqli_union_statement_shaped(needle))
-                        || collected_js_uri);
+                // mirrored across query/Referer/body or not. Level-
+                // independent: `?bq=union select …` search phrases exist on
+                // every tier and are not injections on any of them.
+                let search_phrase = (matches!(pid, "SQL-001" | "SQL-002")
+                    && !sqli_union_statement_shaped(needle))
+                    || (matches!(pid, "SQL-008" | "SQL-009")
+                        && !sqli_into_file_statement_shaped(needle))
+                    || collected_js_uri;
                 if weak {
                     severity = severity.min(2);
                     critical = false;
                 } else if hit.category == AttackCategory::CrlfInjection
-                    && value.source != ValueSource::Body
-                    && crlf_header_injection_shaped(needle)
+                    && ((value.source != ValueSource::Body
+                        && crlf_header_injection_shaped(needle))
+                        || injection_company)
                 {
                     // `…\r\nX-Foo:` is response-splitting material on any
                     // surface except a body blob; bare multi-line text (a
                     // multi-line form input echoed into a query, prose) is
                     // not — CRLF-003/004 carry their own header shape at
                     // sev5 and stay critical via `severity >= 5` above.
+                    // On strict, a same-value injection-family companion
+                    // (command / traversal / SSRF / deser payload smuggled
+                    // past the line break) restores the critical call that
+                    // the blanket-body demotion gave up.
                     critical = true;
                 } else if self.level.is_strict()
+                    && value.source != ValueSource::Path
                     && matches!(
                         hit.category,
-                        AttackCategory::CrlfInjection
-                            | AttackCategory::CommandInjection
+                        AttackCategory::CommandInjection
                             | AttackCategory::Deserialization
                     )
                 {
                     // High-confidence injection families block outright at
-                    // the Strict level instead of waiting for the scorer.
+                    // the Strict level instead of waiting for the scorer —
+                    // but only off the path surface. Bare multi-line text
+                    // in a body (`…\r\n` in log payloads) is far too common
+                    // for a blanket CRLF escalation, and path matrix
+                    // parameters (`/foo;cat=…`) are storage URL grammar,
+                    // not a shell; the path-source hits also stay out of
+                    // the RCE sub-score below.
                     critical = true;
                 }
                 if critical && !search_phrase {
                     critical_hit = true;
                 }
                 if !search_phrase {
+                    if value.source == ValueSource::Path
+                        && matches!(
+                            hit.category,
+                            AttackCategory::CommandInjection
+                                | AttackCategory::Deserialization
+                        )
+                    {
+                        // A command shape inside the path itself never
+                        // reaches a shell — `;cat` is matrix-parameter
+                        // grammar on storage URLs. The hit keeps its
+                        // aggregate score but stays out of the RCE
+                        // sub-score, or PINGWAF-1061 blocks benign
+                        // storage-style paths at Strict.
+                        self.scorer.add_severity_hit(&mut breakdown, severity);
+                        recs.push(HitRec::Sig {
+                            pattern: hit.pattern,
+                            severity,
+                            source: value.source.as_str(),
+                            name: &value.name,
+                        });
+                        continue;
+                    }
                     self.scorer.add_category_hit(
                         &mut breakdown,
                         hit.category,
@@ -442,14 +496,16 @@ impl WafEngine {
                 let weak = is_meta_header
                     || (value.source == ValueSource::Body
                         && (!value.field
-                            || value.decoded.len() > FIELD_STRONG_MAX_LEN)
-                        && !self.level.is_strict());
+                            || (value.decoded.len() > FIELD_STRONG_MAX_LEN
+                                && !self.level.is_strict())));
                 // Same zero-score rule as the needle gate: a union-select
-                // fingerprint without statement structure is a search
-                // phrase, and the needle hit for it is skipped as well.
-                let search_phrase = sqli_fp.contains("union-select")
-                    && !self.level.is_strict()
-                    && !sqli_union_statement_shaped(needle);
+                // or into-file fingerprint without statement structure is
+                // a search phrase, and the needle hit for it is skipped
+                // as well.
+                let search_phrase = (sqli_fp.contains("union-select")
+                    && !sqli_union_statement_shaped(needle))
+                    || (sqli_fp.contains("into-file")
+                        && !sqli_into_file_statement_shaped(needle));
                 let (severity, critical) =
                     if weak { (2, false) } else { (5, true) };
                 if critical && !search_phrase {
@@ -476,13 +532,12 @@ impl WafEngine {
                 // entirely, and the needle hit for it is skipped as well.
                 let collected_js_uri = xss_fp.contains("js-uri")
                     && value.source == ValueSource::Body
-                    && !self.level.is_strict()
                     && !xss_script_uri_html_shaped(needle);
                 let weak = is_meta_header
                     || (value.source == ValueSource::Body
                         && (!value.field
-                            || value.decoded.len() > FIELD_STRONG_MAX_LEN)
-                        && !self.level.is_strict());
+                            || (value.decoded.len() > FIELD_STRONG_MAX_LEN
+                                && !self.level.is_strict())));
                 let (severity, critical) =
                     if weak { (2, false) } else { (5, true) };
                 if critical && !collected_js_uri {
@@ -550,7 +605,16 @@ impl WafEngine {
                         source: value.source.as_str(),
                         name: &value.name,
                     });
-                } else if detect_js_call(needle) {
+                } else if detect_js_call(needle)
+                    && (value.field || value.source != ValueSource::Body)
+                {
+                    // A bracket-call in a real member field or on a
+                    // URL-facing surface is structural attack material and
+                    // scores into the RCE gate. The same shape inside an
+                    // unstructured body blob (collected page text, log
+                    // dumps) is prose — skipped entirely, like the
+                    // search-phrase rule, or the RCE sub-score alone would
+                    // re-block what the critical gate let through.
                     self.scorer.add_expr_hit(&mut breakdown);
                     critical_hit = true;
                     recs.push(HitRec::Expr {
@@ -569,20 +633,26 @@ impl WafEngine {
         for hit in &hits {
             let critical = hit.severity >= 5
                 || (self.level.is_strict()
-                    && matches!(
-                        hit.category,
-                        AttackCategory::CrlfInjection
-                            | AttackCategory::CommandInjection
-                            | AttackCategory::Deserialization
-                    ));
+                    && hit.category == AttackCategory::CrlfInjection);
             if critical {
                 critical_hit = true;
             }
-            self.scorer.add_category_hit(
-                &mut breakdown,
+            // Mirror of the decoded-value gate: CI/Deser shapes found on the
+            // resolved path keep their aggregate score but stay out of the
+            // RCE sub-score.
+            if matches!(
                 hit.category,
-                hit.severity,
-            );
+                AttackCategory::CommandInjection
+                    | AttackCategory::Deserialization
+            ) {
+                self.scorer.add_severity_hit(&mut breakdown, hit.severity);
+            } else {
+                self.scorer.add_category_hit(
+                    &mut breakdown,
+                    hit.category,
+                    hit.severity,
+                );
+            }
             recs.push(HitRec::Sig {
                 pattern: hit.pattern,
                 severity: hit.severity,
@@ -1468,14 +1538,18 @@ mod tests {
     }
 
     #[test]
-    fn union_select_search_phrase_blocks_at_strict() {
-        // Strict has no semantic gate: the needle stays critical there.
+    fn union_select_search_phrase_passes_at_strict_too() {
+        // The search-phrase gate is level-independent: a bare "union select"
+        // in a site-search query is benign on every level. Strict still
+        // blocks the statement-shaped forms (see below).
         let e = strict_engine();
         let v = e.inspect(&req(
             "GET",
             "/AS/Suggestions",
             "bq=site:segmentfault.com+union+select+%E6%95%99%E7%A8%8B",
         ));
+        assert_ne!(v.action, WafAction::Block, "details: {}", v.details);
+        let v = e.inspect(&req("GET", "/list", "id=1%27+union+select+user--"));
         assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
     }
 
@@ -1608,8 +1682,11 @@ mod tests {
     }
 
     #[test]
-    fn js_uri_json_container_blocks_at_strict() {
-        // Strict has no semantic gate: the needle stays critical there.
+    fn js_uri_json_container_passes_at_strict_too() {
+        // The collected-markup gate is level-independent: beacons
+        // re-serialize DOM attributes ("javascript: void(0)") verbatim as
+        // JSON, and this exact shape was 17 strict false positives when
+        // strict kept the needle critical.
         let e = strict_engine();
         let mut r = req("POST", "/analytics/v2_upload", "");
         r.headers
@@ -1619,7 +1696,7 @@ mod tests {
                 .to_vec(),
         );
         let v = e.inspect(&r);
-        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+        assert_ne!(v.action, WafAction::Block, "details: {}", v.details);
     }
 
     #[test]
@@ -1694,12 +1771,158 @@ mod tests {
     #[test]
     fn strict_activates_paranoia_level_3_rules() {
         let e = strict_engine();
-        // 1051 (very long URI) is a PL3 rule; the strict engine's effective
-        // paranoia is at least 3, so it fires without extra configuration.
+        // 1051 (very long URI) is a PL3 Log rule; the strict engine's
+        // effective paranoia is at least 3, so it fires without extra
+        // configuration — but Log only scores, it never forces a block.
         let long = "x".repeat(5000);
         let v = e.inspect(&req("GET", &format!("/{long}"), ""));
-        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+        assert_ne!(v.action, WafAction::Block, "details: {}", v.details);
         assert!(v.matched_rules.iter().any(|m| m == "PINGWAF-1051"));
+    }
+
+    #[test]
+    fn strict_body_crlf_is_not_forced_critical() {
+        // FP regression guard: bare CRLF pairs inside telemetry/log bodies
+        // were the dominant strict false-positive source while the CRLF
+        // family was unconditionally critical on strict. Real header
+        // injection still blocks through the header-name shape gate and
+        // the sev5 CRLF-003/004 needles.
+        let e = strict_engine();
+        let mut r = req("POST", "/collect", "");
+        r.headers.push((
+            "Content-Type".into(),
+            "application/x-www-form-urlencoded".into(),
+        ));
+        r.body = Some(
+            b"log=2024-01-01 12:00:00 INFO started\r\n2024-01-01 INFO done"
+                .to_vec(),
+        );
+        let v = e.inspect(&r);
+        assert_ne!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn strict_path_command_hits_are_not_forced_critical() {
+        // `;cat` inside a matrix-parameter path segment is storage-style
+        // URL grammar, not a shell: path-source CI/Deser hits lost their
+        // strict critical escalation after 18 path false positives.
+        let e = strict_engine();
+        let v = e.inspect(&req("GET", "/store;cat=5/items", ""));
+        assert_ne!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn strict_js_uri_gate_matches_other_levels() {
+        // A bare script URI in a body value has no execution context on any
+        // level (collected markup); on a URL-facing surface it is a real
+        // reflected-XSS shape and blocks.
+        let e = strict_engine();
+        let v = e.inspect(&post_json(
+            "/profile",
+            r#"{"bio":"read it at javascript:void(0)"}"#,
+        ));
+        assert_ne!(v.action, WafAction::Block, "details: {}", v.details);
+        let v = e.inspect(&req("GET", "/redirect", "url=javascript:alert(1)"));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn strict_blocks_wide_command_separators() {
+        let e = strict_engine();
+        for q in [
+            "cmd=; whoami",
+            "cmd=; uname",
+            "q=| curl http://x",
+            "p=|| ping 127.0.0.1",
+            "h=`ping collab.example",
+            "h=`curl http://collab.example",
+            "e=eval(atob(btoa(1)))",
+            "f=)(uid=*)(|(uid=*))",
+            "g=*)(objectclass=*",
+        ] {
+            let v = e.inspect(&req("GET", "/run", q));
+            assert_eq!(v.action, WafAction::Block, "query {q}: {}", v.details);
+        }
+    }
+
+    #[test]
+    fn copy_to_program_blocks_at_all_levels() {
+        // Postgres COPY ... TO PROGRAM never appears outside an
+        // exfiltration statement; the needle is sev5 on both engines.
+        for e in [engine(), strict_engine()] {
+            let v = e.inspect(&req(
+                "GET",
+                "/q",
+                "s=copy (select '') to program 'nslookup x'",
+            ));
+            assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+        }
+    }
+
+    #[test]
+    fn web_inf_and_lua_source_paths_block() {
+        // Sourced-file disclosure paths are sev5 needles — never a benign
+        // path token in any deployed application layout.
+        let e = strict_engine();
+        for p in ["/manager/WEB-INF/web.xml", "/cn/portal_inc.lua"] {
+            let v = e.inspect(&req("GET", p, ""));
+            assert_eq!(v.action, WafAction::Block, "path {p}: {}", v.details);
+        }
+    }
+
+    #[test]
+    fn into_file_search_phrase_passes_but_statement_blocks() {
+        // "into outfile / into dumpfile" quoted in a search query is a
+        // phrase, not a statement — zero value on every level, needle and
+        // libinjection fingerprint alike. A real exfiltration carries a
+        // quoted file target and blocks.
+        for e in [engine(), strict_engine()] {
+            let v = e.inspect(&req(
+                "GET",
+                "/help",
+                "q=please explain into outfile and into dumpfile syntax",
+            ));
+            assert_ne!(v.action, WafAction::Block, "details: {}", v.details);
+        }
+        let e = strict_engine();
+        let v = e.inspect(&req(
+            "GET",
+            "/export",
+            "q=select 'x' into outfile '/tmp/pwned.txt'",
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn strict_crlf_with_injection_companion_is_critical() {
+        // The blanket strict CRLF demotion traded away real
+        // response-splitting probes whose line break smuggles a traversal:
+        // a same-value injection-family companion (PT here — CI/Deser have
+        // their own strict escalation) restores the critical call, while a
+        // bare multi-line query value stays quiet.
+        let e = strict_engine();
+        let v =
+            e.inspect(&req("GET", "/dl", "p=a%0d%0ab%3Fx%3D..%2F..%2Fconf"));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+        let v = e.inspect(&req("GET", "/log", "q=line1%0d%0aline2 goes on"));
+        assert_ne!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn strict_js_call_blob_passes_but_url_surface_blocks() {
+        // Bracket-call text inside an unstructured body blob is collected
+        // page prose (skipped entirely, like the search-phrase rule — the
+        // RCE sub-score must not re-block what the critical gate let
+        // through); the same shape on a URL-facing surface stays critical.
+        let e = strict_engine();
+        let mut r = req("POST", "/collect", "");
+        r.headers.push(("Content-Type".into(), "text/plain".into()));
+        r.body =
+            Some(b"paste: ctx['lookup'](val) worked\r\nnext line".to_vec());
+        let v = e.inspect(&r);
+        assert_ne!(v.action, WafAction::Block, "details: {}", v.details);
+        let v = e.inspect(&req("POST", "/w", "tpl=win['constructor'](1)"));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
     }
 
     #[test]

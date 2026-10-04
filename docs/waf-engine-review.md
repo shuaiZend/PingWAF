@@ -110,6 +110,16 @@ Stage 2：14 条托管规则（Cloudflare 风格 DSL）
 15. **deser/OGNL 形态分级** ✅：`detect_deser_shape`（OGNL 静态调用 `@class@method(`/PHP 序列化 `O:\d+:"`/`s:\d+:"…";s:\d+:"` 记录形态）在 Normal sev4 评分（OGNL 对非 Java 站点无解释面）、Strict sev5 critical（deser 家族在 strict 档整体 critical）；弱信号门（meta header/body blob/超长）与 needle/lib 门一致。
 16. **P2 实测驱动的语义门回修**（两轮 bench FP/回退归因后）✅：SQLI_TAUTOLOGY 收紧为「数字自等/引号对/1<>0」三形态——`word = string` 比较（Lucene/API 过滤语法 `author=="CT Stack"`）不再是注入信号；SQLI_QUOTE_KEYWORD 从「任意距离引号+关键词」收紧为**邻接判定**（引号后 `\s);` 容差内直接跟关键词）——缩写撇号（"couldn't select"）与 b64 词表长距误触发闭合。收紧连带暴露两类 P1 靠宽松 quote-keyword「误打误撞」拦截的攻击面，补确定性检测承接：**bool-subquery 强检查**（操作符前缀子查询 `and (select …` / `N=(SELECT …)` 比较，PortSwigger 布尔盲注家族）、**SQL-020 `utl_inaddr`**（Oracle 报错注入）、**CI-043 `getruntime().exec`**（OGNL/SpEL RCE 载荷核心，承接 6 条 b64 包裹 OGNL 黑样本在 Normal 的拦截）、**CI-044 `securegroovy`**（Jenkins 沙箱绕过端点）、**DZ-016 `getclass().forname`**（EL/SpEL 反射 gadget 链，Nexus CVE-2020-10199/10204 家族）。回修后 16 条新增误报全部消除、59 条新增拦截零回退、8 条 PortSwigger 盲注重新拦截，并顺带压掉 18 条 P1 遗留遥测类误报。
 
+### P4 第五轮：解码链补齐 + strict FP 治理——已落地 ✅
+
+post7 归因（strict+body 漏报 147 条 + strict 档 105 条 FP 全量脚本归因）驱动的第五轮，两条主线：
+
+17. **解码链补齐** ✅：(a) b64 解码层含 `\u`/`\x` 转义时无条件还原（b64 包裹的 JS/Java escape 二次混淆）；(b) JSON 结构位置裸控制字符剥离重试（`{"policy":"<b64>"}` 混入 `\r\t\x00` 后 serde_json 解析失败导致成员不可见）；(c) `parse_query` 对 `param={"json":…}` 值就地解包（对齐 form 语义）；(d) HTML 符号实体表补 27 个（`&colon;`/`&semi;`/`&sol;`/`&lpar;`/`&Tab;`/`&NewLine;` 等——DOM 序列化常用的无分号变体）。
+18. **needle 扩面** ✅：宽命令分隔 CI-045~072（`;|` + 反引号 + `||` 前缀的 whoami/uname/ping/curl/wget/sleep/echo）、CI-078 `eval(atob(`、LDAP 注入 CI-080~082（`)(uid=`/`)(|(`/`*)(objectclass=`）、JSFuck XSS-022 `[(+{}+[])`、PT-017 `web-inf`/PT-018 `portal_inc.lua`、SQL-021 Postgres `COPY … TO PROGRAM '`（sev5 全档 critical）。
+19. **strict FP 治理** ✅：PINGWAF-1051（长 URI）Block→Log；strict CRLF blanket-critical 摘除（body 源多行文本 + 非头名形态不 critical）；path 源 CI/Deser 形态改走 `add_severity_hit` 旁路（矩阵参数 `/foo;cat=…` 是存储 URL 语法不是 shell，保持聚合分但不进 RCE 子分桶）；strict js-call 对非字段 body blob 零分跳过（收集页面文本的括号调用是散文）。
+20. **post8 归因回修（第三轮语义门）** ✅：strict+body 回退 42 条与残余 69 FP 逐条归因后——(a) **CRLF 同伴门**：strict 下同值携带 CI/PT/Deser/SSRF 家族特征时 CRLF 恢复 critical（换行走私载荷 = 真实 response-splitting 流量，纯多行文本无同伴），追回 17 条回退；(b) **into-file 语句形态门**：`sqli_into_file_statement_shaped` 要求 `into (out|dump)file '目标'` 引号目标形态，SQL-008/009 needle 与 libinjection `into-file` 指纹两侧同语义（对齐 union-select 门），6 条搜索短语 FP 消除；(c) PINGWAF-1021 摘压缩包后缀（`.zip/.tar.gz` 是普通下载资源，仅保留 bak/backup/old/swp/sql），5 条 FP 消除；(d) js-call blob 豁免贯彻到 RCE 子分（`add_expr_hit` 的 rce+48 会让 PINGWAF-1061 重新拦截——豁免必须是零分跳过而非仅降 critical），16 条 FP 消除。
+
+
 ### P3 语义架构演进（高性能高命中低误报的地基）
 
 17. **token 归一化语义评分**（SafeLine 思路的确定性近似）：解码后对每个值做轻量词法切分（复用 SQL 指纹器），按语法角色计分：`union+select`（两个 keyword 相邻）> `union`（孤立）> 普通词。比信任度分级更通用，且 O(n)；P2-11 的语句结构门已覆盖其最高价值场景（union select 搜索短语 FP），剩余收益面在深层混淆样本。

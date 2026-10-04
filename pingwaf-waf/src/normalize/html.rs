@@ -57,6 +57,33 @@ static NAMED_ENTITIES: Lazy<AHashMap<&'static str, char>> = Lazy::new(|| {
         ("lsaquo", '\u{2039}'),
         ("rsaquo", '\u{203a}'),
         ("frasl", '\u{2044}'),
+        // Punctuation/symbol entities attackers use to split keywords inside
+        // a payload (`javascript&colon;alert(1)`, `&sol;&lpar;…`) while the
+        // browser still executes the resolved value.
+        ("colon", ':'),
+        ("semi", ';'),
+        ("comma", ','),
+        ("period", '.'),
+        ("sol", '/'),
+        ("bsol", '\\'),
+        ("lpar", '('),
+        ("rpar", ')'),
+        ("lbrack", '['),
+        ("rbrack", ']'),
+        ("lbrace", '{'),
+        ("rbrace", '}'),
+        ("num", '#'),
+        ("percnt", '%'),
+        ("plus", '+'),
+        ("minus", '-'),
+        ("ast", '*'),
+        ("equals", '='),
+        ("quest", '?'),
+        ("excl", '!'),
+        ("grave", '`'),
+        ("dollar", '$'),
+        ("Tab", '\t'),
+        ("NewLine", '\n'),
     ];
     pairs.iter().copied().collect()
 });
@@ -174,5 +201,19 @@ mod tests {
     fn handles_no_semicolon_form() {
         // HTML5 allows &lt without trailing semicolon in text.
         assert_eq!(decode_entities("&ltdiv&gt"), "<div>");
+    }
+
+    #[test]
+    fn decodes_symbolic_entities() {
+        // Symbolic entities are the obfuscation cut-points attackers splice
+        // keywords with (`java&colon;alert` etc.), so the table must see
+        // through them just like the alphanumeric ones.
+        assert_eq!(decode_entities("java&colon;alert"), "java:alert");
+        assert_eq!(decode_entities("&sol;&sol;evil"), "//evil");
+        assert_eq!(decode_entities("&lpar;&rpar;"), "()");
+        assert_eq!(decode_entities("&bsol;&bsol;"), "\\\\");
+        assert_eq!(decode_entities("&Tab;"), "\t");
+        assert_eq!(decode_entities("&NewLine;"), "\n");
+        assert_eq!(decode_entities("&excl;&quest;"), "!?");
     }
 }

@@ -119,8 +119,11 @@ pub fn default_managed_rules(level: WafLevel) -> Vec<CompiledRule> {
         },
         ManagedSpec {
             id: "PINGWAF-1021",
+            // Archive extensions are ordinary downloadable assets — a bare
+            // `.zip`/`.tar.gz` request is a download, not a probe. Only
+            // editor/DB leftovers expose source or data.
             name: "Block common backup-file probes",
-            expression: r#"http.request.uri.path matches "(?i)\\.(?:bak|backup|old|swp|sql|tar|tgz|zip|gz|rar|7z)$""#.to_string(),
+            expression: r#"http.request.uri.path matches "(?i)\\.(?:bak|backup|old|swp|sql)$""#.to_string(),
             action: RuleAction::Block,
             severity: 4,
             paranoia_level: 2,
@@ -176,7 +179,12 @@ pub fn default_managed_rules(level: WafLevel) -> Vec<CompiledRule> {
             id: "PINGWAF-1051",
             name: "Block requests with very long URIs (likely buffer / scan attempts)",
             expression: r#"http.request.uri.full matches "^.{4096,}$""#.to_string(),
-            action: RuleAction::Block,
+            // Log, not Block: a long URI alone is weak evidence — legit deep
+            // paths and encoded query strings trip the 4096 boundary, and at
+            // strict this rule was the sole blocker behind 20 false positives.
+            // Any real payload in the URI still scores through the signature
+            // engine; this only keeps the telemetry.
+            action: RuleAction::Log,
             severity: 3,
             paranoia_level: 3,
             stacks: StackSet::GENERIC,
