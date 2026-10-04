@@ -277,7 +277,7 @@ pub trait CertificateProvider: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_ip_addr, parse_leaf_chain_certificates};
+    use super::{Certificate, parse_ip_addr, parse_leaf_chain_certificates};
     use pretty_assertions::assert_eq;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -300,28 +300,25 @@ mod tests {
     fn test_cert() {
         // spellchecker:off
         let pem = r###"-----BEGIN CERTIFICATE-----
-MIID/TCCAmWgAwIBAgIQJUGCkB1VAYha6fGExkx0KTANBgkqhkiG9w0BAQsFADBV
-MR4wHAYDVQQKExVta2NlcnQgZGV2ZWxvcG1lbnQgQ0ExFTATBgNVBAsMDHZpY2Fu
-c29AdHJlZTEcMBoGA1UEAwwTbWtjZXJ0IHZpY2Fuc29AdHJlZTAeFw0yNDA3MDYw
-MjIzMzZaFw0yNjEwMDYwMjIzMzZaMEAxJzAlBgNVBAoTHm1rY2VydCBkZXZlbG9w
-bWVudCBjZXJ0aWZpY2F0ZTEVMBMGA1UECwwMdmljYW5zb0B0cmVlMIIBIjANBgkq
-hkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAv5dbylSPQNARrpT/Rn7qZf6JmH3cueMp
-YdOpctuPYeefT0Jdgp67bg17fU5pfyR2BWYdwyvHCNmKqLdYPx/J69hwTiVFMOcw
-lVQJjbzSy8r5r2cSBMMsRaAZopRDnPy7Ls7Ji+AIT4vshUgL55eR7ACuIJpdtUYm
-TzMx9PTA0BUDkit6z7bTMaEbjDmciIBDfepV4goHmvyBJoYMIjnAwnTFRGRs/QJN
-d2ikFq999fRINzTDbRDP1K0Kk6+zYoFAiCMs9lEDymu3RmiWXBXpINR/Sv8CXtz2
-9RTVwTkjyiMOPY99qBfaZTiy+VCjcwTGKPyus1axRMff4xjgOBewOwIDAQABo14w
-XDAOBgNVHQ8BAf8EBAMCBaAwEwYDVR0lBAwwCgYIKwYBBQUHAwEwHwYDVR0jBBgw
-FoAUhU5Igu3uLUabIqUhUpVXjk1JVtkwFAYDVR0RBA0wC4IJcGluZ2FwLmlvMA0G
-CSqGSIb3DQEBCwUAA4IBgQDBimRKrqnEG65imKriM2QRCEfdB6F/eP9HYvPswuAP
-tvQ6m19/74qbtkd6vjnf6RhMbj9XbCcAJIhRdnXmS0vsBrLDsm2q98zpg6D04F2E
-L++xTiKU6F5KtejXcTHHe23ZpmD2XilwcVDeGFu5BEiFoRH9dmqefGZn3NIwnIeD
-Yi31/cL7BoBjdWku5Qm2nCSWqy12ywbZtQCbgbzb8Me5XZajeGWKb8r6D0Nb+9I9
-OG7dha1L3kxerI5VzVKSiAdGU0C+WcuxfsKAP8ajb1TLOlBaVyilfqmiF457yo/2
-PmTYzMc80+cQWf7loJPskyWvQyfmAnSUX0DI56avXH8LlQ57QebllOtKgMiCo7cr
-CCB2C+8hgRNG9ZmW1KU8rxkzoddHmSB8d6+vFqOajxGdyOV+aX00k3w6FgtHOoKD
-Ztdj1N0eTfn02pibVcXXfwESPUzcjERaMAGg1hoH1F4Gxg0mqmbySAuVRqNLnXp5
-CRVQZGgOQL6WDg3tUUDXYOs=
+MIIDizCCAnOgAwIBAgIUZVvcd7T7jBSlQ+0HI4S3rZpq/FMwDQYJKoZIhvcNAQEL
+BQAwVTEeMBwGA1UECgwVbWtjZXJ0IGRldmVsb3BtZW50IENBMRUwEwYDVQQLDAx2
+aWNhbnNvQHRyZWUxHDAaBgNVBAMME21rY2VydCB2aWNhbnNvQHRyZWUwHhcNMjYx
+MDA0MDQwNjAxWhcNMzYxMDAxMDQwNjAxWjBVMR4wHAYDVQQKDBVta2NlcnQgZGV2
+ZWxvcG1lbnQgQ0ExFTATBgNVBAsMDHZpY2Fuc29AdHJlZTEcMBoGA1UEAwwTbWtj
+ZXJ0IHZpY2Fuc29AdHJlZTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEB
+AL7rbDF3PQIU/fBAG9vz//iIjK5AgxL9yLWCMDptqqaaXhAv2N0vAGY9NylJjpj1
+t/u+vLtFsTezmaIhRCSQhLKrwbcLOcI+d5FgM9XVEkvct7SzHBEnRh/cCYeIV2x1
+g1rWshTc2OrYfOXmncJAt8TqPJ+78uSSoYXJ+8RRZFBozAzG85whCYAAJ9IEJoF5
+IsgUZMJ2mIkna1WIx9FglJR6zp72Vhg7PJbOMuaXoyRlFgwXL0piylTv63HPnTcB
+e3To2Ojcl3j9eRMdfquyjbso5hrumew+s5RlXIYU/w2YrwgG0F3kJ8bbMcpL2Cjs
+jQ1NgsG23Mbh8DGkSl5SOI0CAwEAAaNTMFEwHQYDVR0OBBYEFOCybNUwvwxLnDYM
+9rIND5XyhRlcMB8GA1UdIwQYMBaAFOCybNUwvwxLnDYM9rIND5XyhRlcMA8GA1Ud
+EwEB/wQFMAMBAf8wDQYJKoZIhvcNAQELBQADggEBADdviV83tgNLbpyd4ABahLqN
+jIEda7PBMA9lFkr7Oxv/C3N/Hk/uQyMdcXnrQMnIYbUfEYA6d7FzbGKfmUAtKL0R
+RJS45qKZySAH0P/0AHoLB6OBedO2EEoLkm4UigYhviZlZyjapCEquzkvD2lokfqD
+zOuccfVUruJqmkGbLQ3VYqPVOGlbWCixEu4OgD7iyETmUT1yHg1Q7PIrjkf6ooMm
+2hnjdKd0q3xfENcpWODptGOQkZX5poINjBGEb6S9/mKq9O4jI6LoxTNqUeRfbaEj
+sBKkA3gCXFaZ5aP4vm9QdFS+LBgfxMXFoPd8tp9ylT+pv4q/NF4I6Q6YnHW3YPM=
 -----END CERTIFICATE-----"###;
         // spellchecker:on
         let (cert, _) = parse_leaf_chain_certificates(pem, "").unwrap();
@@ -330,10 +327,15 @@ CRVQZGgOQL6WDg3tUUDXYOs=
             "O=mkcert development CA, OU=vicanso@tree, CN=mkcert vicanso@tree",
             cert.issuer
         );
-        assert_eq!(1720232616, cert.not_before);
-        assert_eq!(1791253416, cert.not_after);
+        assert_eq!(1791086761, cert.not_before);
+        assert_eq!(2106446761, cert.not_after);
         assert_eq!("mkcert vicanso@tree", cert.get_issuer_common_name());
         assert_eq!(true, cert.valid(2));
+        let expired = Certificate {
+            not_after: 1_000_000_000,
+            ..Default::default()
+        };
+        assert_eq!(false, expired.valid(2));
     }
 
     #[test]
