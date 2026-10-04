@@ -25,8 +25,9 @@ use crate::normalize::{normalize_request, NormalizedRequest};
 use crate::rules::expression::{evaluate, EvalContext};
 use crate::rules::managed::default_managed_rules;
 use crate::rules::signatures::{
-    detect_expr_injection, detect_js_call, detect_sqli, detect_xss,
-    AttackCategory, SignatureEngine, SignatureHit,
+    crlf_header_injection_shaped, detect_expr_injection, detect_js_call,
+    detect_sqli, detect_xss, sqli_union_statement_shaped,
+    xss_script_uri_html_shaped, AttackCategory, SignatureEngine, SignatureHit,
 };
 use crate::rules::{CompiledRule, RuleAction};
 use crate::score::{AnomalyScorer, ScoreBreakdown, ScoreClass};
@@ -168,6 +169,13 @@ struct RuleRec<'a> {
 
 /// Multi-stage WAF detection engine. Clone is intentionally not derived —
 /// share an `Arc<WafEngine>` instead so the Aho-Corasick automaton stays put.
+/// A typed body field (form member / JSON member) above this decoded length
+/// is treated as pasted bulk content — code, documents, uploaded HTML — and
+/// weighted like a blob. Real injection payloads are short; pasted content
+/// routinely carries the same markers (`<script>`, quote+keyword runs,
+/// CRLF) as attacks.
+const FIELD_STRONG_MAX_LEN: usize = 256;
+
 pub struct WafEngine {
     signatures: SignatureEngine,
     rules: Vec<CompiledRule>,
@@ -341,21 +349,52 @@ impl WafEngine {
                         | AttackCategory::Xss
                         | AttackCategory::CommandInjection
                 );
-                if is_meta_header && reflected_family {
-                    severity = 2;
-                    critical = false;
-                } else if value.source == ValueSource::Body
-                    && reflected_family
+                // Weak signals still feed the family sub-scores (three
+                // distinct weak features crossing a gate is the P0-tested
+                // blocking path for payloads reflected into Referer/UA),
+                // but at demoted severity so a single value cannot one-shot.
+                let pid = self.signatures.pattern_id(hit.pattern);
+                // A script-URI inside a body value without tag structure is
+                // collected markup — beacons re-serialize DOM attributes
+                // ("javascript: void(0)") verbatim as JSON, and the JSON
+                // unpacking surfaces them as plain `href` members. It is
+                // skipped entirely (zero score, like the SQL search-phrase
+                // rule): mirrors across blob and unpacked members must not
+                // pile weak features onto the XSS family gate. On
+                // URL-facing surfaces (query / cookie / headers) a bare
+                // script URI stays critical: `?url=javascript:…` is a real
+                // reflected-XSS shape. Strict has no gate.
+                let collected_js_uri = pid == "XSS-007"
+                    && value.source == ValueSource::Body
                     && !self.level.is_strict()
-                {
-                    // Bulk body content (JSON/XML/HTML payloads) carries the
-                    // same strings benignly; a lone reflected-family needle
-                    // there is a weak signal — same tier as reflected
-                    // metadata headers. Corroboration (3+ distinct hits
-                    // crossing a family gate) or the Strict level restores
-                    // enforcement.
+                    && !xss_script_uri_html_shaped(needle);
+                let weak = (is_meta_header && reflected_family)
+                    || (value.source == ValueSource::Body
+                        && (!value.field
+                            || value.decoded.len() > FIELD_STRONG_MAX_LEN)
+                        && reflected_family
+                        && !self.level.is_strict());
+                // A bare "union select" without statement structure is a
+                // search phrase: the needle and its libinjection twin
+                // describe the same string, so neither scores — zero value,
+                // mirrored across query/Referer/body or not.
+                let search_phrase = !self.level.is_strict()
+                    && ((matches!(pid, "SQL-001" | "SQL-002")
+                        && !sqli_union_statement_shaped(needle))
+                        || collected_js_uri);
+                if weak {
                     severity = severity.min(2);
                     critical = false;
+                } else if hit.category == AttackCategory::CrlfInjection
+                    && value.source != ValueSource::Body
+                    && crlf_header_injection_shaped(needle)
+                {
+                    // `…\r\nX-Foo:` is response-splitting material on any
+                    // surface except a body blob; bare multi-line text (a
+                    // multi-line form input echoed into a query, prose) is
+                    // not — CRLF-003/004 carry their own header shape at
+                    // sev5 and stay critical via `severity >= 5` above.
+                    critical = true;
                 } else if self.level.is_strict()
                     && matches!(
                         hit.category,
@@ -368,20 +407,22 @@ impl WafEngine {
                     // the Strict level instead of waiting for the scorer.
                     critical = true;
                 }
-                if critical {
+                if critical && !search_phrase {
                     critical_hit = true;
                 }
-                self.scorer.add_category_hit(
-                    &mut breakdown,
-                    hit.category,
-                    severity,
-                );
-                recs.push(HitRec::Sig {
-                    pattern: hit.pattern,
-                    severity,
-                    source: value.source.as_str(),
-                    name: &value.name,
-                });
+                if !search_phrase {
+                    self.scorer.add_category_hit(
+                        &mut breakdown,
+                        hit.category,
+                        severity,
+                    );
+                    recs.push(HitRec::Sig {
+                        pattern: hit.pattern,
+                        severity,
+                        source: value.source.as_str(),
+                        name: &value.name,
+                    });
+                }
             }
 
             // libinjection-style detectors on user-controlled values only.
@@ -400,45 +441,66 @@ impl WafEngine {
             if is_sqli {
                 let weak = is_meta_header
                     || (value.source == ValueSource::Body
+                        && (!value.field
+                            || value.decoded.len() > FIELD_STRONG_MAX_LEN)
                         && !self.level.is_strict());
+                // Same zero-score rule as the needle gate: a union-select
+                // fingerprint without statement structure is a search
+                // phrase, and the needle hit for it is skipped as well.
+                let search_phrase = sqli_fp.contains("union-select")
+                    && !self.level.is_strict()
+                    && !sqli_union_statement_shaped(needle);
                 let (severity, critical) =
                     if weak { (2, false) } else { (5, true) };
-                if critical {
+                if critical && !search_phrase {
                     critical_hit = true;
                 }
-                self.scorer.add_category_hit(
-                    &mut breakdown,
-                    AttackCategory::SqlInjection,
-                    severity,
-                );
-                recs.push(HitRec::Lib {
-                    kind: "libinjection-sqli",
-                    fingerprint: sqli_fp,
-                    source: value.source.as_str(),
-                    name: &value.name,
-                });
+                if !search_phrase {
+                    self.scorer.add_category_hit(
+                        &mut breakdown,
+                        AttackCategory::SqlInjection,
+                        severity,
+                    );
+                    recs.push(HitRec::Lib {
+                        kind: "libinjection-sqli",
+                        fingerprint: sqli_fp,
+                        source: value.source.as_str(),
+                        name: &value.name,
+                    });
+                }
             }
             let (is_xss, xss_fp) = detect_xss(needle);
             if is_xss {
+                // Mirrors the needle gate: a js-uri fingerprint on body
+                // markup without tag structure is collected data — skipped
+                // entirely, and the needle hit for it is skipped as well.
+                let collected_js_uri = xss_fp.contains("js-uri")
+                    && value.source == ValueSource::Body
+                    && !self.level.is_strict()
+                    && !xss_script_uri_html_shaped(needle);
                 let weak = is_meta_header
                     || (value.source == ValueSource::Body
+                        && (!value.field
+                            || value.decoded.len() > FIELD_STRONG_MAX_LEN)
                         && !self.level.is_strict());
                 let (severity, critical) =
                     if weak { (2, false) } else { (5, true) };
-                if critical {
+                if critical && !collected_js_uri {
                     critical_hit = true;
                 }
-                self.scorer.add_category_hit(
-                    &mut breakdown,
-                    AttackCategory::Xss,
-                    severity,
-                );
-                recs.push(HitRec::Lib {
-                    kind: "libinjection-xss",
-                    fingerprint: xss_fp,
-                    source: value.source.as_str(),
-                    name: &value.name,
-                });
+                if !collected_js_uri {
+                    self.scorer.add_category_hit(
+                        &mut breakdown,
+                        AttackCategory::Xss,
+                        severity,
+                    );
+                    recs.push(HitRec::Lib {
+                        kind: "libinjection-xss",
+                        fingerprint: xss_fp,
+                        source: value.source.as_str(),
+                        name: &value.name,
+                    });
+                }
             }
 
             // Strict level: structural EL / SSTI detection over the decoded
@@ -1128,6 +1190,208 @@ mod tests {
         assert_eq!(v.action, WafAction::Pass, "details: {}", v.details);
     }
 
+    fn post_json(path: &str, body: &str) -> RequestData {
+        let mut r = req("POST", path, "");
+        r.headers
+            .push(("Content-Type".into(), "application/json".into()));
+        r.body = Some(body.as_bytes().to_vec());
+        r
+    }
+
+    #[test]
+    fn json_members_are_scanned_as_fields() {
+        // A JSON member is a typed input: full severity at Normal, unlike
+        // the demoted bulk blob.
+        let e = engine();
+        let v = e.inspect(&post_json(
+            "/api/items",
+            r#"{"q":"<script>alert(1)</script>","page":1}"#,
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn json_unicode_escapes_resolved_by_parser() {
+        // serde_json resolves \u escapes before scanning, so \u003cscript\u003e
+        // is visible at Normal even with the escape pass off.
+        let e = engine();
+        let v = e.inspect(&post_json(
+            "/api/comment",
+            r#"{"text":"\u003cscript\u003ealert(1)\u003c/script\u003e"}"#,
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn json_sqli_member_blocks_at_normal() {
+        let e = engine();
+        let v = e.inspect(&post_json(
+            "/api/login",
+            r#"{"user":"admin' OR 1=1 --","pass":"x"}"#,
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn nested_json_members_scanned() {
+        let e = engine();
+        let v = e.inspect(&post_json(
+            "/api/profile",
+            r#"{"meta":{"tags":["x"],"html":"<script>alert(1)</script>"}}"#,
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn crlf_in_query_is_critical() {
+        // Decoded CRLF in a query value is response splitting; a body blob
+        // (JSON pretty-printing) stays the only CRLF-tolerant surface.
+        let e = engine();
+        let v = e.inspect(&req(
+            "GET",
+            "/redirect",
+            "next=https%3A%2F%2Fevil.example%2F%0d%0aX-Injected%3A%201",
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn encoded_ssrf_loopback_blocked() {
+        let e = engine();
+        let v = e.inspect(&req("GET", "/fetch", "u=http://2130706433/admin"));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+        let v = e.inspect(&req("GET", "/fetch", "u=http://0x7f000001/admin"));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+        // Plain names are sev4: they score, they do not one-shot.
+        let v = e.inspect(&req("GET", "/fetch", "u=http://localhost/admin"));
+        assert_ne!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn powershell_encoded_command_blocked() {
+        let e = engine();
+        let v = e.inspect(&req("GET", "/deploy", "c=powershell+-enc+SQBFAFgA"));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn union_select_search_phrase_passes_at_normal() {
+        // Search phrases are the dominant benign carrier of "union select";
+        // without any statement marker (quote break-out, constant probing,
+        // comment terminator or FROM clause) Normal keeps the hit weak.
+        let e = engine();
+        let v = e.inspect(&req(
+            "GET",
+            "/AS/Suggestions",
+            "bq=site:segmentfault.com+union+select+%E6%95%99%E7%A8%8B",
+        ));
+        assert_ne!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn union_select_statements_still_block_at_normal() {
+        let e = engine();
+        for q in [
+            "id=1+union+select+username%2Cpassword+from+users",
+            "id=1%27+union+select+user--",
+            "id=union+select+1%2C2%2C3",
+            "id=1+union+all+select+user+from+users",
+        ] {
+            let v = e.inspect(&req("GET", "/list", q));
+            assert_eq!(v.action, WafAction::Block, "query {q}: {}", v.details);
+        }
+    }
+
+    #[test]
+    fn union_select_search_phrase_blocks_at_strict() {
+        // Strict has no semantic gate: the needle stays critical there.
+        let e = strict_engine();
+        let v = e.inspect(&req(
+            "GET",
+            "/AS/Suggestions",
+            "bq=site:segmentfault.com+union+select+%E6%95%99%E7%A8%8B",
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn sqli_reflected_mirrors_do_not_trip_family_gate() {
+        // A search phrase mirrored across query and Referer is one signal,
+        // not four: weak hits stay out of the family sub-score, so the
+        // 1002 gate cannot be crossed by repetition.
+        let mut r = req(
+            "GET",
+            "/AS/Suggestions",
+            "bq=site:segmentfault.com+union+select+%E6%95%99%E7%A8%8B",
+        );
+        r.headers.push((
+            "Referer".into(),
+            "https://www.baidu.com/s?wd=site:segmentfault.com union select 教程"
+                .into(),
+        ));
+        let e = engine();
+        let v = e.inspect(&r);
+        assert_ne!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn sqli_prose_with_from_clause_still_blocks() {
+        // Known tradeoff: prose carrying a full "… union select … from …"
+        // shape is indistinguishable from an injected statement at the
+        // lexical level (benchmark sample 92/49). Pinned so the tradeoff is
+        // a conscious one.
+        let e = engine();
+        let v = e.inspect(&req(
+            "GET",
+            "/thread",
+            "p=The+union+select+members+from+each+department+to+form+a+committee.",
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn crlf_multiline_text_query_passes() {
+        // Multi-line form input echoed into a query value: CRLF without a
+        // following header-name shape is scored, not blocked.
+        let e = engine();
+        let v = e.inspect(&req(
+            "GET",
+            "/link",
+            "query=%E6%9C%89%E4%B8%A4%E4%B8%AA%E9%80%89%E9%A1%B9%0D%0A1.+%E5%90%83%E9%A5%AD%0D%0A2.+%E4%B8%8D%E5%90%83%E9%A5%AD",
+        ));
+        assert_ne!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn crlf_in_referer_is_not_critical() {
+        // Same rule on the Referer surface: multi-line text there is noise,
+        // not response splitting.
+        let mut r = req("GET", "/page", "");
+        r.headers.push((
+            "Referer".into(),
+            "https://www.baidu.com/s?wd=line1\r\nline2".into(),
+        ));
+        let e = engine();
+        let v = e.inspect(&r);
+        assert_ne!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn form_body_multiline_code_passes() {
+        // A form field carrying multi-line source code (mathb.in sample):
+        // CRLF inside a body surface is scored, never one-shot blocked.
+        let e = engine();
+        let mut r = req("POST", "/2", "");
+        r.headers.push((
+            "Content-Type".into(),
+            "application/x-www-form-urlencoded".into(),
+        ));
+        r.body =
+            Some(b"code=f(x)\r\n  y = x^2\r\n\r\nNote: plot y\r\n".to_vec());
+        let v = e.inspect(&r);
+        assert_ne!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
     #[test]
     fn normal_scores_rce_without_blocking() {
         let e = engine();
@@ -1138,6 +1402,113 @@ mod tests {
         ));
         assert_ne!(v.action, WafAction::Block, "details: {}", v.details);
         assert!(v.score > 0);
+    }
+
+    #[test]
+    fn js_uri_json_container_passes_at_normal() {
+        // Telemetry beacons re-serialize DOM attributes verbatim
+        // (`{"href":"javascript: void(0);"}`): a script-URI quoted inside a
+        // JSON container with no tag structure is collected data, not an
+        // injection. The needle and its libinjection twin both stay out.
+        let e = engine();
+        let mut r = req("POST", "/analytics/v2_upload", "");
+        r.headers
+            .push(("Content-Type".into(), "application/json".into()));
+        r.body = Some(
+            br#"{"common":{"browser":"Chrome(114)"},"events":[{"mapValue":{"attributes":"{\"href\":\"javascript: void(0);\",\"data-reactid\":\".c.0.1\"}","queryPath":".tc-15-tablist > li > a"}}]}"#
+                .to_vec(),
+        );
+        let v = e.inspect(&r);
+        assert_ne!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn js_uri_with_tag_structure_still_blocks_at_normal() {
+        let e = engine();
+        let v = e.inspect(&req(
+            "GET",
+            "/search",
+            "q=%3Csvg+onload%3Djavascript%3Aalert(1)%3E",
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn bare_js_uri_value_still_blocks_at_normal() {
+        // A value that *is* the script URI (reflected `?url=` payload) has
+        // no container to hide in — the gate keeps it critical.
+        let e = engine();
+        let v = e.inspect(&req("GET", "/redirect", "url=javascript:alert(1)"));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn js_uri_json_container_blocks_at_strict() {
+        // Strict has no semantic gate: the needle stays critical there.
+        let e = strict_engine();
+        let mut r = req("POST", "/analytics/v2_upload", "");
+        r.headers
+            .push(("Content-Type".into(), "application/json".into()));
+        r.body = Some(
+            br#"{"events":[{"mapValue":{"attributes":"{\"href\":\"javascript: void(0);\"}"}}]}"#
+                .to_vec(),
+        );
+        let v = e.inspect(&r);
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn form_json_field_is_unpacked_not_libinjection_matched() {
+        // `param={"add":5,"delete":0}` (Aliyun console sample): the
+        // `"key":value` container shape trips libinjection's quote-keyword
+        // fingerprint, so the container string is replaced by its unpacked
+        // members.
+        let e = engine();
+        let mut r = req("POST", "/buyapi/api/agreement/logAction.json", "");
+        r.headers.push((
+            "Content-Type".into(),
+            "application/x-www-form-urlencoded".into(),
+        ));
+        r.body = Some(
+            b"action=configureSecurityGroupPermissions\
+              &param=%7B%22add%22%3A5%2C%22delete%22%3A0%7D"
+                .to_vec(),
+        );
+        let v = e.inspect(&r);
+        assert_ne!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn nested_json_string_member_is_unpacked() {
+        // A JSON member that is itself serialized JSON (telemetry icon
+        // blobs) expands into typed members instead of staying an opaque
+        // container string.
+        let raw_body: &[u8] = br#"{"__logs__":[{"value":"{\"key\":\"HelpDoc\",\"icon\":\"\\n<svg t=\\\"1682594285904\\\" class=\\\"icon\\\" viewBox=\\\"0 0 1024 1024\\\">\"}"}]}"#;
+        let headers =
+            vec![("Content-Type".to_string(), "application/json".to_string())];
+        let req_data = normalize_request(
+            "POST",
+            "/track",
+            "",
+            &headers,
+            Some(raw_body),
+            3,
+            false,
+        );
+        let names: Vec<&str> = req_data
+            .decoded_values
+            .iter()
+            .map(|v| v.name.as_str())
+            .collect();
+        // The container string is gone; members are addressed by path.
+        assert!(
+            !names.iter().any(|n| n.contains("value") && n.is_empty()),
+            "container kept: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n.contains("icon")),
+            "icon member missing: {names:?}"
+        );
     }
 
     #[test]

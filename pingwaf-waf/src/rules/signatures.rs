@@ -446,6 +446,48 @@ fn builtin_patterns() -> Vec<SignaturePattern> {
             "python subprocess call",
             "subprocess.",
         );
+        push(
+            "CI-032",
+            AttackCategory::CommandInjection,
+            5,
+            "powershell invoke-expression",
+            "invoke-expression",
+        );
+        push(
+            "CI-033",
+            AttackCategory::CommandInjection,
+            4,
+            "powershell iex alias",
+            "iex (",
+        );
+        push(
+            "CI-034",
+            AttackCategory::CommandInjection,
+            4,
+            "windows cmd /c chain",
+            "cmd /c",
+        );
+        push(
+            "CI-035",
+            AttackCategory::CommandInjection,
+            4,
+            "windows cmd.exe /c chain",
+            "cmd.exe /c",
+        );
+        push(
+            "CI-036",
+            AttackCategory::CommandInjection,
+            5,
+            "powershell encoded command",
+            "powershell -enc",
+        );
+        push(
+            "CI-037",
+            AttackCategory::CommandInjection,
+            4,
+            "C/PHP system() call",
+            "system(",
+        );
 
         // ---- SSRF ----
         push(
@@ -531,6 +573,45 @@ fn builtin_patterns() -> Vec<SignaturePattern> {
             4,
             "ftp:// scheme",
             "ftp://",
+        );
+        // Loopback / link-local aliases: classic SSRF filters block the
+        // literal IP, so probes move to alternative encodings. The encoded
+        // forms are unambiguous; the plain names stay non-critical because
+        // "localhost" shows up in dev traffic.
+        push(
+            "SSRF-013",
+            AttackCategory::Ssrf,
+            4,
+            "localhost name",
+            "localhost",
+        );
+        push(
+            "SSRF-014",
+            AttackCategory::Ssrf,
+            4,
+            "loopback IPv4",
+            "127.0.0.1",
+        );
+        push(
+            "SSRF-015",
+            AttackCategory::Ssrf,
+            5,
+            "hex loopback encoding",
+            "0x7f000001",
+        );
+        push(
+            "SSRF-016",
+            AttackCategory::Ssrf,
+            5,
+            "decimal loopback encoding",
+            "2130706433",
+        );
+        push(
+            "SSRF-017",
+            AttackCategory::Ssrf,
+            5,
+            "octal loopback encoding",
+            "0177.0.0.1",
         );
 
         // ---- Deserialization ----
@@ -1723,6 +1804,23 @@ static XSS_PREFILTER: Lazy<AhoCorasick> = Lazy::new(|| {
         .expect("aho-corasick build cannot fail with valid UTF-8 needles")
 });
 
+/// An HTML tag anywhere in the value (`<svg onload=…>`, `"><img …`) — the
+/// structural marker of a payload prepared for markup execution.
+static HTML_TAG_STRUCTURE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"(?i)<\s*\w{1,32}[^>]{0,200}>"#).unwrap());
+
+/// Does the value carry HTML tag structure around the script-URI hit?
+/// An injection payload needs a tag context to execute (`<svg onload=…>`,
+/// `"><img src=x onerror=…>`). A script-URI quoted inside a larger
+/// non-markup string — telemetry beacons re-serializing DOM attributes as
+/// JSON, CSP violation reports, link dumps — is collected data and shows no
+/// tag structure. Whether a bare (container-less) script URI is treated as
+/// an attack is a *source* decision for the engine: a `?url=javascript:…`
+/// query value is a reflected-XSS shape, a body field is collection surface.
+pub fn xss_script_uri_html_shaped(input: &str) -> bool {
+    HTML_TAG_STRUCTURE.is_match(input)
+}
+
 /// Detect XSS by looking for HTML tags / event handlers / dangerous URIs in
 /// contexts that should not contain them.
 ///
@@ -1858,6 +1956,38 @@ fn is_structural_expr(inner: &str) -> bool {
 
 static JS_BRACKET_CALL: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"\b\w+\[[^\]\r\n]{1,48}\]\s*[\[(]").unwrap());
+
+static SQLI_UNION_BREAK: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"(?i)['"`]\s*union\b"#).unwrap());
+static SQLI_UNION_CONST: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"(?i)union[\s/+]{1,8}select[\s/+]{0,4}(?:[\d('"*]|null\b)"#)
+        .unwrap()
+});
+static SQLI_STMT_MARKER: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"(?i)(?:--|/\*|(?:^|\s)#)|\bfrom\b"#).unwrap());
+
+/// Does a `union select` occurrence inside `input` look like an actual
+/// injected statement rather than a search phrase quoting the keywords?
+/// A real statement carries at least one of: a quote breaking out right
+/// before `union`, a comment terminator, a `from` clause, or a constant
+/// probe list (`union select 1,2,3` / `null,null,*`). A search query like
+/// `site:x.com union select 关键字怎么用` has none of those.
+pub fn sqli_union_statement_shaped(input: &str) -> bool {
+    SQLI_UNION_BREAK.is_match(input)
+        || SQLI_UNION_CONST.is_match(input)
+        || SQLI_STMT_MARKER.is_match(input)
+}
+
+static CRLF_HEADER_SHAPE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)[\r\n]{2,}\s*[\w-]{1,32}\s*:").unwrap());
+
+/// Does a CRLF occurrence inside `input` precede a header-name shape
+/// (`…\r\nX-Foo: bar`, including mixed `\r\r\n\n` evasion)? That is
+/// response-splitting material. Bare multi-line text — a multi-line form
+/// input echoed into a query value, prose — is not.
+pub fn crlf_header_injection_shaped(input: &str) -> bool {
+    CRLF_HEADER_SHAPE.is_match(input)
+}
 
 /// Detect JavaScript bracket-call invocation (`parent['eval'](…)`,
 /// `this["constructor"]["constructor"](…)`), a shape plain keyword needles
