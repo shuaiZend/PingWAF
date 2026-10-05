@@ -2774,6 +2774,45 @@ mod tests {
         }
     }
 
+    fn strict_json(body: &[u8]) -> WafVerdict {
+        let e = strict_engine();
+        let mut r = req("POST", "/x", "");
+        r.headers
+            .push(("Content-Type".into(), "application/json".into()));
+        r.body = Some(body.to_vec());
+        e.inspect(&r)
+    }
+
+    #[test]
+    fn nexus_el_probe_and_java_runtime_blocks() {
+        // P13 needle widening: Unomi MVEL statement-separated `Runtime r =
+        // Runtime.getRuntime(); r.exec(…)` (the chained CI-043 form never
+        // occurs here), Nexus EL arithmetic probes `$\A{…}` / `$\B{…}`
+        // (CVE-2020-10204 family), and the Confluence macro-preview
+        // `_template` deployment-descriptor probe.
+        for (name, body) in [
+            (
+                "unomi mvel separated exec",
+                &b"{\"filters\":[{\"condition\":{\"parameterValues\":{\"\": \"script::Runtime r = Runtime.getRuntime(); r.exec(\\\"touch /tmp/mvel\\\");\"},\"type\":\"profilePropertyCondition\"}}]}"[..],
+            ),
+            (
+                "nexus group EL probe",
+                &b"{\"name\":\"internal\",\"group\":{\"memberNames\":[\"$\\\\A{233*233*233}\"]}}"[..],
+            ),
+            (
+                "nexus extdirect EL probe",
+                &b"{\"action\":\"coreui_User\",\"data\":[{\"roles\":[\"nxadmin$\\\\B{233*233}\"]}]}"[..],
+            ),
+            (
+                "confluence _template probe",
+                &b"{\"contentId\":\"786458\",\"macro\":{\"name\":\"widget\",\"params\":{\"_template\":\". /web.xml\"}}}"[..],
+            ),
+        ] {
+            let v = strict_json(body);
+            assert_eq!(v.action, WafAction::Block, "{name}: {}", v.details);
+        }
+    }
+
     #[test]
     fn noncanonical_b64_waitfor_onion_blocks() {
         // (`a2af` family): whole-value b64 transport with non-canonical

@@ -242,6 +242,13 @@ fn builtin_patterns() -> Vec<SignaturePattern> {
             "web-inf",
         );
         push(
+            "PT-020",
+            AttackCategory::PathTraversal,
+            5,
+            "web.xml deployment descriptor probe",
+            "web.xml",
+        );
+        push(
             "PT-018",
             AttackCategory::PathTraversal,
             5,
@@ -954,6 +961,35 @@ fn builtin_patterns() -> Vec<SignaturePattern> {
             5,
             "Lua os library escape",
             "require(\"os\")",
+        );
+        // Java runtime introspection in a data value: `Runtime.getRuntime()`
+        // on its own (statement-separated `…getRuntime(); r.exec(…)` form
+        // skips the CI-043 chained needle) never appears in an honest
+        // parameter, JSON member or form field.
+        push(
+            "CI-113",
+            AttackCategory::CommandInjection,
+            5,
+            "Java runtime introspection",
+            "getruntime()",
+        );
+        // Nexus EL arithmetic probes: `$\A{233*233*233}` / `$\B{233*233}`
+        // (CVE-2020-10204 family) — engine-specific escape variants that
+        // evaluate the injected expression; the brace digits form only
+        // exists inside exploit payloads.
+        push(
+            "CI-114",
+            AttackCategory::CommandInjection,
+            5,
+            "Nexus EL arithmetic probe (A variant)",
+            "$\\a{",
+        );
+        push(
+            "CI-115",
+            AttackCategory::CommandInjection,
+            5,
+            "Nexus EL arithmetic probe (B variant)",
+            "$\\b{",
         );
         // JSFuck / Harley-Davidson style pure-symbol JS: the prefix
         // `[(+{}+[])` only occurs inside obfuscated execution payloads.
@@ -2777,6 +2813,13 @@ pub fn detect_expr_injection(input: &str) -> Option<&'static str> {
 /// two-segment accessor chain (`user.name`) is too common in honest
 /// templating to flag.
 fn is_structural_expr(inner: &str) -> bool {
+    // Expression payloads are printable ASCII by construction. A high-entropy
+    // binary body (log dumps, encrypted blobs) carries `${X(` or `${a=b}`
+    // coincidences at rates near 1.0 over a 100KB scan, so container content
+    // that is not clean printable text is collected data, not an injection.
+    if !inner.bytes().all(|c| c.is_ascii_graphic() || c == b' ') {
+        return false;
+    }
     // A nested container is evaluation by construction (${jndi:${sys:…}}).
     if inner.contains("${") || inner.contains("{{") || inner.contains("{%") {
         return true;
