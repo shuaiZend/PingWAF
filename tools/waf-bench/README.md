@@ -101,3 +101,5 @@ python3 tools/waf-bench/replay.py /tmp/waf-bench/only-black \
 | G3-th30 / th60 | threshold 30 / 60 | 聚合阈值敏感性 |
 | G4 | agent 离线复刻控制面默认 11 条 + PL4 | 产品默认规则集 + auto-block 行为 |
 | level-normal / level-strict | block / PL2 / threshold 40 / `level` 二档 | 拦截级别对比（报告 §9）：Strict 装配 strict-only 签名、收紧托管阈值并激活 PL3；插件段可配 `stacks` 按后端技术栈收窄签名加载 |
+| spot-monitor-sqli / spot-monitor-java | block / PL2 / `monitor_categories = ["sqli"]` 或 `monitor_stacks = ["java"]` | 分类监听降级：命中名单的检测转 Monitor，其余照常 Block |
+| spot-advanced | block / PL2 / `advanced_mode = true` | 站点级高级模式 = Strict 级别 + body 深度检测（对照 level-strict-body） |
