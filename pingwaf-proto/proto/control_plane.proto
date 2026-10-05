@@ -307,6 +307,13 @@ message WafConfig {
 
   // Anomaly scoring
   uint32 anomaly_threshold = 40;
+
+  // Site-level posture merged from the `waf_settings` row: advanced mode
+  // (strict level + body deep inspection) and monitor-only downgrades.
+  // Empty/false = enforce everything at the normal level (the default).
+  bool advanced_mode = 41;
+  repeated string monitor_categories = 42;  // "sqli"…"ssti"; unknown ignored
+  repeated string monitor_stacks = 43;      // "java"|"php"|"python"|"node"
 }
 
 enum WafMode {

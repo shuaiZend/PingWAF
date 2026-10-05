@@ -33,7 +33,7 @@ use crate::models::{
     geo_rules, ip_access_rules, ip_group_sites, ip_groups, mode,
     mtls_client_certificate, rate_limit_rules, rewrite_rules, rule,
     rule_groups, site, site_basic_auth, site_certificates, site_routes,
-    site_ssl, site_status, site_upstream_pools, site_upstreams,
+    site_ssl, site_status, site_upstream_pools, site_upstreams, waf_settings,
 };
 use crate::pki::mtls::normalise_fingerprint;
 
@@ -323,6 +323,16 @@ async fn load_challenge_settings(
 ) -> Result<Option<challenge_settings::Model>, sea_orm::DbErr> {
     challenge_settings::Entity::find()
         .filter(challenge_settings::Column::SiteId.eq(site_id))
+        .one(db)
+        .await
+}
+
+async fn load_waf_settings(
+    db: &DatabaseConnection,
+    site_id: Uuid,
+) -> Result<Option<waf_settings::Model>, sea_orm::DbErr> {
+    waf_settings::Entity::find()
+        .filter(waf_settings::Column::SiteId.eq(site_id))
         .one(db)
         .await
 }
@@ -640,10 +650,13 @@ fn routes_to_proto(
         .collect()
 }
 
-/// Derives the site-wide WAF switches from the rules that are actually enabled.
+/// Derives the site-wide WAF switches from the rules that are actually enabled,
+/// merged with the site's `waf_settings` posture row when present. A missing
+/// row keeps the historical behavior: everything enforced at the normal level.
 fn waf_config_to_proto(
     rules: &[WafRule],
     groups: &[rule_groups::Model],
+    settings: Option<&waf_settings::Model>,
 ) -> WafConfig {
     let active: Vec<&WafRule> = rules.iter().filter(|r| r.enabled).collect();
 
@@ -667,8 +680,27 @@ fn waf_config_to_proto(
     let any_group_enabled =
         groups.is_empty() || groups.iter().any(|group| group.enabled);
 
+    let (advanced_mode, monitor_categories, monitor_stacks) = settings
+        .map(|s| {
+            (
+                s.advanced_mode,
+                s.monitor_categories.clone(),
+                s.monitor_stacks.clone(),
+            )
+        })
+        .unwrap_or_else(|| (false, Vec::new(), Vec::new()));
+
+    // Advanced mode (strict + body inspection) and monitor downgrades are
+    // meaningful only with the WAF on; a site with no custom rules but an
+    // explicit posture still gets the managed ruleset.
+    let enabled = (!active.is_empty()
+        || advanced_mode
+        || !monitor_categories.is_empty()
+        || !monitor_stacks.is_empty())
+        && any_group_enabled;
+
     WafConfig {
-        enabled: !active.is_empty() && any_group_enabled,
+        enabled,
         mode,
         // Paranoia level is derived from the highest severity in use (1-5 maps
         // onto the 1-4 range the protocol allows).
@@ -690,6 +722,9 @@ fn waf_config_to_proto(
         ml_model_path: String::new(),
         ml_threshold: 0.0,
         anomaly_threshold: 0,
+        advanced_mode,
+        monitor_categories,
+        monitor_stacks,
     }
 }
 
@@ -954,6 +989,7 @@ pub async fn build_rule_bundle(
     let referenced_groups = load_referenced_groups(db, &ip_rules).await?;
     let geo = load_geo_rules(db, site_row.id).await?;
     let challenge = load_challenge_settings(db, site_row.id).await?;
+    let waf_settings = load_waf_settings(db, site_row.id).await?;
     let basic_auth = load_basic_auth(db, site_row.id).await?;
     let rewrites = load_rewrite_rules(db, site_row.id).await?;
     let err_pages = load_error_pages(db).await?;
@@ -975,7 +1011,11 @@ pub async fn build_rule_bundle(
         // Filled in below, once every other field is final.
         config_hash: String::new(),
         updated_at: to_timestamp(site_row.updated_at),
-        waf: Some(waf_config_to_proto(&custom_rules, &groups)),
+        waf: Some(waf_config_to_proto(
+            &custom_rules,
+            &groups,
+            waf_settings.as_ref(),
+        )),
         rate_limit_rules: rate_limits.iter().map(rate_limit_to_proto).collect(),
         ip_access_rules: ip_rules
             .iter()
@@ -1159,22 +1199,91 @@ mod tests {
             updated_at: Utc::now(),
         };
         let monitoring = vec![rule_to_proto(&base)];
-        let config = waf_config_to_proto(&monitoring, &[]);
+        let config = waf_config_to_proto(&monitoring, &[], None);
         assert!(config.enabled);
         assert_eq!(config.mode, WAF_MODE_MONITOR);
         assert!(config.sqli_detection);
         assert_eq!(config.paranoia_level, 3);
+        assert!(!config.advanced_mode);
+        assert!(config.monitor_categories.is_empty());
+        assert!(config.monitor_stacks.is_empty());
 
         let mut blocking = base.clone();
         blocking.mode = mode::BLOCK.into();
-        let config = waf_config_to_proto(&[rule_to_proto(&blocking)], &[]);
+        let config =
+            waf_config_to_proto(&[rule_to_proto(&blocking)], &[], None);
         assert_eq!(config.mode, WAF_MODE_BLOCK);
 
         let mut disabled = base.clone();
         disabled.enabled = false;
-        let config = waf_config_to_proto(&[rule_to_proto(&disabled)], &[]);
+        let config =
+            waf_config_to_proto(&[rule_to_proto(&disabled)], &[], None);
         assert!(!config.enabled);
         assert_eq!(config.mode, WAF_MODE_OFF);
+    }
+
+    fn waf_settings_row(
+        site_id: Uuid,
+        advanced_mode: bool,
+        categories: Vec<String>,
+        stacks: Vec<String>,
+    ) -> waf_settings::Model {
+        waf_settings::Model {
+            id: Uuid::new_v4(),
+            site_id,
+            advanced_mode,
+            monitor_categories: categories,
+            monitor_stacks: stacks,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn waf_config_merges_site_settings() {
+        let base = rule::Model {
+            id: Uuid::new_v4(),
+            group_id: None,
+            site_id: Uuid::nil(),
+            name: "r".into(),
+            description: None,
+            expression: "true".into(),
+            action: action::BLOCK.into(),
+            severity: 2,
+            tags: vec!["sql-injection".into()],
+            enabled: true,
+            mode: mode::MONITOR.into(),
+            priority: 0,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let rules = vec![rule_to_proto(&base)];
+
+        // A lone advanced-mode switch must still yield an enabled config so
+        // the data plane spins up the strict managed engine.
+        let advanced =
+            waf_settings_row(Uuid::nil(), true, Vec::new(), Vec::new());
+        let config = waf_config_to_proto(&rules, &[], Some(&advanced));
+        assert!(config.enabled);
+        assert!(config.advanced_mode);
+
+        // Monitor lists flow through verbatim; the data plane ignores
+        // unknown names.
+        let monitored = waf_settings_row(
+            Uuid::nil(),
+            false,
+            vec!["sqli".into(), "ssti".into()],
+            vec!["java".into()],
+        );
+        let config = waf_config_to_proto(&rules, &[], Some(&monitored));
+        assert!(config.enabled);
+        assert!(!config.advanced_mode);
+        assert_eq!(config.monitor_categories, vec!["sqli", "ssti"]);
+        assert_eq!(config.monitor_stacks, vec!["java"]);
+
+        // No rules and no settings row: the pre-existing disabled default.
+        let config = waf_config_to_proto(&[], &[], None);
+        assert!(!config.enabled);
     }
 
     fn pool_model(

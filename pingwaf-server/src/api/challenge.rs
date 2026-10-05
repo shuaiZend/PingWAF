@@ -100,6 +100,13 @@ async fn update_challenge(
     }
     if let Some(uam) = payload.under_attack_mode {
         active.under_attack_mode = Set(uam);
+        // Under-attack mode is meaningless without the challenge gate: the
+        // engine short-circuits to Pass when `enabled` is false, so turning
+        // the banner on forces the gate on. Turning it off leaves `enabled`
+        // alone — the operator may still want plain CC protection.
+        if uam {
+            active.enabled = Set(true);
+        }
     }
     if let Some(level) = payload.default_level {
         if !challenge_level::is_valid(&level) {
