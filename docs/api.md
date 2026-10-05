@@ -280,7 +280,7 @@ Build metadata.
 ```json
 {
   "name": "pingwaf-server",
-  "version": "0.19.0",
+  "version": "0.20.0",
   "api": "/api/v1",
   "registration_open": true
 }
@@ -964,7 +964,7 @@ List registered agents.
       "site_domain": "example.com",
       "hostname": "edge-01",
       "ip_address": "10.0.1.5",
-      "version": "0.19.0",
+      "version": "0.20.0",
       "os_info": "Linux 6.1.0",
       "cpu_cores": 4,
       "memory_bytes": 8589934592,
