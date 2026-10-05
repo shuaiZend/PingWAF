@@ -817,6 +817,16 @@ fn builtin_patterns() -> Vec<SignaturePattern> {
             "LDAP filter injection break",
             "*)((|",
         );
+        // PHP-CGI argument injection (CVE-2024-4577 family): `-d
+        // allow_url_include=on` on a CGI route re-enables remote code
+        // inclusion; the ini flag never appears in benign request input.
+        push(
+            "CI-090",
+            AttackCategory::CommandInjection,
+            5,
+            "PHP-CGI ini override flag",
+            "allow_url_include",
+        );
         // JSFuck / Harley-Davidson style pure-symbol JS: the prefix
         // `[(+{}+[])` only occurs inside obfuscated execution payloads.
         push(
@@ -1424,6 +1434,16 @@ fn builtin_patterns() -> Vec<SignaturePattern> {
             5,
             "Oracle dbms_pipe time-based blind",
             "dbms_pipe.receive_message",
+        );
+        // MySQL error-based exfiltration through the diagnostic XML
+        // function; the call with a concat argument is the standard POC
+        // core (Drupal form-array key injection and friends).
+        push(
+            "SQL-027",
+            AttackCategory::SqlInjection,
+            5,
+            "updatexml error-based exfiltration",
+            "updatexml(",
         );
 
         // ---- XSS (literal needles; detect_xss catches structured payloads) ----
@@ -2651,6 +2671,20 @@ pub fn xss_markup_shaped(input: &str) -> bool {
         || SCRIPT_TAG_COMPACT.is_match(input)
         || XSS_EVENT_HANDLER.is_match(input)
         || XSS_JS_URI.is_match(input)
+}
+
+/// A tautology probe hidden inside one URL path segment
+/// (`/api/products/123 and 1=1/reviews`). libinjection skips Path as a
+/// source (paths are stored-URL syntax, not attacker-typed strings), so
+/// segments are checked individually with the same ≤32B prose bound the
+/// value gate applies — a probe segment is tiny, quoted prose is long.
+pub fn path_tautology_segment(path: &str) -> bool {
+    path.split('/').any(|seg| {
+        (5..=32).contains(&seg.len()) && {
+            let (is_sqli, fp) = detect_sqli(seg);
+            is_sqli && fp.contains("tautology")
+        }
+    })
 }
 
 static CRLF_HEADER_SHAPE: Lazy<Regex> =

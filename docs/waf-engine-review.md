@@ -163,6 +163,17 @@ post11 全量实测（33877 样本）：四配置**全部双向改善**——Nor
 
 post12 全量实测（33877 样本）：四配置拦截 **+21~+28**（P7 为八轮中单轮增益最大）、误报全部持平零新增——Normal 341→**366**，Normal+body 399→**426**，Strict 447→**468**，Strict+body 531→**559**（80.7%→**85.0%**）。P7 三类修复分别承接独立漏报族：b64 外层门放宽承接 JSON 成员内短载荷、10 条 needle 承接 PHP/ThinkPHP/DedeCMS/LDAP/Tomcat/Oracle/Atlassian 各 POC 路由、markup 豁免承接 Referer 反射事件处理器。
 
+### P8 第九轮：零信号残余的四个确定性形态——已落地 ✅
+
+post11 漏报经 P7 后仍开放 84 条（44 Pass / 37 Monitor / 2 链路 / 1 Challenge），Pass 批量抽查定位出四个引擎结构性缺口：
+
+32. **引号包裹 JSON 解包** ✅：`id='{"id":"L2V0Yy9wYXNzd2Q="}'` 的单引号外壳是 SQL/字符串拼接产物（后端会剥壳再解析），`looks_like_json` 首字符检查失败使 JSON 成员整体不可见。`unpack_string_json` 入口增加一层同引号剥壳重试，七个调用点（query/form/JSON 成员）共享同一入口全覆盖。
+33. **needle ×2** ✅：SQL-027 `updatexml(`（MySQL 报错注入外带核心，Drupal form 数组参数名注入形态 `name[0 or updatexml(…)%23]`——key 扫描面 P6 已就位，缺的只是 needle）、CI-090 `allow_url_include`（PHP-CGI ini 覆盖 CVE-2024-4577 族，`?-d+allow_url_include%3Don` 经 key 扫描命中），全部 sev5。
+34. **path 段 tautology** ✅：libinjection 源门排除 Path（路径是存储 URL 语法），`/api/products/123 and 1=1/reviews` 整体 34B 又超 tautology 的 32B prose 门。`path_tautology_segment` 对 `/` 分段独立跑 `detect_sqli`（段 5~32B 与 prose 门语义一致——探测段极短、散文引用极长），命中走 sev5 critical。
+35. **`\u0006` 控制符嵌套与原始 `%ac%ed%00%05` 魔数暂缓**：`\u0006`-分隔的多层编码数组（17/12 等）与 URL 编码原始序列化字节（70/62）需要解码器结构性扩展，收益单样本成本高，归 P9+。
+
+回归：175 单测全绿（`p8_zero_signal_forms_block` 覆盖四形态 + prose slug 放行负样本）；658 黑样本 triage 571→**575**（+4 零回退，四个新形态各承接一条）；fp46 白样本 Block 20 持平零新增。post13 全量实测：见《waf-benchmark-report》§17 P8 行。
+
 ### 收益矩阵（基于 bench 归因的保守估算）
 
 | 方案 | 拦截率提升 | 误报影响 | 工作量 |

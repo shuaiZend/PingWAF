@@ -26,9 +26,10 @@ use crate::rules::expression::{evaluate, EvalContext};
 use crate::rules::managed::default_managed_rules;
 use crate::rules::signatures::{
     crlf_header_injection_shaped, detect_deser_shape, detect_expr_injection,
-    detect_js_call, detect_sqli, detect_xss, sqli_into_file_statement_shaped,
-    sqli_union_statement_shaped, xss_markup_shaped, xss_script_tag_shaped,
-    xss_script_uri_html_shaped, AttackCategory, SignatureEngine, SignatureHit,
+    detect_js_call, detect_sqli, detect_xss, path_tautology_segment,
+    sqli_into_file_statement_shaped, sqli_union_statement_shaped,
+    xss_markup_shaped, xss_script_tag_shaped, xss_script_uri_html_shaped,
+    AttackCategory, SignatureEngine, SignatureHit,
 };
 use crate::rules::{CompiledRule, RuleAction};
 use crate::score::{AnomalyScorer, ScoreBreakdown, ScoreClass};
@@ -490,6 +491,22 @@ impl WafEngine {
             // libinjection-style detectors on user-controlled values only.
             // Path/method/header-name are not attacker-typed strings the same
             // way query / body / cookie values are.
+            if value.source == ValueSource::Path
+                && path_tautology_segment(needle)
+            {
+                critical_hit = true;
+                self.scorer.add_category_hit(
+                    &mut breakdown,
+                    AttackCategory::SqlInjection,
+                    5,
+                );
+                recs.push(HitRec::Lib {
+                    kind: "libinjection-sqli",
+                    fingerprint: "path-segment-tautology".to_string(),
+                    source: value.source.as_str(),
+                    name: &value.name,
+                });
+            }
             if !matches!(
                 value.source,
                 ValueSource::QueryParam
@@ -2199,6 +2216,47 @@ mod tests {
         ));
         let v = e.inspect(&r);
         assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn p8_zero_signal_forms_block() {
+        // Deterministic coverage for post11 misses still open after P7;
+        // each case maps to one attribution family.
+        let e = engine();
+        // Quoted-JSON wrapper: the single-quote shell is a SQL/string
+        // concatenation artifact; the inner b64 member must unpack (1a/f9).
+        let v = e.inspect(&req(
+            "GET",
+            "/vulnerabilities/sqli/",
+            "id=%27%7B%22id%22%3A%22L2V0Yy9wYXNzd2Q%3D%22%7D%27&Submit=Submit",
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+        // Error-based exfiltration injected through a form-array key
+        // (Drupal-style parameter name) (73/2c).
+        let v = e.inspect(&req(
+            "POST",
+            "/?q=node&destination=node",
+            "pass=lol&op=Log+in&name%5B0+or+updatexml%280%2Cconcat%280xa%2Cuser%28%29%29%2C0%29%23%5D=bob",
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+        // PHP-CGI ini override on the exploit route (62/ce).
+        let v = e.inspect(&req(
+            "GET",
+            "/cgi-bin/php5",
+            "-d+allow_url_include%3Don+-d+safe_mode%3Doff",
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+        // Tautology probe inside a path segment (3f/aa) — a prose slug does
+        // not carry `and 1=1` between slashes.
+        let v = e.inspect(&req(
+            "GET",
+            "/api/products/123%20and%201=1/reviews?page=2&size=10&sort=time",
+            "",
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+        let v =
+            e.inspect(&req("GET", "/blog/what-is-1-and-1-in-logic/notes", ""));
+        assert_eq!(v.action, WafAction::Pass, "details: {}", v.details);
     }
 
     #[test]
