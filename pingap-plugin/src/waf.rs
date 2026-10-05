@@ -61,8 +61,9 @@ use pingwaf_waf::rules::{
     EvalContext, Expression, evaluate as evaluate_expression, parse_expression,
 };
 use pingwaf_waf::{
-    CompiledRule, RequestData, RuleAction, ScoreBreakdown, StackSet, WafAction,
-    WafEngine, WafEngineConfig, WafLevel, WafMode, WafVerdict,
+    CategorySet, CompiledRule, RequestData, RuleAction, ScoreBreakdown,
+    StackSet, WafAction, WafEngine, WafEngineConfig, WafLevel, WafMode,
+    WafVerdict,
 };
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -277,6 +278,9 @@ struct SiteContext {
     /// WAF, IP/geo rules, bot protection and rate limiting stop enforcing.
     /// Access control (mTLS, basic auth, a paused site) is never downgraded.
     observation_mode: bool,
+    /// Site-level deep body inspection (advanced mode): inspect request
+    /// bodies even when the plugin-level `inspect_body` switch is off.
+    inspect_body: bool,
 }
 
 impl SiteContext {
@@ -316,6 +320,9 @@ impl SiteContext {
                 .unwrap_or_default(),
             paused: site_rules.is_paused(),
             observation_mode: site_rules.observation_mode,
+            inspect_body: waf_cfg
+                .filter(|cfg| cfg.enabled)
+                .is_some_and(|cfg| cfg.advanced_mode),
         }
     }
 
@@ -1678,6 +1685,34 @@ fn action_str(action: &WafAction) -> &'static str {
     }
 }
 
+/// Parses a site monitor list for attack categories; unknown names are
+/// ignored with a warning so a stale control-plane value can never silently
+/// re-enable enforcement of a category the operator turned off.
+fn parse_monitor_categories(names: &[String]) -> CategorySet {
+    let mut set = CategorySet::EMPTY;
+    for name in names {
+        match CategorySet::parse_name(name) {
+            Some(category) => set = set.union(category),
+            None => warn!(name = %name, "unknown monitor category; ignoring"),
+        }
+    }
+    set
+}
+
+/// Parses a site monitor list for backend stacks. Starts from the empty set
+/// (unlike [`StackSet::from_names`], which always includes GENERIC) because
+/// language-agnostic detection must not be downgradable via stack switches.
+fn parse_monitor_stacks(names: &[String]) -> StackSet {
+    let mut set = StackSet::EMPTY;
+    for name in names {
+        match StackSet::parse_name(name) {
+            Some(stack) => set = set.union(stack),
+            None => warn!(name = %name, "unknown monitor stack; ignoring"),
+        }
+    }
+    set
+}
+
 /// Build a [`WafEngine`] from control-plane site WAF config.
 fn build_site_engine(cfg: &CacheWafConfig) -> WafEngine {
     let mode = match cfg.mode {
@@ -1720,8 +1755,16 @@ fn build_site_engine(cfg: &CacheWafConfig) -> WafEngine {
 
     let engine_config = WafEngineConfig {
         mode,
-        level: WafLevel::default(),
+        // Advanced mode turns on the strict rule set; a site without the
+        // switch keeps the default level.
+        level: if cfg.advanced_mode {
+            WafLevel::Strict
+        } else {
+            WafLevel::default()
+        },
         stacks: StackSet::default(),
+        monitor_categories: parse_monitor_categories(&cfg.monitor_categories),
+        monitor_stacks: parse_monitor_stacks(&cfg.monitor_stacks),
         threshold: if cfg.anomaly_threshold > 0 {
             cfg.anomaly_threshold
         } else {
@@ -1955,6 +1998,12 @@ impl TryFrom<&PluginConf> for WafPlugin {
         let anomaly_threshold =
             get_int_conf_or_default(value, "anomaly_threshold", 40) as u32;
         let detections = get_str_slice_conf(value, "detections");
+        let monitor_categories = parse_monitor_categories(&get_str_slice_conf(
+            value,
+            "monitor_categories",
+        ));
+        let monitor_stacks =
+            parse_monitor_stacks(&get_str_slice_conf(value, "monitor_stacks"));
         let ml_enabled = get_bool_conf(value, "ml_enabled");
         let ml_threshold = value
             .get("ml_threshold")
@@ -1985,6 +2034,8 @@ impl TryFrom<&PluginConf> for WafPlugin {
             mode,
             level,
             stacks,
+            monitor_categories,
+            monitor_stacks,
             threshold: anomaly_threshold,
             paranoia_level,
             max_decode_layers: 3,
@@ -2117,10 +2168,16 @@ impl Plugin for WafPlugin {
         );
         let mut log_body_prefix = LogBodyPrefix::new(body_limit);
         let mut inspect_buf = BytesMut::new();
+        // Advanced-mode sites ask for body inspection even when the plugin
+        // switch is off; the plugin-level switch stays authoritative for the
+        // truncation cap.
+        let site_inspect_body =
+            context.as_ref().is_some_and(|site| site.inspect_body);
+        let should_inspect = self.inspect_body || site_inspect_body;
         // Log capture only matters when an agent consumes it; body inspection
         // works standalone — a static deployment blocks POST payloads just
         // the same.
-        if (agent.is_some() && body_limit > 0 || self.inspect_body)
+        if (agent.is_some() && body_limit > 0 || should_inspect)
             && !(method == "POST" && path == VERIFY_ENDPOINT)
         {
             let mut interrupted = false;
@@ -2130,17 +2187,16 @@ impl Plugin for WafPlugin {
                 };
                 let chunk = chunk.as_ref();
                 log_body_prefix.absorb(chunk);
-                if self.inspect_body {
+                if should_inspect {
                     inspect_buf.put(chunk);
                 }
                 // Inspection needs the prefix; the log needs its own. Stop
                 // once neither can learn anything from more bytes.
-                if self.inspect_body && inspect_buf.len() >= self.max_body_size
-                {
+                if should_inspect && inspect_buf.len() >= self.max_body_size {
                     interrupted = true;
                     break;
                 }
-                if !self.inspect_body && log_body_prefix.limit_hit() {
+                if !should_inspect && log_body_prefix.limit_hit() {
                     interrupted = true;
                     break;
                 }
@@ -2518,7 +2574,7 @@ impl Plugin for WafPlugin {
         // ── Inspect ──
         // The body (if any) was already read during log capture; when body
         // inspection is enabled the engine sees the same prefix.
-        request_data.body = if self.inspect_body && !inspect_buf.is_empty() {
+        request_data.body = if should_inspect && !inspect_buf.is_empty() {
             Some(inspect_buf.to_vec())
         } else {
             None
@@ -2790,6 +2846,103 @@ ml_threshold = 0.75
         assert!(plugin.ml_enabled);
         assert_eq!(5, plugin.detections.len());
         assert_eq!(PluginStep::EarlyRequest, plugin.plugin_step);
+    }
+
+    fn cache_waf_config(
+        advanced_mode: bool,
+        monitor_categories: Vec<String>,
+        monitor_stacks: Vec<String>,
+    ) -> CacheWafConfig {
+        CacheWafConfig {
+            enabled: true,
+            mode: CacheWafMode::Block,
+            paranoia_level: 2,
+            sqli_detection: true,
+            xss_detection: true,
+            rce_detection: true,
+            lfi_detection: true,
+            ssrf_detection: true,
+            bot_detection: true,
+            custom_rules: Vec::new(),
+            managed_overrides: Vec::new(),
+            ml_enabled: false,
+            ml_model_path: String::new(),
+            ml_threshold: 0.0,
+            anomaly_threshold: 0,
+            advanced_mode,
+            monitor_categories,
+            monitor_stacks,
+        }
+    }
+
+    fn probe(query: &str) -> RequestData {
+        RequestData {
+            method: "GET".into(),
+            path: "/page".into(),
+            query: query.into(),
+            headers: vec![
+                ("User-Agent".into(), "Mozilla/5.0".into()),
+                ("Host".into(), "bench.example.net".into()),
+            ],
+            body: None,
+            client_ip: "203.0.113.10".into(),
+            country_code: None,
+            scheme: "https".into(),
+            protocol: "HTTP/1.1".into(),
+        }
+    }
+
+    #[test]
+    fn site_engine_advanced_mode_enables_strict_rules() {
+        // The freemarker EL probe only fires at the strict level, so a block
+        // on it proves the site switch reached the engine level knob.
+        let query =
+            r#"tpl=${"freemarker.template.utility.Execute"?new()("id")}"#;
+        let plain =
+            build_site_engine(&cache_waf_config(false, Vec::new(), Vec::new()));
+        let advanced =
+            build_site_engine(&cache_waf_config(true, Vec::new(), Vec::new()));
+        assert_ne!(
+            plain.inspect(&probe(query)).action,
+            WafAction::Block,
+            "details: {}",
+            plain.inspect(&probe(query)).details
+        );
+        assert_eq!(advanced.inspect(&probe(query)).action, WafAction::Block);
+    }
+
+    #[test]
+    fn site_engine_monitor_categories_downgrade_to_monitor() {
+        let engine = build_site_engine(&cache_waf_config(
+            false,
+            vec!["sqli".into()],
+            Vec::new(),
+        ));
+        let v = engine.inspect(&probe("id=1' OR 1=1 --"));
+        assert_eq!(v.action, WafAction::Monitor, "details: {}", v.details);
+    }
+
+    #[test]
+    fn site_engine_toml_monitor_keys_flow_into_the_engine() {
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(
+                r###"
+mode = "block"
+monitor_categories = ["sqli", "bogus"]
+monitor_stacks = ["java"]
+"###,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let engine = plugin.engine.read().unwrap_or_else(|e| e.into_inner());
+        let sqli = engine.inspect(&probe("id=1' OR 1=1 --"));
+        assert_eq!(
+            sqli.action,
+            WafAction::Monitor,
+            "details: {}",
+            sqli.details
+        );
     }
 
     #[tokio::test]
