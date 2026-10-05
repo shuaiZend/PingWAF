@@ -27,10 +27,11 @@ use crate::rules::managed::default_managed_rules;
 use crate::rules::signatures::{
     ci_backtick_interleaved, crlf_header_injection_shaped, detect_deser_shape,
     detect_expr_injection, detect_js_call, detect_sqli, detect_xss,
-    path_tautology_segment, pt_remote_backslash_include,
-    sqli_into_file_statement_shaped, sqli_union_statement_shaped,
-    ssrf_protocol_smuggling, xss_markup_shaped, xss_script_tag_shaped,
-    xss_script_uri_html_shaped, AttackCategory, SignatureEngine, SignatureHit,
+    path_tautology_segment, pt_double_exec_extension,
+    pt_remote_backslash_include, sqli_into_file_statement_shaped,
+    sqli_union_statement_shaped, ssrf_protocol_smuggling, xss_markup_shaped,
+    xss_script_tag_shaped, xss_script_uri_html_shaped, AttackCategory,
+    SignatureEngine, SignatureHit,
 };
 use crate::rules::{CompiledRule, RuleAction};
 use crate::score::{AnomalyScorer, ScoreBreakdown, ScoreClass};
@@ -523,6 +524,25 @@ impl WafEngine {
                 recs.push(HitRec::Lib {
                     kind: "ci-shape",
                     fingerprint: "path-backticks".to_string(),
+                    source: value.source.as_str(),
+                    name: &value.name,
+                });
+            }
+            // Double executable extension at the path tail
+            // (`/uploadfiles/apache.php.jpeg`): multi-extension parser abuse
+            // prepping a webshell — the image suffix is camouflage.
+            if value.source == ValueSource::Path
+                && pt_double_exec_extension(&value.decoded)
+            {
+                critical_hit = true;
+                self.scorer.add_category_hit(
+                    &mut breakdown,
+                    AttackCategory::PathTraversal,
+                    5,
+                );
+                recs.push(HitRec::Lib {
+                    kind: "pt-shape",
+                    fingerprint: "double-exec-extension".to_string(),
                     source: value.source.as_str(),
                     name: &value.name,
                 });
@@ -2483,6 +2503,100 @@ mod tests {
             "base=ldap%3A%2F%2Fds.example.com%2Fdc%3Dcorp",
         ));
         assert_ne!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn key_only_b64_sqli_and_double_exec_extension_block() {
+        // Key-only b64 onion (86/bf): the entire SQLi payload rides in a
+        // 564B parameter name — base64 wrapping `%2528select extractvalue…`,
+        // which is itself double percent encoding. The key must clear the
+        // old 512-byte scan gate and ride the same b64 unwrap as values.
+        let e = strict_engine();
+        let v = e.inspect(&req(
+            "GET",
+            "/",
+            // spellchecker:off — base64 wire text, not prose
+            concat!(
+                "JTI1MjhzZWxlY3QlMjUyMGV4dHJhY3R2YWx1ZSUyNTI4eG1sdHlwZSUyNTI4",
+                "JTI1MjclMjUzQyUyNTNGeG1sJTI1MjB2ZXJzaW9uJTI1M0QlMjUyMjEuMCUy",
+                "NTIyJTI1MjBlbmNvZGluZyUyNTNEJTI1MjJVVEYtOCUyNTIyJTI1M0YlMjUz",
+                "RSUyNTNDJTI1MjFET0NUWVBFJTI1MjByb290JTI1MjAlMjU1QiUyNTIwJTI1",
+                "M0MlMjUyMUVOVElUWSUyNTIwJTI1MjUlMjUyMHZhcG90JTI1MjBTWVNURU0l",
+                "MjUyMCUyNTIyJTI1MjclMjU3QyUyNTdDJTI1MjhzZWxlY3QlMjUyMHZlcnNp",
+                "b24lMjUyMGZyb20lMjUyMHYlMjUyNGluc3RhbmNlJTI1MjklMjU3QyUyNTdD",
+                "JTI1MjdCdXJwJTI1MkYlMjUyMiUyNTNFJTI1MjV2YXBvdCUyNTNCJTI1NUQl",
+                "MjUzRSUyNTI3JTI1MjklMjUyQyUyNTI3JTI1MkZsJTI1MjclMjUyOSUyNTIw",
+                "ZnJvbSUyNTIwZHVhbCUyNTI5"
+            ),
+            // spellchecker:on
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+        // image suffix camouflaging the executable handler.
+        let v = e.inspect(&req("GET", "/uploadfiles/apache.php.jpeg", ""));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+
+        // Form-array parameter names (`subPayType[deduct][]`, the Tencent
+        // billing family): bare chained indexes on the new form-key scan
+        // surface must not ride the js-call shape.
+        let e = strict_engine();
+        let mut r = req("POST", "/cgi/v2/transactions/getListV2", "");
+        r.headers.push((
+            "Content-Type".into(),
+            "application/x-www-form-urlencoded".into(),
+        ));
+        r.body = Some(
+            b"subPayType%5Bdeduct%5D%5B%5D=panshi&subPayType%5Breturn%5D%5B%5D=trade&payType%5B%5D=all".to_vec(),
+        );
+        let v = e.inspect(&r);
+        assert_ne!(v.action, WafAction::Block, "details: {}", v.details);
+
+        // Quoted bracket-chain riding as a form key stays blocked
+        // (`this['constructor']['constructor']` prototype-pollution prep).
+        let mut r = req("POST", "/api/render", "");
+        r.headers.push((
+            "Content-Type".into(),
+            "application/x-www-form-urlencoded".into(),
+        ));
+        r.body = Some(
+            b"this%5B%27constructor%27%5D%5B%27constructor%27%5D=payload"
+                .to_vec(),
+        );
+        let v = e.inspect(&r);
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+
+        // Ordinary asset paths stay untouched.
+        let v = e.inspect(&req("GET", "/static/app.min.js", ""));
+        assert_ne!(v.action, WafAction::Block, "details: {}", v.details);
+        let v = e.inspect(&req("GET", "/assets/logo.png", ""));
+        assert_ne!(v.action, WafAction::Block, "details: {}", v.details);
+        // webpack DLL bundle naming (`vendor.dll.js`) is standard build
+        // output, not an upload-bypass tail — desktop-binary extensions stay
+        // out of the dangerous set.
+        let v = e.inspect(&req(
+            "GET",
+            "/store/activity/public/vendor.fee62103.dll.js",
+            "",
+        ));
+        assert_ne!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn drupal_render_key_form_rce_blocks() {
+        // Drupalgeddon render-array keys (`mail[#post_render][]=exec`,
+        // ff/fb): the `#`-prefixed property key is the attack carrier, not
+        // the bare bracket chain the old js-call shape happened to catch.
+        let e = strict_engine();
+        let mut r = req("POST", "/user/register?ajax_form=1", "");
+        r.headers.push((
+            "Content-Type".into(),
+            "application/x-www-form-urlencoded".into(),
+        ));
+        r.body = Some(
+            b"form_id=user_register_form&mail%5B%23post_render%5D%5B%5D=exec&mail%5B%23markup%5D=id"
+                .to_vec(),
+        );
+        let v = e.inspect(&r);
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
     }
 
     #[test]

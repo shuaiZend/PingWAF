@@ -570,7 +570,36 @@ P9 输入两路：post13 strict 漏报 95 条全量归因 + P8 遗留 Monitor 22
 - fp46 白样本 triage：Block 20 与 P8 集合完全一致，**零新增**。
 - 性能守恒：b64 门是常量比较；控制符替换仅在严格 parse 失败 + `looks_like_json` 命中后单次重试；三个新正则均在 prefilter/组合条件后激活；ssrf 走私是两个 `contains`。
 
-## 19. 各版本拦截率/通过率对比总表
+## 19. P10 key 扫描面完整化 + 双扩展上传检测与实测（§18 之后的第十一轮）
+
+P10 输入：post14 strict+body 开放 79 条（76 passed + 3 protocol_reject；18 条无 Content-Length 的 POST/PUT 维持链路差异归档），61 条 triage 逐族归因后闭合两个确定性缺口：
+
+- **key 扫描面完整化**：P6 只覆盖了 query key——form key 完全不进扫描面（Drupal `name[0 or updatexml(…)]` 与 `mail[#post_render][]=exec` 两族全靠 key 走私）；key 解码只跑 percent（`\u0025…` 转义洋葱在 key 位置不可见）；512B 上限让一条 564B 的 key-only b64 SQLi（`%2528select extractvalue(…)` 双层 percent）滑过。修复：query/form key 统一走 `decode_value_form` 完整值链、form key 补独立 push、上限 1KB；`decode_value` 的 escape 还原补一轮有界 percent 复解。
+- **path 双扩展上传检测**：`/uploadfiles/apache.php.jpeg` 多扩展解析滥用（图片后缀伪装可执行 handler），path 尾锚定正则 + 普通资产路径负样本护栏。首轮正则曾把 `exe|dll|sh|bat` 列入危险扩展，post15 预览暴露 2 条 webpack DLL 命名（`vendor.dll.js`）FP 后收窄为服务端脚本族（php/asp/jsp/cgi 等），白样本语料预检零命中。
+- **form key 扫描面 × js-call 博弈 + Drupal render-key needle**：form key 进扫描面后，js-call 旧正则尾类 `[\[(]` 将 `subPayType[deduct][]` 裸双下标误判为链式调用（strict-body 预览 +3 FP，腾讯云账单族）；收紧为「尾真调用括号内容无关、尾链式下标要求引号段」。收紧放走了靠裸链误命中的 ff/fb（`mail[#post_render][]=exec`，Drupalgeddon 族），补 CI-091~095 五条 sev5 needle（`#post_render/#pre_render/#lazy_builder/#markup/#elements`，白样本语料预检零命中）恢复拦截。
+
+实现细节见 `waf-engine-review.md` §5 P10 节（第 40~41 条）。
+
+### P10 实测（post15 全量回放，33877 样本）
+
+| 配置 | 拦截率 | 误报率 | 拦截 vs P9(post14) | 误报 vs P9(post14) |
+|---|---|---|---|---|
+| Normal | **57.1%（376/658）** | **0.02%（5）** | +3 | 持平（5） |
+| Normal + body | **67.6%（445/658）** | **0.04%（14）** | +5 | 持平（14） |
+| Strict | **72.8%（479/658）** | **0.02%（5）** | +4 | 持平（5） |
+| Strict + body | **88.9%（585/658）** | **0.07%（22）** | +6 | 持平（22） |
+
+**结果**：四配置零回退、误报全部持平零新增——与 triage 回归（Block 3→9）完全一致，strict+body 的 +6 即 triage 的六条新拦截（双扩展 ×2、key-only b64 ×2、Drupal form key RCE ×2）。normal/normal-body/strict 的增量来自 key-only b64 与双扩展（query/path 面）。strict+body 88.0%→**88.9%**，累计十一轮演进 63.8%→88.9%（+25.1pp）；主档（Normal+body）66.9%→**67.6%**。p95 静态 5ms / body ~3s¹（客户端固有），性能守恒。post15 预览期三轮 FP 事件（双扩展 `dll` 收窄、js-call 尾类收紧 + Drupal render-key needle 补位）全部闭环后才定稿本表，final 四配置 FP 与 P9 完全持平。
+
+### P10 回归验证
+
+- 183 单测全绿（+2 新测试：key-only b64 洋葱 + \u 转义 key、key-only b64 SQLi Block + 双扩展 Block/白形态负样本；含 form key 数组参数 js-call 负样本、引号链 key 正样本、Drupal render-key RCE Block）。
+- 61 条开放样本 triage：Block 3 → **9（+6，全部为真实攻击特征：Drupal form key RCE ×2、key-only b64 SQLi、转义洋葱、双扩展 ×2）**。
+- fp46 白样本 triage：Block 20 持平，**零新增**。
+- post15 预览三轮 FP 事件全部闭环：双扩展 `dll` 扩展收窄（`vendor.dll.js` ×2）、js-call 尾类收紧（`subPayType[deduct][]` ×3）+ Drupal render-key needle 恢复 ff/fb 拦截，样本 triage 复验判决正确，白样本语料全量预检无新命中面。
+- 性能守恒：key 链与值链共享同一套有界解码 pass（1KB/1024 上限、B64_MAX_VALUE_LEN/depth 门不变）；双扩展是单条尾锚定正则；escape 复解仅在输出含 `%` 时激活。
+
+## 20. 各版本拦截率/通过率对比总表
 
 黑样本 658 / 白样本 33219，严格口径（blocked = WAF 判决 403/503）。**通过率** = 黑样本未被拦截的比例（漏报面）；白样本通过率 = 100% − 误报率。
 
@@ -615,10 +644,14 @@ P9 输入两路：post13 strict 漏报 95 条全量归因 + P8 遗留 Monitor 22
 | P9 b64 门放宽+Monitor 升级 | Normal + body | **66.9%（440/658）** | 33.1% | **0.04%（14）** | **99.96%** | ~3s¹ |
 | P9 b64 门放宽+Monitor 升级 | Strict | **72.2%（475/658）** | 27.8% | **0.02%（5）** | **99.98%** | 4ms |
 | P9 b64 门放宽+Monitor 升级 | Strict + body | **88.0%（579/658）** | 12.0% | **0.07%（22）** | **99.93%** | ~3s¹ |
+| P10 key 扫描面+双扩展 | Normal | **57.1%（376/658）** | 42.9% | **0.02%（5）** | **99.98%** | 5ms |
+| P10 key 扫描面+双扩展 | Normal + body | **67.6%（445/658）** | 32.4% | **0.04%（14）** | **99.96%** | ~3s¹ |
+| P10 key 扫描面+双扩展 | Strict | **72.8%（479/658）** | 27.2% | **0.02%（5）** | **99.98%** | 5ms |
+| P10 key 扫描面+双扩展 | Strict + body | **88.9%（585/658）** | 11.1% | **0.07%（22）** | **99.93%** | ~3s¹ |
 
 ¹ p95 ≈3s 是回放客户端 `sendall` 大 body 与「上传中途拦截」的固有交互，非引擎开销（§10.2）。
 
-**主档结论（Normal + body，agent 模式推荐配置）**：P6 → P7 → P8 → P9 四轮连续把拦截率从 P5 的 59.1% 提到 **66.9%（+7.8pp）**，误报率稳定在 **0.04%（14 条）**。**四配置误报率连续六轮低于 0.2% 目标线**（P9：0.015%/0.042%/0.015%/0.066%）。累计十轮演进（v1→P0→P1→P2/P3→P4→P5→P6→P7→P8→P9）：Normal 静态档拦截率 33.1%→**56.7%**（+23.6pp）、误报率 0.17%→**0.015%**；Normal+body 口径自 P0 引入以来 38.1%→**66.9%**（+28.8pp）、误报 0.23%→**0.04%**。Strict+body 拦截率 63.8%→**88.0%**，误报 2.38%→**0.07%**（-770 条）。
+**主档结论（Normal + body，agent 模式推荐配置）**：P6 → P7 → P8 → P9 → P10 五轮连续把拦截率从 P5 的 59.1% 提到 **67.6%（+8.5pp）**，误报率稳定在 **0.04%（14 条）**。**四配置误报率连续七轮低于 0.2% 目标线**（P10：0.015%/0.042%/0.015%/0.066%）。累计十一轮演进（v1→P0→P1→P2/P3→P4→P5→P6→P7→P8→P9→P10）：Normal 静态档拦截率 33.1%→**57.1%**（+24.0pp）、误报率 0.17%→**0.015%**；Normal+body 口径自 P0 引入以来 38.1%→**67.6%**（+29.5pp）、误报 0.23%→**0.04%**。Strict+body 拦截率 63.8%→**88.9%**，误报 2.38%→**0.07%**（-770 条）。
 
 类目拦截率对比（黑样本）：
 
