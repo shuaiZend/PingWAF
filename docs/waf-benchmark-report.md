@@ -800,5 +800,22 @@ post18 遗留 REAL 面 4 条中最后一项可修候选 `ff/67`（S2-045 OGNL �
 
 **结论**：`ff/67` 与「无 Content-Length 的 POST」同级的部署形态伪影——pingora 的 RFC 合规解析行为本身就是防护的一环。可达性口径随之修正：伪影面 ~40 条（34 无 C-L + 3 protocol_reject + 2 SSRF 弱语义 + 1 fragment），**658 口径理论上限 618/658 = 93.9%**，等效口径 **617/618 = 99.8%**。真实不可修面仅剩 waf-ce 合成 XSS 洋葱 2 条 + 未授权 API 注定面 1 条。
 
+### P14 post20：站点级规则分级（0.20.0）零回归验证
+
+0.20.0 把 P12/P13 的 strict + body 深度检测能力暴露为站点级产品功能（规则分级）：`advanced_mode`（一键 Strict + inspect_body）、9 攻击分类监听降级、4 后端栈监听降级。引擎判决层改为双分数（blocking 子集 vs 全量 total），监听命中的分数只进 total 不进 blocking——**monitor 集空时 blocking 分数与旧实现逐位一致**。全量回放验证该等价性：
+
+| 配置 | 拦截率 | 误报率 | vs post19 |
+|---|---|---|---|
+| Normal | 60.2%（396/658） | 0.02%（5） | 逐位复现 |
+| Normal + body | 71.9%（473/658） | 0.04%（14） | 逐位复现 |
+| Strict | 76.0%（500/658） | 0.02%（5） | 逐位复现 |
+| Strict + body | 93.8%（617/658） | 0.06%（21） | 逐位复现 |
+
+四配置 33877 样本全量回放与 post19 逐条 diff：**gained 0 / lost 0**，FP 集合零新增零消失（5/14/5/21 逐条一致）——bench 零回归的实证口径。
+
+**spot 功能矩阵**（三份站点 conf 实测，socket 原样发样本）：`monitor_categories=["sqli"]` 站点 SQLi 黑样本 200、JNDI 照常 403；`monitor_stacks=["java"]` 站点 JNDI 200、SQLi 照常 403；`advanced_mode=true` 站点 strict-only 探针（Freemarker EL）403。验证后 127.0.0.1 被三实例各自 auto-block（0.19.0 起的 block verdict 自动封禁语义），良性请求 503 为预期链路。
+
+**验证轮修复**：spot 验证暴露 TOML 静态配置路径不解析 `advanced_mode` 键（仅控制面 WafConfig 路径生效，conf 里写了被静默忽略）——修复为 `advanced_mode ⇒ Strict + inspect_body`（`advanced_mode` 优先级高于显式 `level` 键，与 `inspect_body` 为 `||` 合并），补插件单测覆盖。四配置 bench 基线不受影响（TOML 基线 conf 不含该键）。
+
 
 
