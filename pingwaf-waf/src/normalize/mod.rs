@@ -662,8 +662,8 @@ fn expand_base64(
             // in JSON structure positions (stray CR between key and colon,
             // NUL before the closing brace) — a strict parse refuses those,
             // so replace them with spaces and retry once. Space keeps the
-            // token boundaries a plain delete would glue away (`selEct\n1`
-            // must not become `selEct1`).
+            // token boundaries a plain delete would glue away (`droP\n1`
+            // must not become `droP1`).
             if looks_like_json(&decoded) {
                 let had_control = decoded.chars().any(|c| c.is_ascii_control());
                 if had_control {
