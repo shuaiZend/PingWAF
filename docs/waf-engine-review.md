@@ -211,6 +211,14 @@ post11 漏报经 P7 后仍开放 84 条（44 Pass / 37 Monitor / 2 链路 / 1 Ch
 
 回归：189 单测全绿（新增 6：`b64_transport_control_chars_no_longer_split_sql_keywords`、`quoted_b64_run_inside_json_array_unwraps`、`python_chr_chain_blocks`、`utf7_and_alert1_probes_blocks`、`asp_one_liner_webshell_blocks`、`noncanonical_b64_waitfor_onion_blocks`）；a2/1f 全链路悬案（非 canonical 尾位 + 裸 waitfor 双断点）解开转 Block；10 条目标样本 triage 0→9 Block；全量 bench 见《waf-benchmark-report》§20 P11 行。
 
+### P12 第十三轮：Java 序列化魔数原始字节传输面——已落地 ✅
+
+输入：post16 strict+body 开放 53 条。逐条归因第一项落地：
+
+47. **Java 序列化魔数 query** ✅：`?s=%ac%ed%00%05%73%72…` 原始 ObjectStream 字节经 percent 传输——byte 还原解码器（非法 UTF-8 经 Latin-1 映射）早已把 `¬í\0\u{5}sr` 文本送进扫描面，**断点在 needle 形态**：hex-text needle `aced0005` 与 b64 transport needle `rO0AB` 都看不见这条 Latin-1 字符序列。修复：`DESER_JAVA_MAGIC` 正则（`\x{AC}\x{ED}\x{00}\x{05}sr`）入 `detect_deser_shape` 返回 `java-serialized-magic`——要求 magic 后随 `sr` 类描述符标记，把形态绑定到真实序列化流；`\u{ac}` contains 预滤保证非样本值零额外成本。Query 源非 weak → Strict critical Block / Normal sev4 计分（与 P8 b64 形态 ViewState 同层同权，互补覆盖同一魔数的两条传输面）。
+
+回归：191 单测全绿（新增 2：`detect_deser_java_magic_in_latin1_restored_bytes`、`java_serialized_magic_percent_query_blocks`）；70/62 triage Pass→Block；全量 bench 见《waf-benchmark-report》§22 P12 行。
+
 ### 收益矩阵（基于 bench 归因的保守估算）
 
 | 方案 | 拦截率提升 | 误报影响 | 工作量 |

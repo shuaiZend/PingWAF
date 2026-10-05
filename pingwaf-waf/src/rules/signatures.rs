@@ -2618,13 +2618,25 @@ static DESER_OGNL_CALL: Lazy<Regex> = Lazy::new(|| {
     // value-stack assignment into one (`#ctx=@java.lang.System@…`).
     Regex::new(r#"@[A-Za-z][\w.]*@[A-Za-z_]\w*\s*\("#).unwrap()
 });
+static DESER_JAVA_MAGIC: Lazy<Regex> = Lazy::new(|| {
+    // Java ObjectStream magic `AC ED 00 05` percent-transported in a query:
+    // the byte-restoring decoder surfaces those bytes as Latin-1 text
+    // (U+00AC U+00ED NUL U+0005), which neither the hex-text needle for the
+    // same magic nor the base64 transport needle can ever see. Requiring the
+    // `sr` class-descriptor marker that follows keeps the shape tied to a
+    // real serialized stream.
+    Regex::new(r"\x{AC}\x{ED}\x{00}\x{05}sr").unwrap()
+});
 
 /// Structural deserialization / expression-language shapes that carry no
-/// single literal: PHP serialized records and OGNL static calls. Returns the
-/// shape name for logging.
+/// single literal: PHP serialized records, OGNL static calls and the Java
+/// ObjectStream magic. Returns the shape name for logging.
 pub fn detect_deser_shape(input: &str) -> Option<&'static str> {
     if input.len() < 8 {
         return None;
+    }
+    if input.contains('\u{ac}') && DESER_JAVA_MAGIC.is_match(input) {
+        return Some("java-serialized-magic");
     }
     if DESER_OGNL_CALL.is_match(input) {
         return Some("ognl-static-call");
@@ -3242,6 +3254,18 @@ mod tests {
         );
         assert_eq!(detect_deser_shape("a normal value"), None);
         assert_eq!(detect_deser_shape("x.constructor.name"), None);
+    }
+
+    #[test]
+    fn detect_deser_java_magic_in_latin1_restored_bytes() {
+        // `?s=%ac%ed%00%05%73%72...` percent-decodes to the raw ObjectStream
+        // bytes; the byte-restoring decoder maps them through Latin-1, so the
+        // shape check must look for the char sequence — the hex-text needle
+        // for the same magic can never see it.
+        let v =
+            "¬í\u{0}\u{5}sr\u{0}\u{1a}com.ct.araleii.test.Person\u{78}\u{70}";
+        assert_eq!(detect_deser_shape(v), Some("java-serialized-magic"));
+        assert_eq!(detect_deser_shape("¬í truncated stream"), None);
     }
 
     #[test]

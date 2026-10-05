@@ -683,10 +683,14 @@ P11 输入：post15 strict+body 开放 73 条（70 passed + 3 protocol_reject，
 | P11 b64 断点+needle 扩面 | Normal + body | **70.7%（465/658）** | 29.3% | **0.04%（14）** | **99.96%** | ~3s¹ |
 | P11 b64 断点+needle 扩面 | Strict | **75.8%（499/658）** | 24.2% | **0.02%（5）** | **99.98%** | 4ms |
 | P11 b64 断点+needle 扩面 | Strict + body | **91.9%（605/658）** | 8.1% | **0.07%（22）** | **99.93%** | ~3s¹ |
+| P12 魔数 query | Normal | **60.2%（396/658）** | 39.8% | **0.02%（5）** | **99.98%** | 5ms |
+| P12 魔数 query | Normal + body | **70.7%（465/658）** | 29.3% | **0.04%（14）** | **99.96%** | ~3s¹ |
+| P12 魔数 query | Strict | **76.0%（500/658）** | 24.0% | **0.02%（5）** | **99.98%** | 4ms |
+| P12 魔数 query | Strict + body | **92.1%（606/658）** | 7.9% | **0.07%（22）** | **99.93%** | ~3s¹ |
 
 ¹ p95 ≈3s 是回放客户端 `sendall` 大 body 与「上传中途拦截」的固有交互，非引擎开销（§10.2）。
 
-**主档结论（Normal + body，agent 模式推荐配置）**：P6 → P7 → P8 → P9 → P10 → P11 六轮连续把拦截率从 P5 的 59.1% 提到 **70.7%（+11.6pp）**，误报率稳定在 **0.04%（14 条）**。**四配置误报率连续八轮低于 0.2% 目标线**（P11：0.015%/0.042%/0.015%/0.066%）。累计十二轮演进（v1→P0→P1→P2/P3→P4→P5→P6→P7→P8→P9→P10→P11）：Normal 静态档拦截率 33.1%→**59.4%**（+26.3pp）、误报率 0.17%→**0.015%**；Normal+body 口径自 P0 引入以来 38.1%→**70.7%**（+32.6pp）、误报 0.23%→**0.04%**。Strict+body 拦截率 63.8%→**91.9%**，误报 2.38%→**0.07%**（-770 条）。
+**主档结论（Normal + body，agent 模式推荐配置）**：P6 → P7 → P8 → P9 → P10 → P11 六轮连续把拦截率从 P5 的 59.1% 提到 **70.7%（+11.6pp）**，误报率稳定在 **0.04%（14 条）**（P12 魔数 query 修复主惠 Normal 静态档与 Strict 面，主档持平）。**四配置误报率连续九轮低于 0.2% 目标线**（P12：0.015%/0.042%/0.015%/0.066%）。累计十三轮演进（v1→P0→P1→P2/P3→P4→P5→P6→P7→P8→P9→P10→P11→P12）：Normal 静态档拦截率 33.1%→**60.2%**（+27.1pp）、误报率 0.17%→**0.015%**；Normal+body 口径自 P0 引入以来 38.1%→**70.7%**（+32.6pp）、误报 0.23%→**0.04%**。Strict+body 拦截率 63.8%→**92.1%**，误报 2.38%→**0.07%**（-770 条）。
 
 类目拦截率对比（黑样本）：
 
@@ -707,6 +711,28 @@ P11 输入：post15 strict+body 开放 73 条（70 passed + 3 protocol_reject，
 P1 相对 P0 的类目增量（Normal+body 口径）：**crlf 0%→40%**（头名形态 critical，query 面生效使 Normal 静态档同样受益）、**deser 0%→33.3%**（needle 扩面 + JSON 成员 typed 检测）、**other 36.2%→42.8%**（needle 扩面 + 嵌套 JSON 解包）；sqli/ssrf/rce/lfi/xss 持平或一致。Strict+body 逐类目与 P0 持平（other 60.4%→60.4%）。
 
 P2/P3 相对 P1 的类目增量（Normal+body 口径）：**deser 33.3%→100%**（DZ needle + deser-shape 分级 + b64 展开承接 b64 包裹 OGNL）、**xss 33.3%→40%**（prototype 链/JSFuck）、**rce 33.3%→41.7%**（CI-043 `getruntime().exec`）、**ssrf 23.1%→30.8%**、**ssti 40%→60%**、**other 42.8%→54.8%**（b64 值级展开 + overlong UTF-8 打开编码包裹可见性，强正则/needle 扩面承接）。Strict+body 口径：**xss 83.3%→90%**、**deser 83.3%→100%**、**other 60.4%→76.0%**（+84 条，b64/overlong 展开对 Strict 档编码家族收益最大）、**ssti 80%→100%**。
+
+## 22. P12 Java 序列化魔数 query 与实测（§20 之后的第十三轮）
+
+P12 输入：post16 strict+body 开放 53 条，逐条归因第一项落地。`?s=%ac%ed%00%05%73%72…` 原始 Java ObjectStream 字节经 percent 传输——byte 还原解码器（非法 UTF-8 经 Latin-1 映射）早已把 `¬í\0\u{5}sr` 文本送进扫描面，断点在 needle 形态：hex-text needle `aced0005` 与 b64 transport needle `rO0AB` 都看不见这条 Latin-1 字符序列。修复：`DESER_JAVA_MAGIC` 正则（`\x{AC}\x{ED}\x{00}\x{05}sr`）入 `detect_deser_shape` 返回 `java-serialized-magic`——要求 magic 后随 `sr` 类描述符标记绑定真实序列化流，`\u{ac}` contains 预滤保证非样本值零额外成本；与 P8 b64 形态（ViewState）互补覆盖同一魔数的两条传输面。实现细节见 `waf-engine-review.md` P12 节（第 47 条）。
+
+### P12 实测（post17 全量回放，33877 样本）
+
+| 配置 | 拦截率 | 误报率 | 拦截 vs P11(post16) | 误报 vs P11(post16) |
+|---|---|---|---|---|
+| Normal | **60.2%（396/658）** | **0.02%（5）** | +5 | 持平（5） |
+| Normal + body | **70.7%（465/658）** | **0.04%（14）** | 持平（465） | 持平（14） |
+| Strict | **76.0%（500/658）** | **0.02%（5）** | +1 | 持平（5） |
+| Strict + body | **92.1%（606/658）** | **0.07%（22）** | +1 | 持平（22） |
+
+**结果**：四配置零回退、零样本丢失、误报全部持平零新增。目标样本 70/62 triage Pass→Block、bench 拦截确认（gained 清单含 `5178e5d4`）。Normal 档 +5 为同族序列化魔数样本在 sev4 计分下整体过阈值（deser 魔数族静态档可见性打开）；Normal+body 档持平系该族已被 body 档既有信号覆盖；Strict/Strict+body 各 +1 为 70/62 critical 判决。strict+body 91.9%→**92.1%**，累计十三轮演进 63.8%→92.1%（+28.3pp）。p95 守恒（静态 4-5ms / body ~3s¹）。
+
+### P12 回归验证
+
+- 191 单测全绿（新增 2：`detect_deser_java_magic_in_latin1_restored_bytes`——Latin-1 还原字节形态命中 + 截断流负例；`java_serialized_magic_percent_query_blocks`——70/62 真实样本 query 端到端 Block）。
+- 四配置 FP 集合与 P11 逐条 diff：**零新增零消失**（normal 5、normal-body 14、strict 5、strict-body 22 完全一致）。
+- FP 风险评估：正则要求 4 字节魔数（`\x{AC}\x{ED}\x{00}\x{05}`）后随 `sr` 标记——NUL/控制字符在诚实文本值中不存在，`\u{ac}` contains 预滤使非样本值零额外成本。
+- 性能守恒：仅新增一条带廉价预滤的正则检查，位于既有 `detect_deser_shape` 分支内（PHP/OGNL 检查同层），无新增解码面。
 
 
 

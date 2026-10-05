@@ -2736,6 +2736,24 @@ mod tests {
     }
 
     #[test]
+    fn java_serialized_magic_percent_query_blocks() {
+        // (`70/62` family): raw Java ObjectStream bytes transported through a
+        // percent-encoded query — the byte-restoring decoder surfaces them as
+        // Latin-1 text, and the deser-shape layer must fire on the magic plus
+        // the `sr` class-descriptor marker.
+        let e = strict_engine();
+        let v = e.inspect(&req(
+            "GET",
+            "/",
+            concat!(
+                "s=%ac%ed%00%05%73%72%00%1a%63%6f%6d%2e%63%74%2e%61%72%61%6c%65%69%69",
+                "%2e%74%65%73%74%2e%50%65%72%73%6f%6e%78%70%00%00%00%01%00%62%65",
+            ),
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
     fn stack_scoped_rules_respect_configured_stacks() {
         // A Java-scoped custom rule must be inactive for an engine built
         // without the Java stack, and active once it is configured.
