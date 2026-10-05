@@ -756,7 +756,7 @@ P12 输入：post16 strict+body 开放 53 条，逐条归因分两批落地。
 
 ### P12 剩余漏报面与 95% 可达性
 
-post18 strict+body 剩余开放漏报 46 条（658−612），按可修性分层：**伪影面 ~39 条**——34 条无 Content-Length 的 POST/PUT（RFC 7230：无 C-L 且无 T-E 即空 body，bench 链路物理不可拦）+ 3 条 protocol_reject（400 判决不计拦截）+ 2 条 SSRF 弱语义（内网 URL 裸形态，与诚实流量同构）+ 若干假黑/灰样本（`<a href=# download>` 无执行面、DVWA 空参数探测起手、随机词假黑）；**REAL 面 ~7 条**——d7b61c 深层 HTML 实体洋葱（waf-ce 合成样本，引号错位形态）、ff/67 URL fragment 盲区（浏览器流量 fragment 不上行，样本面黑 1/白 0）、信息泄露/未授权 API 族注定面。**即使 REAL 面全修，理论上限 ≈ 619/658 = 94.1%**——95% 目标在当前样本库口径下接近不可达；样本库剔除伪影（黑 619 口径）后当前成绩已等效 **98.9%**。继续迭代的方向是把 REAL 面修满并对齐样本库伪影剔除口径，而非在 658 口径上追 95%。
+post18 strict+body 剩余开放漏报 46 条（658−612），按可修性分层：**伪影面 ~39 条**——34 条无 Content-Length 的 POST/PUT（RFC 7230：无 C-L 且无 T-E 即空 body，bench 链路物理不可拦）+ 3 条 protocol_reject（400 判决不计拦截）+ 2 条 SSRF 弱语义（内网 URL 裸形态，与诚实流量同构）+ 若干假黑/灰样本（`<a href=# download>` 无执行面、DVWA 空参数探测起手、随机词假黑）；**REAL 面 ~7 条**——d7b61c 深层 HTML 实体洋葱（waf-ce 合成样本，引号错位形态）、ff/67 URL fragment 盲区（浏览器流量 fragment 不上行，样本面黑 1/白 0）、信息泄露/未授权 API 族注定面。**即使 REAL 面全修，理论上限 ≈ 619/658 = 94.1%**——95% 目标在当前样本库口径下接近不可达；样本库剔除伪影（黑 619 口径）后当前成绩已等效 **98.9%**。继续迭代的方向是把 REAL 面修满并对齐样本库伪影剔除口径，而非在 658 口径上追 95%。（P14 修正：fragment 盲区经技术归因重新定性为链路伪影，口径更新为上限 618/658 = 93.9%、等效 617/618 = 99.8%，见 §23 末节。）
 
 ## 23. P13 Nexus EL 探测 + 分离 Java RCE + web.xml 值面与实测（§22 之后的第十四轮）
 
@@ -789,6 +789,16 @@ P13 输入：post18 strict+body 剩余 46 条漏报按 Content-Length/判决精�
 - 四配置 FP 集合与 post18 逐条 diff：normal/normal-body/strict **零新增零消失**；strict-body 修复后 21 条 = post18 集合 22 − 同族伪影 `0db7f97`，74df 未再出现（首轮 +1 伪影已由可打印性门消除）。
 - FP 风险评估：4 条 needle 均为 exploit 独有形态（`$\A{` 引擎转义变体、裸 `getruntime()`、`web.xml` 值面），白样本全量预检零命中；可打印性门对真实 payload 零损（payload 按构造可打印）。
 - 性能守恒：可打印性门为容器内 O(len) 单遍字节检查，真实 payload ≤256B 上限内成本可忽略；needle 全部在既有 AC 自动机内。
+
+### P14 fragment 盲区重定性（第十五轮归因，零代码修复）
+
+post18 遗留 REAL 面 4 条中最后一项可修候选 `ff/67`（S2-045 OGNL 全量藏 URL `#` fragment 后）经三轮技术归因**重新定性为链路伪影**，P14 无代码修复落地：
+
+1. **http::Uri 语义**：`http` 1.5 `Uri` 无 fragment 存储位（scheme/authority/path_and_query 三元），探针实测 `#` 后内容被解析器静默丢弃（`/index.action?redirect:${#a=…}` → `path_and_query()` 仅返回 `"/index.action?redirect:${"`）。
+2. **pingora 解析层主动剥离**：pingora 0.9 `parse_request_target` 在构造 Uri **之前**按 RFC 9112 §3.2 剥离 fragment（源码注释明确 "must not reach the upstream request-line"），`RequestHeader.raw_target` 保存的同样是剥后字节——插件层既拿不到 fragment 内容，也拿不到 `#` 存在信号。
+3. **利用链物理断裂**：pingwaf 转发上游的请求行不含 fragment——OGNL 载荷永远到不了 Struts2。样本库把 `ff/67` 标黑基于「WAF 直连目标服务器」假设；反代部署形态下该载荷无效。
+
+**结论**：`ff/67` 与「无 Content-Length 的 POST」同级的部署形态伪影——pingora 的 RFC 合规解析行为本身就是防护的一环。可达性口径随之修正：伪影面 ~40 条（34 无 C-L + 3 protocol_reject + 2 SSRF 弱语义 + 1 fragment），**658 口径理论上限 618/658 = 93.9%**，等效口径 **617/618 = 99.8%**。真实不可修面仅剩 waf-ce 合成 XSS 洋葱 2 条 + 未授权 API 注定面 1 条。
 
 
 
