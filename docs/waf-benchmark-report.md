@@ -687,10 +687,14 @@ P11 输入：post15 strict+body 开放 73 条（70 passed + 3 protocol_reject，
 | P12 魔数 query+引号门放宽 | Normal + body | **71.3%（469/658）** | 28.7% | **0.04%（14）** | **99.96%** | ~3s¹ |
 | P12 魔数 query+引号门放宽 | Strict | **76.0%（500/658）** | 24.0% | **0.02%（5）** | **99.98%** | 4ms |
 | P12 魔数 query+引号门放宽 | Strict + body | **93.0%（612/658）** | 7.0% | **0.07%（22）** | **99.93%** | ~3s¹ |
+| P13 Nexus EL+分离 RCE needle | Normal | **60.2%（396/658）** | 39.8% | **0.02%（5）** | **99.98%** | 5ms |
+| P13 Nexus EL+分离 RCE needle | Normal + body | **71.9%（473/658）** | 28.1% | **0.04%（14）** | **99.96%** | ~3s¹ |
+| P13 Nexus EL+分离 RCE needle | Strict | **76.0%（500/658）** | 24.0% | **0.02%（5）** | **99.98%** | 4ms |
+| P13 Nexus EL+分离 RCE needle | Strict + body | **93.8%（617/658）** | 6.2% | **0.06%（21）** | **99.94%** | ~3s¹ |
 
 ¹ p95 ≈3s 是回放客户端 `sendall` 大 body 与「上传中途拦截」的固有交互，非引擎开销（§10.2）。
 
-**主档结论（Normal + body，agent 模式推荐配置）**：P6 → P7 → P8 → P9 → P10 → P11 六轮连续把拦截率从 P5 的 59.1% 提到 **70.7%（+11.6pp）**，误报率稳定在 **0.04%（14 条）**；P12 魔数 query 与引号门/needle 扩面再 +0.6pp 至 **71.3%**。**四配置误报率连续九轮低于 0.2% 目标线**（P12：0.015%/0.042%/0.015%/0.066%）。累计十三轮演进（v1→P0→P1→P2/P3→P4→P5→P6→P7→P8→P9→P10→P11→P12）：Normal 静态档拦截率 33.1%→**60.2%**（+27.1pp）、误报率 0.17%→**0.015%**；Normal+body 口径自 P0 引入以来 38.1%→**71.3%**（+33.2pp）、误报 0.23%→**0.04%**。Strict+body 拦截率 63.8%→**93.0%**，误报 2.38%→**0.07%**（-770 条）。
+**主档结论（Normal + body，agent 模式推荐配置）**：P6 → P7 → P8 → P9 → P10 → P11 六轮连续把拦截率从 P5 的 59.1% 提到 **70.7%（+11.6pp）**，误报率稳定在 **0.04%（14 条）**；P12 魔数 query 与引号门/needle 扩面再 +0.6pp、P13 Nexus EL/分离 RCE needle 再 +0.6pp 至 **71.9%**。**四配置误报率连续十轮低于 0.2% 目标线**（P13：0.015%/0.042%/0.015%/0.063%）。累计十四轮演进（v1→P0→…→P13）：Normal 静态档拦截率 33.1%→**60.2%**（+27.1pp）、误报率 0.17%→**0.015%**；Normal+body 口径自 P0 引入以来 38.1%→**71.9%**（+33.8pp）、误报 0.23%→**0.04%**。Strict+body 拦截率 63.8%→**93.8%**，误报 2.38%→**0.06%**（-771 条）。
 
 类目拦截率对比（黑样本）：
 
@@ -753,6 +757,38 @@ P12 输入：post16 strict+body 开放 53 条，逐条归因分两批落地。
 ### P12 剩余漏报面与 95% 可达性
 
 post18 strict+body 剩余开放漏报 46 条（658−612），按可修性分层：**伪影面 ~39 条**——34 条无 Content-Length 的 POST/PUT（RFC 7230：无 C-L 且无 T-E 即空 body，bench 链路物理不可拦）+ 3 条 protocol_reject（400 判决不计拦截）+ 2 条 SSRF 弱语义（内网 URL 裸形态，与诚实流量同构）+ 若干假黑/灰样本（`<a href=# download>` 无执行面、DVWA 空参数探测起手、随机词假黑）；**REAL 面 ~7 条**——d7b61c 深层 HTML 实体洋葱（waf-ce 合成样本，引号错位形态）、ff/67 URL fragment 盲区（浏览器流量 fragment 不上行，样本面黑 1/白 0）、信息泄露/未授权 API 族注定面。**即使 REAL 面全修，理论上限 ≈ 619/658 = 94.1%**——95% 目标在当前样本库口径下接近不可达；样本库剔除伪影（黑 619 口径）后当前成绩已等效 **98.9%**。继续迭代的方向是把 REAL 面修满并对齐样本库伪影剔除口径，而非在 658 口径上追 95%。
+
+## 23. P13 Nexus EL 探测 + 分离 Java RCE + web.xml 值面与实测（§22 之后的第十四轮）
+
+P13 输入：post18 strict+body 剩余 46 条漏报按 Content-Length/判决精确重分层——34 无 C-L（链路伪影）、3 protocol_reject、3 注定面（Rocket.Chat callAnon 未授权 API + 2 条随机词假黑），**REAL 面 9 条**。逐条归因出 3 个 needle 族：①**Nexus EL 算术探测**（CVE-2020-10204 族，三条）——`$\A{233*233*233}`/`$\B{233*233}` 引擎特有转义变体，算术求值探测只存在于 exploit 载荷；②**分离语句 Java RCE**（Unomi MVEL CVE-2021-44227 族）——`Runtime r = Runtime.getRuntime(); r.exec(…)` 语句分离形态绕开既有连写 needle，裸 `getruntime()` 在诚实参数值零出现；③**部署描述符探测**（Confluence macro-preview `_template`，CVE-2021-26084 探测族）——`_template` 裸形态白样本 19 条命中不可用，改用值面 `web.xml`（与既有 `web-inf` 同族互补）。4 条 needle（PT-020/CI-113/114/115）白样本全量预检零命中，全部在 AC 自动机内零新增解码面。实现细节见 `waf-engine-review.md` P13 节（第 49 条）。
+
+### P13 实测（post19 全量回放，33877 样本）
+
+| 配置 | 拦截率 | 误报率 | 拦截 vs P12 二批(post18) | 误报 vs P12 二批(post18) |
+|---|---|---|---|---|
+| Normal | **60.2%（396/658）** | **0.02%（5）** | 持平（396） | 持平（5） |
+| Normal + body | **71.9%（473/658）** | **0.04%（14）** | +4 | 持平（14） |
+| Strict | **76.0%（500/658）** | **0.02%（5）** | 持平（500） | 持平（5） |
+| Strict + body | **93.8%（617/658）** | **0.06%（21）** | +5 | **−1（22→21）** |
+
+**结果**：normal-body +4 与 strict-body +5 恰为 P13 目标样本全中（`176081cb`/`0b46fe5d`/`a58dfc8b`/`ef7a0e1c` + `ca1b0e50`，全部为 Nexus EL/Unomi/Confluence 族）；normal/strict 持平符合预期（目标均为 POST body 形态）。strict+body 93.0%→**93.8%**，累计十四轮演进 63.8%→**93.8%**（+30.0pp）。误报净 −1 为验证轮可打印性门修复的双收益（见下节）。p95 守恒（静态 4-5ms / body ~3s¹）。
+
+### P13 验证轮 FP 归因与修复（expr 容器可打印性门）
+
+首轮 strict-body 出现 1 条新 FP（`74df46db`，Ctrip 移动端 `saveLogInfo` 日志上报，162KB 高熵乱码 body）——与 P13 needle 无关（needle 全注释复现、解码面 grep 零命中、无 XFF replay 复现），完整归因链跨三层：
+
+1. **插件检测面越过 64KB 门**：body 检测的 max_body_size（默认 64KB）按 **chunk 粒度**截断——无负载时单次 IO 读满 64KB，实际检测面 130556 字节（3580+61440+65536 三次 IO 累计），乱码段 64KB~130KB 区间全部进入扫描。
+2. **expr 容器在高熵数据中的必然命中**：`${…}` 容器出现率≈1，`is_structural_expr` 的「identifier(」与运算符特征在乱码中同样≈1 → strict 档 expr-injection critical → Block。
+3. **判决随 socket chunk 边界抖动**：post18 bench 高负载下 chunk 碎片化、停点贴近 64KB 门 → 仅 TI-002/003 低分 Monitor → passed；post19 无负载大 chunk 一次越门 → blocked。同一样本两轮判决不同，非引擎语义变化。
+
+修复：`is_structural_expr` 开头加容器内容**可打印性门**（全字节 `is_ascii_graphic()` 或空格）——真实 EL/SSTI/JSP payload 按构造全为可打印 ASCII，乱码容器直接拒判结构。单测 194 全绿（P2/P3 全部 EL/SSTI 正样本验证无损）；6 样本重放确认 5 目标 Block + 74df 放行。**额外收益**：重跑后 `0db7f97`（同族 Ctrip `SaveTraceInfo`，164KB 高熵 body，printable ratio 50%）也从 post18 的 FP 集合中消除——同一条 chunk 抖动链在 post18 的既有误报，修复一次带走两条同族 FP，strict-body FP 22→**21** 净减。详见 `waf-engine-review.md` P13 节（第 50 条）。
+
+### P13 回归验证
+
+- 单测：**194 全绿**（新增 1 个测试函数 4 断言：`nexus_el_probe_and_java_runtime_blocks`——Unomi 分离 exec、Nexus group/extdirect 双变体、Confluence web.xml）。
+- 四配置 FP 集合与 post18 逐条 diff：normal/normal-body/strict **零新增零消失**；strict-body 修复后 21 条 = post18 集合 22 − 同族伪影 `0db7f97`，74df 未再出现（首轮 +1 伪影已由可打印性门消除）。
+- FP 风险评估：4 条 needle 均为 exploit 独有形态（`$\A{` 引擎转义变体、裸 `getruntime()`、`web.xml` 值面），白样本全量预检零命中；可打印性门对真实 payload 零损（payload 按构造可打印）。
+- 性能守恒：可打印性门为容器内 O(len) 单遍字节检查，真实 payload ≤256B 上限内成本可忽略；needle 全部在既有 AC 自动机内。
 
 
 
