@@ -599,7 +599,38 @@ P10 输入：post14 strict+body 开放 79 条（76 passed + 3 protocol_reject；
 - post15 预览三轮 FP 事件全部闭环：双扩展 `dll` 扩展收窄（`vendor.dll.js` ×2）、js-call 尾类收紧（`subPayType[deduct][]` ×3）+ Drupal render-key needle 恢复 ff/fb 拦截，样本 triage 复验判决正确，白样本语料全量预检无新命中面。
 - 性能守恒：key 链与值链共享同一套有界解码 pass（1KB/1024 上限、B64_MAX_VALUE_LEN/depth 门不变）；双扩展是单条尾锚定正则；escape 复解仅在输出含 `%` 时激活。
 
-## 20. 各版本拦截率/通过率对比总表
+## 20. P11 B 类漏报归因 + b64 值链断点修复与实测（§19 之后的第十二轮）
+
+P11 输入：post15 strict+body 开放 73 条（70 passed + 3 protocol_reject，Monitor 面 P9/P10 清零）。**口径修正**：18 条无 Content-Length 的 POST 属链路差异（无 C-L 且无 T-E 的 POST 在真实 HTTP 语义下 body 为空，引擎收不到 payload 是正确行为），不计漏报；B 类真漏报 55 条 = 51 Pass/Monitor + 3 protocol_reject + 1 Challenge。归因后闭合三处 b64 值链断点 + 五条 needle + 一条 shape：
+
+- **b64 层控制符归一**：传输填充走私裸 NUL/CR（`OR\0/* \r…`），90% printability 门放行，下游 SQL 词法全断（libinjection 丢 token、`\bor\b` 失配、注释剥离重扫被卡）。解码后控制字符（保留 `\t\n\r`）统一替换为空格，与 P10 JSON 控制符重试同一取舍。
+- **quoted-run b64 提取（Strict-only）**：`\u` 转义洋葱把 payload 藏在 JSON 数组字符串字面量里，escape 解码后 b64 run 裸露于引号之间；门条件「run ≥16 且紧贴双引号」+ charset/printability 质量门，白样本裸 run 占 90% 证明引号门必要。
+- **b64 非 canonical 尾位容错**：a2/1f 两层洋葱悬案——首层 whole-value b64 末组 `S0` 冗余位非零（非规范 base64），python/Java 宽松解码器接受而 Rust base64 crate 严格拒绝，后端能解的传输层 WAF 解不开、整条 payload 从未到达检测面。`b64_decode_value` 换用 `with_decode_allow_trailing_bits(true)` 引擎，charset + printability 质量门不变。
+- **裸 waitfor strong check**：洋葱终层 `));wAITfor` + 注释填充——`SQLI_DANGEROUS_FN` 要求 `waitfor\s*\(` 而真实 T-SQL `WAITFOR DELAY` 语句从不带括号，原正则实际匹配不到真实时间盲注；`\bwaitfor\b` 入 strong，白样本预检零命中。
+- **needle 扩面**：CI-096~098 ASP 一句话木马（`<%eval`/`<%execute`/`eval request(`）、CI-099 `file_put_contents`、XSS-023 `+ADw-`（UTF-7 `<`）、XSS-024 `alert(1)` 字面（泛 `alert(` 维持 sev3）；chr() 码点链 shape（`ci_chr_chain`）入 ci-shape critical。全部经白样本语料全量预检零命中。
+
+实现细节见 `waf-engine-review.md` §5 P11 节（第 42~46 条）。
+
+### P11 实测（post16 全量回放，33877 样本）
+
+| 配置 | 拦截率 | 误报率 | 拦截 vs P10(post15) | 误报 vs P10(post15) |
+|---|---|---|---|---|
+| Normal | **59.4%（391/658）** | **0.02%（5）** | +15 | 持平（5） |
+| Normal + body | **70.7%（465/658）** | **0.04%（14）** | +20 | 持平（14） |
+| Strict | **75.8%（499/658）** | **0.02%（5）** | +20 | 持平（5） |
+| Strict + body | **91.9%（605/658）** | **0.07%（22）** | +20 | 持平（22） |
+
+**结果**：四配置零回退、零样本丢失、误报全部持平零新增。strict+body 的 +20 全部来自 P11 目标族：控制符归一（66b7）、quoted-run 提取（a4e0 + 同族 b169/b171/a587/fe1a）、chr 码点链（02d0）、`alert(1)` 字面（4b67/7a88 族）、UTF-7（fda1）、ASP 一句话（357e）、`file_put_contents`（555e），以及 **a2/1f 两层洋葱悬案**（非 canonical b64 尾位容错 + 裸 waitfor 双断点，Normal 档即生效）——尾位容错还顺带把归档的 5c/aa 经 quoted-run 链路拦下。Normal 档 +15 证明三处 b64 断点修复惠及全配置面（whole-value b64 传输不再因非规范尾位隐身）。strict+body 88.9%→**91.9%**，累计十二轮演进 63.8%→91.9%（+28.1pp）；主档（Normal+body）67.6%→**70.7%**。p95 静态 5ms / body ~3s¹（客户端固有），性能守恒。
+
+### P11 回归验证
+
+- 189 单测全绿（+1 新测试：`noncanonical_b64_waitfor_onion_blocks`——非规范尾位 b64 两层洋葱端到端 Block；P11 累计 +6 测试）。
+- 目标样本 triage：10 条 Block 9 保持；a2/1f 从「归档不修」转 Block（两层 b64 + 裸 waitfor 全链路解谜后实测拦截）。
+- 四配置 FP 集合与 P10 逐条 diff：**零新增零消失**（normal 5、normal-body 14、strict 5、strict-body 22 完全一致）。
+- 白样本预检：裸 waitfor 0 命中（T-SQL 独有关键字）、needle 扩面五条 0 命中；非 canonical 尾位容错的解码面扩大由 charset + printability 质量门约束，bench 全量回放验证无 FP 代价。
+- 性能守恒：尾位容错仅替换解码引擎配置（同一 AhoCorasick 预过滤不变）；quoted-run 的引号邻接扫描在 escape pass 后有界执行；控制符归一是 O(n) 单遍。
+
+## 21. 各版本拦截率/通过率对比总表
 
 黑样本 658 / 白样本 33219，严格口径（blocked = WAF 判决 403/503）。**通过率** = 黑样本未被拦截的比例（漏报面）；白样本通过率 = 100% − 误报率。
 
@@ -648,10 +679,14 @@ P10 输入：post14 strict+body 开放 79 条（76 passed + 3 protocol_reject；
 | P10 key 扫描面+双扩展 | Normal + body | **67.6%（445/658）** | 32.4% | **0.04%（14）** | **99.96%** | ~3s¹ |
 | P10 key 扫描面+双扩展 | Strict | **72.8%（479/658）** | 27.2% | **0.02%（5）** | **99.98%** | 5ms |
 | P10 key 扫描面+双扩展 | Strict + body | **88.9%（585/658）** | 11.1% | **0.07%（22）** | **99.93%** | ~3s¹ |
+| P11 b64 断点+needle 扩面 | Normal | **59.4%（391/658）** | 40.6% | **0.02%（5）** | **99.98%** | 5ms |
+| P11 b64 断点+needle 扩面 | Normal + body | **70.7%（465/658）** | 29.3% | **0.04%（14）** | **99.96%** | ~3s¹ |
+| P11 b64 断点+needle 扩面 | Strict | **75.8%（499/658）** | 24.2% | **0.02%（5）** | **99.98%** | 4ms |
+| P11 b64 断点+needle 扩面 | Strict + body | **91.9%（605/658）** | 8.1% | **0.07%（22）** | **99.93%** | ~3s¹ |
 
 ¹ p95 ≈3s 是回放客户端 `sendall` 大 body 与「上传中途拦截」的固有交互，非引擎开销（§10.2）。
 
-**主档结论（Normal + body，agent 模式推荐配置）**：P6 → P7 → P8 → P9 → P10 五轮连续把拦截率从 P5 的 59.1% 提到 **67.6%（+8.5pp）**，误报率稳定在 **0.04%（14 条）**。**四配置误报率连续七轮低于 0.2% 目标线**（P10：0.015%/0.042%/0.015%/0.066%）。累计十一轮演进（v1→P0→P1→P2/P3→P4→P5→P6→P7→P8→P9→P10）：Normal 静态档拦截率 33.1%→**57.1%**（+24.0pp）、误报率 0.17%→**0.015%**；Normal+body 口径自 P0 引入以来 38.1%→**67.6%**（+29.5pp）、误报 0.23%→**0.04%**。Strict+body 拦截率 63.8%→**88.9%**，误报 2.38%→**0.07%**（-770 条）。
+**主档结论（Normal + body，agent 模式推荐配置）**：P6 → P7 → P8 → P9 → P10 → P11 六轮连续把拦截率从 P5 的 59.1% 提到 **70.7%（+11.6pp）**，误报率稳定在 **0.04%（14 条）**。**四配置误报率连续八轮低于 0.2% 目标线**（P11：0.015%/0.042%/0.015%/0.066%）。累计十二轮演进（v1→P0→P1→P2/P3→P4→P5→P6→P7→P8→P9→P10→P11）：Normal 静态档拦截率 33.1%→**59.4%**（+26.3pp）、误报率 0.17%→**0.015%**；Normal+body 口径自 P0 引入以来 38.1%→**70.7%**（+32.6pp）、误报 0.23%→**0.04%**。Strict+body 拦截率 63.8%→**91.9%**，误报 2.38%→**0.07%**（-770 条）。
 
 类目拦截率对比（黑样本）：
 

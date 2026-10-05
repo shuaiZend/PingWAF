@@ -197,6 +197,20 @@ post11 漏报经 P7 后仍开放 84 条（44 Pass / 37 Monitor / 2 链路 / 1 Ch
 
 回归：183 单测全绿（`key_only_b64_and_escape_onions_join_scan_surface`、`key_only_b64_sqli_and_double_exec_extension_block` 含双扩展白形态负样本、`drupal_render_key_form_rce_blocks`）；61 条 triage Block 3→**9**（+6：双扩展 ×2、key-only b64、转义洋葱、Drupal form key RCE ×2，全部为真实攻击特征）；fp46 白样本 Block 20 持平零新增。post15 全量实测：见《waf-benchmark-report》§19 P10 行。
 
+### P11 第十二轮：B 类漏报归因 + b64 值链三处断点 + needle 扩面——已落地 ✅
+
+输入：post15 strict+body 开放 73 条（70 passed + 3 protocol_reject，Monitor 清零）。**口径修正先行**：73 条中 18 条是无 Content-Length 的 POST——真实链路 body 永远不会到达（RFC 7230：无 C-L 且无 T-E 即空 body），triage 直读文件才看得到 payload，bench 放行是正确的链路语义，**不是漏报不计修复面**。方法论：triage（文件直读）与 bench（真实 HTTP）对无 C-L POST 必然分歧，**先按 C-L 分类再归因**。B 类真漏报 55 条 = 51 Pass/Monitor + 3 protocol_reject + 1 Challenge，逐条归因后落地：
+
+42. **b64 层控制符归一** ✅：b64 传输填充走私裸控制字符（`OR\0/* \r…` —— NUL 粘在 keyword 后），90% printability 门放行（占比低），下游 SQL 词法全断——libinjection 丢 token、`\bor\b` 正则失配、注释剥离重扫同样被 `\0` 卡在 `or` 与 tautology 之间。修复：`expand_base64` 解码后统一把 ASCII 控制字符（保留 `\t\n\r`）替换为空格——与 P10 JSON 控制符重试同一取舍（空格保 token 边界），覆盖 whole-value 与派生层。样本 66b7（NUL 缀于大小写混淆 keyword 与引号 tautology 之间的畸形传输值）恢复 tautology + comment-stripped critical。
+43. **quoted-run b64 提取** ✅：`\u` 转义洋葱的 payload 藏在 JSON 数组字符串字面量里（`["tag","\u004d…"→"KSk7…="]`）——whole-value b64 不适用、escape 解码后经典 b64 run 裸露在引号之间。修复：`expand_b64_substrings`（**Strict-only**——暴露 run 的 escape pass 本就 Strict 专属），门条件「b64 run ≥16 且紧贴双引号开合」——UA token 与 header blob 不满足引号邻接，hex 哈希/驼峰词由 charset + printability 门拒收；白样本裸 run 占比 90%（UA `AppleWebKit/537` 即命中）证明引号门是必要的形式约束，裸提取不可行。每值 ≤4 push 有界。
+44. **needle 扩面五条** ✅（白样本语料全量预检零命中后上线）：CI-096/097/098 ASP 一句话木马（`<%eval`/`<%execute`/`eval request(`，b64 传输解出即拦）、CI-099 `file_put_contents`（远程投毒参数值形态）、XSS-023 `+ADw-`（UTF-7 编码 `<` 固定前缀）、XSS-024 `alert(1)` 字面（泛 `alert(` 维持 sev3 散文豁免，精确字面在良性语料零出现）。另有 chr() 码点链 shape（`chr(121)+chr(101)+chr(115)`，两连 `chr(N)` 即注入构建形态）以 `ci_chr_chain` 正则入 ci-shape critical。
+45. **b64 非 canonical 尾位容错** ✅：a2/1f 两层洋葱悬案解开——首层 214 字符 whole-value b64 末组 `S0`（`0`=`0b110100`，低 4 位冗余位非零）是**非规范 base64**：python `binascii`/Java 宽松解码器接受，Rust base64 crate 严格模式拒绝（`InvalidLastSymbol`）——后端能解开的传输层 WAF 解不开，整条 payload 从未到达检测面。修复：`b64_decode_value` 换用 `with_decode_allow_trailing_bits(true)` 引擎；charset + printability 门仍是质量过滤，尾位宽松只扩大到达门的面。
+46. **裸 waitfor strong check** ✅：洋葱终层 `));wAITfor` + 注释填充词表——现有 `SQLI_DANGEROUS_FN` 要求 `waitfor\s*\(`，而真实 T-SQL `WAITFOR DELAY` 语句从不带括号（原正则实际永远匹配不到真实时间盲注形态）；`SQLI_FUNCTIONS` 词表有裸 waitfor 但仅参与计分不判结构。修复：`\bwaitfor\b` 以 `SQLI_WAITFOR` 入 strong；白样本全量预检零命中（T-SQL 独有语句关键字，HTTP 面无诚实用途），keyword prefilter 早已含 `waitfor`、成本有界。
+
+归档不修：5c/aa 内层为 `));…--` 破坏片 + 词表噪声（静态语义弱，暂无组合门）；信息泄露/未授权 API 族（Coremail dumpConfig、Rocket.Chat callAnon、Joomla config API）与空参数探测起手（`?id=&Submit=`）超出通用语义静态面；2 条 waf-ce 随机词假黑样本。protocol_reject 3 条与 Challenge 1 条维持口径归档。
+
+回归：189 单测全绿（新增 6：`b64_transport_control_chars_no_longer_split_sql_keywords`、`quoted_b64_run_inside_json_array_unwraps`、`python_chr_chain_blocks`、`utf7_and_alert1_probes_blocks`、`asp_one_liner_webshell_blocks`、`noncanonical_b64_waitfor_onion_blocks`）；a2/1f 全链路悬案（非 canonical 尾位 + 裸 waitfor 双断点）解开转 Block；10 条目标样本 triage 0→9 Block；全量 bench 见《waf-benchmark-report》§20 P11 行。
+
 ### 收益矩阵（基于 bench 归因的保守估算）
 
 | 方案 | 拦截率提升 | 误报影响 | 工作量 |
