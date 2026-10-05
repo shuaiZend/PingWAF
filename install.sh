@@ -81,7 +81,7 @@ Examples:
   ./install.sh --mode agent --server-url http://10.0.0.1:9090 --api-key pwk_xxx
 
   # Install specific version as agent only
-  ./install.sh --version 0.19.0 --mode agent
+  ./install.sh --version 0.20.0 --mode agent
 
   # Custom database URL
   ./install.sh --db-url "postgres://user:pass@db-host:5432/pingwaf"

@@ -8,7 +8,31 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
-## [Unreleased]
+## [PingWAF 0.20.0] — 2026-10-06
+
+### ⛰️ Features
+
+- *(security)* Rule grading: the site's WAF posture is now tunable per attack
+  family instead of all-or-nothing. Nine attack categories (SQLi, XSS, RCE,
+  LFI, SSRF, deserialization, CRLF, XXE, SSTI) and four backend stacks (Java,
+  PHP, Python, Node) can be downgraded to monitor-only — detection and logging
+  stay fully active while matches are recorded instead of blocked. Advanced
+  mode switches the strict managed rule set plus deep request-body inspection
+  on with one toggle, trading performance for the engine's maximum
+  interception rate. Settings live in a new `waf_settings` table, flow through
+  the `WafConfig` gRPC message to agent caches (old on-disk caches keep the
+  default blocking posture), and sites without grading settings behave bit
+  for bit as before.
+- *(security)* Under Attack Mode: a site-wide emergency switch that challenges
+  every visitor with a JavaScript check and turns CC protection on
+  automatically. Enable it while the site is under an active flood and
+  disable it once the attack subsides.
+- *(dashboard)* The WAF and CC pages merge into one Web Protection page with
+  three panels — rule grading, WAF rules and CC protection — fronted by a
+  prominent under-attack banner. The pseudo detection toggles that only
+  filtered the rules table are replaced by the real engine-level category
+  switches. Old `/security/waf` and `/security/cc` links redirect with their
+  query strings intact.
 
 ### 🐛 Bug Fixes
 
