@@ -10,9 +10,7 @@ import type {
   RuleMode,
   UpdateGroupRequest,
   UpdateRuleRequest,
-  WafDetection,
 } from './types'
-import { DETECTION_TAGS } from './types'
 
 /**
  * WAF rule groups and rules — `/api/v1/sites/{site_id}/rules`.
@@ -79,11 +77,6 @@ export interface SeedWafDefaultsResult {
    Derived site WAF posture
    ──────────────────────────────────────────────────────────────── */
 
-/** Mirrors `has_tag` in `waf_config_to_proto`: substring match, case-insensitive. */
-function ruleHasTag(rule: Rule, needle: string): boolean {
-  return (rule.tags ?? []).some((tag) => tag.toLowerCase().includes(needle))
-}
-
 /**
  * Computes the site-wide WAF switches exactly the way the control plane does
  * when it builds the agent `RuleBundle`.
@@ -96,9 +89,6 @@ export function deriveWafConfig(rules: Rule[], groups: RuleGroup[]): DerivedWafC
   if (active.some((r) => r.mode === 'block')) mode = 'block'
   else if (active.some((r) => r.mode === 'monitor')) mode = 'monitor'
 
-  const detection = (key: WafDetection): boolean =>
-    DETECTION_TAGS[key].some((needle) => active.some((rule) => ruleHasTag(rule, needle)))
-
   const anyGroupEnabled = groups.length === 0 || groups.some((g) => g.enabled)
 
   const maxSeverity = active.reduce((max, r) => Math.max(max, r.severity), 0)
@@ -109,20 +99,7 @@ export function deriveWafConfig(rules: Rule[], groups: RuleGroup[]): DerivedWafC
     paranoia_level: active.length > 0 ? Math.min(Math.max(maxSeverity, 1), 4) : 1,
     active_rules: active.length,
     total_rules: rules.length,
-    detections: {
-      sqli: detection('sqli'),
-      xss: detection('xss'),
-      rce: detection('rce'),
-      lfi: detection('lfi'),
-      ssrf: detection('ssrf'),
-      bot: detection('bot'),
-    },
   }
-}
-
-/** Rules matching a detection family, used by the detection toggles. */
-export function rulesForDetection(rules: Rule[], key: WafDetection): Rule[] {
-  return rules.filter((rule) => DETECTION_TAGS[key].some((n) => ruleHasTag(rule, n)))
 }
 
 export const ruleKeys = {

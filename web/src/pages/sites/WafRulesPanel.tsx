@@ -7,18 +7,11 @@ import {
   ShieldCheck,
   ShieldWarning,
   Plus,
-  Bug,
-  Code,
-  Terminal,
-  FolderOpen,
-  GlobeSimple,
-  Robot,
   PencilSimple,
   Trash,
   MagnifyingGlass,
   ArrowClockwise,
 } from '@phosphor-icons/react'
-import { PageHeader } from '@/components/PageHeader'
 import { Card, CardBody, CardHeader } from '@/components/ui/Card'
 import { Select } from '@/components/ui/Select'
 import { Switch } from '@/components/ui/Switch'
@@ -33,11 +26,11 @@ import { SkeletonRows, SkeletonStat } from '@/components/ui/Skeleton'
 import { useToast } from '@/components/ui/Toast'
 import { ErrorState } from '@/components/ErrorState'
 import { RuleDialog } from '@/components/waf/RuleDialog'
-import { deriveWafConfig, ruleKeys, rulesApi, rulesForDetection } from '@/api/rules'
+import { deriveWafConfig, ruleKeys, rulesApi } from '@/api/rules'
 import { siteKeys } from '@/api/sites'
 import { useCanWrite, useDebouncedValue } from '@/hooks'
 import { cn } from '@/lib/utils'
-import { RULE_MODES, type Rule, type RuleGroup, type RuleMode, type WafDetection } from '@/api/types'
+import { RULE_MODES, type Rule, type RuleGroup, type RuleMode } from '@/api/types'
 
 const ACTION_TONE: Record<string, 'danger' | 'warning' | 'info' | 'success' | 'neutral'> = {
   block: 'danger',
@@ -53,16 +46,8 @@ const MODE_TONE: Record<string, 'danger' | 'warning' | 'neutral'> = {
   off: 'neutral',
 }
 
-const DETECTION_META: Record<WafDetection, { icon: typeof Bug; labelKey: string }> = {
-  sqli: { icon: Bug, labelKey: 'sqli' },
-  xss: { icon: Code, labelKey: 'xss' },
-  rce: { icon: Terminal, labelKey: 'rce' },
-  lfi: { icon: FolderOpen, labelKey: 'lfi' },
-  ssrf: { icon: GlobeSimple, labelKey: 'ssrf' },
-  bot: { icon: Robot, labelKey: 'bot' },
-}
-
-export function WafPage() {
+/** The rule-management module of the site's protection tab. */
+export function WafRulesPanel() {
   const { t } = useTranslation()
   const toast = useToast()
   const queryClient = useQueryClient()
@@ -168,42 +153,6 @@ export function WafPage() {
     },
   })
 
-  /**
-   * Detection families are tag-driven: turning one on enables every rule that
-   * carries the family's tag, turning it off disables them. A family with no
-   * matching rule means the operator deleted the built-ins — restores them
-   * transparently instead of asking for a hand-written rule.
-   */
-  const applyDetection = useMutation({
-    mutationFn: async ({ key, enabled }: { key: WafDetection; enabled: boolean }) => {
-      let rules = allRules
-      let restored = 0
-      if (enabled && rulesForDetection(rules, key).length === 0) {
-        const result = await rulesApi.restoreDefaults(siteId)
-        restored = result.inserted
-        if (restored > 0) {
-          const page = await rulesApi.list(siteId)
-          rules = page.items
-        }
-      }
-      const targets = rulesForDetection(rules, key).filter((r) => r.enabled !== enabled)
-      await Promise.all(targets.map((r) => rulesApi.toggleEnabled(siteId, r.id, enabled)))
-      return { key, enabled, changed: targets.length, restored }
-    },
-    onSuccess: ({ key, enabled, restored }) => {
-      const detection = t(`pages.waf.${DETECTION_META[key].labelKey}`)
-      if (restored > 0) {
-        toast.success(
-          t('pages.waf.detectionRestored', { count: restored }),
-          `${detection} · ${enabled ? t('common.enabled') : t('common.disabled')}`,
-        )
-      } else {
-        toast.success(detection, enabled ? t('common.enabled') : t('common.disabled'))
-      }
-      invalidate()
-    },
-  })
-
   /** Re-adds the built-in rule pack for a site whose rules were deleted. */
   const restoreBuiltins = useMutation({
     mutationFn: () => rulesApi.restoreDefaults(siteId),
@@ -245,7 +194,7 @@ export function WafPage() {
     },
   })
 
-  const busy = applyMode.isPending || applyDetection.isPending || restoreBuiltins.isPending
+  const busy = applyMode.isPending || restoreBuiltins.isPending
 
   const openCreate = (tags?: string[]) => {
     setEditing(null)
@@ -270,7 +219,7 @@ export function WafPage() {
     }
   }
 
-  // Deep link from the log console: /sites/:siteId/security/waf?rule=<id>
+  // Deep link from the log console: /sites/:siteId/security/protection?rule=<id>
   // opens that rule's dialog once the list has loaded. `null` until the first
   // matching pass, so a link present at mount still opens; the param is
   // stripped on close so revisiting the same link opens the dialog again.
@@ -451,36 +400,7 @@ export function WafPage() {
   const failed = (rulesQuery.isError && !rulesQuery.data) || (groupsQuery.isError && !groupsQuery.data)
 
   return (
-    <div className="animate-slide-up">
-      <PageHeader
-        title={t('pages.waf.title')}
-        description={t('pages.waf.description')}
-        actions={
-          <div className="flex items-center gap-2">
-            <Button
-              variant="secondary"
-              loading={rulesQuery.isFetching}
-              onClick={() => {
-                void rulesQuery.refetch()
-                void groupsQuery.refetch()
-              }}
-              icon={<ArrowClockwise weight="duotone" className="h-4 w-4" />}
-            >
-              {t('common.refresh')}
-            </Button>
-            {canWrite && (
-              <Button
-                variant="primary"
-                icon={<Plus weight="bold" className="h-4 w-4" />}
-                onClick={() => openCreate()}
-              >
-                {t('pages.waf.addRule')}
-              </Button>
-            )}
-          </div>
-        }
-      />
-
+    <div>
       {failed ? (
         <ErrorState
           error={rulesQuery.error ?? groupsQuery.error}
@@ -551,132 +471,85 @@ export function WafPage() {
                   {t(`pages.waf.mode_${waf.mode}`)}
                 </Badge>
                 {canWrite && (
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    loading={restoreBuiltins.isPending}
-                    onClick={() => restoreBuiltins.mutate()}
-                    icon={<ArrowClockwise weight="duotone" className="h-3.5 w-3.5" />}
-                  >
-                    {t('pages.waf.restoreBuiltins')}
-                  </Button>
+                  <>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      loading={rulesQuery.isFetching}
+                      onClick={() => {
+                        void rulesQuery.refetch()
+                        void groupsQuery.refetch()
+                      }}
+                      icon={<ArrowClockwise weight="duotone" className="h-3.5 w-3.5" />}
+                    >
+                      {t('common.refresh')}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      loading={restoreBuiltins.isPending}
+                      onClick={() => restoreBuiltins.mutate()}
+                      icon={<ShieldCheck weight="duotone" className="h-3.5 w-3.5" />}
+                    >
+                      {t('pages.waf.restoreBuiltins')}
+                    </Button>
+                  </>
                 )}
               </div>
             </div>
           )}
 
-          <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-            {/* ── Mode ─────────────────────────────────────────────── */}
-            <Card className="lg:col-span-1">
-              <CardHeader
-                title={t('pages.waf.mode')}
-                description={t('pages.waf.modeCardHint')}
-              />
-              <CardBody className="flex flex-col gap-4">
-                <div className="flex flex-col gap-2">
-                  {RULE_MODES.map((m) => {
-                    const active = waf.mode === m
-                    return (
-                      <button
-                        key={m}
-                        type="button"
-                        disabled={!canWrite || busy || loading}
-                        onClick={() => applyMode.mutate(m as RuleMode)}
-                        className={cn(
-                          'flex items-center justify-between gap-3 rounded-lg border px-3 py-2.5 text-left transition-all disabled:cursor-not-allowed disabled:opacity-60',
-                          active
-                            ? 'border-brand bg-brand-soft'
-                            : 'border-line hover:border-fill hover:bg-recessed',
-                        )}
-                      >
-                        <span className="min-w-0">
-                          <span
-                            className={cn(
-                              'block text-sm font-medium',
-                              active ? 'text-brand' : 'text-fg',
-                            )}
-                          >
-                            {t(`pages.waf.mode_${m}`)}
-                          </span>
-                          <span className="block text-xs text-fg-subtle">
-                            {t(`pages.waf.modeHint_${m}`)}
-                          </span>
-                        </span>
-                        {active && <ShieldCheck weight="fill" className="h-4 w-4 shrink-0 text-brand" />}
-                      </button>
-                    )
-                  })}
-                </div>
-                {applyMode.isPending && (
-                  <p className="text-xs text-fg-subtle">{t('pages.waf.applyingMode')}</p>
-                )}
-                <div className="rounded-md border border-line bg-recessed px-3 py-2">
-                  <p className="text-xs leading-relaxed text-fg-subtle">
-                    {t('pages.waf.modeExplainer')}
-                  </p>
-                </div>
-              </CardBody>
-            </Card>
-
-            {/* ── Detections ───────────────────────────────────────── */}
-            <Card className="lg:col-span-2">
-              <CardHeader
-                title={t('pages.waf.detections')}
-                description={t('pages.waf.detectionsHint')}
-              />
-              <CardBody>
-                {loading ? (
-                  <SkeletonRows rows={3} columns={2} />
-                ) : (
-                  <div className="grid grid-cols-1 gap-x-8 gap-y-3 sm:grid-cols-2">
-                    {(Object.keys(DETECTION_META) as WafDetection[]).map((key) => {
-                      const meta = DETECTION_META[key]
-                      const Icon = meta.icon
-                      const matching = rulesForDetection(allRules, key)
-                      const on = waf.detections[key]
-                      const pending = applyDetection.isPending
-                      return (
-                        <div
-                          key={key}
-                          className="flex items-center justify-between gap-3 rounded-md px-1 py-1.5"
+          {/* ── Mode ─────────────────────────────────────────────────── */}
+          <Card className="max-w-2xl">
+            <CardHeader
+              title={t('pages.waf.mode')}
+              description={t('pages.waf.modeCardHint')}
+            />
+            <CardBody className="flex flex-col gap-4">
+              <div className="flex flex-col gap-2">
+                {RULE_MODES.map((m) => {
+                  const active = waf.mode === m
+                  return (
+                    <button
+                      key={m}
+                      type="button"
+                      disabled={!canWrite || busy || loading}
+                      onClick={() => applyMode.mutate(m as RuleMode)}
+                      className={cn(
+                        'flex items-center justify-between gap-3 rounded-lg border px-3 py-2.5 text-left transition-all disabled:cursor-not-allowed disabled:opacity-60',
+                        active
+                          ? 'border-brand bg-brand-soft'
+                          : 'border-line hover:border-fill hover:bg-recessed',
+                      )}
+                    >
+                      <span className="min-w-0">
+                        <span
+                          className={cn(
+                            'block text-sm font-medium',
+                            active ? 'text-brand' : 'text-fg',
+                          )}
                         >
-                          <span className="flex min-w-0 items-center gap-2.5">
-                            <Icon
-                              weight="duotone"
-                              className={cn('h-4 w-4 shrink-0', on ? 'text-brand' : 'text-fg-subtle')}
-                            />
-                            <span className="min-w-0">
-                              <span className="block truncate text-sm text-fg">
-                                {t(`pages.waf.${meta.labelKey}`)}
-                              </span>
-                              <span className="block text-xs text-fg-subtle">
-                                {matching.length === 0
-                                  ? t('pages.waf.detectionRestoreHint')
-                                  : t('pages.waf.detectionRuleCount', { count: matching.length })}
-                              </span>
-                            </span>
-                          </span>
-                          <Switch
-                            size="sm"
-                            checked={on}
-                            disabled={!canWrite || pending || loading}
-                            aria-label={t(`pages.waf.${meta.labelKey}`)}
-                            onCheckedChange={(enabled) => {
-                              if (!enabled && matching.length === 0) return
-                              applyDetection.mutate({ key, enabled })
-                            }}
-                          />
-                        </div>
-                      )
-                    })}
-                  </div>
-                )}
-                <p className="mt-3 border-t border-line pt-3 text-xs leading-relaxed text-fg-subtle">
-                  {t('pages.waf.detectionExplainer')}
+                          {t(`pages.waf.mode_${m}`)}
+                        </span>
+                        <span className="block text-xs text-fg-subtle">
+                          {t(`pages.waf.modeHint_${m}`)}
+                        </span>
+                      </span>
+                      {active && <ShieldCheck weight="fill" className="h-4 w-4 shrink-0 text-brand" />}
+                    </button>
+                  )
+                })}
+              </div>
+              {applyMode.isPending && (
+                <p className="text-xs text-fg-subtle">{t('pages.waf.applyingMode')}</p>
+              )}
+              <div className="rounded-md border border-line bg-recessed px-3 py-2">
+                <p className="text-xs leading-relaxed text-fg-subtle">
+                  {t('pages.waf.modeExplainer')}
                 </p>
-              </CardBody>
-            </Card>
-          </div>
+              </div>
+            </CardBody>
+          </Card>
 
           {/* ── Rule groups ──────────────────────────────────────────── */}
           <Card className="mt-4">
@@ -953,4 +826,4 @@ function PostureStat({ label, value }: { label: string; value: string | number }
   )
 }
 
-export default WafPage
+export default WafRulesPanel

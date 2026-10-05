@@ -11,14 +11,16 @@ import { LoginPage } from '@/pages/LoginPage'
 import { DashboardPage } from '@/pages/DashboardPage'
 import { SitesListPage } from '@/pages/SitesListPage'
 import { SiteDetailPage } from '@/pages/SiteDetailPage'
-import { WafPage } from '@/pages/WafPage'
 import { RateLimitingPage } from '@/pages/RateLimitingPage'
 import { LogsPage } from '@/pages/LogsPage'
 import { AgentsPage } from '@/pages/AgentsPage'
 import { AssistantPage } from '@/pages/AssistantPage'
 import { SettingsPage } from '@/pages/SettingsPage'
 import { BotPage as BotProtectionPage } from '@/pages/sites/BotPage'
-import { CcProtectionPage } from '@/pages/sites/CcProtectionPage'
+import {
+  ProtectionPage,
+  LegacyProtectionRedirect,
+} from '@/pages/sites/ProtectionPage'
 import {
   AccessControlPage,
   LegacySecurityRedirect,
@@ -82,11 +84,20 @@ export const router = createBrowserRouter([
         children: [
           { index: true, element: <Navigate to="origin" replace /> },
           { path: 'origin', element: <OriginPage /> },
-          { path: 'security/waf', element: <WafPage /> },
+          { path: 'security/protection', element: <ProtectionPage /> },
           { path: 'security/rate-limiting', element: <RateLimitingPage /> },
           { path: 'security/bot', element: <BotProtectionPage /> },
-          { path: 'security/cc', element: <CcProtectionPage /> },
           { path: 'security/access', element: <AccessControlPage /> },
+          // WAF and CC were separate tabs before they were merged; keep old
+          // links (including the `?rule=` deep link) working.
+          {
+            path: 'security/waf',
+            element: <LegacyProtectionRedirect tab="rules" />,
+          },
+          {
+            path: 'security/cc',
+            element: <LegacyProtectionRedirect tab="cc" />,
+          },
           // IP rules and geo were separate tabs before they were merged; keep
           // old links (including `?block=…` deep links) working.
           {

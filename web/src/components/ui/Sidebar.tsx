@@ -13,7 +13,6 @@ import {
   Gear,
   Gauge,
   Robot,
-  Cloud,
   IdentificationCard,
   FunnelSimple,
   CaretDown,
@@ -78,7 +77,12 @@ export function Sidebar({ collapsed, onNavigate }: SidebarProps) {
       labelKey: 'nav.security',
       icon: Shield,
       children: [
-        { to: site('security/waf'), labelKey: 'nav.securityWaf', icon: Shield, requiresSite: true },
+        {
+          to: site('security/protection'),
+          labelKey: 'nav.securityProtection',
+          icon: Shield,
+          requiresSite: true,
+        },
         {
           to: site('security/rate-limiting'),
           labelKey: 'nav.securityRateLimiting',
@@ -86,7 +90,6 @@ export function Sidebar({ collapsed, onNavigate }: SidebarProps) {
           requiresSite: true,
         },
         { to: site('security/bot'), labelKey: 'nav.securityBot', icon: Robot, requiresSite: true },
-        { to: site('security/cc'), labelKey: 'nav.securityCc', icon: Cloud, requiresSite: true },
         {
           to: site('security/access'),
           labelKey: 'nav.securityAccess',
