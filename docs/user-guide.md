@@ -114,7 +114,7 @@ Each site operates in one of three modes:
 | **Detection** | Rules evaluated, matches logged, but not blocked |
 | **Prevention** | Rules evaluated, matches blocked with configured action |
 
-Set via: `Sites → [site] → Rules → Security Mode`
+Set via: `Sites → [site] → Web Protection → WAF Rules`
 
 ### Rule Groups
 
@@ -160,6 +160,30 @@ PingWAF includes built-in protection against:
 
 Enable/disable individual rules within managed groups.
 
+### Rule Grading
+
+```
+Sites → [site] → Web Protection → Grading
+```
+
+Besides per-rule toggles, the whole detection posture of a site can be graded:
+
+| Control | Behavior |
+|---------|----------|
+| **Advanced mode** | Enables the strict managed rule set plus deep request-body inspection. Higher interception rate at a proportional performance cost. |
+| **Attack categories** (9) | `sqli`, `xss`, `rce`, `lfi`, `ssrf`, `deser`, `crlf`, `xxe`, `ssti` — switch a family off to downgrade its matches to monitoring: detection and logging stay fully active, but nothing is blocked. |
+| **Backend stacks** (4) | `java`, `php`, `python`, `node` — same downgrade semantics for stack-specific detections. Language-agnostic detections are never downgraded by a stack switch. |
+
+A site without explicit grading settings behaves exactly like the default posture: every detection blocks.
+
+### Under Attack Mode
+
+```
+Sites → [site] → Web Protection (top banner)
+```
+
+A site-wide emergency switch: every visitor is challenged with a JavaScript check, and CC protection is switched on automatically. Enable it only while the site is under an active flood attack and disable it once the attack subsides.
+
 ## Rate Limiting
 
 Configure per-site rate limits:
@@ -187,7 +211,7 @@ Requests missing the header, cookie or query parameter bucket together, so they 
 ### Challenge Settings
 
 ```
-Sites → [site] → Challenge
+Sites → [site] → Web Protection → CC Protection
 ```
 
 | Setting | Options |
