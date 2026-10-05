@@ -755,8 +755,8 @@ fn expand_base64(
 /// member in a form field): the whole value is not base64 so
 /// [`expand_base64`] skips it, but the classic b64 run sits inside string
 /// quotes after the escape pass. Require the run to open and close inside
-/// double quotes — UA tokens and header blobs never do — and let the
-/// charset + printability gates inside [`b64_decode_value`] reject hex
+/// matching string quotes — UA tokens and header blobs never do — and let
+/// the charset + printability gates inside [`b64_decode_value`] reject hex
 /// hashes and camelCase words. Strict-only: the escape pass that exposes
 /// these runs does not run below Strict.
 fn expand_b64_substrings(decoded_values: &mut Vec<DecodedValue>, strict: bool) {
@@ -773,11 +773,17 @@ fn expand_b64_substrings(decoded_values: &mut Vec<DecodedValue>, strict: bool) {
         let mut pushed = 0usize;
         let mut i = 0usize;
         while i + 1 < bytes.len() && pushed < 4 {
-            // Run must open right behind a double quote.
-            if bytes[i] != b'"' {
+            // Run must open right behind a string quote. Single quotes count
+            // too: SQL/Python string literals carry payloads the same way
+            // (`{'id': 'MCcgfHwg…='}` unwraps to a UNION/tautology chain),
+            // and the white corpus's only single-quoted runs are camelCase
+            // API names that the printability gate inside
+            // [`b64_decode_value`] rejects after decoding.
+            if bytes[i] != b'"' && bytes[i] != b'\'' {
                 i += 1;
                 continue;
             }
+            let quote = bytes[i];
             let start = i + 1;
             let mut end = start;
             while end < bytes.len()
@@ -789,8 +795,8 @@ fn expand_b64_substrings(decoded_values: &mut Vec<DecodedValue>, strict: bool) {
                 end += 1;
             }
             let run_len = end - start;
-            // Close straight into a double quote; padding may precede it.
-            if run_len >= 16 && end < bytes.len() && bytes[end] == b'"' {
+            // Close straight into the matching quote; padding may precede it.
+            if run_len >= 16 && end < bytes.len() && bytes[end] == quote {
                 if let Some(decoded) = b64_decode_value(&value[start..end]) {
                     decoded_values.push(DecodedValue {
                         source,

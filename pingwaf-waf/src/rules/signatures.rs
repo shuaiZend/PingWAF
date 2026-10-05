@@ -898,6 +898,63 @@ fn builtin_patterns() -> Vec<SignaturePattern> {
             "PHP file write primitive",
             "file_put_contents",
         );
+        // Tight `||`-chained DNS lookup: `x||nslookup collab.example` — the
+        // spaced-pipe needles above only see `|| nslookup`; command chains
+        // with an immediate second stage skip the space. The `+`-as-space
+        // query decode already turns `+nslookup` into ` nslookup`.
+        push(
+            "CI-107",
+            AttackCategory::CommandInjection,
+            4,
+            "piped DNS lookup",
+            "||nslookup ",
+        );
+        // Pipe into a filesystem write: `aaa|touch /tmp/success` — the
+        // pipeline hands the attacker-controlled command straight to a
+        // shell; `touch /` never appears in an honest value.
+        push(
+            "CI-108",
+            AttackCategory::CommandInjection,
+            4,
+            "piped file write",
+            "|touch /",
+        );
+        // Git client option injection (CVE-2019-1387 family): a value that
+        // becomes a command-line option (`--upload-pack=cmd`,
+        // `--open-files-in-pager=cmd`) executes it on the server when a
+        // git-aware backend shells out. Options never start a query value
+        // honestly.
+        push(
+            "CI-109",
+            AttackCategory::CommandInjection,
+            5,
+            "git pager option injection",
+            "--open-files-in-pager=",
+        );
+        push(
+            "CI-110",
+            AttackCategory::CommandInjection,
+            5,
+            "git shell option injection",
+            "--upload-pack=",
+        );
+        // Lua sandbox escape via the os library (`local os =
+        // require('os')` in APISIX route scripts); both quote flavors —
+        // honest payloads never load `os` by name.
+        push(
+            "CI-111",
+            AttackCategory::CommandInjection,
+            5,
+            "Lua os library escape",
+            "require('os')",
+        );
+        push(
+            "CI-112",
+            AttackCategory::CommandInjection,
+            5,
+            "Lua os library escape",
+            "require(\"os\")",
+        );
         // JSFuck / Harley-Davidson style pure-symbol JS: the prefix
         // `[(+{}+[])` only occurs inside obfuscated execution payloads.
         push(
@@ -1195,6 +1252,23 @@ fn builtin_patterns() -> Vec<SignaturePattern> {
             5,
             "Java serialized object magic (b64)",
             "rO0AB",
+        );
+        // XStream custom-serialization XML (CVE-2021-21344 family): the
+        // `serialization='custom'` attribute and `java.util.` element names
+        // are produced only by the exploit's hand-written XML stream.
+        push(
+            "DZ-018",
+            AttackCategory::Deserialization,
+            4,
+            "XStream java element",
+            "<java.util.",
+        );
+        push(
+            "DZ-019",
+            AttackCategory::Deserialization,
+            5,
+            "XStream custom serialization",
+            "serialization='custom'",
         );
 
         // ---- XXE ----
