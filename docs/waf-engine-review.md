@@ -219,6 +219,8 @@ post11 漏报经 P7 后仍开放 84 条（44 Pass / 37 Monitor / 2 链路 / 1 Ch
 
 回归：191 单测全绿（新增 2：`detect_deser_java_magic_in_latin1_restored_bytes`、`java_serialized_magic_percent_query_blocks`）；70/62 triage Pass→Block；全量 bench 见《waf-benchmark-report》§22 P12 行。
 
+48. **quoted-run 单引号放宽 + 管道/git/Lua/XStream needle 族** ✅：post17 后 13 条 REAL other 漏报逐条归因出 6 个可修族。①**引号门放宽**——`expand_b64_substrings` 的引号包裹 b64 run 只认双引号，而 SQL/Python 字典值（`{'id': 'MCcg…='}`）的单引号字符串字面量同样承载 payload（710c90 族），放宽为 matching string quotes；白样本全量预检：单引号 b64 run 唯一命中族是驼峰 API Action 名（ListResourceGroups 等），解码后 printability 门拒收（11%~46%），放宽安全。②**needle 族 8 条**——紧凑 `||` 管道 DNS 链（`||nslookup `，`+`→空格解码后成立）、管道写文件（`|touch /`）、git 选项注入（`--open-files-in-pager=`/`--upload-pack=`，CVE-2019-1387 族）、Lua os 沙箱逃逸（`require('os')`/`require("os")`，APISIX 族）、XStream custom-serialization XML（`<java.util.`/`serialization='custom'`，CVE-2021-21344 族）；白样本 needle 预检 8 条零命中。**编号教训**：初版与既有 `$(cat` 命令替换族（CI-101~106）重号——details 去重按 ID（engine 1054-1058），重号不吞分但归因歧义，扩 needle 前必须 grep 既有 ID 占用；已顺延为 CI-107~112。
+
 ### 收益矩阵（基于 bench 归因的保守估算）
 
 | 方案 | 拦截率提升 | 误报影响 | 工作量 |

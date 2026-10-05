@@ -2716,6 +2716,64 @@ mod tests {
         assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
     }
 
+    fn strict_form(body: &[u8]) -> WafVerdict {
+        let e = strict_engine();
+        let mut r = req("POST", "/x", "");
+        r.headers.push((
+            "Content-Type".into(),
+            "application/x-www-form-urlencoded".into(),
+        ));
+        r.body = Some(body.to_vec());
+        e.inspect(&r)
+    }
+
+    #[test]
+    fn single_quoted_b64_sql_dict_blocks() {
+        // (`710c90` family): SQL payload wrapped in a Python-dict form value
+        // whose b64 run sits inside single quotes — the quoted-run gate must
+        // accept matching single quotes, not only double ones.
+        let v = strict_form(
+            b"id=%7B%27id%27%3A+%27MCcgfHwgMj0xZTF1bmlvbiBhbGwgLyohc2VsZWN0Ki8gMSwgMiM%3D%27%7D&Submit=Submit",
+        );
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn cmd_git_lua_xstream_needles_block() {
+        // P12 needle widening: tight `||` DNS chain, pipe into a filesystem
+        // write, git client option injection, Lua os-library escape, and
+        // XStream custom-serialization XML.
+        for (name, body) in [
+            (
+                "tight || dns chain",
+                &b"ip=x||nslookup+x.BURP-COLLABORATOR-SUBDOMAIN||&Submit=Submit"[..],
+            ),
+            (
+                "pipe into touch",
+                &b"token=12312&client=ssh&ssh_priv=aaa|touch%20/tmp/success%3b"[..],
+            ),
+            (
+                "git pager option",
+                &b"query=--open-files-in-pager=touch+/tmp/success%3B"[..],
+            ),
+            (
+                "git upload-pack option",
+                &b"path=--upload-pack%3Devil%40host%3Arepo.git"[..],
+            ),
+            (
+                "lua os escape",
+                &b"script=local+_M+%3D+{}+local+os+%3D+require('os')"[..],
+            ),
+            (
+                "xstream custom xml",
+                &b"<java.util.PriorityQueue+serialization='custom'><unserializable-parents/>"[..],
+            ),
+        ] {
+            let v = strict_form(body);
+            assert_eq!(v.action, WafAction::Block, "{name}: {}", v.details);
+        }
+    }
+
     #[test]
     fn noncanonical_b64_waitfor_onion_blocks() {
         // (`a2af` family): whole-value b64 transport with non-canonical
