@@ -2112,6 +2112,16 @@ fn fingerprint_sql(lower: &str) -> String {
 static SQLI_UNION_SELECT: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)\bunion\b[\s/*!]+(?:\ball\b[\s/*!]+)?\bselect\b").unwrap()
 });
+/// Comment-glued union/select split: `unION#filler\nselECT`,
+/// `union--filler\nselect`. The `#`/`--` must sit *glued* to `union` —
+/// honest prose and teaching SQL always keep whitespace before a comment, so
+/// the glued shape is authored obfuscation — and `select` must appear within
+/// 64 filler bytes. The right edge accepts a digit or any non-letter
+/// (`select1`) because attacker-controlled newline deletion glues the
+/// keyword to the following token; `selection` still cannot fire.
+static SQLI_UNION_COMMENT_SPLIT: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)\bunion(?:#|--)[\s\S]{0,64}?\bselect(?:[^a-z]|$)").unwrap()
+});
 static SQLI_STACKED: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i);\s*(?:select|insert|update|delete|drop|alter|create|truncate|exec|execute|grant|revoke|declare|begin|shutdown)\b").unwrap()
 });
@@ -2251,6 +2261,14 @@ fn sqli_strong_checks(lower: &str) -> Vec<&'static str> {
     let mut strong: Vec<&'static str> = Vec::with_capacity(4);
     if SQLI_UNION_SELECT.is_match(lower) {
         strong.push("union-select");
+    }
+    // `unION#filler\nselECT` / `union--filler select`: a row comment glued
+    // straight onto `union` with `select` behind the filler words. Honest SQL
+    // prose keeps whitespace between the keyword and a comment, so the glued
+    // shape is authored obfuscation — and the filler-bounded window keeps a
+    // plain "union … select" mention (no comment) out of this check.
+    if SQLI_UNION_COMMENT_SPLIT.is_match(lower) {
+        strong.push("union-comment-split");
     }
     if SQLI_STACKED.is_match(lower) {
         strong.push("stacked-query");
@@ -2685,6 +2703,40 @@ pub fn path_tautology_segment(path: &str) -> bool {
             is_sqli && fp.contains("tautology")
         }
     })
+}
+
+/// Backtick-interleaved command names (`;wh``oami`, `|ca``t /e`): an empty
+/// backtick pair glued inside a command word behind a shell operator. Honest
+/// text keeps whitespace before a backtick span, so the interleaved shape is
+/// authored obfuscation against literal `` `id` ``-style signatures.
+static CI_BACKTICK_INTERLEAVED: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)(?:;|\||&&|&)\s*[a-z_]{1,12}`{2}[a-z_]").unwrap()
+});
+
+pub fn ci_backtick_interleaved(input: &str) -> bool {
+    CI_BACKTICK_INTERLEAVED.is_match(input)
+}
+
+/// Protocol CRLF smuggling: an SSRF-exploit scheme (`ldap://`, `gopher://`,
+/// `dict://`) carrying a decoded newline. These schemes exist to speak raw
+/// wire protocols, and a newline inside them is a framed request injection —
+/// never a benign URL.
+pub fn ssrf_protocol_smuggling(input: &str) -> bool {
+    (input.contains("ldap://")
+        || input.contains("gopher://")
+        || input.contains("dict://"))
+        && (input.contains('\n') || input.contains('\r'))
+}
+
+/// Backslash-joined remote include (`dir=http\..\admin\...`): a scheme
+/// prefix followed by backslash traversal — RFI and Windows-path traversal
+/// composed into one payload. Backslash traversal alone is PT-002; the
+/// scheme prefix in front of it marks an inclusion attempt.
+static PT_REMOTE_BACKSLASH: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)(?:https?|ftp)\\+\.\.\\").unwrap());
+
+pub fn pt_remote_backslash_include(input: &str) -> bool {
+    PT_REMOTE_BACKSLASH.is_match(input)
 }
 
 static CRLF_HEADER_SHAPE: Lazy<Regex> =
