@@ -25,9 +25,9 @@ use crate::normalize::{normalize_request, NormalizedRequest};
 use crate::rules::expression::{evaluate, EvalContext};
 use crate::rules::managed::default_managed_rules;
 use crate::rules::signatures::{
-    ci_backtick_interleaved, crlf_header_injection_shaped, detect_deser_shape,
-    detect_expr_injection, detect_js_call, detect_sqli, detect_xss,
-    path_tautology_segment, pt_double_exec_extension,
+    ci_backtick_interleaved, ci_chr_chain, crlf_header_injection_shaped,
+    detect_deser_shape, detect_expr_injection, detect_js_call, detect_sqli,
+    detect_xss, path_tautology_segment, pt_double_exec_extension,
     pt_remote_backslash_include, sqli_into_file_statement_shaped,
     sqli_union_statement_shaped, ssrf_protocol_smuggling, xss_markup_shaped,
     xss_script_tag_shaped, xss_script_uri_html_shaped, AttackCategory,
@@ -689,6 +689,20 @@ impl WafEngine {
                 recs.push(HitRec::Lib {
                     kind: "ci-shape",
                     fingerprint: "backtick-interleaved".to_string(),
+                    source: value.source.as_str(),
+                    name: &value.name,
+                });
+            }
+            if ci_chr_chain(needle) {
+                critical_hit = true;
+                self.scorer.add_category_hit(
+                    &mut breakdown,
+                    AttackCategory::CommandInjection,
+                    5,
+                );
+                recs.push(HitRec::Lib {
+                    kind: "ci-shape",
+                    fingerprint: "chr-codepoint-chain".to_string(),
                     source: value.source.as_str(),
                     name: &value.name,
                 });
@@ -2600,6 +2614,85 @@ mod tests {
     }
 
     #[test]
+    fn b64_transport_control_chars_no_longer_split_sql_keywords() {
+        // b64 tautology with transport padding (66b7): the decoded layer
+        // carries a stray NUL glued to `OR` (`OR\0/* … */"1"="1"`) — the
+        // NUL broke both the libinjection token and the `\bor\b` regex.
+        // Control chars (minus \t\n\r) now become spaces before scanning.
+        let e = strict_engine();
+        let v = e.inspect(&req(
+            "GET",
+            "/",
+            // spellchecker:off — base64 wire text, not prose
+            "roll%20off=YWRtaU4iKSAjIGNhbGVuZGFyIApPUgAvKiANYXJlYXN0aGVtZXRhc21hbiAqLyIxIj0iMSItLQ==",
+            // spellchecker:on
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn quoted_b64_run_inside_json_array_unwraps() {
+        // b64 hidden inside a quoted string of a larger JSON-array value
+        // (a4e0 family): whole-value b64 does not apply, but the quoted run
+        // extraction (Strict-only) lifts the inner layer where the
+        // comment-split tautology waits.
+        let e = strict_engine();
+        let v = e.inspect(&req(
+            "GET",
+            "/",
+            // spellchecker:off — base64 wire text, not prose
+            "traceability=%5B%22tag%22%2C%22MSAjIGEKT1IALyogDWIgKi8iMSI9IjEiLS0%3D%22%5D",
+            // spellchecker:on
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn python_chr_chain_blocks() {
+        // Python codepoint chain (`02d0`): `chr(97)) or 1: print
+        // chr(121)+chr(101)+chr(115)` — codepoint concatenation is
+        // evaluation input, never prose.
+        let e = strict_engine();
+        let v = e.inspect(&req(
+            "GET",
+            "/audit/gui_detail_view.php",
+            "token=1&id=%5C&uid=%2Cchr(97))%20or%201:%20print%20chr(121)%2bchr(101)%2bchr(115)&login=admin",
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn utf7_and_alert1_probes_block() {
+        let e = strict_engine();
+        // UTF-7 markup opener (`fda1`): `+ADw-script+AD4-prompt(1)…`.
+        let v = e.inspect(&req(
+            "GET",
+            "/",
+            "name=%2B%2Fv8+%2BADw-script%2BAD4-prompt(1)%2BADw-%2Fscript%2BAD4-",
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+        // Literal smoke-test probe (`4b67`).
+        let v = e.inspect(&req(
+            "GET",
+            "/vulnerabilities/xss_r/",
+            "name=%7B%7D.%22%29%29%29%3Balert(1)%2F%2F%22%3B",
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn asp_one_liner_webshell_blocks() {
+        // ASP one-liner (`357e`): b64 transport over `<%eval request("sb")%>`.
+        let e = strict_engine();
+        let v = e.inspect(&req(
+            "GET",
+            "/",
+            "push=PCVldmFsIHJlcXVlc3QoInNiIiklPg%3D%3D",
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
     fn base64_html_entity_inner_payload_blocks() {
         // b64 transport wrapping an HTML-entity-encoded meta-refresh with a
         // javascript: target (05/4a): the b64 expansion must entity-decode
@@ -2620,6 +2713,25 @@ mod tests {
             .to_vec(),
         );
         let v = e.inspect(&form);
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn noncanonical_b64_waitfor_onion_blocks() {
+        // (`a2af` family): whole-value b64 transport with non-canonical
+        // trailing bits — the backend's lenient decoder unwraps it while a
+        // strict decoder refuses — over a second b64 layer carrying
+        // `));wAITfor` time-blindness with comment filler (no `delay`, no
+        // `(` after waitfor).
+        let e = strict_engine();
+        let v = e.inspect(&req(
+            "HEAD",
+            "/x",
+            concat!(
+                "analogy=S1NrN2QwRkpWR1p2Y2dvdktpQnBiblJsY25CdmJHRjBaV04xY25KbGJuUjBhVzFsZW05dVpXOXdkSE5tYjJOMWMyRmliR1Z2Y21SbGNtTnZiM0prYzNWdWMzVmljMk55YVdKbENuTmxjR0Z5WVhSdmNuTmxjM05wYjI1amJHOXpaWE4wYjNKa1pYSm",
+                "llV0Z1YVcxaGRHVmtaMjl2WkFvS0",
+            ),
+        ));
         assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
     }
 

@@ -866,6 +866,38 @@ fn builtin_patterns() -> Vec<SignaturePattern> {
             "Drupal render-array elements key",
             "#elements",
         );
+        // Classic ASP one-liner webshell (`<%eval request("x")%>`); the
+        // scriptlet-plus-eval pair never occurs in honest markup.
+        push(
+            "CI-096",
+            AttackCategory::CommandInjection,
+            5,
+            "ASP scriptlet eval backdoor",
+            "<%eval",
+        );
+        push(
+            "CI-097",
+            AttackCategory::CommandInjection,
+            5,
+            "ASP scriptlet execute backdoor",
+            "<%execute",
+        );
+        push(
+            "CI-098",
+            AttackCategory::CommandInjection,
+            5,
+            "ASP eval-request one-liner",
+            "eval request(",
+        );
+        // PHP write primitive as a bare parameter value — the remote-dropper
+        // pattern (`t=file_put_contents&t1=./shell.php&t3=http://…/txt`).
+        push(
+            "CI-099",
+            AttackCategory::CommandInjection,
+            5,
+            "PHP file write primitive",
+            "file_put_contents",
+        );
         // JSFuck / Harley-Davidson style pure-symbol JS: the prefix
         // `[(+{}+[])` only occurs inside obfuscated execution payloads.
         push(
@@ -874,6 +906,25 @@ fn builtin_patterns() -> Vec<SignaturePattern> {
             5,
             "JSFuck invocation prefix",
             "[(+{}+[])",
+        );
+        // UTF-7 encoded `<` (`+ADw-`): the classic `+ADw-script+AD4-` markup
+        // smuggle rides on this fixed prefix; honest text never emits it.
+        push(
+            "XSS-023",
+            AttackCategory::Xss,
+            5,
+            "UTF-7 encoded markup opener",
+            "+ADw-",
+        );
+        // The literal probe `alert(1)` — the overwhelmingly common smoke-test
+        // payload. The generic `alert(` needle stays sev3 (prose mentions);
+        // the exact `alert(1)` literal does not occur in benign corpus.
+        push(
+            "XSS-024",
+            AttackCategory::Xss,
+            5,
+            "alert(1) literal probe",
+            "alert(1)",
         );
 
         // ---- SSRF ----
@@ -2167,6 +2218,13 @@ static SQLI_STACKED: Lazy<Regex> = Lazy::new(|| {
 static SQLI_DANGEROUS_FN: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)\b(?:sleep|benchmark|pg_sleep|waitfor|load_file|extractvalue|updatexml|xp_cmdshell|sp_executesql)\s*\(").unwrap()
 });
+// T-SQL `WAITFOR` is a standalone statement keyword — `WAITFOR DELAY '0:05'`
+// is never followed by `(`, so the function-call regex above cannot see real
+// time-blindness payloads (`));wAITfor` in a transport-wrapped value).
+// Bare `waitfor` inside an HTTP surface has no honest prose use and the
+// keyword prefilter already bounds the cost to inputs mentioning it.
+static SQLI_WAITFOR: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)\bwaitfor\b").unwrap());
 static SQLI_TAUTOLOGY: Lazy<Regex> = Lazy::new(|| {
     // Tautology shapes only: numeric self-equality (`or 1=1`, `1='1'`),
     // quoted-token equality (`or 'a'='a'`, `"1"="1"`) and the classic blind
@@ -2314,6 +2372,9 @@ fn sqli_strong_checks(lower: &str) -> Vec<&'static str> {
     }
     if SQLI_DANGEROUS_FN.is_match(lower) {
         strong.push("dangerous-function");
+    }
+    if SQLI_WAITFOR.is_match(lower) {
+        strong.push("waitfor-statement");
     }
     if SQLI_TAUTOLOGY.is_match(lower) {
         strong.push("tautology");
@@ -2785,6 +2846,18 @@ static PT_REMOTE_BACKSLASH: Lazy<Regex> =
 
 pub fn pt_remote_backslash_include(input: &str) -> bool {
     PT_REMOTE_BACKSLASH.is_match(input)
+}
+
+/// Python chr() codepoint chain: two `chr(N)` calls joined by an operator
+/// (`chr(121)+chr(101)+chr(115)` → "yes"). Assembling evaluation input from
+/// codepoints is an injection-building shape; benign traffic carries no
+/// chr() chains at all.
+static CI_CHR_CHAIN: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)chr\(\d{1,3}\)\s*[+%&|^.]\s*chr\(\d{1,3}\)").unwrap()
+});
+
+pub fn ci_chr_chain(input: &str) -> bool {
+    CI_CHR_CHAIN.is_match(input)
 }
 
 /// Double executable extension at the end of a path (`apache.php.jpeg`):

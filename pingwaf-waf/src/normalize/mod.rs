@@ -16,6 +16,8 @@ pub mod url;
 
 use std::borrow::Cow;
 
+use once_cell::sync::Lazy;
+
 use crate::normalize::html::decode_entities;
 use crate::normalize::path::normalize as normalize_path;
 use crate::normalize::url::multi_decode;
@@ -254,6 +256,7 @@ pub fn normalize_request<'a>(
     }
 
     expand_base64(&mut decoded_values, max_decode_layers, decode_escapes);
+    expand_b64_substrings(&mut decoded_values, decode_escapes);
 
     NormalizedRequest {
         method,
@@ -668,6 +671,30 @@ fn expand_base64(
             if decoded.is_empty() || decoded.len() > B64_MAX_VALUE_LEN {
                 continue;
             }
+            // Transport padding smuggles bare control characters past the
+            // 90% printability gate (stray NUL between `OR` and the block
+            // comment, lone CR): every SQL keyword lexer downstream loses
+            // the token (`or\0` is not `\bor\b`). Replace them with spaces —
+            // same trade as the JSON control-char retry below, spaces keep
+            // token boundaries a delete would glue away.
+            if decoded.chars().any(|c| {
+                c.is_ascii_control() && c != '\t' && c != '\n' && c != '\r'
+            }) {
+                decoded = decoded
+                    .chars()
+                    .map(|c| {
+                        if c.is_ascii_control()
+                            && c != '\t'
+                            && c != '\n'
+                            && c != '\r'
+                        {
+                            ' '
+                        } else {
+                            c
+                        }
+                    })
+                    .collect();
+            }
             let name = if name.is_empty() {
                 "b64".to_string()
             } else {
@@ -723,9 +750,88 @@ fn expand_base64(
     }
 }
 
+/// Quoted-run b64 extraction. Some transports hide the payload inside a
+/// larger text surface (a JSON array of `\uXXXX`-escaped strings, a quoted
+/// member in a form field): the whole value is not base64 so
+/// [`expand_base64`] skips it, but the classic b64 run sits inside string
+/// quotes after the escape pass. Require the run to open and close inside
+/// double quotes — UA tokens and header blobs never do — and let the
+/// charset + printability gates inside [`b64_decode_value`] reject hex
+/// hashes and camelCase words. Strict-only: the escape pass that exposes
+/// these runs does not run below Strict.
+fn expand_b64_substrings(decoded_values: &mut Vec<DecodedValue>, strict: bool) {
+    if !strict {
+        return;
+    }
+    let layer: Vec<(ValueSource, String, String)> = decoded_values
+        .iter()
+        .filter(|v| v.field && !v.name.contains(".b64"))
+        .map(|v| (v.source, v.name.clone(), v.decoded.clone()))
+        .collect();
+    for (source, name, value) in layer {
+        let bytes = value.as_bytes();
+        let mut pushed = 0usize;
+        let mut i = 0usize;
+        while i + 1 < bytes.len() && pushed < 4 {
+            // Run must open right behind a double quote.
+            if bytes[i] != b'"' {
+                i += 1;
+                continue;
+            }
+            let start = i + 1;
+            let mut end = start;
+            while end < bytes.len()
+                && (bytes[end].is_ascii_alphanumeric()
+                    || bytes[end] == b'+'
+                    || bytes[end] == b'/'
+                    || bytes[end] == b'=')
+            {
+                end += 1;
+            }
+            let run_len = end - start;
+            // Close straight into a double quote; padding may precede it.
+            if run_len >= 16 && end < bytes.len() && bytes[end] == b'"' {
+                if let Some(decoded) = b64_decode_value(&value[start..end]) {
+                    decoded_values.push(DecodedValue {
+                        source,
+                        name: if name.is_empty() {
+                            "b64q".to_string()
+                        } else {
+                            format!("{name}.b64q")
+                        },
+                        decoded,
+                        field: true,
+                    });
+                    pushed += 1;
+                }
+                i = end + 1;
+            } else {
+                i = end.max(start + 1);
+            }
+        }
+    }
+}
+
 /// Decode a value that is *entirely* base64 into text. `None` when the value
 /// carries anything outside the base64 alphabet (data URIs, signed tokens,
 /// hex hashes decode to binary and fail the printability gate anyway).
+/// Lenient decode engine: the stock STANDARD engine rejects non-canonical
+/// trailing bits, but mainstream server decoders (python `binascii`, Java
+/// `util.Base64` without strict flags) accept them — a payload wrapped by
+/// such an encoder (`…S0` ending in a symbol whose low bits are nonzero)
+/// decodes on the backend while the WAF's `b64_decode_value` returned None,
+/// hiding the whole transport layer. The charset and printability gates
+/// around the decode are the quality filter; trailing-bit leniency only
+/// widens what reaches them.
+static B64_ENGINE: Lazy<base64::engine::general_purpose::GeneralPurpose> =
+    Lazy::new(|| {
+        use base64::engine::GeneralPurposeConfig as Cfg;
+        base64::engine::general_purpose::GeneralPurpose::new(
+            &base64::alphabet::STANDARD,
+            Cfg::new().with_decode_allow_trailing_bits(true),
+        )
+    });
+
 fn b64_decode_value(s: &str) -> Option<String> {
     use base64::Engine as _;
     if !s.bytes().all(|b| {
@@ -746,9 +852,7 @@ fn b64_decode_value(s: &str) -> Option<String> {
     for _ in 0..pad {
         buf.push('=');
     }
-    let raw = base64::engine::general_purpose::STANDARD
-        .decode(buf.as_bytes())
-        .ok()?;
+    let raw = B64_ENGINE.decode(buf.as_bytes()).ok()?;
     let text = String::from_utf8(raw).ok()?;
     let printable = text
         .bytes()
