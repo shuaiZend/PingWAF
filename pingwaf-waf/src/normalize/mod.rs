@@ -540,14 +540,28 @@ fn unpack_string_json(
     decode_escapes: bool,
     decoded_values: &mut Vec<DecodedValue>,
 ) -> bool {
-    if depth >= JSON_MAX_DEPTH
-        || s.is_empty()
-        || s.len() > JSON_MAX_VALUE_LEN
-        || !looks_like_json(s)
-    {
+    if depth >= JSON_MAX_DEPTH || s.is_empty() || s.len() > JSON_MAX_VALUE_LEN {
         return false;
     }
-    let Ok(nested) = serde_json::from_str::<serde_json::Value>(s) else {
+    // A quoting wrapper around the payload (`id='{"id":"…"}'` in a query —
+    // a SQL/string-concatenation artifact the backend still strips before
+    // parsing) must not hide the members. One shell layer, matching quotes.
+    let stripped = s.trim();
+    let stripped = {
+        let bytes = stripped.as_bytes();
+        if bytes.len() >= 2
+            && (bytes[0] == b'\'' || bytes[0] == b'"')
+            && bytes[bytes.len() - 1] == bytes[0]
+        {
+            &stripped[1..stripped.len() - 1]
+        } else {
+            stripped
+        }
+    };
+    if !looks_like_json(stripped) {
+        return false;
+    }
+    let Ok(nested) = serde_json::from_str::<serde_json::Value>(stripped) else {
         return false;
     };
     let before = decoded_values.len();
