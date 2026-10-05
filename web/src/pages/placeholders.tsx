@@ -1,7 +1,6 @@
 import { useTranslation } from 'react-i18next'
 import {
   Robot,
-  Cloud,
   IdentificationCard,
   Lightning,
   Lock,
@@ -22,18 +21,6 @@ export function BotProtectionPage() {
       description={t('pages.bot.description')}
       icon={<Robot weight="duotone" />}
       emptyTitle={t('pages.bot.empty')}
-    />
-  )
-}
-
-export function CcProtectionPage() {
-  const { t } = useTranslation()
-  return (
-    <PlaceholderPage
-      title={t('pages.cc.title')}
-      description={t('pages.cc.description')}
-      icon={<Cloud weight="duotone" />}
-      emptyTitle={t('pages.cc.empty')}
     />
   )
 }

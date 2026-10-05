@@ -378,28 +378,53 @@ export interface DerivedWafConfig {
   paranoia_level: number
   active_rules: number
   total_rules: number
-  detections: Record<WafDetection, boolean>
 }
 
-export type WafDetection = 'sqli' | 'xss' | 'rce' | 'lfi' | 'ssrf' | 'bot'
+/** Attack families a site can downgrade to monitor-only (`pingwaf-waf::CategorySet`). */
+export type WafCategory =
+  | 'sqli'
+  | 'xss'
+  | 'rce'
+  | 'lfi'
+  | 'ssrf'
+  | 'deser'
+  | 'crlf'
+  | 'xxe'
+  | 'ssti'
 
-export const WAF_DETECTIONS: WafDetection[] = [
+/** Backend stacks a site can downgrade to monitor-only (`pingwaf-waf::StackSet`). */
+export type WafStack = 'java' | 'php' | 'python' | 'node'
+
+export const WAF_CATEGORIES: WafCategory[] = [
   'sqli',
   'xss',
   'rce',
   'lfi',
   'ssrf',
-  'bot',
+  'deser',
+  'crlf',
+  'xxe',
+  'ssti',
 ]
 
-/** Tag aliases accepted by `waf_config_to_proto` for each detection family. */
-export const DETECTION_TAGS: Record<WafDetection, string[]> = {
-  sqli: ['sqli', 'sql-injection'],
-  xss: ['xss'],
-  rce: ['rce', 'command-injection'],
-  lfi: ['lfi', 'file-inclusion'],
-  ssrf: ['ssrf'],
-  bot: ['bot'],
+export const WAF_STACKS: WafStack[] = ['java', 'php', 'python', 'node']
+
+/** `models::waf_settings::Model` — the persisted site-level grading knobs. */
+export interface WafSettings {
+  id: string
+  site_id: string
+  advanced_mode: boolean
+  monitor_categories: WafCategory[] | string[]
+  monitor_stacks: WafStack[] | string[]
+  created_at: string
+  updated_at: string
+}
+
+/** Patch semantics: omitted fields keep their current value. */
+export interface UpdateWafSettingsRequest {
+  advanced_mode?: boolean
+  monitor_categories?: string[]
+  monitor_stacks?: string[]
 }
 
 /* ── Rate limiting ────────────────────────────────────────────────── */
@@ -1398,7 +1423,8 @@ export interface ChallengeConfig {
   tls_fingerprint_check: boolean
 }
 
-export type UpdateChallengeRequest = ChallengeConfig
+/** Patch semantics: omitted fields keep their current value (mirrors the server). */
+export type UpdateChallengeRequest = Partial<ChallengeConfig>
 
 /* ── IP access rules ──────────────────────────────────────────────── */
 

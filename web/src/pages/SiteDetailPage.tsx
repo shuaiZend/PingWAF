@@ -14,7 +14,6 @@ import {
   Pause,
   Play,
   Robot,
-  Cloud,
   IdentificationCard,
   Network,
   Warning,
@@ -71,14 +70,17 @@ export function SiteDetailPage() {
   const base = `/sites/${siteId}`
   const tabs = [
     { to: `${base}/origin`, label: t('nav.origin'), icon: Network },
-    { to: `${base}/security/waf`, label: t('nav.securityWaf'), icon: Shield },
+    {
+      to: `${base}/security/protection`,
+      label: t('nav.securityProtection'),
+      icon: Shield,
+    },
     {
       to: `${base}/security/rate-limiting`,
       label: t('nav.securityRateLimiting'),
       icon: Gauge,
     },
     { to: `${base}/security/bot`, label: t('nav.securityBot'), icon: Robot },
-    { to: `${base}/security/cc`, label: t('nav.securityCc'), icon: Cloud },
     {
       to: `${base}/security/access`,
       label: t('nav.securityAccess'),
