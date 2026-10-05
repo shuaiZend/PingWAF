@@ -34,8 +34,22 @@ pub struct ScoreBreakdown {
     pub xss_score: u8,
     /// RCE / command-injection sub-score, 0–99.
     pub rce_score: u8,
-    /// Final classification derived from `total` vs the engine threshold.
+    /// Final classification derived from `block_total` vs the engine threshold.
     pub overall_class: ScoreClass,
+    /// Blocking subset of `total`: excludes hits downgraded to monitor-only
+    /// by per-site category/stack config. Equal to `total` when nothing is
+    /// downgraded.
+    #[serde(default)]
+    pub block_total: u32,
+    /// Blocking subset of `sqli_score`.
+    #[serde(default)]
+    pub block_sqli_score: u8,
+    /// Blocking subset of `xss_score`.
+    #[serde(default)]
+    pub block_xss_score: u8,
+    /// Blocking subset of `rce_score`.
+    #[serde(default)]
+    pub block_rce_score: u8,
 }
 
 impl Default for ScoreBreakdown {
@@ -52,6 +66,10 @@ impl ScoreBreakdown {
             xss_score: 0,
             rce_score: 0,
             overall_class: ScoreClass::Clean,
+            block_total: 0,
+            block_sqli_score: 0,
+            block_xss_score: 0,
+            block_rce_score: 0,
         }
     }
 
@@ -106,10 +124,25 @@ impl AnomalyScorer {
         breakdown: &mut ScoreBreakdown,
         severity: u8,
     ) {
-        breakdown.total = breakdown
-            .total
-            .saturating_add(Self::points_for_severity(severity));
-        breakdown.overall_class = self.classify(breakdown.total);
+        self.add_severity_hit_ex(breakdown, severity, false);
+    }
+
+    /// [`AnomalyScorer::add_severity_hit`] with a monitor-only downgrade
+    /// flag: downgraded hits keep the aggregate (visibility) but are
+    /// excluded from the blocking subset.
+    pub fn add_severity_hit_ex(
+        &self,
+        breakdown: &mut ScoreBreakdown,
+        severity: u8,
+        monitored: bool,
+    ) {
+        let points = Self::points_for_severity(severity);
+        breakdown.total = breakdown.total.saturating_add(points);
+        if !monitored {
+            breakdown.block_total =
+                breakdown.block_total.saturating_add(points);
+        }
+        breakdown.overall_class = self.classify(breakdown.block_total);
     }
 
     /// Add a hit attributed to a specific attack category. Updates both the
@@ -120,20 +153,48 @@ impl AnomalyScorer {
         category: AttackCategory,
         severity: u8,
     ) {
+        self.add_category_hit_ex(breakdown, category, severity, false);
+    }
+
+    /// [`AnomalyScorer::add_category_hit`] with a monitor-only downgrade
+    /// flag (see [`AnomalyScorer::add_severity_hit_ex`]).
+    pub fn add_category_hit_ex(
+        &self,
+        breakdown: &mut ScoreBreakdown,
+        category: AttackCategory,
+        severity: u8,
+        monitored: bool,
+    ) {
         let points = Self::points_for_severity(severity);
         breakdown.total = breakdown.total.saturating_add(points);
+        if !monitored {
+            breakdown.block_total =
+                breakdown.block_total.saturating_add(points);
+        }
         let bump = u8::try_from(points * 12).unwrap_or(u8::MAX);
         match category {
             AttackCategory::SqlInjection => {
                 breakdown.sqli_score =
                     breakdown.sqli_score.saturating_add(bump);
+                if !monitored {
+                    breakdown.block_sqli_score =
+                        breakdown.block_sqli_score.saturating_add(bump);
+                }
             },
             AttackCategory::Xss => {
                 breakdown.xss_score = breakdown.xss_score.saturating_add(bump);
+                if !monitored {
+                    breakdown.block_xss_score =
+                        breakdown.block_xss_score.saturating_add(bump);
+                }
             },
             AttackCategory::CommandInjection
             | AttackCategory::Deserialization => {
                 breakdown.rce_score = breakdown.rce_score.saturating_add(bump);
+                if !monitored {
+                    breakdown.block_rce_score =
+                        breakdown.block_rce_score.saturating_add(bump);
+                }
             },
             // Template-injection openers (`{{`, `${`, …) are weak signals on
             // their own — they stay out of the RCE sub-score so the Strict
@@ -147,7 +208,7 @@ impl AnomalyScorer {
                 // Non-family attacks contribute to the aggregate only.
             },
         }
-        breakdown.overall_class = self.classify(breakdown.total);
+        breakdown.overall_class = self.classify(breakdown.block_total);
     }
 
     /// Add a structural expression-injection hit — a `${…}` / `{{…}}` /
@@ -155,9 +216,23 @@ impl AnomalyScorer {
     /// (see `detect_expr_injection`). Confirmed template evaluation is RCE
     /// territory, so this feeds the RCE sub-score directly.
     pub fn add_expr_hit(&self, breakdown: &mut ScoreBreakdown) {
+        self.add_expr_hit_ex(breakdown, false);
+    }
+
+    /// [`AnomalyScorer::add_expr_hit`] with a monitor-only downgrade flag.
+    pub fn add_expr_hit_ex(
+        &self,
+        breakdown: &mut ScoreBreakdown,
+        monitored: bool,
+    ) {
         breakdown.total = breakdown.total.saturating_add(4);
         breakdown.rce_score = breakdown.rce_score.saturating_add(48);
-        breakdown.overall_class = self.classify(breakdown.total);
+        if !monitored {
+            breakdown.block_total = breakdown.block_total.saturating_add(4);
+            breakdown.block_rce_score =
+                breakdown.block_rce_score.saturating_add(48);
+        }
+        breakdown.overall_class = self.classify(breakdown.block_total);
     }
 
     /// Map an aggregate score onto a [`ScoreClass`].

@@ -10,6 +10,7 @@
 //! and adds rules that are too aggressive for general traffic (e.g. blocking
 //! on the RCE sub-score alone).
 
+use crate::rules::signatures::AttackCategory;
 use crate::rules::{CompiledRule, RuleAction};
 use crate::{StackSet, WafLevel};
 
@@ -228,6 +229,27 @@ pub fn default_managed_rules(level: WafLevel) -> Vec<CompiledRule> {
         }
     }
     out
+}
+
+/// Map a managed rule onto the attack category its tags declare, so
+/// per-site monitor downgrades can apply to literal-expression rules.
+/// Score-gate rules (family / aggregate thresholds) don't need this — their
+/// expression input already excludes downgraded hits — but the mapping is
+/// harmless for them and future literal rules with family tags pick the
+/// semantics up automatically. Rules without a family tag (recon, method
+/// policy, …) return `None` and are never downgraded.
+pub(crate) fn managed_rule_category(
+    rule: &CompiledRule,
+) -> Option<AttackCategory> {
+    const FAMILY_TAGS: [(&str, AttackCategory); 3] = [
+        ("sqli", AttackCategory::SqlInjection),
+        ("xss", AttackCategory::Xss),
+        ("rce", AttackCategory::CommandInjection),
+    ];
+    FAMILY_TAGS
+        .iter()
+        .find(|(tag, _)| rule.tags.iter().any(|t| t == tag))
+        .map(|(_, category)| *category)
 }
 
 #[cfg(test)]

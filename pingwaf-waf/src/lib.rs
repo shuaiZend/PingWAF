@@ -14,7 +14,7 @@ pub mod rules;
 pub mod score;
 
 pub use engine::{RequestData, WafEngine, WafEngineConfig, WafMode};
-pub use rules::{CompiledRule, RuleAction};
+pub use rules::{AttackCategory, CompiledRule, RuleAction};
 pub use score::{AnomalyScorer, ScoreBreakdown, ScoreClass};
 
 use serde::{Deserialize, Serialize};
@@ -74,6 +74,7 @@ impl StackSet {
     /// Node.js / JavaScript runtimes.
     pub const NODE: Self = Self(1 << 4);
     pub const ALL: Self = Self(0b0001_1111);
+    pub const EMPTY: Self = Self(0);
 
     pub const fn bits(self) -> u8 {
         self.0
@@ -119,6 +120,35 @@ impl StackSet {
         }
         set
     }
+
+    /// Union of every recognized name WITHOUT forcing [`StackSet::GENERIC`].
+    ///
+    /// Used for monitor-only downgrade sets, where an empty set means
+    /// "enforce everything" — pre-seeding GENERIC would make that impossible.
+    pub fn from_names_exact<'a, I>(names: I) -> Self
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        let mut set = Self::EMPTY;
+        for name in names {
+            if let Some(s) = Self::parse_name(name) {
+                set = set.union(s);
+            }
+        }
+        set
+    }
+
+    /// `true` when any stack is shared with `other`.
+    pub const fn intersects(self, other: Self) -> bool {
+        self.0 & other.0 != 0
+    }
+
+    /// Drops the [`StackSet::GENERIC`] bit: language-agnostic patterns can
+    /// never be attributed to a single backend stack, so stack-scoped
+    /// monitor sets must not match them.
+    pub const fn except_generic(self) -> Self {
+        Self(self.0 & !Self::GENERIC.0)
+    }
 }
 
 impl Default for StackSet {
@@ -126,6 +156,91 @@ impl Default for StackSet {
     /// known stack set is an explicit opt-in, never a default.
     fn default() -> Self {
         Self::ALL
+    }
+}
+
+/// Attack-category dimension of per-site monitor downgrades.
+///
+/// Categories listed here still get detected and scored (visibility is
+/// preserved) but their hits can never block: the engine keeps a separate
+/// "blocking" score that excludes these contributions. Mirrors the
+/// [`StackSet`] style; the default is empty = enforce everything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct CategorySet(u16);
+
+impl CategorySet {
+    pub const SQLI: Self = Self(1 << 0);
+    pub const XSS: Self = Self(1 << 1);
+    pub const RCE: Self = Self(1 << 2);
+    pub const LFI: Self = Self(1 << 3);
+    pub const SSRF: Self = Self(1 << 4);
+    pub const DESER: Self = Self(1 << 5);
+    pub const CRLF: Self = Self(1 << 6);
+    pub const XXE: Self = Self(1 << 7);
+    pub const SSTI: Self = Self(1 << 8);
+    pub const ALL: Self = Self(0b01_1111_1111);
+    pub const EMPTY: Self = Self(0);
+
+    pub const fn bits(self) -> u16 {
+        self.0
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// `true` when `category` is in this monitor set.
+    pub const fn contains_category(self, category: AttackCategory) -> bool {
+        let bit = match category {
+            AttackCategory::SqlInjection => Self::SQLI.0,
+            AttackCategory::Xss => Self::XSS.0,
+            AttackCategory::CommandInjection => Self::RCE.0,
+            AttackCategory::PathTraversal => Self::LFI.0,
+            AttackCategory::Ssrf => Self::SSRF.0,
+            AttackCategory::Deserialization => Self::DESER.0,
+            AttackCategory::CrlfInjection => Self::CRLF.0,
+            AttackCategory::Xxe => Self::XXE.0,
+            AttackCategory::TemplateInjection => Self::SSTI.0,
+        };
+        self.0 & bit != 0
+    }
+
+    /// Parse a single category name (serde form, case-insensitive).
+    /// Unknown names return `None` so callers can warn on forward-compat
+    /// drift; the set itself is built by [`CategorySet::from_names`].
+    pub fn parse_name(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "sqli" | "sql_injection" => Some(Self::SQLI),
+            "xss" => Some(Self::XSS),
+            "rce" | "command_injection" => Some(Self::RCE),
+            "lfi" | "path_traversal" => Some(Self::LFI),
+            "ssrf" => Some(Self::SSRF),
+            "deser" | "deserialization" => Some(Self::DESER),
+            "crlf" | "crlf_injection" => Some(Self::CRLF),
+            "xxe" => Some(Self::XXE),
+            "ssti" | "template_injection" => Some(Self::SSTI),
+            _ => None,
+        }
+    }
+
+    /// Union of every recognized name; unrecognized names are ignored
+    /// (mirrors [`StackSet::from_names`] tolerance). An empty iterator
+    /// yields the empty set = enforce everything.
+    pub fn from_names<'a, I>(names: I) -> Self
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        let mut set = Self::EMPTY;
+        for name in names {
+            if let Some(c) = Self::parse_name(name) {
+                set = set.union(c);
+            }
+        }
+        set
     }
 }
 
