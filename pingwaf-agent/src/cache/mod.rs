@@ -137,6 +137,14 @@ pub struct WafConfig {
     pub ml_model_path: String,
     pub ml_threshold: f64,
     pub anomaly_threshold: u32,
+    /// Site-level WAF grading. Defaults keep old on-disk caches (written
+    /// before these fields existed) enforcing everything.
+    #[serde(default)]
+    pub advanced_mode: bool,
+    #[serde(default)]
+    pub monitor_categories: Vec<String>,
+    #[serde(default)]
+    pub monitor_stacks: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1242,6 +1250,9 @@ impl RuleCache {
             ml_model_path: w.ml_model_path.clone(),
             ml_threshold: w.ml_threshold,
             anomaly_threshold: w.anomaly_threshold,
+            advanced_mode: w.advanced_mode,
+            monitor_categories: w.monitor_categories.clone(),
+            monitor_stacks: w.monitor_stacks.clone(),
         }
     }
 
