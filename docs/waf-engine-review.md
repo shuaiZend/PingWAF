@@ -174,6 +174,17 @@ post11 漏报经 P7 后仍开放 84 条（44 Pass / 37 Monitor / 2 链路 / 1 Ch
 
 回归：175 单测全绿（`p8_zero_signal_forms_block` 覆盖四形态 + prose slug 放行负样本）；658 黑样本 triage 571→**575**（+4 零回退，四个新形态各承接一条）；fp46 白样本 Block 20 持平零新增。post13 全量实测：见《waf-benchmark-report》§17 P8 行。
 
+### P9 第十轮：b64 传输门放宽 + Monitor 形态升级——已落地 ✅
+
+输入两路：post13 strict 漏报 95 条全量归因（批次一）+ P8 遗留 Monitor 22 条逐条复核（批次二）。95 条中 18 条为无 Content-Length 的 POST/PUT（bench 回放器与 triage 直读文件的链路差异——合规客户端不发 body，物理不可拦，精确化取代 P8 归档的「13 条」口径）；其余 77 条批量抽查以 4 个代表性样本走 python 模拟解码链逐层对照，定位出**唯一共同断点**：`B64_MAX_VALUE_LEN=4096`。
+
+36. **B64_MAX_VALUE_LEN 4096→16384** ✅：transport-wrapped XML/JSON 攻击体（5.1KB wire 值解出 3.8KB JSON，OGNL `#context.get('com.opensymphony.xwork2')` 以 `\u` 转义嵌入）整体落在门与检测器之间。charset + printability 双质量门仍在 `b64_decode_value` 内部，扩的是尺寸上限不是质量标准。
+37. **控制符剥离 filter→空格替换** ✅：obfuscated transport 的 JSON 结构位携带裸控制字符（key 与冒号间杂 CR、闭括号前 NUL），严格 parse 拒收后重试被跳过；原 filter 直接删字符会把 `selEct\n1` 粘成 `selEct1` 丢掉 `\bselect\b` 词边界——替换为空格保留 token 边界。
+38. **SQLI_UNION_COMMENT_SPLIT 粘注释拆分** ✅：`unION#filler\nselECT` 形态（`union` 与 `select` 被 `#`/`--` 注释 + 填充分离）。`#`/`--` 必须**粘**在 `union` 后——诚实散文与教学 SQL 注释前总有空格，粘注释即作者混淆；`select` 须在 64 filler 字节内出现；右缘接受数字或任意非字母（攻击者删换行把 keyword 粘到后续 token），`selection` 无法触发。曾设计的行注释剥离重扫（`UNION\n-- x\nSELECT` 教学 SQL 剥注释后 union/select 相邻）因误报面被否决删除，51/09 实际由本形态命中。
+39. **Monitor 三形态升级 + Path 反引号对** ✅（22 条非 CRLF Monitor 逐条归因后的确定性族）：`ci_backtick_interleaved`（`;wh``oami` 反引号空对插空绕过分号命令分隔）；Path 源成对反引号（URL content 不携带未转义反引号，成对即命令替换 `/ax--exec=`id`--remote`）；`ssrf_protocol_smuggling`（ldap/gopher/dict:// + 换行 = 协议走私，纯 ldap URL 无换行保持放行——监控集成探测是合法场景，有负样本护栏）；`pt_remote_backslash_include`（`http\..\` 远程包含反斜杠形态）。暂缓 3 族：SSTI `\B{233*233}`（f7/8b 需新表达式形态族）、deser-shape Referer 降权豁免（b1/71 档位设计权衡）、XSS-019 DVWA 反射族（需响应面知识，静态检测面之外）。
+
+回归：180 单测全绿（5 个新测试：`b64_wire_over_old_gate_ognl_blocks`、`union_comment_glued_split_blocks` + 散文负样本 `union_teaching_sql_with_spaced_comment_passes`、`monitor_upgrade_shapes_block` 四 case + `ssrf_ldap_url_without_newline_stays_monitor`）；658 黑样本 triage 575→**592**（+17：13 条 b64 门 + 4 条 Monitor 升级，零回退；9 条大 body 噪声样本命中均为双层 b64 埋 OGNL/script-tag 的多规则交叉确认真实攻击）；fp46 白样本 Block 20 与 P8 集合完全一致零新增。post14 全量实测：四配置 +3/+10/+3/+16 零回退、FP 全部持平（5/14/5/22），strict+body 85.6%→**88.0%**，p95 持平（静态 4ms / body ~3s¹）——见《waf-benchmark-report》§18 P9 行。
+
 ### 收益矩阵（基于 bench 归因的保守估算）
 
 | 方案 | 拦截率提升 | 误报影响 | 工作量 |

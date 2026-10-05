@@ -25,11 +25,12 @@ use crate::normalize::{normalize_request, NormalizedRequest};
 use crate::rules::expression::{evaluate, EvalContext};
 use crate::rules::managed::default_managed_rules;
 use crate::rules::signatures::{
-    crlf_header_injection_shaped, detect_deser_shape, detect_expr_injection,
-    detect_js_call, detect_sqli, detect_xss, path_tautology_segment,
+    ci_backtick_interleaved, crlf_header_injection_shaped, detect_deser_shape,
+    detect_expr_injection, detect_js_call, detect_sqli, detect_xss,
+    path_tautology_segment, pt_remote_backslash_include,
     sqli_into_file_statement_shaped, sqli_union_statement_shaped,
-    xss_markup_shaped, xss_script_tag_shaped, xss_script_uri_html_shaped,
-    AttackCategory, SignatureEngine, SignatureHit,
+    ssrf_protocol_smuggling, xss_markup_shaped, xss_script_tag_shaped,
+    xss_script_uri_html_shaped, AttackCategory, SignatureEngine, SignatureHit,
 };
 use crate::rules::{CompiledRule, RuleAction};
 use crate::score::{AnomalyScorer, ScoreBreakdown, ScoreClass};
@@ -507,6 +508,25 @@ impl WafEngine {
                     name: &value.name,
                 });
             }
+            // Raw backticks inside the path (`/ax--exec=`id`--remote`): URL
+            // content never carries them unescaped, so a pair of them frames
+            // a command substitution written by an attack tool.
+            if value.source == ValueSource::Path
+                && needle.matches('`').count() >= 2
+            {
+                critical_hit = true;
+                self.scorer.add_category_hit(
+                    &mut breakdown,
+                    AttackCategory::CommandInjection,
+                    5,
+                );
+                recs.push(HitRec::Lib {
+                    kind: "ci-shape",
+                    fingerprint: "path-backticks".to_string(),
+                    source: value.source.as_str(),
+                    name: &value.name,
+                });
+            }
             if !matches!(
                 value.source,
                 ValueSource::QueryParam
@@ -629,6 +649,54 @@ impl WafEngine {
                 recs.push(HitRec::Lib {
                     kind: "deser-shape",
                     fingerprint: shape.to_string(),
+                    source: value.source.as_str(),
+                    name: &value.name,
+                });
+            }
+
+            // Exploit-only shape compositions, each a critical with no
+            // honest counterpart: a shell command interleaved with an empty
+            // backtick pair (`;wh``oami`), an SSRF-exploit scheme carrying a
+            // framed newline (`ldap://…%0astats`), and a scheme prefix glued
+            // to backslash traversal (`dir=http\..\admin\…`).
+            if ci_backtick_interleaved(needle) {
+                critical_hit = true;
+                self.scorer.add_category_hit(
+                    &mut breakdown,
+                    AttackCategory::CommandInjection,
+                    5,
+                );
+                recs.push(HitRec::Lib {
+                    kind: "ci-shape",
+                    fingerprint: "backtick-interleaved".to_string(),
+                    source: value.source.as_str(),
+                    name: &value.name,
+                });
+            }
+            if ssrf_protocol_smuggling(needle) {
+                critical_hit = true;
+                self.scorer.add_category_hit(
+                    &mut breakdown,
+                    AttackCategory::Ssrf,
+                    5,
+                );
+                recs.push(HitRec::Lib {
+                    kind: "ssrf-shape",
+                    fingerprint: "protocol-smuggling".to_string(),
+                    source: value.source.as_str(),
+                    name: &value.name,
+                });
+            }
+            if pt_remote_backslash_include(needle) {
+                critical_hit = true;
+                self.scorer.add_category_hit(
+                    &mut breakdown,
+                    AttackCategory::PathTraversal,
+                    5,
+                );
+                recs.push(HitRec::Lib {
+                    kind: "pt-shape",
+                    fingerprint: "remote-backslash-include".to_string(),
                     source: value.source.as_str(),
                     name: &value.name,
                 });
@@ -2257,6 +2325,164 @@ mod tests {
         let v =
             e.inspect(&req("GET", "/blog/what-is-1-and-1-in-logic/notes", ""));
         assert_eq!(v.action, WafAction::Pass, "details: {}", v.details);
+    }
+
+    #[test]
+    fn b64_wire_over_old_gate_ognl_blocks() {
+        // 5.1KB base64 wire value (decoded: 3.8KB JSON) — the old 4096B
+        // wire gate skipped the unwrap entirely, so the OGNL
+        // `#context.get(` payload inside was invisible to every detector.
+        let e = strict_engine();
+        let mut form = req("POST", "/page", "");
+        form.headers.push((
+            "Content-Type".into(),
+            "application/x-www-form-urlencoded".into(),
+        ));
+        form.body = Some(
+            format!("depreciation={body}", body = concat!(
+                "eyJmaXJzdCI6IjEiLCJvZyI6IiNyZXE9I2NvbnRleHQuZ2V0KCdjb20ub3BlbnN5bXBob255Lnh3b3JrMicpIiIsInBhZCI6IkEy",
+                "MzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3IiwicGFk",
+                "IjoiQTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njci",
+                "LCJwYWQiOiJBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIz",
+                "NDU2NyIsInBhZCI6IkEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2",
+                "NzhBMjM0NTY3IiwicGFkIjoiQTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhB",
+                "MjM0NTY3OEEyMzQ1NjciLCJwYWQiOiJBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0",
+                "NTY3OEEyMzQ1Njc4QTIzNDU2NyIsInBhZCI6IkEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3",
+                "OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3IiwicGFkIjoiQTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEy",
+                "MzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1NjciLCJwYWQiOiJBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1",
+                "Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NyIsInBhZCI6IkEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4",
+                "QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3IiwicGFkIjoiQTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIz",
+                "NDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1NjciLCJwYWQiOiJBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2",
+                "NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NyIsInBhZCI6IkEyMzQ1Njc4QTIzNDU2NzhB",
+                "MjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3IiwicGFkIjoiQTIzNDU2NzhBMjM0",
+                "NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1NjciLCJwYWQiOiJBMjM0NTY3",
+                "OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NyIsInBhZCI6IkEy",
+                "MzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3IiwicGFk",
+                "IjoiQTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njci",
+                "LCJwYWQiOiJBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIz",
+                "NDU2NyIsInBhZCI6IkEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2",
+                "NzhBMjM0NTY3IiwicGFkIjoiQTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhB",
+                "MjM0NTY3OEEyMzQ1NjciLCJwYWQiOiJBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0",
+                "NTY3OEEyMzQ1Njc4QTIzNDU2NyIsInBhZCI6IkEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3",
+                "OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3IiwicGFkIjoiQTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEy",
+                "MzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1NjciLCJwYWQiOiJBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1",
+                "Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NyIsInBhZCI6IkEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4",
+                "QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3IiwicGFkIjoiQTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIz",
+                "NDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1NjciLCJwYWQiOiJBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2",
+                "NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NyIsInBhZCI6IkEyMzQ1Njc4QTIzNDU2NzhB",
+                "MjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3IiwicGFkIjoiQTIzNDU2NzhBMjM0",
+                "NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1NjciLCJwYWQiOiJBMjM0NTY3",
+                "OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NyIsInBhZCI6IkEy",
+                "MzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3IiwicGFk",
+                "IjoiQTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njci",
+                "LCJwYWQiOiJBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIz",
+                "NDU2NyIsInBhZCI6IkEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2",
+                "NzhBMjM0NTY3IiwicGFkIjoiQTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhB",
+                "MjM0NTY3OEEyMzQ1NjciLCJwYWQiOiJBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0",
+                "NTY3OEEyMzQ1Njc4QTIzNDU2NyIsInBhZCI6IkEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3",
+                "OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3IiwicGFkIjoiQTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEy",
+                "MzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1NjciLCJwYWQiOiJBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1",
+                "Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NyIsInBhZCI6IkEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4",
+                "QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3IiwicGFkIjoiQTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIz",
+                "NDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1NjciLCJwYWQiOiJBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2",
+                "NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NyIsInBhZCI6IkEyMzQ1Njc4QTIzNDU2NzhB",
+                "MjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3IiwicGFkIjoiQTIzNDU2NzhBMjM0",
+                "NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1NjciLCJwYWQiOiJBMjM0NTY3",
+                "OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NyIsInBhZCI6IkEy",
+                "MzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3IiwicGFk",
+                "IjoiQTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njd9"
+            ))
+                .into_bytes(),
+        );
+        let v = e.inspect(&form);
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn union_comment_glued_split_blocks() {
+        // `union#filler...select` with the keyword glued to the comment and
+        // `select` glued to a digit — the newline-deletion gluing that a
+        // plain `\bselect\b` right edge cannot see.
+        let e = strict_engine();
+        let mut form = req("POST", "/page", "");
+        form.headers.push((
+            "Content-Type".into(),
+            "application/x-www-form-urlencoded".into(),
+        ));
+        form.body = Some(
+            b"refresh=4+AND+x+union%23+fillerfillerfiller+select1+%23".to_vec(),
+        );
+        let v = e.inspect(&form);
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn union_teaching_sql_with_spaced_comment_passes() {
+        // `UNION -- comment\nSELECT` (honest teaching SQL) and prose with a
+        // spaced `#` hashtag must not fire the glued-comment split — the
+        // comment marker must sit directly behind `union`.
+        let e = strict_engine();
+        let mut form = req("POST", "/page", "");
+        form.headers.push((
+            "Content-Type".into(),
+            "application/x-www-form-urlencoded".into(),
+        ));
+        form.body = Some(
+            b"q=UNION+--+pick+a+plan%0ASELECT+x+FROM+t&n=the+union+%231+selects+members"
+                .to_vec(),
+        );
+        let v = e.inspect(&form);
+        assert_ne!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn monitor_upgrade_shapes_block() {
+        // Four Monitor-only forms raised to critical compositions:
+        // ldap:// scheme carrying a framed newline (SSRF wire smuggling),
+        // a command interleaved with an empty backtick pair behind `;`,
+        // raw backticks in the URL path (command substitution), and a
+        // scheme prefix glued to backslash traversal (remote include).
+        let e = strict_engine();
+
+        let q = req(
+            "GET",
+            "/",
+            "url=ldap%3A%2F%2Fevil.com%3A11211%2F%0astats%0aquit",
+        );
+        let v = e.inspect(&q);
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+
+        let mut form = req("POST", "/vulnerabilities/exec/", "");
+        form.headers.push((
+            "Content-Type".into(),
+            "application/x-www-form-urlencoded".into(),
+        ));
+        form.body = Some(b"ip=127.0.0.1%3Bwh%60%60oami&Submit=Submit".to_vec());
+        let v = e.inspect(&form);
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+
+        let v = e.inspect(&req("GET", "/ax--exec=`id`--remote=origin", ""));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+
+        let v = e.inspect(&req(
+            "GET",
+            "/include/thumb.php",
+            "dir=http\\..\\admin\\login\\login_check.php",
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn ssrf_ldap_url_without_newline_stays_monitor() {
+        // A plain ldap:// URL (directory integration) must not hit the
+        // smuggling composition — no decoded newline inside the scheme.
+        let e = strict_engine();
+        let v = e.inspect(&req(
+            "GET",
+            "/search",
+            "base=ldap%3A%2F%2Fds.example.com%2Fdc%3Dcorp",
+        ));
+        assert_ne!(v.action, WafAction::Block, "details: {}", v.details);
     }
 
     #[test]

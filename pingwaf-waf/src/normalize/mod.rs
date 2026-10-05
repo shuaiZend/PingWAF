@@ -582,9 +582,13 @@ fn unpack_string_json(
 
 /// Upper bounds for the base64 value-unwrapping pass: nesting depth (a value
 /// that is base64 of base64 of a payload) and the byte size above which a
-/// value is bulk content, not a transport-wrapped parameter.
+/// value is bulk content, not a transport-wrapped parameter. 16KB covers the
+/// transport-wrapped XML/JSON attack bodies observed in the wild (a 5KB wire
+/// value carrying an OGNL `#context.get` payload in `\u`-escaped JSON used to
+/// fall between this gate and every detector); the charset + printability
+/// gates inside `b64_decode_value` remain the real quality filter.
 const B64_MAX_DEPTH: usize = 2;
-const B64_MAX_VALUE_LEN: usize = 4096;
+const B64_MAX_VALUE_LEN: usize = 16384;
 
 /// Expand values whose entire content is base64 (`eyJpZCI6IjEgYW5kIDE9MiJ9`
 /// is `{"id":"1 and 1=2"}`): whole payloads get wrapped in a transport
@@ -657,23 +661,26 @@ fn expand_base64(
             // Obfuscated transports sometimes carry bare control characters
             // in JSON structure positions (stray CR between key and colon,
             // NUL before the closing brace) — a strict parse refuses those,
-            // so strip them and retry once. Losing control bytes inside a
-            // string value is acceptable here: the detectors need the
-            // members visible, and every dropped byte is whitespace-class.
+            // so replace them with spaces and retry once. Space keeps the
+            // token boundaries a plain delete would glue away (`selEct\n1`
+            // must not become `selEct1`).
             if looks_like_json(&decoded) {
-                let stripped: String =
-                    decoded.chars().filter(|c| !c.is_ascii_control()).collect();
-                if stripped.len() != decoded.len()
-                    && unpack_string_json(
+                let had_control = decoded.chars().any(|c| c.is_ascii_control());
+                if had_control {
+                    let stripped: String = decoded
+                        .chars()
+                        .map(|c| if c.is_ascii_control() { ' ' } else { c })
+                        .collect();
+                    if unpack_string_json(
                         &stripped,
                         0,
                         &name,
                         max_decode_layers,
                         decode_escapes,
                         decoded_values,
-                    )
-                {
-                    continue;
+                    ) {
+                        continue;
+                    }
                 }
             }
             decoded_values.push(DecodedValue {
