@@ -1984,8 +1984,12 @@ impl TryFrom<&PluginConf> for WafPlugin {
         let category = PluginCategory::Waf.to_string();
 
         let mode = parse_mode(&get_str_conf(value, "mode"));
-        let level =
-            WafLevel::parse(&get_str_conf(value, "level")).unwrap_or_default();
+        let advanced_mode = get_bool_conf(value, "advanced_mode");
+        let level = if advanced_mode {
+            WafLevel::Strict
+        } else {
+            WafLevel::parse(&get_str_conf(value, "level")).unwrap_or_default()
+        };
         let stack_names = get_str_slice_conf(value, "stacks");
         let stacks = if stack_names.is_empty() {
             StackSet::default()
@@ -2009,7 +2013,8 @@ impl TryFrom<&PluginConf> for WafPlugin {
             .get("ml_threshold")
             .and_then(|v| v.as_float())
             .unwrap_or(0.5);
-        let inspect_body = get_bool_conf(value, "inspect_body");
+        let inspect_body =
+            advanced_mode || get_bool_conf(value, "inspect_body");
         let max_body_size =
             get_int_conf_or_default(value, "max_body_size", 64 * 1024) as usize;
         let pow_difficulty =
@@ -2942,6 +2947,31 @@ monitor_stacks = ["java"]
             WafAction::Monitor,
             "details: {}",
             sqli.details
+        );
+    }
+
+    #[tokio::test]
+    async fn toml_advanced_mode_enables_strict_rules_and_body() {
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(
+                r###"
+mode = "block"
+advanced_mode = true
+"###,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(plugin.inspect_body, "advanced mode implies body inspection");
+        let engine = plugin.engine.read().unwrap_or_else(|e| e.into_inner());
+        let tpl = engine.inspect(&probe(
+            r#"tpl=${"freemarker.template.utility.Execute"?new()("id")}"#,
+        ));
+        assert_eq!(
+            tpl.action,
+            WafAction::Block,
+            "strict-only rules must be active, details: {}",
+            tpl.details
         );
     }
 
