@@ -37,6 +37,7 @@ pub mod security_events;
 pub mod site_basic_auth;
 pub mod sites;
 pub mod users;
+pub mod waf_settings;
 
 pub use agent_blocked_ips::agent_blocked_ips as agent_blocked_ip;
 pub use agent_metrics::agent_metrics as agent_metric;

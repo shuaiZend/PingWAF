@@ -37,6 +37,7 @@ pub mod sites;
 pub mod ssl;
 pub mod state;
 pub mod system_tls;
+pub mod waf_settings;
 
 use crate::frontend::serve_frontend;
 use crate::tls::ConnInfo;
@@ -85,6 +86,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(geo::routes())
         .merge(bot::routes())
         .merge(challenge::routes())
+        .merge(waf_settings::routes())
         .merge(rewrite::routes())
         .merge(error_pages::routes())
         .merge(debug::routes())
