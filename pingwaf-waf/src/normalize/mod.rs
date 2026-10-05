@@ -281,8 +281,16 @@ pub fn decode_value(
     } else {
         url_decoded
     };
-    if decode_escapes {
+    let out = if decode_escapes {
         decode_escapes_owned(&out)
+    } else {
+        out
+    };
+    // Escape resolution can expose a fresh percent layer (`\u0025\u0032\u0035`
+    // → `%25`) that the pre-escape multi_decode never saw; re-run the bounded
+    // percent pass so the innermost form is readable to the detectors.
+    if out.contains('%') {
+        multi_decode(&out, max_decode_layers)
     } else {
         out
     }
@@ -387,7 +395,11 @@ fn parse_query(
             Some((k, v)) => (k, v),
             None => (pair, ""),
         };
-        let key_decoded = multi_decode(k, max_decode_layers);
+        // The key runs the full value chain (percent + entity + escape
+        // resolution): `\u0025\u0032\u0035…` keys and `redirect:%24%7B…` keys
+        // are the same onion as values, just glued into the name position.
+        let key_decoded =
+            decode_value_form(k, max_decode_layers, decode_escapes);
         let val_decoded =
             decode_value_form(v, max_decode_layers, decode_escapes);
         // A query value that is itself serialized JSON (`?id={"id":"…"}`) is
@@ -411,8 +423,9 @@ fn parse_query(
         // carries the whole OGNL payload in an *encoded* key with an empty
         // value, invisible to the detectors unless the key joins the scan
         // surface. Bounded so a pathological word-list key cannot mirror a
-        // value-sized blob.
-        if !key_decoded.is_empty() && key_decoded.len() <= 512 {
+        // value-sized blob; 1KB still covers the transport-wrapped SQLi keys
+        // observed in the wild (a 564B key once slipped past the 512 gate).
+        if !key_decoded.is_empty() && key_decoded.len() <= 1024 {
             decoded_values.push(DecodedValue {
                 source: ValueSource::QueryParam,
                 name: String::new(),
@@ -451,7 +464,11 @@ fn parse_form_body(
             Some((k, v)) => (k, v),
             None => (pair, ""),
         };
-        let key_decoded = multi_decode(k, max_decode_layers);
+        // Same full-chain key decode as `parse_query`: percent + entity +
+        // escape resolution, so `\u00…`/`%25…` onions glued into the name
+        // position are readable.
+        let key_decoded =
+            decode_value_form(k, max_decode_layers, decode_escapes);
         let val_decoded =
             decode_value_form(v, max_decode_layers, decode_escapes);
         // A form field whose value is itself serialized JSON (APIs that
@@ -469,6 +486,16 @@ fn parse_form_body(
             )
         {
             continue;
+        }
+        // Mirror the query-side key scan surface (1KB bound) — form keys are
+        // request input too (`ip[0 or updatexml(…)%23]=x`).
+        if !key_decoded.is_empty() && key_decoded.len() <= 1024 {
+            decoded_values.push(DecodedValue {
+                source: ValueSource::Body,
+                name: String::new(),
+                decoded: key_decoded.clone(),
+                field: true,
+            });
         }
         decoded_values.push(DecodedValue {
             source: ValueSource::Body,
@@ -876,6 +903,44 @@ fn parse_cookies(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn key_only_b64_and_escape_onions_join_scan_surface() {
+        // `?JTI1MjhzZWxlY3Q…` — the whole SQLi payload rides in a 564B
+        // key-only parameter: base64 → `%2528select…` → `(select
+        // extractvalue(…`. It must clear the 512-era gate (1KB now) and the
+        // b64 unwrap must run for keys.
+        let key = "JTI1MjhzZWxlY3QlMjUyMGV4dHJhY3R2YWx1ZSUyNTI4eG1sdHlwZSUyNTI4JTI1MjclMjUzQyUyNTNGeG1sJTI1MjB2ZXJzaW9uJTI1M0QlMjUyMjEuMCUyNTIyJTI1MjBlbmNvZGluZyUyNTNEJTI1MjJVVEYtOCUyNTIyJTI1M0YlMjUzRSUyNTNDJTI1MjFET0NUWVBFJTI1MjByb290JTI1MjAlMjU1QiUyNTIwJTI1M0MlMjUyMUVOVElUWSUyNTIwJTI1MjUlMjUyMHZhcG90JTI1MjBTWVNURU0lMjUyMCUyNTIyJTI1MjclMjU3QyUyNTdDJTI1MjhzZWxlY3QlMjUyMHZlcnNpb24lMjUyMGZyb20lMjUyMHYlMjUyNGluc3RhbmNlJTI1MjklMjU3QyUyNTdDJTI1MjdCdXJwJTI1MkYlMjUyMiUyNTNFJTI1MjV2YXBvdCUyNTNCJTI1NUQlMjUzRSUyNTI3JTI1MjklMjUyQyUyNTI3JTI1MkZsJTI1MjclMjUyOSUyNTIwZnJvbSUyNTIwZHVhbCUyNTI5";
+        let req = normalize_request("GET", "/", key, &[], None, 3, true);
+        let unwrapped = req
+            .decoded_values
+            .iter()
+            .find(|v| v.name == "b64" || v.name.ends_with(".b64"))
+            .expect("b64-unwrapped key");
+        assert!(
+            unwrapped.decoded.contains("(select extractvalue"),
+            "decoded head: {:?}",
+            &unwrapped.decoded[..unwrapped.decoded.len().min(80)]
+        );
+
+        // `\u0025\u0032\u0035\u0032\u0038select…` as a percent-encoded
+        // key-only parameter: the escape pass resolves to `%2528select`, and
+        // the freshly exposed percent layer must be decoded again instead of
+        // stopping at one visible form.
+        let escaped_key = "%5Cu0025%5Cu0032%5Cu0035%5Cu0032%5Cu0038s%5Cu0065%5Cu006C%5Cu0065%5Cu0063%5Cu0074%5Cu0020%5Cu0074";
+        let req =
+            normalize_request("GET", "/", escaped_key, &[], None, 3, true);
+        assert!(
+            req.decoded_values
+                .iter()
+                .any(|v| v.decoded.contains("(select t")),
+            "no value carries the twice-decoded form; got {:?}",
+            req.decoded_values
+                .iter()
+                .map(|v| v.decoded.clone())
+                .collect::<Vec<_>>()
+        );
+    }
 
     #[test]
     fn parses_query_and_cookies() {

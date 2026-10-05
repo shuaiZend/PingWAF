@@ -827,6 +827,45 @@ fn builtin_patterns() -> Vec<SignaturePattern> {
             "PHP-CGI ini override flag",
             "allow_url_include",
         );
+        // Drupal render-array property keys (Drupalgeddon 2/3 family):
+        // `mail[#post_render][]=exec&mail[#markup]=id`. Honest HTML forms
+        // essentially never carry `#`-prefixed array keys; the corpus shows
+        // zero benign hits.
+        push(
+            "CI-091",
+            AttackCategory::CommandInjection,
+            5,
+            "Drupal render-array post_render key",
+            "#post_render",
+        );
+        push(
+            "CI-092",
+            AttackCategory::CommandInjection,
+            5,
+            "Drupal render-array pre_render key",
+            "#pre_render",
+        );
+        push(
+            "CI-093",
+            AttackCategory::CommandInjection,
+            5,
+            "Drupal render-array lazy_builder key",
+            "#lazy_builder",
+        );
+        push(
+            "CI-094",
+            AttackCategory::CommandInjection,
+            5,
+            "Drupal render-array markup key",
+            "#markup",
+        );
+        push(
+            "CI-095",
+            AttackCategory::CommandInjection,
+            5,
+            "Drupal render-array elements key",
+            "#elements",
+        );
         // JSFuck / Harley-Davidson style pure-symbol JS: the prefix
         // `[(+{}+[])` only occurs inside obfuscated execution payloads.
         push(
@@ -2624,8 +2663,17 @@ fn is_structural_expr(inner: &str) -> bool {
     false
 }
 
-static JS_BRACKET_CALL: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"\b\w+\[[^\]\r\n]{1,48}\]\s*[\[(]").unwrap());
+static JS_BRACKET_CALL: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        // Call-paren tail stays content-agnostic (`x[y](…`, bare or quoted)
+        // — a real invocation is strong signal. A chained-bracket tail is
+        // only signal when the index is a quoted string
+        // (`this["constructor"]…`); bare chains like `subPayType[deduct][]`
+        // are form-array parameter names, not property access.
+        r#"\b\w+\[[^\]\r\n]{1,48}\]\s*(?:\(|\[\s*['"][^'"\]\r\n]{1,48}['"]\s*\])"#,
+    )
+    .unwrap()
+});
 
 static SQLI_UNION_BREAK: Lazy<Regex> =
     Lazy::new(|| Regex::new(r#"(?i)['"`]\s*union\b"#).unwrap());
@@ -2739,6 +2787,27 @@ pub fn pt_remote_backslash_include(input: &str) -> bool {
     PT_REMOTE_BACKSLASH.is_match(input)
 }
 
+/// Double executable extension at the end of a path (`apache.php.jpeg`):
+/// the classic Apache/IIS multi-extension parsing chain — the upload wins a
+/// benign image suffix while the handler still executes the PHP/ASP part.
+/// Anchored to the path tail so ordinary dot-separated route segments in the
+/// middle cannot fire; a script's real extension is never followed by a
+/// second suffix unless a parser quirk is the point.
+// Only server-executable script extensions count: a double extension like
+// `shell.php.jpeg` is the classic upload-bypass form. Desktop-binary names
+// (exe/dll/sh/bat) are excluded — `vendor.dll.js` is standard webpack DLL
+// bundle output and a much larger benign population than an attack surface.
+static PT_DOUBLE_EXEC_EXT: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"(?i)\.(?:php\d?|phtml|asp|aspx|jsp|jspx|cgi|pl|ashx)\.[a-z0-9]{1,5}$",
+    )
+    .unwrap()
+});
+
+pub fn pt_double_exec_extension(path: &str) -> bool {
+    PT_DOUBLE_EXEC_EXT.is_match(path)
+}
+
 static CRLF_HEADER_SHAPE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)[\r\n]{2,}\s*[\w-]{1,32}\s*:").unwrap());
 
@@ -2794,8 +2863,14 @@ mod tests {
             "this[\"constructor\"][\"constructor\"](atob('..'))()"
         ));
         assert!(detect_js_call("global[\\x65val](cmd)"));
+        assert!(detect_js_call("this['constructor']['constructor']"));
         assert!(!detect_js_call("rows[0].name"));
         assert!(!detect_js_call("list[a] and list[b]"));
+        // Form-array parameter names: bare chained indexes, quoted or not,
+        // are never property-access invocation.
+        assert!(!detect_js_call("subPayType[deduct][]"));
+        assert!(!detect_js_call("subPayType['deduct'][]"));
+        assert!(!detect_js_call("x[a][b] filter"));
     }
 
     #[test]
