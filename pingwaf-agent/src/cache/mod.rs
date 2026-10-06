@@ -145,6 +145,8 @@ pub struct WafConfig {
     pub monitor_categories: Vec<String>,
     #[serde(default)]
     pub monitor_stacks: Vec<String>,
+    #[serde(default)]
+    pub monitor_managed_rules: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1253,6 +1255,7 @@ impl RuleCache {
             advanced_mode: w.advanced_mode,
             monitor_categories: w.monitor_categories.clone(),
             monitor_stacks: w.monitor_stacks.clone(),
+            monitor_managed_rules: w.monitor_managed_rules.clone(),
         }
     }
 
