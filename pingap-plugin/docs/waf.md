@@ -13,6 +13,12 @@ rules), and the resulting verdict is mapped onto the proxy pipeline.
 | --- | --- | --- | --- |
 | `category` | string | — | Must be `waf`. |
 | `mode` | string | `block` | `off`, `monitor` or `block`. `off` skips inspection entirely; `monitor` logs events but never blocks; `block` enforces verdicts. Case-insensitive; unknown values fall back to `block`. |
+| `advanced_mode` | bool | `false` | One-step Strict grading: implies `level = "strict"` and `inspect_body = true`, taking precedence over an explicit `level` key. |
+| `level` | string | `normal` | Rule grading level, `normal` or `strict`. `strict` additionally assembles Strict-only managed rules (e.g. `PINGWAF-1061`). Ignored when `advanced_mode` is on. |
+| `stacks` | string[] | all | Backend stacks to detect for: `generic`, `java`, `php`, `python`, `node`. Empty means all stacks. Stack filters apply to signatures and managed rules alike. |
+| `monitor_categories` | string[] | `[]` | Attack categories to downgrade to monitor-only: `sqli`, `xss`, `rce`, `lfi`, `ssrf`, `deser`, `crlf`, `xxe`, `ssti`. Matched requests are still detected and logged but never blocked. Unknown names are ignored with a warning. |
+| `monitor_stacks` | string[] | `[]` | Backend stacks to downgrade to monitor-only (same names as `stacks`). Language-agnostic (generic) detection is never downgradable. |
+| `monitor_managed_rules` | string[] | `[]` | Managed rule ids to downgrade to monitor-only, e.g. `["PINGWAF-1010"]`. Applies to every managed rule including score-gate rules (`PINGWAF-1002`/`1003`/`1004`/`1061`). Unknown ids are ignored with a warning. |
 | `paranoia_level` | int | `2` | Detection sensitivity, clamped to `1`–`4`. Higher catches more but increases false positives. |
 | `anomaly_threshold` | int | `40` | Accumulated anomaly score at which a request is blocked/challenged. |
 | `detections` | string[] | `[]` | Enabled detection families, e.g. `["sqli", "xss", "rce", "lfi", "ssrf"]`. |
@@ -29,14 +35,14 @@ rules), and the resulting verdict is mapped onto the proxy pipeline.
 | --- | --- |
 | `Pass` | `Continue` — request proceeds untouched. |
 | `Monitor` | Event logged, `Continue`. |
-| `Block` | `403 Forbidden` HTML block page with the event id. |
+| `Block` | `403 Forbidden` HTML block page with the request id. |
 | `Challenge` | `503` JS challenge page (delegated to the [challenge](challenge.md) subsystem). |
 
 The block page body is:
 
 ```html
 <html><body><h1>403 Forbidden</h1><p>Request blocked by PingWAF.</p>
-<p>Reason: {reason}</p><p>Event ID: {request_id}</p></body></html>
+<p>Reason: {reason}</p><p>Request ID: {request_id}</p></body></html>
 ```
 
 ## Control plane vs standalone
@@ -80,6 +86,18 @@ Monitor (shadow) mode — log what would be blocked without enforcing:
 category = "waf"
 mode = "monitor"
 paranoia_level = 2
+```
+
+Strict grading with body inspection, keeping a known-noisy managed rule in
+monitor-only mode and ignoring SQLi hits for a PHP backend:
+
+```toml
+[plugins.waf]
+category = "waf"
+advanced_mode = true
+monitor_managed_rules = ["PINGWAF-1010"]
+monitor_categories = ["sqli"]
+stacks = ["php"]
 ```
 
 ## Usage notes

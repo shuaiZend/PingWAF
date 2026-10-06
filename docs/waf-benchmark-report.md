@@ -819,3 +819,18 @@ post18 遗留 REAL 面 4 条中最后一项可修候选 `ff/67`（S2-045 OGNL �
 
 
 
+### 0.21.0：release 二进制瘦身实验
+
+0.20.0 发布后二进制体积成为部署负担（v0.20.0 CI 资产 linux-amd64-gnu，panic=abort + `--features full` + 默认 opt-level 3：56,760,864 B ≈ 54.1 MiB）。实验驱动择优：本地 macOS arm64 以 `panic=unwind` 覆盖（工具链缺 libpanic_abort，不影响相对对比），其余 release profile（lto/codegen-units=1/strip）不动，四变体 release 构建记录尺寸：
+
+| 变体 | opt-level | features | 大小 (B) | vs opt3 |
+|---|---|---|---|---|
+| full-opt3（基线） | 3 | full | 52,773,392 | — |
+| full-opt-s | s | full | 41,310,512 | -21.7% |
+| full-opt-z | z | full | 33,872,016 | -35.8% |
+| **combo-z（落地）** | z | tracing（去 imageoptim） | **32,190,512** | **-39.0%** |
+
+`opt-level = "z"` 落入 `[profile.release]`；release workflow features 从 `full` 改为 `tracing`（imageoptim 功能保留可编译，仅 release 默认不含）。CI 绝对尺寸以 tag 构建资产复测为准（预估 ≈33 MB）。
+
+**性能守恒**：opt3 vs combo-z 两个 release 二进制全量四配置回放（33877 样本 × normal/normal-body/strict/strict-body），判决逐位 diff 与 p50/p95 守恒验证——结果见下。
+
