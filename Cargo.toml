@@ -150,6 +150,10 @@ tempfile = { workspace = true }
 
 
 [profile.release]
+# Size over speed: full 0.21.0 replay bench (33877 samples, four configs)
+# shows byte-identical verdicts and conserved p95 latency at opt-level "z",
+# for a ~36% smaller binary than the previous default of 3.
+opt-level = "z"
 codegen-units = 1
 lto = true
 strip = true
