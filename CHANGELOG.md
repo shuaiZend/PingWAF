@@ -8,6 +8,49 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.21.0] — 2026-10-07
+
+### ⛰️ Features
+
+- *(security)* Managed rules are now visible and tunable per site. The 14
+  built-in `PINGWAF-*` rules ship in a catalogue (id, name, action, severity,
+  tags, backend stacks, strict-only) exposed at `GET /api/v1/managed-rules`
+  and rendered in the Web Protection rules panel, where each rule has a
+  monitor switch. A monitored managed rule keeps detecting and logging
+  normally but never blocks — including the score-gate rules
+  (`PINGWAF-1002`/`1003`/`1004`/`1061`) — so a single rule that clashes with a
+  site's business traffic can be demoted without touching the rest of the
+  posture. The setting flows through the `WafConfig` gRPC message, the
+  `waf_settings` table and a new `monitor_managed_rules` static TOML key, and
+  sites without it behave bit for bit as before.
+- *(security)* Security events are typed. A new `event_type` field classifies
+  every event as `managed`, `waf`, `ip_geo`, `bot`, `rate_limit` or
+  `challenge`, stamped by the data plane at detection time and carried through
+  ingestion to the REST API. The detail link in the logs page now routes by
+  type — a rate-limit event opens the exact rate-limiting rule in its editor,
+  geo and bot events deep-link into their pages — instead of always landing on
+  the WAF rules page, and events are searchable by `type:`. Legacy rows with
+  no type keep the old behavior.
+- *(security)* Traffic that arrives without a `Host` header (bare-IP access:
+  HTTP/1.0 clients, health probes, scanners) is no longer invisible. Such
+  requests keep full managed-rule protection, are recorded with a null site in
+  both security events and access logs, and show as an unassigned badge in the
+  global log views; the site filter gains an unassigned traffic option and
+  `site:none` search syntax lists only these requests.
+- *(build)* Release binaries shrink by roughly 40%: the release profile now
+  optimizes for size (`opt-level = "z"`) and the default release build no
+  longer enables the image-optimization feature (pass `--features imageoptim`
+  to opt back in). Verified against the full four-configuration replay bench
+  with byte-identical verdicts and conserved latency percentiles.
+
+### 🐛 Bug Fixes
+
+- *(dashboard)* Log detail cards no longer show the node (agent) field, the
+  country renders as a flag icon prefixing the client IP instead of its own
+  row, and the block and error pages label their request identifier as
+  "Request ID" — matching what the dashboard searches by — instead of
+  "Event ID".
+
 ## [PingWAF 0.20.0] — 2026-10-06
 
 ### ⛰️ Features

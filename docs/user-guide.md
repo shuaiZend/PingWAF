@@ -360,6 +360,19 @@ Sites → [site] → Error Pages → Add
 - Filter by status code, path, client IP
 - Request headers and a body preview (first 1 KiB) are stored in PostgreSQL, so requests can be inspected from the dashboard without Elasticsearch
 
+#### Unassigned (no Host header) traffic
+
+Requests that arrive at a bare IP with no `Host` header (HTTP/1.0 clients,
+health probes, scanners) are proxied by the default site and their managed-rule
+protection stays active, but they cannot be attributed to any site. Both log
+views record them with a null site — shown as an **unassigned** badge in the
+global log views — so they remain traceable:
+
+- The site filter offers an **unassigned traffic** option (or search
+  `site:none`) to list only these requests.
+- Search `type:` in Security Events narrows by event type (`managed`, `waf`,
+  `ip_geo`, `bot`, `rate_limit`, `challenge`).
+
 ### Elasticsearch Integration
 
 For high-volume deployments, ship logs to Elasticsearch:
