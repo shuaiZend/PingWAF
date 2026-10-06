@@ -342,6 +342,7 @@ pub async fn refresh(
             stacks: StackSet::default(),
             monitor_categories: CategorySet::EMPTY,
             monitor_stacks: StackSet::EMPTY,
+            monitor_managed_rules: std::collections::HashSet::new(),
             threshold: 40,
             paranoia_level: 2,
             max_decode_layers: 3,

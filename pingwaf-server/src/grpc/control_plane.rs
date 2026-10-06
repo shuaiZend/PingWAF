@@ -1306,6 +1306,7 @@ fn security_event_row(
         path: Set(optional(&entry.path)),
         rule_id: Set(truncate(&entry.waf_rule_id, MAX_RULE_ID)),
         rule_name: Set(truncate(&entry.waf_rule_name, MAX_RULE_NAME)),
+        event_type: Set(optional(&entry.waf_event_type)),
         action: Set(truncate(waf_action, MAX_ACTION)
             .unwrap_or_else(|| action::LOG.to_string())),
         score: Set(if entry.waf_score == 0 {
@@ -1422,6 +1423,7 @@ fn security_event_document(
 
         rule_id: entry.waf_rule_id.clone(),
         rule_name: optional(&entry.waf_rule_name),
+        event_type: optional(&entry.waf_event_type),
         action: if waf_action.is_empty() {
             action::LOG.to_string()
         } else {

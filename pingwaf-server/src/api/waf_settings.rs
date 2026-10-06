@@ -27,6 +27,11 @@ pub const CATEGORIES: [&str; 9] = [
 /// with `StackSet::parse_name` in `pingwaf-waf`.
 pub const STACKS: [&str; 4] = ["java", "php", "python", "node"];
 
+/// Built-in managed rules a site can downgrade to monitor-only, by id.
+/// Mirrors `pingwaf_waf::MANAGED_RULE_IDS` (whitelisted through the crate so
+/// a new managed rule cannot be configured before the engine knows it).
+pub const MANAGED_RULES: [&str; 14] = pingwaf_waf::MANAGED_RULE_IDS;
+
 #[derive(Debug, Deserialize)]
 pub struct UpdateWafSettingsRequest {
     #[serde(default)]
@@ -35,13 +40,51 @@ pub struct UpdateWafSettingsRequest {
     pub monitor_categories: Option<Vec<String>>,
     #[serde(default)]
     pub monitor_stacks: Option<Vec<String>>,
+    #[serde(default)]
+    pub monitor_managed_rules: Option<Vec<String>>,
+}
+
+/// Dashboard-facing metadata for one built-in managed rule.
+#[derive(serde::Serialize)]
+pub struct ManagedRuleEntry {
+    pub id: String,
+    pub name: String,
+    pub action: String,
+    pub severity: u8,
+    pub tags: Vec<String>,
+    pub stacks: Vec<String>,
+    pub strict_only: bool,
 }
 
 /// Routes contributed to `/api/v1`.
 pub fn routes() -> Router<AppState> {
-    Router::new().route(
-        "/sites/{site_id}/waf/settings",
-        get(get_waf_settings).put(update_waf_settings),
+    Router::new()
+        .route(
+            "/sites/{site_id}/waf/settings",
+            get(get_waf_settings).put(update_waf_settings),
+        )
+        .route("/managed-rules", get(list_managed_rules))
+}
+
+/// `GET /api/v1/managed-rules` — catalogue of the built-in managed rules.
+///
+/// Listed at the Strict level so the strict-only gate (PINGWAF-1061) shows
+/// too; a site running the Normal level simply never matches it, and the
+/// `strict_only` flag tells the dashboard.
+async fn list_managed_rules() -> Json<Vec<ManagedRuleEntry>> {
+    Json(
+        pingwaf_waf::managed_rule_catalogue(pingwaf_waf::WafLevel::Strict)
+            .into_iter()
+            .map(|rule| ManagedRuleEntry {
+                id: rule.id,
+                name: rule.name,
+                action: rule.action,
+                severity: rule.severity,
+                tags: rule.tags,
+                stacks: rule.stacks,
+                strict_only: rule.strict_only,
+            })
+            .collect(),
     )
 }
 
@@ -87,6 +130,10 @@ async fn update_waf_settings(
         active.monitor_stacks =
             Set(normalise_list(&stacks, &STACKS, "monitor_stacks")?);
     }
+    if let Some(rules) = payload.monitor_managed_rules {
+        active.monitor_managed_rules =
+            Set(normalise_rule_ids(&rules, "monitor_managed_rules")?);
+    }
     // An update whose every field stays unchanged is silently dropped by
     // SeaORM; touching updated_at guarantees the row round-trips.
     active.updated_at = Set(chrono::Utc::now());
@@ -124,6 +171,31 @@ fn normalise_list(
     Ok(out)
 }
 
+/// Trims, de-duplicates and whitelist-checks a managed-rule id list. Unlike
+/// category/stack names, ids keep their case (`PINGWAF-1010`).
+fn normalise_rule_ids(
+    raw: &[String],
+    field: &str,
+) -> Result<Vec<String>, ApiError> {
+    let mut out: Vec<String> = Vec::with_capacity(raw.len());
+    for value in raw {
+        let value = value.trim().to_string();
+        if value.is_empty() {
+            continue;
+        }
+        if !MANAGED_RULES.contains(&value.as_str()) {
+            return Err(ApiError::BadRequest(format!(
+                "unknown {field} value '{value}'; allowed: {}",
+                MANAGED_RULES.join(", ")
+            )));
+        }
+        if !out.contains(&value) {
+            out.push(value);
+        }
+    }
+    Ok(out)
+}
+
 /// Finds the waf_settings row for a site, creating a default (enforce
 /// everything, no advanced mode) one if absent.
 async fn find_or_create(
@@ -145,6 +217,7 @@ async fn find_or_create(
         advanced_mode: Set(false),
         monitor_categories: Set(Vec::new()),
         monitor_stacks: Set(Vec::new()),
+        monitor_managed_rules: Set(Vec::new()),
         created_at: Set(now),
         updated_at: Set(now),
     }
@@ -168,6 +241,24 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out, vec!["sqli", "ssti"]);
+    }
+
+    #[test]
+    fn normalise_rule_ids_keeps_case_and_validates() {
+        let out = normalise_rule_ids(
+            &[" PINGWAF-1010 ".into(), "PINGWAF-1010".into()],
+            "monitor_managed_rules",
+        )
+        .unwrap();
+        assert_eq!(out, vec!["PINGWAF-1010"]);
+
+        let err = normalise_rule_ids(
+            &["PINGWAF-9999".into()],
+            "monitor_managed_rules",
+        )
+        .unwrap_err();
+        assert!(matches!(err, ApiError::BadRequest(_)));
+        assert!(err.to_string().contains("PINGWAF-9999"));
     }
 
     #[test]

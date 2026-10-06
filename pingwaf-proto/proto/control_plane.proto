@@ -314,6 +314,9 @@ message WafConfig {
   bool advanced_mode = 41;
   repeated string monitor_categories = 42;  // "sqli"…"ssti"; unknown ignored
   repeated string monitor_stacks = 43;      // "java"|"php"|"python"|"node"
+  // Individual managed rule ids (e.g. "PINGWAF-1010") downgraded to
+  // monitor-only at this site. Unknown ids are ignored by the data plane.
+  repeated string monitor_managed_rules = 44;
 }
 
 enum WafMode {
@@ -659,6 +662,9 @@ message LogEntry {
   string waf_details = 53;
   repeated string waf_matched_tags = 54;
   string waf_rule_name = 55;        // Display name of the rule that fired
+  // Which protection produced the event: "managed"|"waf"|"ip_geo"|"bot"|
+  // "rate_limit"|"challenge". Drives dashboard deep links; empty on old data.
+  string waf_event_type = 56;
 
   // Performance
   uint64 total_latency_ms = 60;

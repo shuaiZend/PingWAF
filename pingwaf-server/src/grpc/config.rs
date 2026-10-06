@@ -680,15 +680,21 @@ fn waf_config_to_proto(
     let any_group_enabled =
         groups.is_empty() || groups.iter().any(|group| group.enabled);
 
-    let (advanced_mode, monitor_categories, monitor_stacks) = settings
+    let (
+        advanced_mode,
+        monitor_categories,
+        monitor_stacks,
+        monitor_managed_rules,
+    ) = settings
         .map(|s| {
             (
                 s.advanced_mode,
                 s.monitor_categories.clone(),
                 s.monitor_stacks.clone(),
+                s.monitor_managed_rules.clone(),
             )
         })
-        .unwrap_or_else(|| (false, Vec::new(), Vec::new()));
+        .unwrap_or_else(|| (false, Vec::new(), Vec::new(), Vec::new()));
 
     // Advanced mode (strict + body inspection) and monitor downgrades are
     // meaningful only with the WAF on; a site with no custom rules but an
@@ -696,7 +702,8 @@ fn waf_config_to_proto(
     let enabled = (!active.is_empty()
         || advanced_mode
         || !monitor_categories.is_empty()
-        || !monitor_stacks.is_empty())
+        || !monitor_stacks.is_empty()
+        || !monitor_managed_rules.is_empty())
         && any_group_enabled;
 
     WafConfig {
@@ -725,6 +732,7 @@ fn waf_config_to_proto(
         advanced_mode,
         monitor_categories,
         monitor_stacks,
+        monitor_managed_rules,
     }
 }
 
@@ -1228,12 +1236,29 @@ mod tests {
         categories: Vec<String>,
         stacks: Vec<String>,
     ) -> waf_settings::Model {
+        waf_settings_row_with_rules(
+            site_id,
+            advanced_mode,
+            categories,
+            stacks,
+            Vec::new(),
+        )
+    }
+
+    fn waf_settings_row_with_rules(
+        site_id: Uuid,
+        advanced_mode: bool,
+        categories: Vec<String>,
+        stacks: Vec<String>,
+        managed_rules: Vec<String>,
+    ) -> waf_settings::Model {
         waf_settings::Model {
             id: Uuid::new_v4(),
             site_id,
             advanced_mode,
             monitor_categories: categories,
             monitor_stacks: stacks,
+            monitor_managed_rules: managed_rules,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -1280,6 +1305,19 @@ mod tests {
         assert!(!config.advanced_mode);
         assert_eq!(config.monitor_categories, vec!["sqli", "ssti"]);
         assert_eq!(config.monitor_stacks, vec!["java"]);
+
+        // A per-rule managed downgrade alone also enables the config and
+        // flows through verbatim.
+        let per_rule = waf_settings_row_with_rules(
+            Uuid::nil(),
+            false,
+            Vec::new(),
+            Vec::new(),
+            vec!["PINGWAF-1010".into()],
+        );
+        let config = waf_config_to_proto(&[], &[], Some(&per_rule));
+        assert!(config.enabled);
+        assert_eq!(config.monitor_managed_rules, vec!["PINGWAF-1010"]);
 
         // No rules and no settings row: the pre-existing disabled default.
         let config = waf_config_to_proto(&[], &[], None);

@@ -21,6 +21,7 @@ pub struct Model {
     pub advanced_mode: bool,
     pub monitor_categories: Vec<String>,
     pub monitor_stacks: Vec<String>,
+    pub monitor_managed_rules: Vec<String>,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
 }
