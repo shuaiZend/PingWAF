@@ -44,6 +44,9 @@ pub struct SecurityEvent {
     pub query_string: String,
     pub rule_id: String,
     pub rule_name: String,
+    /// Which protection produced the event: `managed` / `waf` / `ip_geo` /
+    /// `bot` / `rate_limit` / `challenge`. Drives dashboard deep links.
+    pub event_type: String,
     pub action: String,
     pub score: u32,
     pub details: String,
@@ -249,6 +252,7 @@ impl PingWafAgent {
             waf_action: event.action,
             waf_rule_id: event.rule_id,
             waf_rule_name: event.rule_name,
+            waf_event_type: event.event_type,
             waf_details: event.details,
             waf_matched_tags: event.matched_tags,
             total_latency_ms: 0,
@@ -315,6 +319,7 @@ impl PingWafAgent {
             waf_action: String::new(),
             waf_rule_id: String::new(),
             waf_rule_name: String::new(),
+            waf_event_type: String::new(),
             waf_details: String::new(),
             waf_matched_tags: Vec::new(),
             total_latency_ms: entry.total_latency_ms,
