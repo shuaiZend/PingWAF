@@ -53,6 +53,9 @@ pub struct ManagedRuleEntry {
     pub severity: u8,
     pub tags: Vec<String>,
     pub stacks: Vec<String>,
+    /// Attack family (`sqli`/`xss`/`rce`) whose per-category downgrade also
+    /// affects this rule, or `None` for policy/recon rules.
+    pub category: Option<String>,
     pub strict_only: bool,
 }
 
@@ -82,6 +85,7 @@ async fn list_managed_rules() -> Json<Vec<ManagedRuleEntry>> {
                 severity: rule.severity,
                 tags: rule.tags,
                 stacks: rule.stacks,
+                category: rule.category,
                 strict_only: rule.strict_only,
             })
             .collect(),

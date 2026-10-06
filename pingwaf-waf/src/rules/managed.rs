@@ -259,6 +259,9 @@ pub struct ManagedRuleInfo {
     pub severity: u8,
     pub tags: Vec<String>,
     pub stacks: Vec<String>,
+    /// Attack family declared by the rule's tags (`sqli`/`xss`/`rce`), or
+    /// `None` for policy rules that no category downgrade applies to.
+    pub category: Option<String>,
     /// `true` when the rule only exists at the Strict level.
     pub strict_only: bool,
 }
@@ -287,14 +290,19 @@ pub fn managed_rule_catalogue(level: WafLevel) -> Vec<ManagedRuleInfo> {
         normal_rules.iter().map(|r| r.id.as_str()).collect();
     default_managed_rules(level)
         .into_iter()
-        .map(|r| ManagedRuleInfo {
-            strict_only: !normal_ids.contains(r.id.as_str()),
-            id: r.id,
-            name: r.name,
-            action: r.action.as_str().to_string(),
-            severity: r.severity,
-            tags: r.tags,
-            stacks: stack_names(r.stacks),
+        .map(|r| {
+            let category =
+                managed_rule_category(&r).map(|c| c.as_str().to_string());
+            ManagedRuleInfo {
+                strict_only: !normal_ids.contains(r.id.as_str()),
+                id: r.id,
+                name: r.name,
+                action: r.action.as_str().to_string(),
+                severity: r.severity,
+                tags: r.tags,
+                stacks: stack_names(r.stacks),
+                category,
+            }
         })
         .collect()
 }
@@ -432,5 +440,41 @@ mod tests {
         assert!(strict
             .iter()
             .all(|e| e.strict_only == (e.id == "PINGWAF-1061")));
+    }
+
+    #[test]
+    fn catalogue_categories_match_family_tags() {
+        // Exactly the family-tagged rules carry a category; the expected
+        // values are spelled out so a future tag edit surfaces here.
+        let strict = managed_rule_catalogue(WafLevel::Strict);
+        let by_id = |id: &str| {
+            strict
+                .iter()
+                .find(|e| e.id == id)
+                .unwrap_or_else(|| panic!("{id} missing from catalogue"))
+        };
+        for (id, category) in [
+            ("PINGWAF-1002", "sqli"),
+            ("PINGWAF-1003", "xss"),
+            ("PINGWAF-1050", "rce"),
+            ("PINGWAF-1061", "rce"),
+        ] {
+            assert_eq!(by_id(id).category.as_deref(), Some(category), "{id}");
+        }
+
+        let family_ids = [
+            "PINGWAF-1002",
+            "PINGWAF-1003",
+            "PINGWAF-1050",
+            "PINGWAF-1061",
+        ];
+        for entry in &strict {
+            assert_eq!(
+                entry.category.is_some(),
+                family_ids.contains(&entry.id.as_str()),
+                "{}",
+                entry.id
+            );
+        }
     }
 }
