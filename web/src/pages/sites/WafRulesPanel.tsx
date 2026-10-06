@@ -27,10 +27,19 @@ import { useToast } from '@/components/ui/Toast'
 import { ErrorState } from '@/components/ErrorState'
 import { RuleDialog } from '@/components/waf/RuleDialog'
 import { deriveWafConfig, ruleKeys, rulesApi } from '@/api/rules'
+import { managedRulesApi, wafSettingsApi, wafSettingsKeys } from '@/api/wafSettings'
 import { siteKeys } from '@/api/sites'
 import { useCanWrite, useDebouncedValue } from '@/hooks'
 import { cn } from '@/lib/utils'
-import { RULE_MODES, type Rule, type RuleGroup, type RuleMode } from '@/api/types'
+import {
+  RULE_MODES,
+  type ManagedRule,
+  type Rule,
+  type RuleGroup,
+  type RuleMode,
+  type UpdateWafSettingsRequest,
+  type WafSettings,
+} from '@/api/types'
 
 const ACTION_TONE: Record<string, 'danger' | 'warning' | 'info' | 'success' | 'neutral'> = {
   block: 'danger',
@@ -80,6 +89,20 @@ export function WafRulesPanel() {
     select: (page) => page.items,
     enabled: Boolean(siteId),
   })
+
+  const managedRulesQuery = useQuery({
+    queryKey: wafSettingsKeys.managedRules(),
+    queryFn: () => managedRulesApi.list(),
+    staleTime: 5 * 60 * 1000,
+  })
+
+  const settingsQuery = useQuery({
+    queryKey: wafSettingsKeys.settings(siteId),
+    queryFn: () => wafSettingsApi.get(siteId),
+    enabled: Boolean(siteId),
+  })
+  const settings = settingsQuery.data
+  const monitoredRules = (settings?.monitor_managed_rules ?? []) as string[]
 
   const allRules = useMemo(() => rulesQuery.data ?? [], [rulesQuery.data])
   const groups = useMemo(() => groupsQuery.data ?? [], [groupsQuery.data])
@@ -174,6 +197,62 @@ export function WafRulesPanel() {
       rulesApi.updateGroup(siteId, group.id, { enabled }),
     onSuccess: () => invalidate(),
   })
+
+  /** Per-rule monitor downgrade, mirroring the settings panel's optimistic patch. */
+  const updateSettings = useMutation({
+    mutationFn: (payload: UpdateWafSettingsRequest) =>
+      wafSettingsApi.update(siteId, payload),
+    onMutate: async (payload) => {
+      await queryClient.cancelQueries({
+        queryKey: wafSettingsKeys.settings(siteId),
+      })
+      const previous = queryClient.getQueryData<WafSettings>(
+        wafSettingsKeys.settings(siteId),
+      )
+      queryClient.setQueryData<WafSettings>(
+        wafSettingsKeys.settings(siteId),
+        (prev) =>
+          prev
+            ? {
+                ...prev,
+                ...(payload.monitor_managed_rules !== undefined && {
+                  monitor_managed_rules: payload.monitor_managed_rules,
+                }),
+              }
+            : prev,
+      )
+      return { previous }
+    },
+    onError: (error, _payload, context) => {
+      if (context?.previous) {
+        queryClient.setQueryData(
+          wafSettingsKeys.settings(siteId),
+          context.previous,
+        )
+      }
+      toast.error(
+        t('pages.protection.updateFailed'),
+        error instanceof Error ? error.message : undefined,
+      )
+    },
+    onSuccess: (saved) => {
+      queryClient.setQueryData(wafSettingsKeys.settings(siteId), saved)
+      toast.success(t('pages.protection.saved'))
+    },
+    onSettled: () => {
+      void queryClient.invalidateQueries({
+        queryKey: wafSettingsKeys.all(siteId),
+      })
+    },
+  })
+
+  const toggleManagedMonitor = (ruleId: string, on: boolean) => {
+    updateSettings.mutate({
+      monitor_managed_rules: on
+        ? [...monitoredRules, ruleId]
+        : monitoredRules.filter((id) => id !== ruleId),
+    })
+  }
 
   const deleteGroup = useMutation({
     mutationFn: (groupId: string) => rulesApi.deleteGroup(siteId, groupId),
@@ -499,8 +578,109 @@ export function WafRulesPanel() {
             </div>
           )}
 
+          {/* ── Built-in managed rules ──────────────────────────────── */}
+          <Card>
+            <CardHeader
+              title={t('pages.waf.managedRules')}
+              description={t('pages.waf.managedRulesHint')}
+            />
+            <CardBody>
+              {settingsQuery.isError && !settings ? (
+                <ErrorState
+                  error={settingsQuery.error}
+                  onRetry={() => settingsQuery.refetch()}
+                  retrying={settingsQuery.isFetching}
+                />
+              ) : managedRulesQuery.isError && !managedRulesQuery.data ? (
+                <ErrorState
+                  error={managedRulesQuery.error}
+                  onRetry={() => managedRulesQuery.refetch()}
+                  retrying={managedRulesQuery.isFetching}
+                />
+              ) : managedRulesQuery.isPending || settingsQuery.isPending ? (
+                <SkeletonRows rows={4} columns={3} />
+              ) : (
+                <div className="grid grid-cols-1 gap-x-8 gap-y-0.5 lg:grid-cols-2">
+                  {(managedRulesQuery.data ?? []).map((rule: ManagedRule) => {
+                    const monitored = monitoredRules.includes(rule.id)
+                    return (
+                      <div
+                        key={rule.id}
+                        className="flex items-center justify-between gap-3 rounded-md px-1 py-1.5"
+                      >
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span
+                              className={cn(
+                                'truncate text-sm',
+                                monitored ? 'text-fg' : 'text-fg-subtle',
+                              )}
+                            >
+                              {rule.name}
+                            </span>
+                            <Badge tone={ACTION_TONE[rule.action] ?? 'neutral'}>
+                              {t(`actions.${rule.action}`, rule.action)}
+                            </Badge>
+                            {rule.strict_only && (
+                              <Badge tone="warning">
+                                {t('pages.waf.strictOnly')}
+                              </Badge>
+                            )}
+                          </div>
+                          <div className="mt-0.5 flex items-center gap-2">
+                            <span className="pw-mono text-xs text-fg-subtle">
+                              {rule.id}
+                            </span>
+                            <span
+                              className="flex items-center gap-0.5"
+                              title={`${rule.severity}/5`}
+                            >
+                              {[1, 2, 3, 4, 5].map((n) => (
+                                <span
+                                  key={n}
+                                  className={cn(
+                                    'h-1 w-2.5 rounded-full',
+                                    n <= rule.severity
+                                      ? rule.severity >= 4
+                                        ? 'bg-danger'
+                                        : 'bg-brand'
+                                      : 'bg-fill',
+                                  )}
+                                />
+                              ))}
+                            </span>
+                            {rule.tags.slice(0, 2).map((tag) => (
+                              <span
+                                key={tag}
+                                className="pw-mono rounded border border-line bg-recessed px-1.5 py-px text-[10px] text-fg-subtle"
+                              >
+                                {tag}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                        <Switch
+                          size="sm"
+                          checked={monitored}
+                          disabled={!canWrite || updateSettings.isPending}
+                          aria-label={`${t('pages.waf.managedMonitor')}: ${rule.name}`}
+                          onCheckedChange={(on) =>
+                            toggleManagedMonitor(rule.id, on)
+                          }
+                        />
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+              <p className="mt-3 border-t border-line pt-3 text-xs leading-relaxed text-fg-subtle">
+                {t('pages.waf.managedExplainer')}
+              </p>
+            </CardBody>
+          </Card>
+
           {/* ── Mode ─────────────────────────────────────────────────── */}
-          <Card className="max-w-2xl">
+          <Card className="mt-4 max-w-2xl">
             <CardHeader
               title={t('pages.waf.mode')}
               description={t('pages.waf.modeCardHint')}
