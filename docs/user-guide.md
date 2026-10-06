@@ -104,6 +104,8 @@ A prefix route on `/` is rejected: it would conflict with the default-pool fallb
 
 ## WAF Configuration
 
+The Web Protection page is organized into three tabs — **Managed rules** (attack categories, built-in rules, deep inspection, backend stacks), **Custom rules** (posture and user-defined rules) and **Rate limiting & challenge** (rate-limit entry plus challenge settings).
+
 ### Security Modes
 
 Each site operates in one of three modes:
@@ -114,7 +116,7 @@ Each site operates in one of three modes:
 | **Detection** | Rules evaluated, matches logged, but not blocked |
 | **Prevention** | Rules evaluated, matches blocked with configured action |
 
-Set via: `Sites → [site] → Web Protection → WAF Rules`
+Set via: `Sites → [site] → Web Protection → Custom rules`
 
 ### Rule Groups
 
@@ -126,7 +128,7 @@ Rules are organized into groups that execute in order:
 | `response` | Evaluated on upstream responses |
 | `custom` | User-defined rule groups |
 
-### WAF Rules
+### Custom Rules
 
 Each rule defines a condition and an action:
 
@@ -148,33 +150,19 @@ Each rule defines a condition and an action:
 - `log` — Log only, do not block
 - `redirect` — Redirect to a URL
 
-### Managed Rulesets
+### Managed Rules
 
-PingWAF includes built-in protection against:
-- SQL Injection (SQLi)
-- Cross-Site Scripting (XSS)
-- Remote Code Execution (RCE)
-- Path Traversal
-- Command Injection
-- Protocol violations
+PingWAF includes built-in protection against SQL injection, XSS, remote code execution, path traversal, command injection and protocol violations. The protection page splits this into two cards:
 
-Enable/disable individual rules within managed groups.
+**Attack categories** (9): `sqli`, `xss`, `rce`, `lfi`, `ssrf`, `deser`, `crlf`, `xxe`, `ssti`. Each category is a two-state switch — **Block** (default) or **Log only**. Log-only keeps the family's detection and logging fully active but stops blocking its matches. There is no per-category "off": detection always runs.
 
-### Rule Grading
+**Built-in rules**: each of the built-in managed rules has its own Block / Log-only switch, independent of the category switches. Batch buttons switch all rules at once. Because a family's rules (SQLi, XSS, RCE score gates) and its category switch control the same signature surface, downgrading a category also flips its family rules to log-only; switching the category back removes those per-rule downgrades, resetting any individual overrides made in between.
 
-```
-Sites → [site] → Web Protection → Grading
-```
+**Deep inspection** enables the strict managed rule set plus deep request-body inspection. Higher interception rate at a proportional performance cost.
 
-Besides per-rule toggles, the whole detection posture of a site can be graded:
+**Backend stacks** (`java`, `php`, `python`, `node`) downgrade stack-specific detections the same way; language-agnostic detections are never affected by a stack switch. Stack switches are collapsed by default.
 
-| Control | Behavior |
-|---------|----------|
-| **Advanced mode** | Enables the strict managed rule set plus deep request-body inspection. Higher interception rate at a proportional performance cost. |
-| **Attack categories** (9) | `sqli`, `xss`, `rce`, `lfi`, `ssrf`, `deser`, `crlf`, `xxe`, `ssti` — switch a family off to downgrade its matches to monitoring: detection and logging stay fully active, but nothing is blocked. |
-| **Backend stacks** (4) | `java`, `php`, `python`, `node` — same downgrade semantics for stack-specific detections. Language-agnostic detections are never downgraded by a stack switch. |
-
-A site without explicit grading settings behaves exactly like the default posture: every detection blocks.
+A site without explicit settings behaves exactly like the default posture: every detection blocks.
 
 ### Under Attack Mode
 
@@ -206,13 +194,15 @@ Example: Limit to 100 requests per 60 seconds per IP on `/api/*`.
 
 Requests missing the header, cookie or query parameter bucket together, so they still count against the limit. Header names match case-insensitively; cookie and query names are case-sensitive. The `ja3` characteristic is reserved for future use and is not yet accepted by the API.
 
-## CC Protection & Challenges
+## Challenges (CC Protection)
 
 ### Challenge Settings
 
 ```
-Sites → [site] → Web Protection → CC Protection
+Sites → [site] → Web Protection → Rate limiting & challenge
 ```
+
+Dimension-based rate limit rules live on the separate Rate Limiting page; this tab links to it and holds the challenge settings below.
 
 | Setting | Options |
 |---------|---------|
