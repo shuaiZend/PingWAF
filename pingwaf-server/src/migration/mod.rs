@@ -35,6 +35,8 @@ pub mod m20240101_000027_ai_agent;
 pub mod m20240101_000028_access_log_search_indexes;
 pub mod m20240101_000029_agent_blocked_ips;
 pub mod m20240101_000030_waf_settings;
+pub mod m20240101_000031_waf_settings_monitor_managed_rules;
+pub mod m20240101_000032_security_events_event_type;
 
 use sea_orm_migration::prelude::*;
 
@@ -77,6 +79,10 @@ impl MigratorTrait for Migrator {
             Box::new(m20240101_000028_access_log_search_indexes::Migration),
             Box::new(m20240101_000029_agent_blocked_ips::Migration),
             Box::new(m20240101_000030_waf_settings::Migration),
+            Box::new(
+                m20240101_000031_waf_settings_monitor_managed_rules::Migration,
+            ),
+            Box::new(m20240101_000032_security_events_event_type::Migration),
         ]
     }
 }
@@ -88,7 +94,7 @@ mod tests {
     #[test]
     fn migrations_are_ordered_and_unique() {
         let migrations = Migrator::migrations();
-        assert_eq!(migrations.len(), 30);
+        assert_eq!(migrations.len(), 32);
         let names: Vec<String> =
             migrations.iter().map(|m| m.name().to_owned()).collect();
         let mut sorted = names.clone();
