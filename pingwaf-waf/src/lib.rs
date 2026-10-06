@@ -14,6 +14,9 @@ pub mod rules;
 pub mod score;
 
 pub use engine::{RequestData, WafEngine, WafEngineConfig, WafMode};
+pub use rules::managed::{
+    managed_rule_catalogue, ManagedRuleInfo, MANAGED_RULE_IDS,
+};
 pub use rules::{AttackCategory, CompiledRule, RuleAction};
 pub use score::{AnomalyScorer, ScoreBreakdown, ScoreClass};
 

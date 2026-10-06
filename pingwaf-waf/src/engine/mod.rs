@@ -88,6 +88,12 @@ pub struct WafEngineConfig {
     /// Backend stacks downgraded to monitor-only, same semantics as
     /// `monitor_categories`. `GENERIC`-only patterns are never downgraded.
     pub monitor_stacks: StackSet,
+    /// Individual managed rules (by id, e.g. `PINGWAF-1010`) downgraded to
+    /// monitor-only. Same semantics as the category/stack sets but scoped to
+    /// one rule; score-gate rules downgrade too (their Block verdict becomes
+    /// Monitor while the hit still feeds the total score). Empty = enforce
+    /// everything.
+    pub monitor_managed_rules: std::collections::HashSet<String>,
 }
 
 impl Default for WafEngineConfig {
@@ -104,6 +110,7 @@ impl Default for WafEngineConfig {
             fast_path_block_on_critical: true,
             monitor_categories: CategorySet::EMPTY,
             monitor_stacks: StackSet::EMPTY,
+            monitor_managed_rules: std::collections::HashSet::new(),
         }
     }
 }
@@ -206,6 +213,7 @@ pub struct WafEngine {
     fast_path_block_on_critical: bool,
     monitor_categories: CategorySet,
     monitor_stacks: StackSet,
+    monitor_managed_rules: std::collections::HashSet<String>,
 }
 
 impl std::fmt::Debug for WafEngine {
@@ -249,6 +257,7 @@ impl WafEngine {
             fast_path_block_on_critical: config.fast_path_block_on_critical,
             monitor_categories: config.monitor_categories,
             monitor_stacks: config.monitor_stacks,
+            monitor_managed_rules: config.monitor_managed_rules.clone(),
         }
     }
 
@@ -266,13 +275,15 @@ impl WafEngine {
 
     /// `true` when a Stage-2 managed rule is downgraded to monitor-only.
     /// Only managed rules participate: custom rules are explicit operator
-    /// configuration and are never silently downgraded. Score-gate rules
-    /// don't need this mapping (their expression input already excludes
-    /// downgraded hits); it matters for literal-expression rules like the
-    /// Log4Shell gate.
+    /// configuration and are never silently downgraded. Three downgrade
+    /// sources compose: attack-category sets, backend-stack sets and the
+    /// per-rule set (which also covers score-gate rules).
     fn rule_monitored(&self, rule: &CompiledRule) -> bool {
         if !rule.id.starts_with("PINGWAF-") {
             return false;
+        }
+        if self.monitor_managed_rules.contains(rule.id.as_str()) {
+            return true;
         }
         match managed_rule_category(rule) {
             Some(category) => {
@@ -1329,6 +1340,55 @@ mod tests {
         assert_eq!(v.action, WafAction::Pass, "details: {}", v.details);
         assert_eq!(v.score, 0);
         assert!(v.matched_rules.is_empty());
+    }
+
+    #[test]
+    fn monitored_managed_rule_downgrades_block_to_monitor() {
+        let mut r = req("GET", "/", "");
+        r.headers
+            .retain(|(k, _)| !k.eq_ignore_ascii_case("User-Agent"));
+        r.headers.push(("User-Agent".into(), "sqlmap/1.7".into()));
+        assert_eq!(engine().inspect(&r).action, WafAction::Block);
+
+        let cfg = WafEngineConfig {
+            monitor_managed_rules: ["PINGWAF-1010".to_string()]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let v = WafEngine::new(&cfg).inspect(&r);
+        // Still detected — rule surfaces in matched_rules, the score stays in
+        // the aggregate — but nothing lands in the blocking subset.
+        assert_eq!(v.action, WafAction::Monitor);
+        assert!(v.matched_rules.contains(&"PINGWAF-1010".to_string()));
+        assert_eq!(v.breakdown.block_total, 0);
+        assert!(v.breakdown.total > 0);
+        assert!(v.details.contains("[monitored]"));
+    }
+
+    #[test]
+    fn monitored_score_gate_downgrades_gate_verdict() {
+        // With the critical fast path off, this request blocks only through
+        // the SQLi family gate (PINGWAF-1002 fires on a sub-score of 60).
+        let r = req("GET", "/api/users", "id=1' OR 1=1 --");
+        let base = WafEngineConfig {
+            fast_path_block_on_critical: false,
+            ..Default::default()
+        };
+        assert_eq!(WafEngine::new(&base).inspect(&r).action, WafAction::Block);
+
+        let cfg = WafEngineConfig {
+            fast_path_block_on_critical: false,
+            monitor_managed_rules: ["PINGWAF-1002".to_string()]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let v = WafEngine::new(&cfg).inspect(&r);
+        assert_eq!(v.action, WafAction::Monitor);
+        assert!(v.matched_rules.contains(&"PINGWAF-1002".to_string()));
+        assert!(v.breakdown.total > 0);
+        assert!(v.details.contains("[monitored]"));
     }
 
     #[test]

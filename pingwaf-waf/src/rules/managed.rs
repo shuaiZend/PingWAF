@@ -231,6 +231,74 @@ pub fn default_managed_rules(level: WafLevel) -> Vec<CompiledRule> {
     out
 }
 
+/// Rule ids of the built-in managed set, in spec-table order. Serves as the
+/// write-side whitelist for per-site "monitor this managed rule" settings.
+pub const MANAGED_RULE_IDS: [&str; 14] = [
+    "PINGWAF-1001",
+    "PINGWAF-1002",
+    "PINGWAF-1003",
+    "PINGWAF-1004",
+    "PINGWAF-1010",
+    "PINGWAF-1011",
+    "PINGWAF-1020",
+    "PINGWAF-1021",
+    "PINGWAF-1030",
+    "PINGWAF-1031",
+    "PINGWAF-1040",
+    "PINGWAF-1050",
+    "PINGWAF-1051",
+    "PINGWAF-1061",
+];
+
+/// Dashboard-facing metadata for one managed rule.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ManagedRuleInfo {
+    pub id: String,
+    pub name: String,
+    pub action: String,
+    pub severity: u8,
+    pub tags: Vec<String>,
+    pub stacks: Vec<String>,
+    /// `true` when the rule only exists at the Strict level.
+    pub strict_only: bool,
+}
+
+fn stack_names(stacks: StackSet) -> Vec<String> {
+    const NAMES: [(u8, &str); 5] = [
+        (StackSet::GENERIC.bits(), "generic"),
+        (StackSet::JAVA.bits(), "java"),
+        (StackSet::PHP.bits(), "php"),
+        (StackSet::PYTHON.bits(), "python"),
+        (StackSet::NODE.bits(), "node"),
+    ];
+    NAMES
+        .iter()
+        .filter(|(bit, _)| stacks.bits() & bit != 0)
+        .map(|(_, name)| name.to_string())
+        .collect()
+}
+
+/// Flatten the built-in rule set into dashboard-facing metadata. `level`
+/// decides which rules exist (Strict adds the strict-only gates); the
+/// `strict_only` flag is derived from the Normal-level set difference.
+pub fn managed_rule_catalogue(level: WafLevel) -> Vec<ManagedRuleInfo> {
+    let normal_rules = default_managed_rules(WafLevel::Normal);
+    let normal_ids: std::collections::HashSet<&str> =
+        normal_rules.iter().map(|r| r.id.as_str()).collect();
+    default_managed_rules(level)
+        .into_iter()
+        .map(|r| ManagedRuleInfo {
+            strict_only: !normal_ids.contains(r.id.as_str()),
+            id: r.id,
+            name: r.name,
+            action: r.action.as_str().to_string(),
+            severity: r.severity,
+            tags: r.tags,
+            stacks: stack_names(r.stacks),
+        })
+        .collect()
+}
+
 /// Map a managed rule onto the attack category its tags declare, so
 /// per-site monitor downgrades can apply to literal-expression rules.
 /// Score-gate rules (family / aggregate thresholds) don't need this — their
@@ -333,5 +401,36 @@ mod tests {
         let rules = default_managed_rules(WafLevel::Normal);
         let r = find(&rules, "PINGWAF-1050");
         assert_eq!(r.stacks, StackSet::JAVA);
+    }
+
+    #[test]
+    fn catalogue_covers_every_managed_rule_id() {
+        // The strict-level catalogue is exhaustive; the Normal-level one
+        // omits exactly the strict-only rules.
+        let strict = managed_rule_catalogue(WafLevel::Strict);
+        let normal = managed_rule_catalogue(WafLevel::Normal);
+        assert_eq!(strict.len(), MANAGED_RULE_IDS.len());
+        for (entry, id) in strict.iter().zip(MANAGED_RULE_IDS.iter()) {
+            assert_eq!(entry.id, *id);
+            assert!(!entry.name.is_empty());
+            assert!((1..=5).contains(&entry.severity));
+        }
+        assert_eq!(normal.len(), MANAGED_RULE_IDS.len() - 1);
+
+        // `strict_only` is exactly the Normal-level set difference.
+        let normal_ids: std::collections::HashSet<&str> =
+            normal.iter().map(|e| e.id.as_str()).collect();
+        for entry in &strict {
+            assert_eq!(
+                entry.strict_only,
+                !normal_ids.contains(entry.id.as_str()),
+                "{}",
+                entry.id
+            );
+        }
+        assert!(strict.iter().any(|e| e.strict_only));
+        assert!(strict
+            .iter()
+            .all(|e| e.strict_only == (e.id == "PINGWAF-1061")));
     }
 }
