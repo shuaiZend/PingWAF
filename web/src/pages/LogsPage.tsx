@@ -109,9 +109,11 @@ function ruleLink(event: SecurityEvent): string {
     case 'bot':
       return `${base}/security/bot`
     case 'challenge':
-      return `${base}/security/protection`
+      return `${base}/security/protection?tab=cc`
+    case 'managed':
+      return `${base}/security/protection?tab=managed&rule=${rule}`
     default:
-      return `${base}/security/protection?tab=rules&rule=${rule}`
+      return `${base}/security/protection?tab=custom&rule=${rule}`
   }
 }
 

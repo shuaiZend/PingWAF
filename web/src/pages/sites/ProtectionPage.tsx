@@ -1,8 +1,8 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Navigate, useLocation, useParams, useSearchParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Cloud, Gauge, ShieldCheck, Warning } from '@phosphor-icons/react'
+import { Cloud, ShieldCheck, Sliders, Warning } from '@phosphor-icons/react'
 import { PageHeader } from '@/components/PageHeader'
 import { Tabs } from '@/components/ui/Tabs'
 import { Switch } from '@/components/ui/Switch'
@@ -11,23 +11,31 @@ import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { useToast } from '@/components/ui/Toast'
 import { challengeApi, challengeKeys } from '@/api/challenge'
 import { useCanWrite } from '@/hooks'
-import { ProtectionSettingsPanel } from './ProtectionSettingsPanel'
-import { WafRulesPanel } from './WafRulesPanel'
-import { CcPanel } from './CcPanel'
+import { ManagedRulesPanel } from './ManagedRulesPanel'
+import { CustomRulesPanel } from './CustomRulesPanel'
+import { MitigationPanel } from './MitigationPanel'
 
-type ProtectionTab = 'settings' | 'rules' | 'cc'
+type ProtectionTab = 'managed' | 'custom' | 'cc'
 
-const PROTECTION_TABS: ProtectionTab[] = ['settings', 'rules', 'cc']
+const PROTECTION_TABS: ProtectionTab[] = ['managed', 'custom', 'cc']
+
+/** Pre-0.22 tab values, still accepted in links and normalized on load. */
+const LEGACY_TABS: Record<string, ProtectionTab> = {
+  settings: 'managed',
+  rules: 'custom',
+}
 
 function parseTab(value: string | null): ProtectionTab {
+  if (value && LEGACY_TABS[value]) return LEGACY_TABS[value]
   return PROTECTION_TABS.includes(value as ProtectionTab)
     ? (value as ProtectionTab)
-    : 'settings'
+    : 'managed'
 }
 
 /**
- * Web protection for one site: WAF posture and rules, the grading knobs and
- * CC protection under one roof, fronted by the under-attack banner.
+ * Web protection for one site: the built-in managed rules and attack
+ * categories, the user's own WAF rules, and rate-limiting/challenge
+ * mitigation under one roof, fronted by the under-attack banner.
  */
 export function ProtectionPage() {
   const { t } = useTranslation()
@@ -43,6 +51,16 @@ export function ProtectionPage() {
     params.set('tab', next)
     setSearchParams(params, { replace: true })
   }
+
+  // Rewrite a legacy `?tab=settings|rules` link in place so the address bar
+  // always shows the current vocabulary — every other param (`?rule=`) stays.
+  useEffect(() => {
+    const raw = searchParams.get('tab')
+    if (raw !== 'settings' && raw !== 'rules') return
+    const params = new URLSearchParams(searchParams)
+    params.set('tab', parseTab(raw))
+    setSearchParams(params, { replace: true })
+  }, [searchParams, setSearchParams])
 
   const challengeQuery = useQuery({
     queryKey: challengeKeys.config(siteId),
@@ -148,13 +166,13 @@ export function ProtectionPage() {
         onChange={setTab}
         items={[
           {
-            value: 'settings',
-            label: t('pages.protection.tabSettings'),
-            icon: <Gauge weight="duotone" className="h-4 w-4" />,
+            value: 'managed',
+            label: t('pages.protection.tabManaged'),
+            icon: <Sliders weight="duotone" className="h-4 w-4" />,
           },
           {
-            value: 'rules',
-            label: t('pages.protection.tabRules'),
+            value: 'custom',
+            label: t('pages.protection.tabCustom'),
             icon: <ShieldCheck weight="duotone" className="h-4 w-4" />,
           },
           {
@@ -165,9 +183,9 @@ export function ProtectionPage() {
         ]}
       />
 
-      {tab === 'settings' && <ProtectionSettingsPanel />}
-      {tab === 'rules' && <WafRulesPanel />}
-      {tab === 'cc' && <CcPanel />}
+      {tab === 'managed' && <ManagedRulesPanel />}
+      {tab === 'custom' && <CustomRulesPanel />}
+      {tab === 'cc' && <MitigationPanel />}
 
       <ConfirmDialog
         open={confirmUnderAttack}

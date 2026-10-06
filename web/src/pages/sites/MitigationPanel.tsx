@@ -1,30 +1,95 @@
 import { useState } from 'react'
-import { useParams } from 'react-router-dom'
+import { useNavigate, useParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowClockwise } from '@phosphor-icons/react'
+import {
+  ArrowClockwise,
+  ArrowRight,
+  Gauge,
+} from '@phosphor-icons/react'
 import { Card, CardBody, CardHeader } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { Select } from '@/components/ui/Select'
 import { Switch } from '@/components/ui/Switch'
 import { TagInput } from '@/components/ui/MultiSelect'
+import { SkeletonCard } from '@/components/ui/Skeleton'
 import { useToast } from '@/components/ui/Toast'
 import { ErrorState } from '@/components/ErrorState'
 import { challengeApi, challengeKeys, defaultChallengeConfig } from '@/api/challenge'
+import { rateLimitApi, rateLimitKeys } from '@/api/rateLimiting'
 import { useCanWrite } from '@/hooks'
 import { CHALLENGE_LEVELS, type ChallengeConfig } from '@/api/types'
 
 const MIN_CLEARANCE_SECS = 60
 const MAX_CLEARANCE_SECS = 86_400
 
-/** The CC protection module of the site's protection tab. */
-export function CcPanel() {
+/**
+ * The mitigation module of the protection page: an entry card into the
+ * dedicated rate-limiting page plus the site's challenge configuration.
+ */
+export function MitigationPanel() {
+  const { siteId = '' } = useParams<{ siteId: string }>()
+  return (
+    <div className="flex flex-col gap-4">
+      <RateLimitingEntryCard siteId={siteId} />
+      <ChallengeConfigCard siteId={siteId} />
+    </div>
+  )
+}
+
+/** Shortcut to the rate-limiting page, with a live count of that site's rules. */
+function RateLimitingEntryCard({ siteId }: { siteId: string }) {
+  const { t } = useTranslation()
+  const navigate = useNavigate()
+
+  const rulesQuery = useQuery({
+    queryKey: rateLimitKeys.list(siteId),
+    queryFn: () => rateLimitApi.list(siteId),
+    enabled: Boolean(siteId),
+  })
+  const rules = rulesQuery.data?.items ?? []
+  const enabled = rules.filter((r) => r.enabled).length
+
+  return (
+    <Card>
+      <CardBody className="flex flex-wrap items-center gap-4">
+        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-recessed text-fg-subtle">
+          <Gauge weight="duotone" className="h-5 w-5" />
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="block text-sm font-semibold text-fg-strong">
+            {t('pages.protection.rateLimitingEntry.title')}
+          </span>
+          <span className="mt-0.5 block text-[13px] text-fg-subtle">
+            {t('pages.protection.rateLimitingEntry.description')}
+          </span>
+          {!rulesQuery.isPending && !rulesQuery.isError && rules.length > 0 && (
+            <span className="mt-1 block text-xs text-fg-subtle">
+              {t('pages.protection.rateLimitingEntry.ruleCount', {
+                enabled,
+                total: rules.length,
+              })}
+            </span>
+          )}
+        </span>
+        <Button
+          variant="secondary"
+          onClick={() => navigate(`/sites/${siteId}/security/rate-limiting`)}
+          icon={<ArrowRight weight="duotone" className="h-4 w-4" />}
+        >
+          {t('pages.protection.rateLimitingEntry.cta')}
+        </Button>
+      </CardBody>
+    </Card>
+  )
+}
+
+function ChallengeConfigCard({ siteId }: { siteId: string }) {
   const { t } = useTranslation()
   const toast = useToast()
   const queryClient = useQueryClient()
   const canWrite = useCanWrite()
-  const { siteId = '' } = useParams<{ siteId: string }>()
 
   const [config, setConfig] = useState<ChallengeConfig | null>(null)
   const [dirty, setDirty] = useState(false)
@@ -80,15 +145,22 @@ export function CcPanel() {
     },
   })
 
+  if (configQuery.isPending) {
+    return <SkeletonCard className="h-64" />
+  }
+  if (configQuery.isError && !config) {
+    return (
+      <ErrorState
+        error={configQuery.error}
+        onRetry={() => configQuery.refetch()}
+        retrying={configQuery.isFetching}
+      />
+    )
+  }
+
   return (
     <div>
-      {configQuery.isError && !config ? (
-        <ErrorState
-          error={configQuery.error}
-          onRetry={() => configQuery.refetch()}
-          retrying={configQuery.isFetching}
-        />
-      ) : config ? (
+      {config ? (
         <div className="flex flex-col gap-4">
           {/* Under-attack mode is managed from the page-level banner; keep it
               out of this form so the two controls cannot fight each other. */}
@@ -218,4 +290,4 @@ export function CcPanel() {
   )
 }
 
-export default CcPanel
+export default MitigationPanel

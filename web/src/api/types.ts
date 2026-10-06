@@ -437,6 +437,8 @@ export interface ManagedRule {
   severity: number
   tags: string[]
   stacks: string[]
+  /** Attack family (`sqli`/`xss`/`rce`) whose category switch also drives this rule. */
+  category: string | null
   strict_only: boolean
 }
 
