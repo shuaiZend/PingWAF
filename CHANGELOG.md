@@ -8,6 +8,32 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.22.0] — 2026-10-07
+
+### ⛰️ Features
+
+- *(web)* The Web Protection page is reorganized into three tabs aligned with
+  the rule surfaces, replacing the old split where a "grading" tab and a "WAF
+  rules" tab overlapped invisibly. **Managed rules** holds the attack
+  categories, the built-in rule switches, deep inspection and the backend
+  stacks; **Custom rules** holds the posture banner and user-defined rules;
+  **Rate limiting & challenge** links to the rate-limiting page and keeps the
+  challenge settings. Legacy deep links (`?tab=settings`/`?tab=rules`) are
+  normalized to the new tabs while preserving other query parameters, and log
+  drill-downs land on the matching tab.
+- *(web)* Attack categories are now two-state — **block** or **log only** —
+  with the two mechanisms finally visible on one surface. The managed rule
+  catalogue carries a `category` field (derived from the engine's family-tag
+  mapping, exposed via `GET /api/v1/managed-rules`), and downgrading a
+  category (SQLi, XSS, RCE) now also flips its family managed rules to
+  log-only in the same request; switching the category back removes those
+  downgrades, resetting individual overrides made in between. Per-rule
+  switches stay independent, and batch buttons switch every built-in rule at
+  once. "Advanced mode" is renamed to "deep inspection" and the old
+  "monitoring" wording is replaced by "log only" throughout.
+- *(build)* The web dashboard gains a unit-test setup (vitest) wired into CI,
+  currently covering the category-linkage logic.
+
 ## [PingWAF 0.21.0] — 2026-10-07
 
 ### ⛰️ Features
