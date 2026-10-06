@@ -1713,6 +1713,27 @@ fn parse_monitor_stacks(names: &[String]) -> StackSet {
     set
 }
 
+/// Parses a per-rule managed monitor list; unknown ids are ignored with a
+/// warning (the rule may have been removed from the engine since the setting
+/// was written).
+fn parse_monitor_managed_rules(names: &[String]) -> HashSet<String> {
+    let known = pingwaf_waf::MANAGED_RULE_IDS
+        .iter()
+        .copied()
+        .collect::<HashSet<&str>>();
+    names
+        .iter()
+        .filter(|id| {
+            let keep = known.contains(id.as_str());
+            if !keep {
+                warn!(id = %id, "unknown managed rule id; ignoring");
+            }
+            keep
+        })
+        .cloned()
+        .collect()
+}
+
 /// Build a [`WafEngine`] from control-plane site WAF config.
 fn build_site_engine(cfg: &CacheWafConfig) -> WafEngine {
     let mode = match cfg.mode {
@@ -1765,6 +1786,9 @@ fn build_site_engine(cfg: &CacheWafConfig) -> WafEngine {
         stacks: StackSet::default(),
         monitor_categories: parse_monitor_categories(&cfg.monitor_categories),
         monitor_stacks: parse_monitor_stacks(&cfg.monitor_stacks),
+        monitor_managed_rules: parse_monitor_managed_rules(
+            &cfg.monitor_managed_rules,
+        ),
         threshold: if cfg.anomaly_threshold > 0 {
             cfg.anomaly_threshold
         } else {
@@ -1838,6 +1862,16 @@ impl WafPlugin {
         }
     }
 
+    /// Which protection produced an engine-verdict event. Managed rules keep
+    /// their own type so the dashboard can deep-link the built-in catalogue;
+    /// every other engine hit is a site (custom) rule.
+    fn engine_event_type(verdict: &WafVerdict) -> &'static str {
+        match verdict.matched_rules.first() {
+            Some(id) if id.starts_with("PINGWAF-") => "managed",
+            _ => "waf",
+        }
+    }
+
     /// Ship a security event to the control plane (best effort, non-blocking).
     fn log_event(
         site_id: &str,
@@ -1846,6 +1880,7 @@ impl WafPlugin {
         request_data: &RequestData,
         verdict: &WafVerdict,
         rule_name: &str,
+        event_type: &str,
     ) {
         let Some(agent) = PingWafAgent::instance() else {
             return;
@@ -1876,6 +1911,7 @@ impl WafPlugin {
             query_string: request_data.query.clone(),
             rule_id: verdict.matched_rules.first().cloned().unwrap_or_default(),
             rule_name: rule_name.to_string(),
+            event_type: event_type.to_string(),
             action: action_str(&verdict.action).to_string(),
             score: verdict.score as u32,
             details: verdict.details.clone(),
@@ -1900,6 +1936,7 @@ impl WafPlugin {
         rule_id: &str,
         detail: &str,
         rule_name: &str,
+        event_type: &str,
     ) {
         tracing::info!(
             site_id,
@@ -1925,6 +1962,7 @@ impl WafPlugin {
             request_data,
             &verdict,
             rule_name,
+            event_type,
         );
     }
 
@@ -1940,6 +1978,7 @@ impl WafPlugin {
         denial: &Denial,
         original_url: &str,
         pow_difficulty: u32,
+        event_type: &str,
     ) -> RequestPluginResult {
         let verdict = WafVerdict {
             action: if denial.challenge {
@@ -1959,6 +1998,7 @@ impl WafPlugin {
             request_data,
             &verdict,
             &denial.rule_name,
+            event_type,
         );
         let response = if denial.challenge {
             build_challenge_response(
@@ -2008,6 +2048,9 @@ impl TryFrom<&PluginConf> for WafPlugin {
         ));
         let monitor_stacks =
             parse_monitor_stacks(&get_str_slice_conf(value, "monitor_stacks"));
+        let monitor_managed_rules = parse_monitor_managed_rules(
+            &get_str_slice_conf(value, "monitor_managed_rules"),
+        );
         let ml_enabled = get_bool_conf(value, "ml_enabled");
         let ml_threshold = value
             .get("ml_threshold")
@@ -2041,6 +2084,7 @@ impl TryFrom<&PluginConf> for WafPlugin {
             stacks,
             monitor_categories,
             monitor_stacks,
+            monitor_managed_rules,
             threshold: anomaly_threshold,
             paranoia_level,
             max_decode_layers: 3,
@@ -2328,6 +2372,7 @@ impl Plugin for WafPlugin {
                         &denial.rule_id,
                         &denial.detail,
                         &denial.rule_name,
+                        "ip_geo",
                     );
                 } else {
                     let original_url = if query.is_empty() {
@@ -2344,6 +2389,7 @@ impl Plugin for WafPlugin {
                         denial,
                         &original_url,
                         self.pow_difficulty,
+                        "ip_geo",
                     ));
                 }
             }
@@ -2412,6 +2458,7 @@ impl Plugin for WafPlugin {
                             &denial.rule_id,
                             &denial.detail,
                             &denial.rule_name,
+                            "bot",
                         );
                     } else {
                         let original_url = if query.is_empty() {
@@ -2428,6 +2475,7 @@ impl Plugin for WafPlugin {
                             &denial,
                             &original_url,
                             self.pow_difficulty,
+                            "bot",
                         ));
                     }
                 },
@@ -2446,6 +2494,7 @@ impl Plugin for WafPlugin {
                         &request_data,
                         &verdict,
                         &denial.rule_name,
+                        "bot",
                     );
                 },
             }
@@ -2482,6 +2531,7 @@ impl Plugin for WafPlugin {
                     &request_data,
                     &verdict,
                     &tripped.rule_name,
+                    "rate_limit",
                 );
             }
             if let Some(tripped) = outcome.deny {
@@ -2499,6 +2549,7 @@ impl Plugin for WafPlugin {
                         &tripped.rule_id,
                         &tripped.detail,
                         &tripped.rule_name,
+                        "rate_limit",
                     );
                 } else {
                     let original_url = if query.is_empty() {
@@ -2524,6 +2575,7 @@ impl Plugin for WafPlugin {
                         &request_data,
                         &verdict,
                         &tripped.rule_name,
+                        "rate_limit",
                     );
                     // Defense in depth: refuse the client at the edge for the
                     // mitigation window so a repeat offender never reaches
@@ -2624,6 +2676,7 @@ impl Plugin for WafPlugin {
                 &request_data,
                 &verdict,
                 &rule_name,
+                Self::engine_event_type(&verdict),
             );
             return Ok(RequestPluginResult::Continue);
         }
@@ -2652,6 +2705,7 @@ impl Plugin for WafPlugin {
                 &request_data,
                 &observed,
                 &rule_name,
+                Self::engine_event_type(&observed),
             );
             return Ok(RequestPluginResult::Continue);
         }
@@ -2667,6 +2721,7 @@ impl Plugin for WafPlugin {
             &request_data,
             &verdict,
             &rule_name,
+            Self::engine_event_type(&verdict),
         );
         let response = if verdict.action == WafAction::Block {
             // Auto-block the client for a grace window: repeat requests are
@@ -2877,6 +2932,7 @@ ml_threshold = 0.75
             advanced_mode,
             monitor_categories,
             monitor_stacks,
+            monitor_managed_rules: Vec::new(),
         }
     }
 
@@ -2914,6 +2970,65 @@ ml_threshold = 0.75
             plain.inspect(&probe(query)).details
         );
         assert_eq!(advanced.inspect(&probe(query)).action, WafAction::Block);
+    }
+
+    #[test]
+    fn site_engine_honours_monitor_managed_rules() {
+        // The scanner UA only fires PINGWAF-1010; downgrading that one rule
+        // id must turn the Block into a Monitor.
+        let mut r = probe("/");
+        r.headers
+            .retain(|(k, _)| !k.eq_ignore_ascii_case("User-Agent"));
+        r.headers.push(("User-Agent".into(), "sqlmap/1.7".into()));
+        let enforcing =
+            build_site_engine(&cache_waf_config(false, Vec::new(), Vec::new()));
+        assert_eq!(enforcing.inspect(&r).action, WafAction::Block);
+
+        let mut cfg = cache_waf_config(false, Vec::new(), Vec::new());
+        cfg.monitor_managed_rules =
+            vec!["PINGWAF-1010".into(), "not-a-rule".into()];
+        let downgraded = build_site_engine(&cfg);
+        let v = downgraded.inspect(&r);
+        assert_eq!(v.action, WafAction::Monitor, "details: {}", v.details);
+        assert!(v.matched_rules.contains(&"PINGWAF-1010".to_string()));
+    }
+
+    #[test]
+    fn engine_event_type_follows_matched_rule() {
+        let verdict = |ids: Vec<String>| WafVerdict {
+            action: WafAction::Block,
+            score: 10,
+            matched_rules: ids,
+            details: String::new(),
+            breakdown: ScoreBreakdown::clean(),
+        };
+        assert_eq!(
+            WafPlugin::engine_event_type(&verdict(vec!["PINGWAF-1010".into()])),
+            "managed"
+        );
+        assert_eq!(
+            WafPlugin::engine_event_type(&verdict(vec![
+                "site-rule-uuid".into()
+            ])),
+            "waf"
+        );
+        assert_eq!(WafPlugin::engine_event_type(&verdict(Vec::new())), "waf");
+    }
+
+    #[test]
+    fn parse_monitor_managed_rules_drops_unknown_ids() {
+        let parsed = parse_monitor_managed_rules(&[
+            "PINGWAF-1010".to_string(),
+            "PINGWAF-1002".to_string(),
+            "PINGWAF-9999".to_string(),
+            String::new(),
+        ]);
+        assert_eq!(
+            parsed,
+            ["PINGWAF-1010".to_string(), "PINGWAF-1002".to_string()]
+                .into_iter()
+                .collect()
+        );
     }
 
     #[test]

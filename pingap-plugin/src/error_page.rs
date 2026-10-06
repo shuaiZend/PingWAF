@@ -151,7 +151,7 @@ const PAGE_403: &str = r##"<!DOCTYPE html>
   <h1>Access Denied</h1>
   <p class="msg">Your request has been blocked by the web application firewall. If you believe this is a mistake, contact the site administrator with the event ID below.</p>
   <div class="details">
-    <div class="row"><span class="k">Event ID</span><span class="v">{{ request_id }}</span></div>
+    <div class="row"><span class="k">Request ID</span><span class="v">{{ request_id }}</span></div>
     <div class="row"><span class="k">Time</span><span class="v">{{ timestamp }}</span></div>
     <div class="row"><span class="k">Your IP</span><span class="v">{{ client_ip }}</span></div>
     <div class="row"><span class="k">Path</span><span class="v">{{ method }} {{ path }}</span></div>
@@ -178,7 +178,7 @@ const PAGE_429: &str = r##"<!DOCTYPE html>
   <h1>Rate Limit Exceeded</h1>
   <p class="msg">You have sent too many requests in a short period of time. Please slow down and try again shortly.</p>
   <div class="details">
-    <div class="row"><span class="k">Event ID</span><span class="v">{{ request_id }}</span></div>
+    <div class="row"><span class="k">Request ID</span><span class="v">{{ request_id }}</span></div>
     <div class="row"><span class="k">Time</span><span class="v">{{ timestamp }}</span></div>
     <div class="row"><span class="k">Your IP</span><span class="v">{{ client_ip }}</span></div>
     {% if retry_after %}<div class="row"><span class="k">Retry after</span><span class="v">{{ retry_after }}s</span></div>{% endif %}
@@ -204,7 +204,7 @@ const PAGE_5XX: &str = r##"<!DOCTYPE html>
   <h1>Service Temporarily Unavailable</h1>
   <p class="msg">The server could not complete your request right now. This is usually temporary — please try again in a few moments.</p>
   <div class="details">
-    <div class="row"><span class="k">Event ID</span><span class="v">{{ request_id }}</span></div>
+    <div class="row"><span class="k">Request ID</span><span class="v">{{ request_id }}</span></div>
     <div class="row"><span class="k">Time</span><span class="v">{{ timestamp }}</span></div>
     <div class="row"><span class="k">Host</span><span class="v">{{ host }}</span></div>
     <div class="row"><span class="k">Path</span><span class="v">{{ method }} {{ path }}</span></div>
