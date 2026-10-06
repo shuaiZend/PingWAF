@@ -832,5 +832,14 @@ post18 遗留 REAL 面 4 条中最后一项可修候选 `ff/67`（S2-045 OGNL �
 
 `opt-level = "z"` 落入 `[profile.release]`；release workflow features 从 `full` 改为 `tracing`（imageoptim 功能保留可编译，仅 release 默认不含）。CI 绝对尺寸以 tag 构建资产复测为准（预估 ≈33 MB）。
 
-**性能守恒**：opt3 vs combo-z 两个 release 二进制全量四配置回放（33877 样本 × normal/normal-body/strict/strict-body），判决逐位 diff 与 p50/p95 守恒验证——结果见下。
+**性能守恒**：opt3 vs combo-z 两个 release 二进制全量四配置回放（33877 样本 × normal/normal-body/strict/strict-body，`--concurrency 32 --xff` 参数与 post20 一致），判决与延迟对比：
+
+| 配置 | blocked（opt3 = combo） | gained/lost | p50（opt3→combo） | p95（opt3→combo） |
+|---|---|---|---|---|
+| Normal | 401 = 401 | 0 / 0 | 1 → 1 ms | 2 → 2 ms |
+| Normal + body | 487 = 487 | 0 / 0 | 1 → 1 ms | 3004 → 3005 ms |
+| Strict | 505 = 505 | 0 / 0 | 2 → 2 ms | 3 → 3 ms |
+| Strict + body | 638 = 638 | 0 / 0 | 1 → 1 ms | 3004 → 3005 ms |
+
+四配置判决逐位一致（gained 0 / lost 0），p50/p95 完全守恒（body 档 p95 ~3 s 为网络瓶颈，1 ms 差为噪声）——`opt-level = "z"` 无性能代价。同一批回放与 post20 基线 blocked 集合逐位 diff 亦为 gained 0 / lost 0（401/487/505/638 与 post20 原始 jsonl 精确持平），本轮引擎改动（monitor_managed_rules 空集语义）零回归的实证口径。CI 绝对尺寸以 tag 构建资产复测为准。
 
