@@ -25,9 +25,11 @@ const UUID_RE =
  * method:POST,PUT                one of several methods
  * action:block,challenge         WAF decision
  * rule:xss-001                   rule id
+ * type:managed,bot               security event protection type
  * country:CN  cache_status:hit
  * latency:>500                   minimum total latency in ms
  * site:9f8f8e5c-…                site id
+ * site:none                      traffic with no owning site (no Host header)
  * host:example.com               exact host (`*` for a wildcard)
  * from:2026-09-01  to:2026-09-02 time window (overrides the pickers)
  * free text terms                matched against path and host
@@ -65,7 +67,13 @@ export function parseLogQuery(input: string, tab: LogTab): LogSearch {
         break
       case 'site':
       case 'site_id':
-        if (UUID_RE.test(value)) params.site_id = value
+        if (value === 'none') params.unassigned = true
+        else if (UUID_RE.test(value)) params.site_id = value
+        else unknown.push(token)
+        break
+      case 'type':
+      case 'event_type':
+        if (tab === 'security') params.event_type = value.toLowerCase()
         else unknown.push(token)
         break
       case 'request_id':
@@ -152,11 +160,13 @@ export function formatLogQuery(params: LogQueryParams, tab: LogTab): string {
   } else {
     if (params.action) parts.push(`action:${params.action}`)
     if (params.rule_id) parts.push(`rule:${quote(params.rule_id)}`)
+    if (params.event_type) parts.push(`type:${params.event_type}`)
     if (tab === 'control' && params.method) parts.push(`method:${params.method}`)
   }
   if (params.country_code) parts.push(`country:${params.country_code}`)
   if (params.request_id) parts.push(`request_id:${params.request_id}`)
-  if (params.site_id) parts.push(`site:${params.site_id}`)
+  if (params.unassigned) parts.push('site:none')
+  else if (params.site_id) parts.push(`site:${params.site_id}`)
   if (params.q) parts.push(quote(params.q))
   return parts.join(' ')
 }

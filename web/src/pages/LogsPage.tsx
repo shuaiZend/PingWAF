@@ -29,6 +29,7 @@ import { useToast } from '@/components/ui/Toast'
 import { ErrorState } from '@/components/ErrorState'
 import { downloadJson, fileTimestamp, logKeys, logsApi } from '@/api/logs'
 import { apiProtectionApi, apiProtectionKeys } from '@/api/apiProtection'
+import { countryFlag } from '@/api/geo'
 import { useCanWrite, useSitesList } from '@/hooks'
 import { useAuthStore } from '@/stores/authStore'
 import { cn } from '@/lib/utils'
@@ -90,6 +91,28 @@ function defaultWindow(): { from: string; to: string } {
   const to = new Date()
   const from = new Date(to.getTime() - 24 * 3600_000)
   return { from: toLocalInputValue(from), to: toLocalInputValue(to) }
+}
+
+/**
+ * Deep link for the rule that produced a security event, routed by the
+ * protection that emitted it (`event_type`). Rows without a type predate the
+ * field and default to the WAF rules panel — the historical target.
+ */
+function ruleLink(event: SecurityEvent): string {
+  const base = `/sites/${event.site_id}`
+  const rule = encodeURIComponent(event.rule_id ?? '')
+  switch (event.event_type) {
+    case 'rate_limit':
+      return `${base}/security/rate-limiting?rule=${rule}`
+    case 'ip_geo':
+      return `${base}/security/access`
+    case 'bot':
+      return `${base}/security/bot`
+    case 'challenge':
+      return `${base}/security/protection`
+    default:
+      return `${base}/security/protection?tab=rules&rule=${rule}`
+  }
 }
 
 export function LogsPage() {
@@ -160,14 +183,21 @@ export function LogsPage() {
       from: fromLocalInputValue(fromValue),
       to: fromLocalInputValue(toValue),
     }
-    if (siteId) base.site_id = siteId
+    // `site=none` in the URL means "traffic with no owning site".
+    if (siteId === 'none') base.unassigned = true
+    else if (siteId) base.site_id = siteId
     return base
   }, [parsedQuery, page, pageSize, fromValue, toValue, siteId])
 
   // Control plane rows are cross-tenant and carry no site column, so the site
   // filter is dropped (and hidden) on that tab.
   const controlParams = useMemo<ControlPlaneLogQuery>(() => {
-    const { site_id: _siteId, ...rest } = parsedQuery.params
+    const {
+      site_id: _siteId,
+      event_type: _eventType,
+      unassigned: _unassigned,
+      ...rest
+    } = parsedQuery.params
     return {
       ...rest,
       page,
@@ -260,6 +290,7 @@ export function LogsPage() {
     }
     if (parsed.params.from || parsed.params.to) patch.preset = 'custom'
     if (parsed.params.site_id) patch.site_id = parsed.params.site_id
+    if (parsed.params.unassigned) patch.site_id = 'none'
     updateQuery(patch)
   }
 
@@ -317,6 +348,7 @@ export function LogsPage() {
     () => [
       { value: '', label: t('pages.logs.allSites') },
       ...(sites ?? []).map((s) => ({ value: s.id, label: s.domain })),
+      { value: 'none', label: t('pages.logs.unassigned') },
     ],
     [sites, t],
   )
@@ -363,6 +395,11 @@ export function LogsPage() {
         <div className="min-w-0">
           <p className="pw-mono truncate text-[13px]">{r.path ?? '—'}</p>
           {r.host && <p className="truncate text-[11px] text-fg-subtle">{r.host}</p>}
+          {!siteId && r.site_id == null && (
+            <Badge tone="warning" size="sm">
+              {t('pages.logs.unassigned')}
+            </Badge>
+          )}
         </div>
       ),
     },
@@ -455,6 +492,11 @@ export function LogsPage() {
         <div className="min-w-0">
           <p className="pw-mono truncate text-[13px]">{r.path ?? '—'}</p>
           {r.host && <p className="truncate text-[11px] text-fg-subtle">{r.host}</p>}
+          {!siteId && r.site_id == null && (
+            <Badge tone="warning" size="sm">
+              {t('pages.logs.unassigned')}
+            </Badge>
+          )}
         </div>
       ),
     },
@@ -895,8 +937,12 @@ export function LogsPage() {
             <DefinitionGrid
               rows={[
                 [t('pages.logs.time'), formatDateTime(selectedEvent.timestamp)],
-                [t('pages.logs.clientIp'), selectedEvent.client_ip],
-                [t('pages.logs.country'), selectedEvent.country_code?.toUpperCase()],
+                [
+                  t('pages.logs.clientIp'),
+                  selectedEvent.country_code
+                    ? `${countryFlag(selectedEvent.country_code)} ${selectedEvent.client_ip}`
+                    : selectedEvent.client_ip,
+                ],
                 [t('pages.logs.method'), selectedEvent.method],
                 [t('pages.logs.host'), selectedEvent.host],
                 [t('pages.logs.path'), selectedEvent.path],
@@ -905,7 +951,7 @@ export function LogsPage() {
                   selectedEvent.rule_id ? (
                     selectedEvent.site_id ? (
                       <Link
-                        to={`/sites/${selectedEvent.site_id}/security/waf?rule=${selectedEvent.rule_id}`}
+                        to={ruleLink(selectedEvent)}
                         className="text-link hover:underline"
                       >
                         {selectedEvent.rule_id}
@@ -916,8 +962,10 @@ export function LogsPage() {
                   ) : undefined,
                 ],
                 [t('pages.logs.requestId'), selectedEvent.request_id],
-                [t('pages.logs.agent'), selectedEvent.agent_id],
-                [t('pages.logs.site'), selectedEvent.site_id],
+                [
+                  t('pages.logs.site'),
+                  selectedEvent.site_id ?? t('pages.logs.unassigned'),
+                ],
               ]}
             />
             {selectedEvent.waf_details && (
@@ -996,8 +1044,12 @@ export function LogsPage() {
             <DefinitionGrid
               rows={[
                 [t('pages.logs.time'), formatDateTime(selectedLog.timestamp)],
-                [t('pages.logs.clientIp'), selectedLog.client_ip],
-                [t('pages.logs.country'), selectedLog.country_code?.toUpperCase()],
+                [
+                  t('pages.logs.clientIp'),
+                  selectedLog.country_code
+                    ? `${countryFlag(selectedLog.country_code)} ${selectedLog.client_ip}`
+                    : selectedLog.client_ip,
+                ],
                 [t('pages.logs.host'), selectedLog.host],
                 [t('pages.logs.size'), selectedLog.response_size != null ? formatSize(selectedLog.response_size) : undefined],
                 [t('pages.logs.upstream'), selectedLog.upstream_addr],
