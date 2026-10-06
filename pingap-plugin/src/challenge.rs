@@ -185,7 +185,7 @@ pub(crate) fn build_challenge_response(
 pub(crate) fn block_page(request_id: &str, reason: &str) -> HttpResponse {
     let body = format!(
         "<html><body><h1>403 Forbidden</h1><p>Request blocked by PingWAF.</p>\
-<p>Reason: {reason}</p><p>Event ID: {request_id}</p></body></html>"
+<p>Reason: {reason}</p><p>Request ID: {request_id}</p></body></html>"
     );
     HttpResponse::builder(StatusCode::FORBIDDEN)
         .body(body)
@@ -205,7 +205,7 @@ pub(crate) fn basic_auth_page(
     let body = format!(
         "<html><body><h1>401 Unauthorized</h1>\
 <p>This resource requires basic authentication.</p>\
-<p>Reason: {reason}</p><p>Event ID: {request_id}</p></body></html>"
+<p>Reason: {reason}</p><p>Request ID: {request_id}</p></body></html>"
     );
     HttpResponse::builder(StatusCode::UNAUTHORIZED)
         .body(body)
@@ -228,7 +228,7 @@ pub(crate) fn paused_page(request_id: &str) -> HttpResponse {
     let body = format!(
         "<html><body><h1>503 Service Unavailable</h1>\
 <p>This site is temporarily paused.</p>\
-<p>Event ID: {request_id}</p></body></html>"
+<p>Request ID: {request_id}</p></body></html>"
     );
     HttpResponse::builder(StatusCode::SERVICE_UNAVAILABLE)
         .body(body)
@@ -255,7 +255,7 @@ pub(crate) fn rate_limit_page(
     };
     let body = format!(
         "<html><body><h1>429 Too Many Requests</h1><p>Rate limit exceeded.</p>\
-<p>Reason: {reason}</p>{retry_hint}<p>Event ID: {request_id}</p></body></html>"
+<p>Reason: {reason}</p>{retry_hint}<p>Request ID: {request_id}</p></body></html>"
     );
     let mut response = HttpResponse::builder(StatusCode::TOO_MANY_REQUESTS)
         .body(body)
