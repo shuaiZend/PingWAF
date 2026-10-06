@@ -62,7 +62,9 @@
     "value": "值",
     "description": "描述",
     "priority": "优先级",
-    "lastUpdated": "最近更新"
+    "lastUpdated": "最近更新",
+    "show": "显示",
+    "hide": "收起"
   },
   "status": {
     "active": "运行中",
@@ -467,7 +469,6 @@
       "managedExplainer": "开启监听后规则仍会检测，但只记录命中、不再拦截；积分门规则同样受开关控制，降级后其命中不再计入对应阈值。",
       "managedMonitor": "监听",
       "managedRules": "内置规则",
-      "managedRulesHint": "随引擎分发的托管规则。打开开关可将该规则在本站点降级为仅监听。",
       "strictOnly": "仅高级模式",
       "mode": "防护模式",
       "modeAlready": "所有规则已使用此模式",
@@ -653,17 +654,9 @@
     },
     "protection": {
       "title": "Web 防护",
-      "description": "本站点的 WAF 姿态、规则分级与 CC 防护。",
-      "tabSettings": "分级",
-      "tabRules": "WAF 规则",
-      "tabCc": "CC 防护",
-      "advancedMode": "高级模式",
-      "advancedModeHint": "启用 strict 托管规则集与深度请求体检测。",
+      "description": "本站点的托管规则、自定义规则与限流质询配置。",
+      "tabCc": "限流与质询",
       "performanceHint": "拦截率更高，性能开销相应增加。",
-      "monitorTitle": "仅监听降级",
-      "monitorHint": "关闭某个分类或后端栈后，仍会检测并记录其命中，只是不再拦截。",
-      "monitorCategories": "攻击分类",
-      "monitorStacks": "后端栈",
       "monitorExplainer": "开启降级后检测完全保留，仅记录而不拦截。与语言无关的检测不受后端栈开关影响。",
       "saved": "防护设置已保存",
       "updateFailed": "更新失败",
@@ -675,7 +668,37 @@
       "underAttackConfirmDescription": "所有访客都会被质询，CC 防护将同步开启。仅在攻击持续期间保持开启。",
       "underAttackCta": "开启被攻击模式",
       "underAttackOn": "被攻击模式已开启",
-      "underAttackOff": "被攻击模式已关闭"
+      "underAttackOff": "被攻击模式已关闭",
+      "tabManaged": "托管规则",
+      "tabCustom": "自定义规则",
+      "deepInspection": "深度检测",
+      "deepInspectionHint": "启用 strict 托管规则集与深度请求体检测。",
+      "state": {
+        "block": "拦截",
+        "log": "仅记录"
+      },
+      "categories": {
+        "cardTitle": "攻击类别",
+        "cardHint": "按攻击类别整面降级：仅记录时该类检测仍然运行，命中只记录、不再拦截。",
+        "linkageHint": "该类别的托管规则会随此开关一并降级；回切会重置这些规则的单条开关。"
+      },
+      "managedRules": {
+        "cardHint": "逐条降级内置规则，或用批量按钮整体切换。",
+        "batchLogAll": "全部仅记录",
+        "batchBlockAll": "全部拦截",
+        "groupRecon": "侦查与访问策略",
+        "groupProtocol": "协议与异常"
+      },
+      "stacks": {
+        "cardTitle": "后端栈降级",
+        "cardHint": "按后端语言栈降级，默认收起。"
+      },
+      "rateLimitingEntry": {
+        "title": "限流规则",
+        "description": "按维度限速的规则在独立页面管理。",
+        "cta": "配置限流规则",
+        "ruleCount": "{{enabled}}/{{total}} 条启用中"
+      }
     },
     "ipRules": {
       "title": "IP 访问规则",

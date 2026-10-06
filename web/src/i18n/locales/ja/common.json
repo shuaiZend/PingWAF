@@ -62,7 +62,9 @@
     "value": "値",
     "description": "説明",
     "priority": "優先度",
-    "lastUpdated": "最終更新"
+    "lastUpdated": "最終更新",
+    "show": "表示",
+    "hide": "非表示"
   },
   "status": {
     "active": "アクティブ",
@@ -467,7 +469,6 @@
       "managedExplainer": "モニターを有効にしたルールは検出を継続しますが、ブロックせずに記録のみ行います。スコアゲートもスイッチの対象で、ダウングレード後のヒットはしきい値に計上されません。",
       "managedMonitor": "モニター",
       "managedRules": "組み込みルール",
-      "managedRulesHint": "エンジンに同梱されるマネージドルール。スイッチを有効にすると、該当ルールはこのサイトでモニターのみにダウングレードされます。",
       "strictOnly": "厳格モードのみ",
       "mode": "保護モード",
       "modeAlready": "すべてのルールがすでにこのモードを使用しています",
@@ -653,17 +654,9 @@
     },
     "protection": {
       "title": "Web 保護",
-      "description": "このサイトの WAF 状態、ルールの分段、CC 対策。",
-      "tabSettings": "分段",
-      "tabRules": "WAF ルール",
-      "tabCc": "CC 対策",
-      "advancedMode": "アドバンスモード",
-      "advancedModeHint": "厳格（strict）マネージドルールセットとリクエストボディの深層検査を有効化します。",
+      "description": "このサイトのマネージドルール、カスタムルール、レート制限。",
+      "tabCc": "レート制限とチャレンジ",
       "performanceHint": "検知率が向上する代わりに、パフォーマンスコストも比例して増加します。",
-      "monitorTitle": "監視のみへのダウングレード",
-      "monitorHint": "カテゴリやバックエンドスタックをオフにすると、検出と記録は継続し、ブロックのみを行わなくなります。",
-      "monitorCategories": "攻撃カテゴリ",
-      "monitorStacks": "バックエンドスタック",
       "monitorExplainer": "ダウングレードを有効にしても検出は完全に維持され、ブロックの代わりに記録のみ行われます。言語非依存の検出はスタックスイッチの影響を受けません。",
       "saved": "保護設定を保存しました",
       "updateFailed": "更新に失敗しました",
@@ -675,7 +668,37 @@
       "underAttackConfirmDescription": "すべての訪問者にチャレンジが行われ、CC 対策が自動的に有効化されます。攻撃が続いている間のみ有効のままにしてください。",
       "underAttackCta": "攻撃中モードを有効化",
       "underAttackOn": "攻撃中モードを有効にしました",
-      "underAttackOff": "攻撃中モードを無効にしました"
+      "underAttackOff": "攻撃中モードを無効にしました",
+      "tabManaged": "マネージドルール",
+      "tabCustom": "カスタムルール",
+      "deepInspection": "詳細検査",
+      "deepInspectionHint": "厳格（strict）マネージドルールセットとリクエストボディの深層検査を有効化します。",
+      "state": {
+        "block": "ブロック",
+        "log": "記録のみ"
+      },
+      "categories": {
+        "cardTitle": "攻撃カテゴリ",
+        "cardHint": "攻撃サーフェス全体をまとめてダウングレードします。記録のみモードでは検出は継続し、ヒットはブロックされずに記録されます。",
+        "linkageHint": "このカテゴリのマネージドルールはスイッチに連動してダウングレードされます。戻すと各ルールの個別設定はリセットされます。"
+      },
+      "managedRules": {
+        "cardHint": "組み込みルールを個別にダウングレードするか、一括ボタンでまとめて切り替えます。",
+        "batchLogAll": "すべて記録のみ",
+        "batchBlockAll": "すべてブロック",
+        "groupRecon": "偵察とアクセス制御",
+        "groupProtocol": "プロトコルと異常"
+      },
+      "stacks": {
+        "cardTitle": "バックエンドスタックのダウングレード",
+        "cardHint": "言語スタック単位のダウングレード。デフォルトでは折りたたまれています。"
+      },
+      "rateLimitingEntry": {
+        "title": "レート制限ルール",
+        "description": "IP やパスなど軸ごとのレート制限ルールは専用ページで管理します。",
+        "cta": "レート制限を管理",
+        "ruleCount": "{{total}} 件中 {{enabled}} 件が有効"
+      }
     },
     "ipRules": {
       "title": "IP アクセスルール",

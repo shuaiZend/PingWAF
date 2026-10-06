@@ -62,7 +62,9 @@
     "value": "Value",
     "description": "Description",
     "priority": "Priority",
-    "lastUpdated": "Last updated"
+    "lastUpdated": "Last updated",
+    "show": "Show",
+    "hide": "Hide"
   },
   "status": {
     "active": "Active",
@@ -467,7 +469,6 @@
       "managedExplainer": "A switched-on rule keeps detecting but only records its matches — no blocking. Score gates honour the switch too: a downgraded rule's hits no longer count towards its threshold.",
       "managedMonitor": "Monitor",
       "managedRules": "Built-in rules",
-      "managedRulesHint": "Managed rules shipped with the engine. Turning a switch on downgrades that rule to monitor-only for this site.",
       "strictOnly": "Strict only",
       "mode": "Protection mode",
       "modeAlready": "All rules already use this mode",
@@ -653,17 +654,9 @@
     },
     "protection": {
       "title": "Web Protection",
-      "description": "WAF posture, rule grading and CC protection for this site.",
-      "tabSettings": "Grading",
-      "tabRules": "WAF Rules",
-      "tabCc": "CC Protection",
-      "advancedMode": "Advanced mode",
-      "advancedModeHint": "Enables the strict managed rule set and deep request-body inspection.",
+      "description": "Managed rules, custom rules and rate limiting for this site.",
+      "tabCc": "Rate limiting & challenge",
       "performanceHint": "Higher interception rate at a proportional performance cost.",
-      "monitorTitle": "Monitor-only downgrades",
-      "monitorHint": "Turn a family or stack off to keep detecting and logging its matches without blocking them.",
-      "monitorCategories": "Attack categories",
-      "monitorStacks": "Backend stacks",
       "monitorExplainer": "A switched-on downgrade keeps detection fully active but records instead of blocking. Language-agnostic detections are never downgraded by a stack switch.",
       "saved": "Protection settings saved",
       "updateFailed": "Update failed",
@@ -675,7 +668,37 @@
       "underAttackConfirmDescription": "Every visitor will be challenged and CC protection will be switched on. Keep it on only as long as the attack lasts.",
       "underAttackCta": "Enable Under Attack Mode",
       "underAttackOn": "Under Attack Mode enabled",
-      "underAttackOff": "Under Attack Mode disabled"
+      "underAttackOff": "Under Attack Mode disabled",
+      "tabManaged": "Managed rules",
+      "tabCustom": "Custom rules",
+      "deepInspection": "Deep inspection",
+      "deepInspectionHint": "Enables the strict managed rule set and deep request-body inspection.",
+      "state": {
+        "block": "Block",
+        "log": "Log only"
+      },
+      "categories": {
+        "cardTitle": "Attack categories",
+        "cardHint": "Downgrade a whole attack surface at once: in log-only mode detection keeps running, but matches are recorded instead of blocked.",
+        "linkageHint": "Managed rules of this family follow this switch; switching back resets their individual toggles."
+      },
+      "managedRules": {
+        "cardHint": "Downgrade built-in rules one by one, or flip the whole set with the batch buttons.",
+        "batchLogAll": "Log all",
+        "batchBlockAll": "Block all",
+        "groupRecon": "Recon & access policy",
+        "groupProtocol": "Protocol & anomalies"
+      },
+      "stacks": {
+        "cardTitle": "Backend stack downgrades",
+        "cardHint": "Language-scoped downgrades, collapsed by default."
+      },
+      "rateLimitingEntry": {
+        "title": "Rate limiting",
+        "description": "Per-IP, per-path and other rate-limiting rules are managed on their own page.",
+        "cta": "Manage rate limiting",
+        "ruleCount": "{{enabled}} of {{total}} rules enabled"
+      }
     },
     "ipRules": {
       "title": "IP Access Rules",

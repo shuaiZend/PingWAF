@@ -65,3 +65,5 @@ export function useNow(intervalMs = 30_000): number {
   }, [intervalMs])
   return now
 }
+
+export { useWafSettingsMutation } from './useWafSettingsMutation'

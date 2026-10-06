@@ -92,7 +92,7 @@ export const router = createBrowserRouter([
           // links (including the `?rule=` deep link) working.
           {
             path: 'security/waf',
-            element: <LegacyProtectionRedirect tab="rules" />,
+            element: <LegacyProtectionRedirect tab="custom" />,
           },
           {
             path: 'security/cc',
