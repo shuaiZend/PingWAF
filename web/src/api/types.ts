@@ -416,6 +416,7 @@ export interface WafSettings {
   advanced_mode: boolean
   monitor_categories: WafCategory[] | string[]
   monitor_stacks: WafStack[] | string[]
+  monitor_managed_rules: string[]
   created_at: string
   updated_at: string
 }
@@ -425,6 +426,18 @@ export interface UpdateWafSettingsRequest {
   advanced_mode?: boolean
   monitor_categories?: string[]
   monitor_stacks?: string[]
+  monitor_managed_rules?: string[]
+}
+
+/** `api::waf_settings::ManagedRuleEntry` — one built-in managed rule. */
+export interface ManagedRule {
+  id: string
+  name: string
+  action: string
+  severity: number
+  tags: string[]
+  stacks: string[]
+  strict_only: boolean
 }
 
 /* ── Rate limiting ────────────────────────────────────────────────── */
@@ -548,6 +561,9 @@ export interface SecurityEvent {
   path: string | null
   rule_id: string | null
   rule_name: string | null
+  /** Which protection produced the event: `managed` / `waf` / `ip_geo` /
+   * `bot` / `rate_limit` / `challenge`; null on pre-0.21 rows. */
+  event_type: string | null
   action: string
   score: number | null
   waf_details: string | null
@@ -598,6 +614,9 @@ export interface SecurityLogQuery extends PaginationQuery {
   client_ip?: string
   action?: string
   rule_id?: string
+  event_type?: string
+  /** Matches only rows with no owning site (no `Host` header on the wire). */
+  unassigned?: boolean
   host?: string
   path?: string
   country_code?: string
@@ -620,6 +639,8 @@ export interface AccessLogQuery extends PaginationQuery {
   country_code?: string
   min_latency_ms?: number
   request_id?: string
+  /** Matches only rows with no owning site (no `Host` header on the wire). */
+  unassigned?: boolean
   q?: string
 }
 

@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { useParams } from 'react-router-dom'
+import { useParams, useSearchParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -93,6 +93,7 @@ export function RateLimitingPage() {
   const queryClient = useQueryClient()
   const canWrite = useCanWrite()
   const { siteId = '' } = useParams<{ siteId: string }>()
+  const [searchParams, setSearchParams] = useSearchParams()
 
   const [dialogOpen, setDialogOpen] = useState(false)
   const [editing, setEditing] = useState<RateLimitRule | null>(null)
@@ -114,6 +115,25 @@ export function RateLimitingPage() {
       ),
     [rulesQuery.data],
   )
+
+  // Deep link from the log console: /sites/:siteId/security/rate-limiting?rule=<id>
+  // opens that rule's dialog once the list has loaded; the param is stripped
+  // on close so revisiting the same link reopens it.
+  const requestedRuleId = searchParams.get('rule')
+  const [lastRequestedRuleId, setLastRequestedRuleId] = useState<string | null>(null)
+  if (
+    canWrite &&
+    requestedRuleId &&
+    !rulesQuery.isPending &&
+    requestedRuleId !== lastRequestedRuleId
+  ) {
+    setLastRequestedRuleId(requestedRuleId)
+    const rule = rules.find((r) => r.id === requestedRuleId)
+    if (rule) {
+      setEditing(rule)
+      setDialogOpen(true)
+    }
+  }
 
   // Re-seed the dialog form every time it opens (render-phase reset), so the
   // first paint already shows the right rule instead of the previous one.
@@ -169,6 +189,11 @@ export function RateLimitingPage() {
     setForm(emptyForm())
     setCharDraft('')
     setError(null)
+    if (searchParams.has('rule')) {
+      const next = new URLSearchParams(searchParams)
+      next.delete('rule')
+      setSearchParams(next, { replace: true })
+    }
   }
 
   const addCharacteristic = () => {
