@@ -511,10 +511,7 @@ pub fn resolve_client_ip_with_trust(
     } else {
         value
     };
-    raw.trim()
-        .parse::<IpAddr>()
-        .ok()
-        .map(|ip| ip.to_string())
+    raw.trim().parse::<IpAddr>().ok().map(|ip| ip.to_string())
 }
 
 /// A convenient helper to get a header value as a `&str` from a `RequestHeader`.
@@ -671,9 +668,11 @@ mod tests {
         );
 
         let trust = ProxyTrust::new(true, "x-real-ip", true);
-        let session =
-            new_test_session(&["Host: github.com", "X-Real-IP: 198.51.100.9"], "/")
-                .await;
+        let session = new_test_session(
+            &["Host: github.com", "X-Real-IP: 198.51.100.9"],
+            "/",
+        )
+        .await;
         assert_eq!(
             Some("198.51.100.9".to_string()),
             resolve_client_ip_with_trust(&session, &trust)

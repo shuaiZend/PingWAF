@@ -121,7 +121,10 @@ async fn create(
         role = %account.role,
         "account created by administrator"
     );
-    Ok((StatusCode::CREATED, Json(UserResponse::from(account))).into_response())
+    Ok(
+        (StatusCode::CREATED, Json(UserResponse::from(account)))
+            .into_response(),
+    )
 }
 
 /// `PUT /api/v1/users/{user_id}`
@@ -139,7 +142,8 @@ async fn update(
 
     // Self-service profile changes go through `/auth/me`; role and status
     // changes on the caller's own account could lock the operator out.
-    if id == admin.id() && (payload.role.is_some() || payload.disabled.is_some())
+    if id == admin.id()
+        && (payload.role.is_some() || payload.disabled.is_some())
     {
         return Err(ApiError::BadRequest(
             "cannot change your own role or disabled state".to_string(),

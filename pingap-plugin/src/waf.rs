@@ -2187,7 +2187,9 @@ impl Plugin for WafPlugin {
         if let Some(ip) = context.as_ref().and_then(|site| {
             site.proxy_trust
                 .enabled
-                .then(|| resolve_client_ip_with_trust(session, &site.proxy_trust))
+                .then(|| {
+                    resolve_client_ip_with_trust(session, &site.proxy_trust)
+                })
                 .flatten()
         }) {
             ctx.conn.client_ip = Some(ip);

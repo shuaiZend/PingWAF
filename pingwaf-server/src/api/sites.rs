@@ -754,9 +754,7 @@ async fn create(
         plan: Set(plan),
         cache_quota_mb: Set(crate::defaults::DEFAULT_CACHE_QUOTA_MB),
         trust_proxy_headers: Set(false),
-        trusted_header: Set(
-            crate::models::trusted_header::DEFAULT.to_string(),
-        ),
+        trusted_header: Set(crate::models::trusted_header::DEFAULT.to_string()),
         trust_last_hop: Set(true),
         created_at: Set(timestamp),
         updated_at: Set(timestamp),
