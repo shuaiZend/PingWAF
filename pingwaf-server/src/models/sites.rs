@@ -22,12 +22,8 @@ pub mod trusted_header {
     pub const CF_CONNECTING_IP: &str = "cf-connecting-ip";
     pub const TRUE_CLIENT_IP: &str = "true-client-ip";
 
-    pub const ALL: [&str; 4] = [
-        X_FORWARDED_FOR,
-        X_REAL_IP,
-        CF_CONNECTING_IP,
-        TRUE_CLIENT_IP,
-    ];
+    pub const ALL: [&str; 4] =
+        [X_FORWARDED_FOR, X_REAL_IP, CF_CONNECTING_IP, TRUE_CLIENT_IP];
 
     pub const DEFAULT: &str = X_FORWARDED_FOR;
 

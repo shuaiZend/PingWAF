@@ -164,9 +164,7 @@ async fn login(
     }
     if account.disabled {
         tracing::debug!(%email, "login failed: account disabled");
-        return Err(ApiError::Unauthorized(
-            "account is disabled".to_string(),
-        ));
+        return Err(ApiError::Unauthorized("account is disabled".to_string()));
     }
 
     tracing::info!(%email, user_id = %account.id, role = %account.role, "user logged in");
@@ -249,9 +247,7 @@ async fn refresh(
         })?;
 
     if account.disabled {
-        return Err(ApiError::Unauthorized(
-            "account is disabled".to_string(),
-        ));
+        return Err(ApiError::Unauthorized("account is disabled".to_string()));
     }
     if !role::is_valid(&account.role) {
         return Err(ApiError::Unauthorized(format!(
