@@ -215,6 +215,8 @@ mod tests {
             password_hash: String::new(),
             name: None,
             role: role.to_string(),
+            disabled: false,
+            must_change_password: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

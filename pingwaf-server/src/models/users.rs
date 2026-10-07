@@ -7,10 +7,12 @@ use serde::{Deserialize, Serialize};
 /// read-only.
 pub mod role {
     pub const ADMIN: &str = "admin";
+    /// Read-only auditor: may inspect every resource but never mutate.
+    pub const AUDITOR: &str = "auditor";
     pub const VIEWER: &str = "viewer";
 
     pub fn is_valid(role: &str) -> bool {
-        matches!(role, ADMIN | VIEWER)
+        matches!(role, ADMIN | AUDITOR | VIEWER)
     }
 }
 
@@ -28,6 +30,10 @@ pub mod users {
         pub password_hash: String,
         pub name: Option<String>,
         pub role: String,
+        /// Disabled accounts are refused at login and on every token check.
+        pub disabled: bool,
+        /// First-login flag: the console forces a password change.
+        pub must_change_password: bool,
         pub created_at: DateTimeUtc,
         pub updated_at: DateTimeUtc,
     }

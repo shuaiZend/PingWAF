@@ -34,6 +34,10 @@ pub struct UserResponse {
     pub email: String,
     pub name: Option<String>,
     pub role: String,
+    /// The console walks first-login accounts through a password change.
+    pub must_change_password: bool,
+    /// Disabled accounts cannot sign in; shown in the admin user list.
+    pub disabled: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -45,6 +49,8 @@ impl From<user::Model> for UserResponse {
             email: model.email,
             name: model.name,
             role: model.role,
+            must_change_password: model.must_change_password,
+            disabled: model.disabled,
             created_at: model.created_at,
             updated_at: model.updated_at,
         }
@@ -156,6 +162,12 @@ async fn login(
         tracing::debug!(%email, "login failed: wrong password");
         return Err(ApiError::Unauthorized(INVALID_CREDENTIALS.to_string()));
     }
+    if account.disabled {
+        tracing::debug!(%email, "login failed: account disabled");
+        return Err(ApiError::Unauthorized(
+            "account is disabled".to_string(),
+        ));
+    }
 
     tracing::info!(%email, user_id = %account.id, role = %account.role, "user logged in");
     issue_tokens(&state, account)
@@ -236,6 +248,11 @@ async fn refresh(
             ApiError::Unauthorized("account no longer exists".to_string())
         })?;
 
+    if account.disabled {
+        return Err(ApiError::Unauthorized(
+            "account is disabled".to_string(),
+        ));
+    }
     if !role::is_valid(&account.role) {
         return Err(ApiError::Unauthorized(format!(
             "account has an unknown role '{}'",
@@ -332,6 +349,8 @@ async fn change_password(
     let mut active: user::ActiveModel = account.into();
     active.password_hash = Set(hash_password(&payload.new_password)
         .map_err(|err| ApiError::BadRequest(err.to_string()))?);
+    // The first-login gate only demands one successful change.
+    active.must_change_password = Set(false);
     active.updated_at = Set(Utc::now());
     active.update(&state.db).await?;
 
@@ -347,7 +366,7 @@ const DUMMY_HASH: &str =
     "$2b$10$Q9V0Z7rQZ3h8YqQZQZQZQeQ9V0Z7rQZ3h8YqQZQZQZQZQZQZQZQZu";
 
 /// Lower-cases and structurally validates an e-mail address.
-fn normalise_email(raw: &str) -> Result<String, ApiError> {
+pub(crate) fn normalise_email(raw: &str) -> Result<String, ApiError> {
     let email = raw.trim().to_lowercase();
     let (local, domain) = email.split_once('@').ok_or_else(|| {
         ApiError::BadRequest("invalid e-mail address".to_string())
@@ -388,6 +407,8 @@ pub async fn create_user(
         password_hash: Set(password_hash),
         name: Set(name),
         role: Set(assigned_role.to_string()),
+        disabled: Set(false),
+        must_change_password: Set(false),
         created_at: Set(timestamp),
         updated_at: Set(timestamp),
     };
@@ -456,6 +477,8 @@ mod tests {
             password_hash: "$2b$10$secret".into(),
             name: Some("Ops".into()),
             role: role::ADMIN.into(),
+            disabled: false,
+            must_change_password: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
