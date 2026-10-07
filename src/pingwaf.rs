@@ -1444,7 +1444,8 @@ fn log_directives(rust_log: Option<&str>) -> String {
 mod tests {
     use super::*;
     use pingwaf_agent::cache::{
-        CachedRules, RouteConfig, SiteRules, UpstreamConfig, UpstreamPeer,
+        CachedRules, ProxyTrustConfig, RouteConfig, SiteRules, UpstreamConfig,
+        UpstreamPeer,
     };
 
     #[test]
@@ -1485,6 +1486,7 @@ mod tests {
             bot_protection: None,
             basic_auth: None,
             observation_mode: false,
+            proxy_trust: ProxyTrustConfig::default(),
         }
     }
 

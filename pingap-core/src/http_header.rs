@@ -456,6 +456,67 @@ pub fn get_client_ip(session: &Session) -> String {
     "".to_string()
 }
 
+/// Per-site proxy trust settings, mirrored from the control plane.
+///
+/// Sites behind a CDN or reverse proxy ask the plugin to derive the client IP
+/// from a forwarded header instead of the direct TCP peer, so that IP access
+/// rules, rate limiting and logs all key on the real client address.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProxyTrust {
+    /// Whether per-site proxy trust is enabled.
+    pub enabled: bool,
+    /// The forwarded header to trust, lower-case (e.g. `x-forwarded-for`).
+    pub header: String,
+    /// Trust only the most recent hop: take the last entry of
+    /// `X-Forwarded-For` (appended by the closest proxy, so a client cannot
+    /// spoof it) instead of the first.
+    pub last_hop_only: bool,
+}
+
+impl ProxyTrust {
+    /// Normalises a header name from configuration (trimmed, lower-cased).
+    pub fn new(enabled: bool, header: &str, last_hop_only: bool) -> Self {
+        Self {
+            enabled,
+            header: header.trim().to_ascii_lowercase(),
+            last_hop_only,
+        }
+    }
+}
+
+/// Resolves the client IP from the site-trusted forwarded header.
+///
+/// Returns `None` when proxy trust is disabled or the header is absent or
+/// does not parse as an IP address; callers then keep the default
+/// [`get_client_ip`] resolution. Unlike the global resolution this helper
+/// never consults the direct TCP peer — it must only be used for sites where
+/// the operator has confirmed a trusted proxy sits in front.
+pub fn resolve_client_ip_with_trust(
+    session: &Session,
+    trust: &ProxyTrust,
+) -> Option<String> {
+    if !trust.enabled || trust.header.is_empty() {
+        return None;
+    }
+    let value = session.get_header(trust.header.as_str())?;
+    let value = value.to_str().ok()?;
+    let raw = if trust.header == HTTP_HEADER_X_FORWARDED_FOR {
+        // `X-Forwarded-For` is a comma separated list. The last entry is
+        // appended by the closest proxy and cannot be spoofed by the client.
+        if trust.last_hop_only {
+            value.rsplit(',').next().unwrap_or_default()
+        } else {
+            value.split(',').next().unwrap_or_default()
+        }
+    } else {
+        value
+    };
+    raw.trim()
+        .parse::<IpAddr>()
+        .ok()
+        .map(|ip| ip.to_string())
+}
+
 /// A convenient helper to get a header value as a `&str` from a `RequestHeader`.
 pub fn get_req_header_value<'a>(
     req_header: &'a RequestHeader,
@@ -578,6 +639,70 @@ mod tests {
     use super::*;
     use crate::{ConnectionInfo, UpstreamInfo, new_test_session};
     use pretty_assertions::assert_eq;
+
+    #[tokio::test]
+    async fn test_resolve_client_ip_with_trust() {
+        let trust = ProxyTrust::new(true, "x-forwarded-for", true);
+        let session = new_test_session(
+            &["Host: github.com", "X-Forwarded-For: 1.2.3.4, 10.0.0.1"],
+            "/",
+        )
+        .await;
+        assert_eq!(
+            Some("10.0.0.1".to_string()),
+            resolve_client_ip_with_trust(&session, &trust)
+        );
+
+        let trust = ProxyTrust::new(true, "x-forwarded-for", false);
+        assert_eq!(
+            Some("1.2.3.4".to_string()),
+            resolve_client_ip_with_trust(&session, &trust)
+        );
+
+        let trust = ProxyTrust::new(true, "cf-connecting-ip", true);
+        let session = new_test_session(
+            &["Host: github.com", "CF-Connecting-IP: 203.0.113.7"],
+            "/",
+        )
+        .await;
+        assert_eq!(
+            Some("203.0.113.7".to_string()),
+            resolve_client_ip_with_trust(&session, &trust)
+        );
+
+        let trust = ProxyTrust::new(true, "x-real-ip", true);
+        let session =
+            new_test_session(&["Host: github.com", "X-Real-IP: 198.51.100.9"], "/")
+                .await;
+        assert_eq!(
+            Some("198.51.100.9".to_string()),
+            resolve_client_ip_with_trust(&session, &trust)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_client_ip_with_trust_fallbacks() {
+        // Disabled or unknown header never resolves.
+        let trust = ProxyTrust::new(false, "x-forwarded-for", true);
+        let session = new_test_session(
+            &["Host: github.com", "X-Forwarded-For: 1.2.3.4"],
+            "/",
+        )
+        .await;
+        assert_eq!(None, resolve_client_ip_with_trust(&session, &trust));
+
+        let trust = ProxyTrust::new(true, "x-forwarded-for", true);
+        // Absent header.
+        let session = new_test_session(&["Host: github.com"], "/").await;
+        assert_eq!(None, resolve_client_ip_with_trust(&session, &trust));
+        // Not an IP address (header injection attempt).
+        let session = new_test_session(
+            &["Host: github.com", "X-Forwarded-For: evil.example.com"],
+            "/",
+        )
+        .await;
+        assert_eq!(None, resolve_client_ip_with_trust(&session, &trust));
+    }
 
     #[test]
     fn test_convert_headers() {

@@ -27,6 +27,7 @@ use crate::models::{
     acme_challenge, cache_rules, ip_groups, rate_limit_rules, route_match_type,
     rule, rule_groups, site, site_certificates, site_routes, site_ssl,
     site_status, site_upstream_pools, site_upstreams, tls_version,
+    trusted_header,
 };
 
 /// Public representation of a site.
@@ -41,6 +42,12 @@ pub struct SiteResponse {
     pub plan: String,
     /// Disk budget, in MiB, the agents may use for this site's cache.
     pub cache_quota_mb: i32,
+    /// Security features key on the forwarded-header client IP.
+    pub trust_proxy_headers: bool,
+    /// Lower-case forwarded header the client IP is read from.
+    pub trusted_header: String,
+    /// Trust the last XFF entry (nearest proxy) instead of the first.
+    pub trust_last_hop: bool,
     pub user_id: Uuid,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -56,6 +63,9 @@ impl From<site::Model> for SiteResponse {
             status: model.status,
             plan: model.plan,
             cache_quota_mb: model.cache_quota_mb,
+            trust_proxy_headers: model.trust_proxy_headers,
+            trusted_header: model.trusted_header,
+            trust_last_hop: model.trust_last_hop,
             user_id: model.user_id,
             created_at: model.created_at,
             updated_at: model.updated_at,
@@ -187,6 +197,16 @@ pub struct UpdateSiteRequest {
     pub status: Option<String>,
     #[serde(default)]
     pub plan: Option<String>,
+    /// Security features key on the forwarded-header client IP.
+    #[serde(default)]
+    pub trust_proxy_headers: Option<bool>,
+    /// Lower-case forwarded header the client IP is read from; an empty
+    /// string resets it to `x-forwarded-for`.
+    #[serde(default)]
+    pub trusted_header: Option<String>,
+    /// Trust the last XFF entry (nearest proxy) instead of the first.
+    #[serde(default)]
+    pub trust_last_hop: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -733,6 +753,11 @@ async fn create(
         status: Set(status),
         plan: Set(plan),
         cache_quota_mb: Set(crate::defaults::DEFAULT_CACHE_QUOTA_MB),
+        trust_proxy_headers: Set(false),
+        trusted_header: Set(
+            crate::models::trusted_header::DEFAULT.to_string(),
+        ),
+        trust_last_hop: Set(true),
         created_at: Set(timestamp),
         updated_at: Set(timestamp),
     }
@@ -887,6 +912,25 @@ async fn update(
             ));
         }
         active.plan = Set(plan);
+    }
+    if let Some(value) = payload.trust_proxy_headers {
+        active.trust_proxy_headers = Set(value);
+    }
+    if let Some(header) = payload.trusted_header {
+        let header = header.trim().to_ascii_lowercase();
+        if !header.is_empty() && !trusted_header::is_valid(&header) {
+            return Err(ApiError::BadRequest(format!(
+                "unknown trusted header '{header}'"
+            )));
+        }
+        active.trusted_header = Set(if header.is_empty() {
+            trusted_header::DEFAULT.to_string()
+        } else {
+            header
+        });
+    }
+    if let Some(value) = payload.trust_last_hop {
+        active.trust_last_hop = Set(value);
     }
     active.updated_at = Set(Utc::now());
 

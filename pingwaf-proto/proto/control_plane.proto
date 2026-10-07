@@ -613,6 +613,15 @@ message Site {
   repeated string alternate_domains = 4;
   SiteStatusEnum status = 5;
   RuleBundle rules = 6;
+  // The site sits behind a CDN / reverse proxy: the real client IP used by
+  // IP access control, rate limiting, challenges and logs is taken from a
+  // forwarded header instead of the direct TCP peer.
+  bool trust_proxy_headers = 7;
+  // Lower-case header the client IP is read from; empty = x-forwarded-for.
+  string trusted_header = 8;
+  // Trust the last XFF entry (appended by the nearest proxy) instead of the
+  // client-supplied first one.
+  bool trust_last_hop = 9;
 }
 
 enum SiteStatusEnum {

@@ -39,8 +39,9 @@ use dashmap::DashMap;
 use pingap_config::{PluginCategory, PluginConf};
 use pingap_core::{
     Ctx, HTTP_HEADER_NAME_X_REQUEST_ID, HttpResponse, Plugin, PluginStep,
-    RequestPluginResult, ResponseBodyPluginResult, ResponsePluginResult,
-    constant_time_eq, ensure_client_ip, get_host,
+    ProxyTrust, RequestPluginResult, ResponseBodyPluginResult,
+    ResponsePluginResult, constant_time_eq, ensure_client_ip, get_host,
+    resolve_client_ip_with_trust,
 };
 use pingap_util::{IpRules, base64_decode};
 use pingora::http::{ResponseHeader, Version};
@@ -281,6 +282,10 @@ struct SiteContext {
     /// Site-level deep body inspection (advanced mode): inspect request
     /// bodies even when the plugin-level `inspect_body` switch is off.
     inspect_body: bool,
+    /// Sites behind a CDN/proxy: derive the client IP from a forwarded
+    /// header instead of the TCP peer; IP rules, rate limits and logs all
+    /// key on the resolved address.
+    proxy_trust: ProxyTrust,
 }
 
 impl SiteContext {
@@ -323,6 +328,11 @@ impl SiteContext {
             inspect_body: waf_cfg
                 .filter(|cfg| cfg.enabled)
                 .is_some_and(|cfg| cfg.advanced_mode),
+            proxy_trust: ProxyTrust::new(
+                site_rules.proxy_trust.enabled,
+                site_rules.proxy_trust.effective_header(),
+                site_rules.proxy_trust.last_hop_only,
+            ),
         }
     }
 
@@ -2166,6 +2176,22 @@ impl Plugin for WafPlugin {
             _ => "HTTP/1.1",
         }
         .to_string();
+        // ── Resolve the engine and access restrictions for this domain ──
+        // Before the client IP: sites behind a CDN/proxy derive it from a
+        // trusted forwarded header instead of the TCP peer, so IP access
+        // rules, rate limiting and logs all key on the real visitor address.
+        let resolved = self.resolve_site(&host);
+        let site_id = resolved.site_id.clone();
+        let context = resolved.context.clone();
+        let choice = resolved.choice;
+        if let Some(ip) = context.as_ref().and_then(|site| {
+            site.proxy_trust
+                .enabled
+                .then(|| resolve_client_ip_with_trust(session, &site.proxy_trust))
+                .flatten()
+        }) {
+            ctx.conn.client_ip = Some(ip);
+        }
         let client_ip = ensure_client_ip(session, ctx).to_string();
         let client_addr: Option<IpAddr> = client_ip.parse().ok();
 
@@ -2182,12 +2208,6 @@ impl Plugin for WafPlugin {
                 id
             },
         };
-
-        // ── Resolve the engine and access restrictions for this domain ──
-        let resolved = self.resolve_site(&host);
-        let site_id = resolved.site_id.clone();
-        let context = resolved.context.clone();
-        let choice = resolved.choice;
         // Observation mode: detections keep running but nothing is enforced.
         // Access control (mTLS, basic auth, a paused site) is never downgraded.
         let observe =
@@ -3283,6 +3303,9 @@ advanced_mode = true
                         ],
                         ..Default::default()
                     }),
+                    trust_proxy_headers: false,
+                    trusted_header: String::new(),
+                    trust_last_hop: false,
                 }],
                 config_hash: "hash-1".to_string(),
                 updated_at: None,
@@ -3322,6 +3345,9 @@ advanced_mode = true
                         }],
                         ..Default::default()
                     }),
+                    trust_proxy_headers: false,
+                    trusted_header: String::new(),
+                    trust_last_hop: false,
                 }],
                 config_hash: "hash-1".to_string(),
                 updated_at: None,
@@ -3478,6 +3504,9 @@ advanced_mode = true
                         }),
                         ..Default::default()
                     }),
+                    trust_proxy_headers: false,
+                    trusted_header: String::new(),
+                    trust_last_hop: false,
                 }],
                 config_hash,
                 updated_at: None,
@@ -3648,6 +3677,9 @@ advanced_mode = true
                         }),
                         ..Default::default()
                     }),
+                    trust_proxy_headers: false,
+                    trusted_header: String::new(),
+                    trust_last_hop: false,
                 }],
                 config_hash,
                 updated_at: None,
@@ -3927,6 +3959,9 @@ advanced_mode = true
                         }],
                         ..Default::default()
                     }),
+                    trust_proxy_headers: false,
+                    trusted_header: String::new(),
+                    trust_last_hop: false,
                 }],
                 config_hash: "hash-1".to_string(),
                 updated_at: None,
@@ -3979,6 +4014,9 @@ advanced_mode = true
                         }),
                         ..Default::default()
                     }),
+                    trust_proxy_headers: false,
+                    trusted_header: String::new(),
+                    trust_last_hop: false,
                 }],
                 config_hash: "hash-1".to_string(),
                 updated_at: None,
@@ -4372,6 +4410,9 @@ advanced_mode = true
                         }),
                         ..Default::default()
                     }),
+                    trust_proxy_headers: false,
+                    trusted_header: String::new(),
+                    trust_last_hop: false,
                 }],
                 config_hash: "hash-1".to_string(),
                 updated_at: None,
@@ -4557,6 +4598,9 @@ advanced_mode = true
                         rate_limit_rules: rules,
                         ..Default::default()
                     }),
+                    trust_proxy_headers: false,
+                    trusted_header: String::new(),
+                    trust_last_hop: false,
                 }],
                 config_hash: "hash-1".to_string(),
                 updated_at: None,
