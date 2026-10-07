@@ -1089,6 +1089,9 @@ pub async fn build_site_config(
             alternate_domains: row.alternate_domains.clone(),
             status: site_status_proto(&row.status),
             rules: Some(bundle),
+            trust_proxy_headers: row.trust_proxy_headers,
+            trusted_header: row.trusted_header.clone(),
+            trust_last_hop: row.trust_last_hop,
         });
     }
 

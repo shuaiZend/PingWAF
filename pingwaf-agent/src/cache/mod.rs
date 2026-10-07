@@ -79,6 +79,51 @@ pub struct SiteRules {
     /// WAF, IP/geo rules, bot protection and rate limiting only record.
     #[serde(default)]
     pub observation_mode: bool,
+    /// Forwarded-header client IP resolution; disabled when the site has no
+    /// CDN / reverse proxy in front of it.
+    #[serde(default)]
+    pub proxy_trust: ProxyTrustConfig,
+}
+
+/// Site-level forwarded-header trust: which header carries the real client
+/// IP and whether only the nearest proxy's entry is believed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProxyTrustConfig {
+    /// Trust forwarded headers at all.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Lower-case header name; empty means `x-forwarded-for`.
+    #[serde(default)]
+    pub header: String,
+    /// Take the last XFF entry (added by the nearest proxy) instead of the
+    /// first one, which the client can spoof.
+    #[serde(default = "default_true")]
+    pub last_hop_only: bool,
+}
+
+impl Default for ProxyTrustConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            header: String::new(),
+            last_hop_only: true,
+        }
+    }
+}
+
+impl ProxyTrustConfig {
+    /// Effective header name; empty resolves to `x-forwarded-for`.
+    pub fn effective_header(&self) -> &str {
+        if self.header.is_empty() {
+            "x-forwarded-for"
+        } else {
+            &self.header
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl SiteRules {
@@ -905,6 +950,11 @@ impl RuleCache {
                     site_rules.alternate_domains =
                         site.alternate_domains.clone();
                     site_rules.status = site_status_str(site.status);
+                    site_rules.proxy_trust = ProxyTrustConfig {
+                        enabled: site.trust_proxy_headers,
+                        header: site.trusted_header.clone(),
+                        last_hop_only: site.trust_last_hop,
+                    };
 
                     // Update domain index
                     updated
@@ -1208,6 +1258,7 @@ impl RuleCache {
                 .as_ref()
                 .map(Self::convert_basic_auth),
             observation_mode: bundle.observation_mode,
+            proxy_trust: ProxyTrustConfig::default(),
         }
     }
 
@@ -1554,6 +1605,7 @@ mod tests {
                     error_pages: Vec::new(),
                     basic_auth: None,
                     observation_mode: false,
+                    proxy_trust: ProxyTrustConfig::default(),
                     ssl_config: None,
                     upstreams: vec![UpstreamConfig {
                         name: "default".to_string(),
@@ -1684,6 +1736,9 @@ mod tests {
                 }],
                 ..Default::default()
             }),
+            trust_proxy_headers: false,
+            trusted_header: String::new(),
+            trust_last_hop: false,
         };
         assert_eq!(site_status_str(site.status), site_status::PAUSED);
         let rules =
@@ -1715,6 +1770,9 @@ mod tests {
                 }),
                 ..Default::default()
             }),
+            trust_proxy_headers: false,
+            trusted_header: String::new(),
+            trust_last_hop: false,
         };
         let rules =
             RuleCache::convert_bundle(site.rules.as_ref().expect("bundle"));

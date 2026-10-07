@@ -15,6 +15,27 @@ pub mod site_status {
     }
 }
 
+/// Forwarded headers accepted in `sites.trusted_header`.
+pub mod trusted_header {
+    pub const X_FORWARDED_FOR: &str = "x-forwarded-for";
+    pub const X_REAL_IP: &str = "x-real-ip";
+    pub const CF_CONNECTING_IP: &str = "cf-connecting-ip";
+    pub const TRUE_CLIENT_IP: &str = "true-client-ip";
+
+    pub const ALL: [&str; 4] = [
+        X_FORWARDED_FOR,
+        X_REAL_IP,
+        CF_CONNECTING_IP,
+        TRUE_CLIENT_IP,
+    ];
+
+    pub const DEFAULT: &str = X_FORWARDED_FOR;
+
+    pub fn is_valid(value: &str) -> bool {
+        ALL.contains(&value)
+    }
+}
+
 /// `sites` — one protected site, served on one or more hostnames.
 pub mod sites {
     use super::*;
@@ -39,6 +60,14 @@ pub mod sites {
         pub plan: String,
         /// Disk budget, in MiB, the agents may use for this site's cache.
         pub cache_quota_mb: i32,
+        /// The site sits behind a CDN / reverse proxy: security features key
+        /// on the forwarded-header client IP, not the direct TCP peer.
+        pub trust_proxy_headers: bool,
+        /// Lower-case forwarded header the client IP is read from.
+        pub trusted_header: String,
+        /// Take the last XFF entry (nearest proxy) instead of the first one,
+        /// which the client can spoof.
+        pub trust_last_hop: bool,
         pub created_at: DateTimeUtc,
         pub updated_at: DateTimeUtc,
     }

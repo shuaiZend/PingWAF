@@ -35,8 +35,8 @@ use http::{HeaderValue, StatusCode};
 use pingap_config::{PluginCategory, PluginConf};
 use pingap_core::{
     Ctx, HTTP_HEADER_CONTENT_HTML, HttpResponse, Plugin, PluginStep,
-    RequestPluginResult, ensure_client_ip, get_cookie_value, get_host,
-    get_req_header_value,
+    ProxyTrust, RequestPluginResult, ensure_client_ip, get_cookie_value,
+    get_host, get_req_header_value, resolve_client_ip_with_trust,
 };
 use pingora::proxy::Session;
 use pingwaf_agent::PingWafAgent;
@@ -370,6 +370,23 @@ pub(crate) fn resolve_cookie_secret(configured: &str) -> String {
     }
 }
 
+/// Resolves the site-level proxy trust for `host` from the agent cache.
+///
+/// `None` when the site is not behind a trusted proxy, in which case the
+/// default client-IP resolution applies.
+fn site_proxy_trust(host: &str) -> Option<ProxyTrust> {
+    let agent = PingWafAgent::instance()?;
+    let site_rules = agent.get_rules_for_domain(host)?;
+    let trust = &site_rules.proxy_trust;
+    trust.enabled.then(|| {
+        ProxyTrust::new(
+            trust.enabled,
+            trust.effective_header(),
+            trust.last_hop_only,
+        )
+    })
+}
+
 // ─────────────────────────────────────────────────────────────
 // ChallengePlugin
 // ─────────────────────────────────────────────────────────────
@@ -678,6 +695,17 @@ impl Plugin for ChallengePlugin {
             return self.handle_verify(session).await;
         }
 
+        let host = get_host(session.req_header())
+            .unwrap_or_default()
+            .to_string();
+        // Sites behind a CDN/proxy derive the client IP from the trusted
+        // forwarded header so challenge rate limiting keys on the real
+        // visitor address.
+        if let Some(trust) = site_proxy_trust(&host)
+            && let Some(ip) = resolve_client_ip_with_trust(session, &trust)
+        {
+            ctx.conn.client_ip = Some(ip);
+        }
         let client_ip = ensure_client_ip(session, ctx).to_string();
         let user_agent =
             get_req_header_value(session.req_header(), "user-agent")
@@ -693,9 +721,6 @@ impl Plugin for ChallengePlugin {
             return Ok(RequestPluginResult::Continue);
         }
 
-        let host = get_host(session.req_header())
-            .unwrap_or_default()
-            .to_string();
         let Some(engine) = self.decision_engine(&host) else {
             return Ok(RequestPluginResult::Continue);
         };
@@ -931,6 +956,9 @@ cookie_secret = "test-secret"
                             challenge: challenge.clone(),
                             ..Default::default()
                         }),
+                        trust_proxy_headers: false,
+                        trusted_header: String::new(),
+                        trust_last_hop: false,
                     },
                     proto::Site {
                         id: "site-2".to_string(),
@@ -943,6 +971,9 @@ cookie_secret = "test-secret"
                             config_hash: "hash-1".to_string(),
                             ..Default::default()
                         }),
+                        trust_proxy_headers: false,
+                        trusted_header: String::new(),
+                        trust_last_hop: false,
                     },
                 ],
                 config_hash: "hash-1".to_string(),

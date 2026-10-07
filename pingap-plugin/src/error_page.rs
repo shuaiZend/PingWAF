@@ -864,6 +864,9 @@ template = '{"error":"rate_limit_exceeded","request_id":"{{ request_id }}"}'
                             }],
                             ..Default::default()
                         }),
+                        trust_proxy_headers: false,
+                        trusted_header: String::new(),
+                        trust_last_hop: false,
                     }],
                     config_hash: "hash-1".to_string(),
                     updated_at: None,
@@ -925,6 +928,9 @@ template = '{"error":"rate_limit_exceeded","request_id":"{{ request_id }}"}'
                             }],
                             ..Default::default()
                         }),
+                        trust_proxy_headers: false,
+                        trusted_header: String::new(),
+                        trust_last_hop: false,
                     }],
                     config_hash: "hash-1".to_string(),
                     updated_at: None,
