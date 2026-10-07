@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { Navigate, useLocation, useParams, useSearchParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Cloud, ShieldCheck, Sliders, Warning } from '@phosphor-icons/react'
+import { Cloud, Gauge, Lightning, ShieldCheck, Sliders, Warning } from '@phosphor-icons/react'
 import { PageHeader } from '@/components/PageHeader'
 import { Tabs } from '@/components/ui/Tabs'
 import { Switch } from '@/components/ui/Switch'
@@ -10,7 +10,8 @@ import { SkeletonCard } from '@/components/ui/Skeleton'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { useToast } from '@/components/ui/Toast'
 import { challengeApi, challengeKeys } from '@/api/challenge'
-import { useCanWrite } from '@/hooks'
+import { wafSettingsApi, wafSettingsKeys } from '@/api/wafSettings'
+import { useCanWrite, useWafSettingsMutation } from '@/hooks'
 import { ManagedRulesPanel } from './ManagedRulesPanel'
 import { CustomRulesPanel } from './CustomRulesPanel'
 import { MitigationPanel } from './MitigationPanel'
@@ -67,6 +68,14 @@ export function ProtectionPage() {
     queryFn: () => challengeApi.get(siteId),
     enabled: Boolean(siteId),
   })
+  const settingsQuery = useQuery({
+    queryKey: wafSettingsKeys.settings(siteId),
+    queryFn: () => wafSettingsApi.get(siteId),
+    enabled: Boolean(siteId),
+  })
+  const settings = settingsQuery.data
+  const updateSettings = useWafSettingsMutation(siteId)
+
   const underAttack = challengeQuery.data?.under_attack_mode ?? false
 
   const setUnderAttack = useMutation({
@@ -103,12 +112,13 @@ export function ProtectionPage() {
         description={t('pages.protection.description')}
       />
 
-      {/* ── Under Attack banner ─────────────────────────────────────────── */}
+      {/* ── Mitigation modes: under attack + deep inspection, side by side ── */}
+      <div className="mb-5 grid gap-4 lg:grid-cols-2">
       {challengeQuery.isPending ? (
-        <SkeletonCard className="mb-5 h-16" />
+        <SkeletonCard className="h-16" />
       ) : (
         <div
-          className={`mb-5 flex flex-wrap items-center justify-between gap-4 rounded-lg border px-4 py-3 ${
+          className={`flex flex-wrap items-center justify-between gap-4 rounded-lg border px-4 py-3 ${
             underAttack
               ? 'border-danger/45 bg-danger/10'
               : 'border-line bg-elevated'
@@ -158,6 +168,49 @@ export function ProtectionPage() {
           )}
         </div>
       )}
+      {settingsQuery.isPending ? (
+        <SkeletonCard className="h-16" />
+      ) : (
+        <div
+          className={`flex flex-wrap items-center justify-between gap-4 rounded-lg border px-4 py-3 ${
+            settings?.advanced_mode
+              ? 'border-danger/45 bg-danger/10'
+              : 'border-line bg-elevated'
+          }`}
+        >
+          <span className="flex min-w-0 items-center gap-3">
+            <span
+              className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg ${
+                settings?.advanced_mode
+                  ? 'bg-danger/15 text-fg-danger'
+                  : 'bg-recessed text-fg-subtle'
+              }`}
+            >
+              <Lightning weight="duotone" className="h-5 w-5" />
+            </span>
+            <span className="min-w-0">
+              <span className="block text-sm font-semibold text-fg-strong">
+                {t('pages.protection.deepInspection')}
+              </span>
+              <span className="mt-0.5 block text-[13px] text-fg-subtle">
+                {t('pages.protection.deepInspectionHint')}
+              </span>
+              <span className="mt-1.5 flex items-center gap-1.5 text-xs text-fg-warning">
+                <Gauge weight="duotone" className="h-3.5 w-3.5 shrink-0" />
+                {t('pages.protection.performanceHint')}
+              </span>
+            </span>
+          </span>
+          <Switch
+            size="md"
+            checked={settings?.advanced_mode ?? false}
+            disabled={!canWrite || updateSettings.isPending}
+            aria-label={t('pages.protection.deepInspection')}
+            onCheckedChange={(advanced_mode) => updateSettings.mutate({ advanced_mode })}
+          />
+        </div>
+      )}
+      </div>
 
       <Tabs
         variant="pill"

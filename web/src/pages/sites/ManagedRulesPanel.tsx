@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react'
 import { useParams, useSearchParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { useQuery } from '@tanstack/react-query'
-import { Gauge, Info, Lightning, CaretDown, ShieldWarning } from '@phosphor-icons/react'
+import { Info, CaretDown, ShieldWarning } from '@phosphor-icons/react'
 import { Card, CardBody, CardHeader } from '@/components/ui/Card'
 import { Switch } from '@/components/ui/Switch'
 import { Badge } from '@/components/ui/Badge'
@@ -267,43 +267,6 @@ export function ManagedRulesPanel() {
           <p className="border-t border-line pt-3 text-xs leading-relaxed text-fg-subtle">
             {t('pages.waf.managedExplainer')}
           </p>
-        </CardBody>
-      </Card>
-
-      {/* ── Deep inspection ───────────────────────────────────────────── */}
-      <Card className={cn(settings.advanced_mode && 'border-danger/35')}>
-        <CardBody className="flex items-start justify-between gap-4">
-          <span className="flex min-w-0 gap-3">
-            <span
-              className={cn(
-                'flex h-10 w-10 shrink-0 items-center justify-center rounded-lg',
-                settings.advanced_mode
-                  ? 'bg-danger/15 text-fg-danger'
-                  : 'bg-recessed text-fg-subtle',
-              )}
-            >
-              <Lightning weight="duotone" className="h-5 w-5" />
-            </span>
-            <span className="min-w-0">
-              <span className="block text-sm font-semibold text-fg-strong">
-                {t('pages.protection.deepInspection')}
-              </span>
-              <span className="mt-0.5 block text-[13px] text-fg-subtle">
-                {t('pages.protection.deepInspectionHint')}
-              </span>
-              <span className="mt-1.5 flex items-center gap-1.5 text-xs text-fg-warning">
-                <Gauge weight="duotone" className="h-3.5 w-3.5 shrink-0" />
-                {t('pages.protection.performanceHint')}
-              </span>
-            </span>
-          </span>
-          <Switch
-            size="md"
-            checked={settings.advanced_mode}
-            disabled={!canWrite || busy}
-            aria-label={t('pages.protection.deepInspection')}
-            onCheckedChange={(advanced_mode) => updateSettings.mutate({ advanced_mode })}
-          />
         </CardBody>
       </Card>
 
