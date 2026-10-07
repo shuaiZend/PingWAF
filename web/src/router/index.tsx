@@ -16,6 +16,7 @@ import { LogsPage } from '@/pages/LogsPage'
 import { AgentsPage } from '@/pages/AgentsPage'
 import { AssistantPage } from '@/pages/AssistantPage'
 import { SettingsPage } from '@/pages/SettingsPage'
+import { AccountPage } from '@/pages/AccountPage'
 import { BotPage as BotProtectionPage } from '@/pages/sites/BotPage'
 import {
   ProtectionPage,
@@ -32,7 +33,7 @@ import { GlobalSslPage } from '@/pages/GlobalSslPage'
 import { GlobalTrafficPage } from '@/pages/GlobalTrafficPage'
 import { IpGroupsPage } from '@/pages/IpGroupsPage'
 import { RewritePage } from '@/pages/sites/RewritePage'
-import { OriginPage } from '@/pages/sites/OriginPage'
+import { BasicPage } from '@/pages/sites/BasicPage'
 import { LifecyclePage } from '@/pages/LifecyclePage'
 import { SiteSettingsPage } from '@/pages/placeholders'
 import { EmptyState } from '@/components/ui/EmptyState'
@@ -82,8 +83,8 @@ export const router = createBrowserRouter([
         path: 'sites/:siteId',
         element: <SiteDetailPage />,
         children: [
-          { index: true, element: <Navigate to="origin" replace /> },
-          { path: 'origin', element: <OriginPage /> },
+          { index: true, element: <Navigate to="basic" replace /> },
+          { path: 'basic', element: <BasicPage /> },
           { path: 'security/protection', element: <ProtectionPage /> },
           { path: 'security/rate-limiting', element: <RateLimitingPage /> },
           { path: 'security/bot', element: <BotProtectionPage /> },
@@ -123,6 +124,7 @@ export const router = createBrowserRouter([
       // Global surfaces. The per-site counterparts live under `/sites/:siteId`.
       { path: 'ssl', element: <GlobalSslPage /> },
       { path: 'traffic', element: <GlobalTrafficPage /> },
+      { path: 'account', element: <AccountPage /> },
       { path: 'settings', element: <SettingsPage /> },
       { path: '*', element: <NotFoundPage /> },
     ],

@@ -37,6 +37,7 @@ import type {
   CreateUpstreamRequest,
   IpGroupResponse,
   Route,
+  Site,
   Upstream,
   UpstreamPool,
   UpdatePoolRequest,
@@ -179,7 +180,119 @@ const emptyRouteForm = (poolId: string): RouteFormState => ({
 
 /* ── Page ─────────────────────────────────────────────────────────── */
 
-export function OriginPage() {
+/* ── Trusted proxy ────────────────────────────────────────────────── */
+
+/** Select values for the trusted forwarded header dropdown. */
+const TRUSTED_HEADER_OPTIONS = [
+  { value: 'x-forwarded-for', labelKey: 'pages.basic.proxyTrust.headerXff' },
+  { value: 'x-real-ip', labelKey: 'pages.basic.proxyTrust.headerRealIp' },
+  { value: 'cf-connecting-ip', labelKey: 'pages.basic.proxyTrust.headerCf' },
+  { value: 'true-client-ip', labelKey: 'pages.basic.proxyTrust.headerTrueClient' },
+]
+
+/**
+ * Sites behind a CDN/reverse proxy derive the client IP from a trusted
+ * forwarded header; IP blocks, CC rules and logs all key on the resolved
+ * address instead of the TCP peer.
+ */
+function ProxyTrustCard({ site }: { site: Site }) {
+  const { t } = useTranslation()
+  const toast = useToast()
+  const queryClient = useQueryClient()
+  const canWrite = useCanWrite()
+  const [enabled, setEnabled] = useState(site.trust_proxy_headers)
+  const [header, setHeader] = useState(
+    site.trusted_header || 'x-forwarded-for',
+  )
+  const [lastHop, setLastHop] = useState(site.trust_last_hop)
+  const [error, setError] = useState<string | null>(null)
+
+  const dirty =
+    enabled !== site.trust_proxy_headers ||
+    header !== (site.trusted_header || 'x-forwarded-for') ||
+    lastHop !== site.trust_last_hop
+
+  const save = useMutation({
+    mutationFn: () =>
+      sitesApi.update(site.id, {
+        trust_proxy_headers: enabled,
+        trusted_header: enabled ? header : '',
+        trust_last_hop: lastHop,
+      }),
+    onSuccess: () => {
+      toast.success(t('pages.basic.proxyTrust.saved'))
+      void queryClient.invalidateQueries({
+        queryKey: siteKeys.detail(site.id),
+      })
+    },
+    onError: (e) => setError(errorMessage(e)),
+  })
+
+  return (
+    <Card>
+      <CardHeader
+        title={t('pages.basic.proxyTrust.title')}
+        description={t('pages.basic.proxyTrust.description')}
+      />
+      <CardBody className="space-y-4">
+        <Switch
+          checked={enabled}
+          disabled={!canWrite}
+          label={t('pages.basic.proxyTrust.enabled')}
+          description={t('pages.basic.proxyTrust.enabledHint')}
+          onCheckedChange={setEnabled}
+        />
+        {enabled && (
+          <>
+            <Select
+              label={t('pages.basic.proxyTrust.header')}
+              hint={t('pages.basic.proxyTrust.headerHint')}
+              value={header}
+              options={TRUSTED_HEADER_OPTIONS.map((o) => ({
+                value: o.value,
+                label: t(o.labelKey),
+              }))}
+              disabled={!canWrite}
+              onChange={(e) => setHeader(e.target.value)}
+            />
+            <Switch
+              checked={lastHop}
+              disabled={!canWrite}
+              label={t('pages.basic.proxyTrust.lastHop')}
+              description={t('pages.basic.proxyTrust.lastHopHint')}
+              onCheckedChange={setLastHop}
+            />
+          </>
+        )}
+        {error && (
+          <p
+            role="alert"
+            className="rounded-md border border-danger/40 bg-danger/8 px-3 py-2 text-[13px] text-fg-danger"
+          >
+            {error}
+          </p>
+        )}
+        {canWrite && (
+          <div className="flex justify-end">
+            <Button
+              variant="primary"
+              loading={save.isPending}
+              disabled={!dirty}
+              onClick={() => {
+                setError(null)
+                save.mutate()
+              }}
+            >
+              {t('common.save')}
+            </Button>
+          </div>
+        )}
+      </CardBody>
+    </Card>
+  )
+}
+
+export function BasicPage() {
   const { t } = useTranslation()
   const toast = useToast()
   const queryClient = useQueryClient()
@@ -204,6 +317,11 @@ export function OriginPage() {
   const ipGroupsQuery = useQuery({
     queryKey: ipGroupKeys.list({ page_size: 100 }),
     queryFn: () => ipGroupsApi.list({ page_size: 100 }),
+  })
+  const siteQuery = useQuery({
+    queryKey: siteKeys.detail(siteId),
+    queryFn: () => sitesApi.get(siteId),
+    enabled: Boolean(siteId),
   })
 
   const ipGroups: IpGroupResponse[] = useMemo(
@@ -253,15 +371,15 @@ export function OriginPage() {
   )
 
   const lbOptions = [
-    { value: 'round_robin', label: t('pages.origin.lb.roundRobin') },
-    { value: 'least_connections', label: t('pages.origin.lb.leastConnections') },
-    { value: 'random', label: t('pages.origin.lb.random') },
-    { value: 'hash:ip', label: t('pages.origin.lb.hashIp') },
-    { value: 'hash:url', label: t('pages.origin.lb.hashUrl') },
-    { value: 'hash:path', label: t('pages.origin.lb.hashPath') },
-    { value: 'hash:header', label: t('pages.origin.lb.hashHeader') },
-    { value: 'hash:cookie', label: t('pages.origin.lb.hashCookie') },
-    { value: 'hash:query', label: t('pages.origin.lb.hashQuery') },
+    { value: 'round_robin', label: t('pages.basic.lb.roundRobin') },
+    { value: 'least_connections', label: t('pages.basic.lb.leastConnections') },
+    { value: 'random', label: t('pages.basic.lb.random') },
+    { value: 'hash:ip', label: t('pages.basic.lb.hashIp') },
+    { value: 'hash:url', label: t('pages.basic.lb.hashUrl') },
+    { value: 'hash:path', label: t('pages.basic.lb.hashPath') },
+    { value: 'hash:header', label: t('pages.basic.lb.hashHeader') },
+    { value: 'hash:cookie', label: t('pages.basic.lb.hashCookie') },
+    { value: 'hash:query', label: t('pages.basic.lb.hashQuery') },
   ]
 
   const lbLabel = (algo: string) => {
@@ -293,7 +411,7 @@ export function OriginPage() {
         : sitesApi.createPool(siteId, data.create!),
     onSuccess: (pool, vars) => {
       toast.success(
-        vars.id ? t('pages.origin.poolUpdated') : t('pages.origin.poolCreated'),
+        vars.id ? t('pages.basic.poolUpdated') : t('pages.basic.poolCreated'),
         pool.name,
       )
       setPoolDialogOpen(false)
@@ -305,12 +423,12 @@ export function OriginPage() {
   const deletePool = useMutation({
     mutationFn: (id: string) => sitesApi.deletePool(siteId, id),
     onSuccess: (_d, id) => {
-      toast.success(t('pages.origin.poolDeleted'), poolById.get(id)?.name)
+      toast.success(t('pages.basic.poolDeleted'), poolById.get(id)?.name)
       setPendingDeletePool(null)
       invalidate()
     },
     onError: (e) => {
-      toast.error(t('pages.origin.poolDeleteFailed'), errorMessage(e))
+      toast.error(t('pages.basic.poolDeleteFailed'), errorMessage(e))
     },
   })
 
@@ -332,7 +450,7 @@ export function OriginPage() {
     setPoolError(null)
     const name = poolForm.name.trim()
     if (!name || name.length > 100) {
-      setPoolError(t('pages.origin.errors.nameRequired'))
+      setPoolError(t('pages.basic.errors.nameRequired'))
       return
     }
 
@@ -341,13 +459,13 @@ export function OriginPage() {
     let lbAlgorithm = lbType
     if (isHashKeyType(lbType)) {
       if (!hashKey) {
-        setPoolError(t('pages.origin.errors.lbKeyRequired'))
+        setPoolError(t('pages.basic.errors.lbKeyRequired'))
         return
       }
       lbAlgorithm = `${lbType}:${hashKey}`
     }
     if (lbAlgorithm.length > 64) {
-      setPoolError(t('pages.origin.errors.lbKeyRequired'))
+      setPoolError(t('pages.basic.errors.lbKeyRequired'))
       return
     }
 
@@ -355,15 +473,15 @@ export function OriginPage() {
     if (poolForm.httpsOrigin) {
       sni = poolForm.sni.trim().toLowerCase()
       if (!sni) {
-        setPoolError(t('pages.origin.errors.sniRequired'))
+        setPoolError(t('pages.basic.errors.sniRequired'))
         return
       }
       if (sni.length > 255) {
-        setPoolError(t('pages.origin.errors.sniTooLong'))
+        setPoolError(t('pages.basic.errors.sniTooLong'))
         return
       }
       if (sni === '$host' || sni.includes('://') || sni.includes(':')) {
-        setPoolError(t('pages.origin.errors.sniInvalid'))
+        setPoolError(t('pages.basic.errors.sniInvalid'))
         return
       }
     }
@@ -407,7 +525,7 @@ export function OriginPage() {
         : sitesApi.createUpstream(siteId, data.payload as CreateUpstreamRequest),
     onSuccess: (node, vars) => {
       toast.success(
-        vars.id ? t('pages.origin.nodeUpdated') : t('pages.origin.nodeCreated'),
+        vars.id ? t('pages.basic.nodeUpdated') : t('pages.basic.nodeCreated'),
         node.address,
       )
       setNodeDialogOpen(false)
@@ -419,11 +537,11 @@ export function OriginPage() {
   const deleteNode = useMutation({
     mutationFn: (id: string) => sitesApi.deleteUpstream(siteId, id),
     onSuccess: () => {
-      toast.success(t('pages.origin.nodeDeleted'))
+      toast.success(t('pages.basic.nodeDeleted'))
       setPendingDeleteNode(null)
       invalidate()
     },
-    onError: (e) => toast.error(t('pages.origin.nodeDeleteFailed'), errorMessage(e)),
+    onError: (e) => toast.error(t('pages.basic.nodeDeleteFailed'), errorMessage(e)),
   })
 
   const openCreateNode = (pool: UpstreamPool) => {
@@ -449,22 +567,22 @@ export function OriginPage() {
     setNodeError(null)
     const name = nodeForm.name.trim()
     if (!name || name.length > 100) {
-      setNodeError(t('pages.origin.errors.nameRequired'))
+      setNodeError(t('pages.basic.errors.nameRequired'))
       return
     }
     const parsed = parseOriginAddress(nodeForm.address)
     if ('error' in parsed) {
-      setNodeError(t(`pages.origin.${parsed.error}`))
+      setNodeError(t(`pages.basic.${parsed.error}`))
       return
     }
     const address = parsed.address
     const weight = Number(nodeForm.weight)
     if (!Number.isInteger(weight) || weight < 1 || weight > 10_000) {
-      setNodeError(t('pages.origin.errors.weightInvalid'))
+      setNodeError(t('pages.basic.errors.weightInvalid'))
       return
     }
     if (!nodeForm.poolId || !poolById.has(nodeForm.poolId)) {
-      setNodeError(t('pages.origin.errors.poolRequired'))
+      setNodeError(t('pages.basic.errors.poolRequired'))
       return
     }
 
@@ -497,7 +615,7 @@ export function OriginPage() {
         : sitesApi.createRoute(siteId, data.create!),
     onSuccess: (route, vars) => {
       toast.success(
-        vars.id ? t('pages.origin.routeUpdated') : t('pages.origin.routeCreated'),
+        vars.id ? t('pages.basic.routeUpdated') : t('pages.basic.routeCreated'),
         route.name,
       )
       setRouteDialogOpen(false)
@@ -509,18 +627,18 @@ export function OriginPage() {
   const deleteRoute = useMutation({
     mutationFn: (id: string) => sitesApi.deleteRoute(siteId, id),
     onSuccess: (_d, id) => {
-      toast.success(t('pages.origin.routeDeleted'), routes.find((r) => r.id === id)?.name)
+      toast.success(t('pages.basic.routeDeleted'), routes.find((r) => r.id === id)?.name)
       setPendingDeleteRoute(null)
       invalidate()
     },
-    onError: (e) => toast.error(t('pages.origin.routeDeleteFailed'), errorMessage(e)),
+    onError: (e) => toast.error(t('pages.basic.routeDeleteFailed'), errorMessage(e)),
   })
 
   const toggleRoute = useMutation({
     mutationFn: ({ route, enabled }: { route: Route; enabled: boolean }) =>
       sitesApi.updateRoute(siteId, route.id, { enabled }),
     onSuccess: () => invalidate(),
-    onError: (e) => toast.error(t('pages.origin.routeToggleFailed'), errorMessage(e)),
+    onError: (e) => toast.error(t('pages.basic.routeToggleFailed'), errorMessage(e)),
   })
 
   const openCreateRoute = () => {
@@ -549,33 +667,33 @@ export function OriginPage() {
     setRouteError(null)
     const name = routeForm.name.trim()
     if (!name || name.length > 100) {
-      setRouteError(t('pages.origin.errors.nameRequired'))
+      setRouteError(t('pages.basic.errors.nameRequired'))
       return
     }
     const matchType = routeForm.matchType
     const path = routeForm.path.trim()
     if (!path || path.length > 512) {
-      setRouteError(t('pages.origin.errors.pathRequired'))
+      setRouteError(t('pages.basic.errors.pathRequired'))
       return
     }
     if (matchType === 'regex') {
       try {
         new RegExp(path)
       } catch {
-        setRouteError(t('pages.origin.errors.regexInvalid'))
+        setRouteError(t('pages.basic.errors.regexInvalid'))
         return
       }
     } else {
       if (!path.startsWith('/')) {
-        setRouteError(t('pages.origin.errors.pathStartSlash'))
+        setRouteError(t('pages.basic.errors.pathStartSlash'))
         return
       }
       if (path.startsWith('=') || path.startsWith('~')) {
-        setRouteError(t('pages.origin.errors.pathSpecial'))
+        setRouteError(t('pages.basic.errors.pathSpecial'))
         return
       }
       if (matchType === 'prefix' && path === '/') {
-        setRouteError(t('pages.origin.errors.pathRootPrefix'))
+        setRouteError(t('pages.basic.errors.pathRootPrefix'))
         return
       }
     }
@@ -584,14 +702,14 @@ export function OriginPage() {
     if (routeForm.priority.trim() !== '') {
       const parsed = Number(routeForm.priority)
       if (!Number.isInteger(parsed) || parsed < 1 || parsed > 60_000) {
-        setRouteError(t('pages.origin.errors.priorityInvalid'))
+        setRouteError(t('pages.basic.errors.priorityInvalid'))
         return
       }
       priority = parsed
     }
 
     if (!routeForm.poolId || !poolById.has(routeForm.poolId)) {
-      setRouteError(t('pages.origin.errors.poolRequired'))
+      setRouteError(t('pages.basic.errors.poolRequired'))
       return
     }
 
@@ -643,43 +761,43 @@ export function OriginPage() {
         <div className="min-w-0">
           <p className="truncate text-[13px] font-medium text-fg-strong">{r.name}</p>
           <p className="truncate text-xs text-fg-subtle">
-            {poolById.get(r.pool_id)?.name ?? t('pages.origin.missingPool')}
+            {poolById.get(r.pool_id)?.name ?? t('pages.basic.missingPool')}
           </p>
         </div>
       ),
     },
     {
       key: 'match_type',
-      header: t('pages.origin.matchType'),
+      header: t('pages.basic.matchType'),
       accessor: (r) => r.match_type,
       width: '1%',
       cell: (r) => (
         <Badge tone={MATCH_TONE[r.match_type] ?? 'neutral'}>
-          {t(`pages.origin.match.${r.match_type}`, r.match_type)}
+          {t(`pages.basic.match.${r.match_type}`, r.match_type)}
         </Badge>
       ),
     },
     {
       key: 'path',
-      header: t('pages.origin.routePath'),
+      header: t('pages.basic.routePath'),
       accessor: (r) => r.path,
       cell: (r) => <span className="pw-mono text-[13px] text-fg">{r.path}</span>,
     },
     {
       key: 'priority',
-      header: t('pages.origin.priority'),
+      header: t('pages.basic.priority'),
       align: 'right',
       sortable: true,
       accessor: (r) => r.priority ?? 0,
       cell: (r) => (
         <span className="tabular-nums text-[13px] text-fg-subtle">
-          {r.priority ?? t('pages.origin.auto')}
+          {r.priority ?? t('pages.basic.auto')}
         </span>
       ),
     },
     {
       key: 'ip_group',
-      header: t('pages.origin.ipGroup'),
+      header: t('pages.basic.ipGroup'),
       accessor: (r) => (r.ip_group_id ? ipGroupById.get(r.ip_group_id)?.name ?? '' : ''),
       cell: (r) => {
         if (!r.ip_group_id) {
@@ -687,14 +805,14 @@ export function OriginPage() {
         }
         const group = ipGroupById.get(r.ip_group_id)
         if (!group) {
-          return <Badge tone="warning">{t('pages.origin.ipGroupMissing')}</Badge>
+          return <Badge tone="warning">{t('pages.basic.ipGroupMissing')}</Badge>
         }
         return <Badge tone="brand">{group.name}</Badge>
       },
     },
     {
       key: 'pool',
-      header: t('pages.origin.targetPool'),
+      header: t('pages.basic.targetPool'),
       accessor: (r) => poolById.get(r.pool_id)?.name ?? '',
       cell: (r) => {
         const pool = poolById.get(r.pool_id)
@@ -703,12 +821,12 @@ export function OriginPage() {
             {pool.name}
             {pool.is_default && (
               <Badge tone="brand" size="sm" className="ml-1.5">
-                {t('pages.origin.defaultBadge')}
+                {t('pages.basic.defaultBadge')}
               </Badge>
             )}
           </span>
         ) : (
-          <span className="text-[13px] text-fg-danger">{t('pages.origin.missingPool')}</span>
+          <span className="text-[13px] text-fg-danger">{t('pages.basic.missingPool')}</span>
         )
       },
     },
@@ -761,7 +879,7 @@ export function OriginPage() {
   const nodeColumns: Column<Upstream>[] = [
     {
       key: 'address',
-      header: t('pages.origin.nodeAddress'),
+      header: t('pages.basic.nodeAddress'),
       accessor: (n) => n.address,
       sortable: true,
       cell: (n) => (
@@ -781,7 +899,7 @@ export function OriginPage() {
     },
     {
       key: 'weight',
-      header: t('pages.origin.nodeWeight'),
+      header: t('pages.basic.nodeWeight'),
       align: 'right',
       sortable: true,
       accessor: (n) => n.weight,
@@ -789,7 +907,7 @@ export function OriginPage() {
     },
     {
       key: 'created_at',
-      header: t('pages.origin.added'),
+      header: t('pages.basic.added'),
       accessor: (n) => n.created_at,
       sortable: true,
       cell: (n) => (
@@ -837,8 +955,8 @@ export function OriginPage() {
   return (
     <div className="animate-slide-up">
       <PageHeader
-        title={t('pages.origin.title')}
-        description={t('pages.origin.description')}
+        title={t('pages.basic.title')}
+        description={t('pages.basic.description')}
         actions={
           <div className="flex items-center gap-2">
             <Button
@@ -855,7 +973,7 @@ export function OriginPage() {
                 icon={<Plus weight="bold" className="h-4 w-4" />}
                 onClick={openCreatePool}
               >
-                {t('pages.origin.addPool')}
+                {t('pages.basic.addPool')}
               </Button>
             )}
             {canWrite && (
@@ -864,12 +982,15 @@ export function OriginPage() {
                 icon={<Plus weight="bold" className="h-4 w-4" />}
                 onClick={openCreateRoute}
               >
-                {t('pages.origin.addRoute')}
+                {t('pages.basic.addRoute')}
               </Button>
             )}
           </div>
         }
       />
+
+      {/* ── Trusted proxy ── */}
+      {siteQuery.data && <ProxyTrustCard site={siteQuery.data.site} />}
 
       {/* ── Origin pools ── */}
       {poolsQuery.isError && !poolsQuery.data ? (
@@ -890,8 +1011,8 @@ export function OriginPage() {
             <EmptyState
               className="border-0 py-12"
               icon={<Network weight="duotone" className="h-8 w-8" />}
-              title={t('pages.origin.poolsEmptyTitle')}
-              description={t('pages.origin.poolsEmptyDescription')}
+              title={t('pages.basic.poolsEmptyTitle')}
+              description={t('pages.basic.poolsEmptyDescription')}
               action={
                 canWrite ? (
                   <Button
@@ -899,7 +1020,7 @@ export function OriginPage() {
                     icon={<Plus weight="bold" className="h-4 w-4" />}
                     onClick={openCreatePool}
                   >
-                    {t('pages.origin.addPool')}
+                    {t('pages.basic.addPool')}
                   </Button>
                 ) : undefined
               }
@@ -918,7 +1039,7 @@ export function OriginPage() {
                       <span className="truncate">{pool.name}</span>
                       {pool.is_default && (
                         <Badge tone="brand" size="sm">
-                          {t('pages.origin.defaultBadge')}
+                          {t('pages.basic.defaultBadge')}
                         </Badge>
                       )}
                     </span>
@@ -935,14 +1056,14 @@ export function OriginPage() {
                           <span className="pw-mono">{pool.sni}</span>
                           <span className="text-fg-subtle/70">
                             {pool.verify_cert === false
-                              ? t('pages.origin.certNotVerified')
-                              : t('pages.origin.certVerified')}
+                              ? t('pages.basic.certNotVerified')
+                              : t('pages.basic.certVerified')}
                           </span>
                         </span>
                       ) : (
                         <span className="flex items-center gap-1">
                           <Globe weight="duotone" className="h-3.5 w-3.5" />
-                          {t('pages.origin.httpOrigin')}
+                          {t('pages.basic.httpOrigin')}
                         </span>
                       )}
                     </span>
@@ -976,8 +1097,8 @@ export function OriginPage() {
                     <EmptyState
                       className="border-0 py-8"
                       icon={<Globe weight="duotone" className="h-6 w-6" />}
-                      title={t('pages.origin.nodesEmpty')}
-                      description={t('pages.origin.nodesEmptyDescription')}
+                      title={t('pages.basic.nodesEmpty')}
+                      description={t('pages.basic.nodesEmptyDescription')}
                       action={
                         canWrite ? (
                           <Button
@@ -986,7 +1107,7 @@ export function OriginPage() {
                             icon={<Plus weight="bold" className="h-3.5 w-3.5" />}
                             onClick={() => openCreateNode(pool)}
                           >
-                            {t('pages.origin.addNode')}
+                            {t('pages.basic.addNode')}
                           </Button>
                         ) : undefined
                       }
@@ -1012,7 +1133,7 @@ export function OriginPage() {
                             icon={<Plus weight="bold" className="h-3.5 w-3.5" />}
                             onClick={() => openCreateNode(pool)}
                           >
-                            {t('pages.origin.addNode')}
+                            {t('pages.basic.addNode')}
                           </Button>
                         </div>
                       )}
@@ -1036,8 +1157,8 @@ export function OriginPage() {
         ) : (
           <Card>
             <CardHeader
-              title={t('pages.origin.routesTitle')}
-              description={t('pages.origin.routesDescription')}
+              title={t('pages.basic.routesTitle')}
+              description={t('pages.basic.routesDescription')}
             />
             <CardBody className="p-0">
               {routesQuery.isPending ? (
@@ -1046,8 +1167,8 @@ export function OriginPage() {
                 <EmptyState
                   className="border-0 py-10"
                   icon={<Signpost weight="duotone" className="h-8 w-8" />}
-                  title={t('pages.origin.routesEmpty')}
-                  description={t('pages.origin.routesEmptyDescription')}
+                  title={t('pages.basic.routesEmpty')}
+                  description={t('pages.basic.routesEmptyDescription')}
                   action={
                     canWrite ? (
                       <Button
@@ -1055,7 +1176,7 @@ export function OriginPage() {
                         icon={<Plus weight="bold" className="h-4 w-4" />}
                         onClick={openCreateRoute}
                       >
-                        {t('pages.origin.addRoute')}
+                        {t('pages.basic.addRoute')}
                       </Button>
                     ) : undefined
                   }
@@ -1078,11 +1199,11 @@ export function OriginPage() {
       <Dialog
         open={poolDialogOpen}
         onClose={savePool.isPending ? () => undefined : () => setPoolDialogOpen(false)}
-        title={editingPool ? t('pages.origin.editPool') : t('pages.origin.addPool')}
+        title={editingPool ? t('pages.basic.editPool') : t('pages.basic.addPool')}
         description={
           editingPool
-            ? t('pages.origin.poolEditDescription')
-            : t('pages.origin.poolCreateDescription')
+            ? t('pages.basic.poolEditDescription')
+            : t('pages.basic.poolCreateDescription')
         }
         footer={
           <>
@@ -1101,26 +1222,26 @@ export function OriginPage() {
       >
         <div className="flex flex-col gap-4">
           <Input
-            label={t('pages.origin.poolName')}
+            label={t('pages.basic.poolName')}
             value={poolForm.name}
-            placeholder={t('pages.origin.poolNamePlaceholder')}
+            placeholder={t('pages.basic.poolNamePlaceholder')}
             onChange={(e) => setPoolForm((f) => ({ ...f, name: e.target.value }))}
             autoFocus
             required
           />
           <Select
-            label={t('pages.origin.lbAlgorithm')}
+            label={t('pages.basic.lbAlgorithm')}
             value={poolForm.lbType}
-            hint={t('pages.origin.lbHint')}
+            hint={t('pages.basic.lbHint')}
             options={lbOptions}
             onChange={(e) => setPoolForm((f) => ({ ...f, lbType: e.target.value }))}
           />
           {isHashKeyType(poolForm.lbType) && (
             <Input
-              label={t('pages.origin.lbKey')}
+              label={t('pages.basic.lbKey')}
               value={poolForm.hashKey}
               placeholder="x-user-id"
-              hint={t('pages.origin.lbKeyHint')}
+              hint={t('pages.basic.lbKeyHint')}
               onChange={(e) => setPoolForm((f) => ({ ...f, hashKey: e.target.value }))}
               required
             />
@@ -1128,16 +1249,16 @@ export function OriginPage() {
           <Switch
             checked={poolForm.httpsOrigin}
             onCheckedChange={(httpsOrigin) => setPoolForm((f) => ({ ...f, httpsOrigin }))}
-            label={t('pages.origin.httpsOrigin')}
-            description={t('pages.origin.httpsOriginHint')}
+            label={t('pages.basic.httpsOrigin')}
+            description={t('pages.basic.httpsOriginHint')}
           />
           {poolForm.httpsOrigin && (
             <>
               <Input
-                label={t('pages.origin.sni')}
+                label={t('pages.basic.sni')}
                 value={poolForm.sni}
                 placeholder="origin.example.com"
-                hint={t('pages.origin.sniHint')}
+                hint={t('pages.basic.sniHint')}
                 prefixIcon={<Lock weight="duotone" />}
                 onChange={(e) => setPoolForm((f) => ({ ...f, sni: e.target.value }))}
                 required
@@ -1145,8 +1266,8 @@ export function OriginPage() {
               <Switch
                 checked={poolForm.verifyCert}
                 onCheckedChange={(verifyCert) => setPoolForm((f) => ({ ...f, verifyCert }))}
-                label={t('pages.origin.verifyCert')}
-                description={t('pages.origin.verifyCertHint')}
+                label={t('pages.basic.verifyCert')}
+                description={t('pages.basic.verifyCertHint')}
               />
             </>
           )}
@@ -1165,8 +1286,8 @@ export function OriginPage() {
       <Dialog
         open={nodeDialogOpen}
         onClose={saveNode.isPending ? () => undefined : () => setNodeDialogOpen(false)}
-        title={editingNode ? t('pages.origin.editNode') : t('pages.origin.addNode')}
-        description={t('pages.origin.nodeDialogDescription')}
+        title={editingNode ? t('pages.basic.editNode') : t('pages.basic.addNode')}
+        description={t('pages.basic.nodeDialogDescription')}
         footer={
           <>
             <Button
@@ -1184,10 +1305,10 @@ export function OriginPage() {
       >
         <div className="flex flex-col gap-4">
           <Input
-            label={t('pages.origin.nodeAddress')}
+            label={t('pages.basic.nodeAddress')}
             value={nodeForm.address}
             placeholder="http://10.0.0.1:8080"
-            hint={t('pages.origin.nodeAddressHint')}
+            hint={t('pages.basic.nodeAddressHint')}
             prefixIcon={<Globe weight="duotone" />}
             className="pw-mono"
             onChange={(e) => setNodeForm((f) => ({ ...f, address: e.target.value }))}
@@ -1196,29 +1317,29 @@ export function OriginPage() {
           />
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <Input
-              label={t('pages.origin.nodeName')}
+              label={t('pages.basic.nodeName')}
               value={nodeForm.name}
-              placeholder={t('pages.origin.nodeNamePlaceholder')}
+              placeholder={t('pages.basic.nodeNamePlaceholder')}
               onChange={(e) => setNodeForm((f) => ({ ...f, name: e.target.value }))}
               required
             />
             <Input
-              label={t('pages.origin.nodeWeight')}
+              label={t('pages.basic.nodeWeight')}
               type="number"
               min={1}
               max={10000}
               value={nodeForm.weight}
-              hint={t('pages.origin.nodeWeightHint')}
+              hint={t('pages.basic.nodeWeightHint')}
               onChange={(e) => setNodeForm((f) => ({ ...f, weight: e.target.value }))}
               required
             />
           </div>
           <Select
-            label={t('pages.origin.nodePool')}
+            label={t('pages.basic.nodePool')}
             value={nodeForm.poolId}
             options={pools.map((p) => ({
               value: p.id,
-              label: p.is_default ? `${p.name} (${t('pages.origin.defaultBadge')})` : p.name,
+              label: p.is_default ? `${p.name} (${t('pages.basic.defaultBadge')})` : p.name,
             }))}
             onChange={(e) => setNodeForm((f) => ({ ...f, poolId: e.target.value }))}
           />
@@ -1237,8 +1358,8 @@ export function OriginPage() {
       <Dialog
         open={routeDialogOpen}
         onClose={saveRoute.isPending ? () => undefined : () => setRouteDialogOpen(false)}
-        title={editingRoute ? t('pages.origin.editRoute') : t('pages.origin.addRoute')}
-        description={t('pages.origin.routeDialogDescription')}
+        title={editingRoute ? t('pages.basic.editRoute') : t('pages.basic.addRoute')}
+        description={t('pages.basic.routeDialogDescription')}
         footer={
           <>
             <Button
@@ -1256,32 +1377,32 @@ export function OriginPage() {
       >
         <div className="flex flex-col gap-4">
           <Input
-            label={t('pages.origin.routeName')}
+            label={t('pages.basic.routeName')}
             value={routeForm.name}
-            placeholder={t('pages.origin.routeNamePlaceholder')}
+            placeholder={t('pages.basic.routeNamePlaceholder')}
             onChange={(e) => setRouteForm((f) => ({ ...f, name: e.target.value }))}
             autoFocus
             required
           />
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <Select
-              label={t('pages.origin.matchType')}
+              label={t('pages.basic.matchType')}
               value={routeForm.matchType}
               options={[
-                { value: 'prefix', label: t('pages.origin.match.prefix') },
-                { value: 'exact', label: t('pages.origin.match.exact') },
-                { value: 'regex', label: t('pages.origin.match.regex') },
+                { value: 'prefix', label: t('pages.basic.match.prefix') },
+                { value: 'exact', label: t('pages.basic.match.exact') },
+                { value: 'regex', label: t('pages.basic.match.regex') },
               ]}
               onChange={(e) => setRouteForm((f) => ({ ...f, matchType: e.target.value }))}
             />
             <Input
-              label={t('pages.origin.routePath')}
+              label={t('pages.basic.routePath')}
               value={routeForm.path}
               placeholder={routeForm.matchType === 'regex' ? '^/static/.*' : '/api'}
               hint={
                 routeForm.matchType === 'regex'
-                  ? t('pages.origin.pathRegexHint')
-                  : t('pages.origin.routePathHint')
+                  ? t('pages.basic.pathRegexHint')
+                  : t('pages.basic.routePathHint')
               }
               className="pw-mono"
               onChange={(e) => setRouteForm((f) => ({ ...f, path: e.target.value }))}
@@ -1290,42 +1411,42 @@ export function OriginPage() {
           </div>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <Input
-              label={t('pages.origin.priority')}
+              label={t('pages.basic.priority')}
               type="number"
               min={1}
               max={60000}
               value={routeForm.priority}
-              placeholder={t('pages.origin.auto')}
-              hint={t('pages.origin.priorityHint')}
+              placeholder={t('pages.basic.auto')}
+              hint={t('pages.basic.priorityHint')}
               onChange={(e) => setRouteForm((f) => ({ ...f, priority: e.target.value }))}
             />
             <Select
-              label={t('pages.origin.targetPool')}
+              label={t('pages.basic.targetPool')}
               value={routeForm.poolId}
               options={pools.map((p) => ({
                 value: p.id,
-                label: p.is_default ? `${p.name} (${t('pages.origin.defaultBadge')})` : p.name,
+                label: p.is_default ? `${p.name} (${t('pages.basic.defaultBadge')})` : p.name,
               }))}
               onChange={(e) => setRouteForm((f) => ({ ...f, poolId: e.target.value }))}
             />
           </div>
           <Select
-            label={t('pages.origin.ipGroup')}
+            label={t('pages.basic.ipGroup')}
             value={routeForm.ipGroupId}
             options={[
-              { value: '', label: t('pages.origin.ipGroupNone') },
+              { value: '', label: t('pages.basic.ipGroupNone') },
               ...gateableGroups.map((g) => ({ value: g.id, label: g.name })),
               ...(editingRoute?.ip_group_id &&
               !gateableGroups.some((g) => g.id === editingRoute.ip_group_id)
                 ? [
                     {
                       value: editingRoute.ip_group_id,
-                      label: `${ipGroupById.get(editingRoute.ip_group_id)?.name ?? editingRoute.ip_group_id} (${t('pages.origin.ipGroupUnusable')})`,
+                      label: `${ipGroupById.get(editingRoute.ip_group_id)?.name ?? editingRoute.ip_group_id} (${t('pages.basic.ipGroupUnusable')})`,
                     },
                   ]
                 : []),
             ]}
-            hint={t('pages.origin.ipGroupHint')}
+            hint={t('pages.basic.ipGroupHint')}
             onChange={(e) => setRouteForm((f) => ({ ...f, ipGroupId: e.target.value }))}
           />
           <Switch
@@ -1349,8 +1470,8 @@ export function OriginPage() {
         open={pendingDeletePool !== null}
         onClose={() => setPendingDeletePool(null)}
         onConfirm={() => pendingDeletePool && deletePool.mutate(pendingDeletePool.id)}
-        title={t('pages.origin.deletePoolTitle')}
-        description={t('pages.origin.deletePoolDescription')}
+        title={t('pages.basic.deletePoolTitle')}
+        description={t('pages.basic.deletePoolDescription')}
         confirmLabel={t('common.delete')}
         loading={deletePool.isPending}
       >
@@ -1359,7 +1480,7 @@ export function OriginPage() {
             <p className="text-[13px] font-medium text-fg-strong">{pendingDeletePool.name}</p>
             <p className="mt-0.5 text-xs text-fg-subtle">
               {(nodesByPool.get(pendingDeletePool.id) ?? []).length}{' '}
-              {t('pages.origin.nodesCount')}
+              {t('pages.basic.nodesCount')}
             </p>
           </div>
         )}
@@ -1369,8 +1490,8 @@ export function OriginPage() {
         open={pendingDeleteNode !== null}
         onClose={() => setPendingDeleteNode(null)}
         onConfirm={() => pendingDeleteNode && deleteNode.mutate(pendingDeleteNode.id)}
-        title={t('pages.origin.deleteNodeTitle')}
-        description={t('pages.origin.deleteNodeDescription')}
+        title={t('pages.basic.deleteNodeTitle')}
+        description={t('pages.basic.deleteNodeDescription')}
         confirmLabel={t('common.delete')}
         loading={deleteNode.isPending}
       >
@@ -1388,8 +1509,8 @@ export function OriginPage() {
         open={pendingDeleteRoute !== null}
         onClose={() => setPendingDeleteRoute(null)}
         onConfirm={() => pendingDeleteRoute && deleteRoute.mutate(pendingDeleteRoute.id)}
-        title={t('pages.origin.deleteRouteTitle')}
-        description={t('pages.origin.deleteRouteDescription')}
+        title={t('pages.basic.deleteRouteTitle')}
+        description={t('pages.basic.deleteRouteDescription')}
         confirmLabel={t('common.delete')}
         loading={deleteRoute.isPending}
       >
@@ -1404,4 +1525,4 @@ export function OriginPage() {
   )
 }
 
-export default OriginPage
+export default BasicPage
