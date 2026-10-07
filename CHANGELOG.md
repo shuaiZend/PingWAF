@@ -8,6 +8,39 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.23.0] — 2026-10-08
+
+### ⛰️ Features
+
+- *(server)* Sites can now declare reverse-proxy trust: whether the origin
+  sits behind a CDN/proxy, which header carries the real client IP
+  (`x-forwarded-for` default, `cf-connecting-ip`, `x-real-ip`,
+  `true-client-ip` and `forwarded` accepted) and whether only the last hop is
+  trusted. When enabled, IP block lists, CC/rate limiting and logged client
+  IPs are resolved from that header instead of the TCP peer. Ships as a
+  migration, REST fields, proto fields, agent cache state and plugin TOML
+  keys.
+- *(web)* The site "Origin" tab is renamed to **Basic** and gains a
+  reverse-proxy trust card driving the new site fields, alongside the origin
+  pools and route tables.
+- *(web)* On the Web Protection page the **under-attack mode** and **deep
+  inspection** switches now sit side by side on one row, and deep inspection
+  explicitly extends request-body evaluation to custom rules so body-carrying
+  bypass attempts are caught by user-defined expressions too. The API
+  protection settings no longer explain the port number, keeping the copy
+  lean.
+- *(server)* A full account system: `disabled` and `must_change_password`
+  flags on users, an `auditor` role (read-only across every resource),
+  admin-only user management endpoints with self-lockout protection, forced
+  password change on first sign-in, self-service API keys for every account,
+  and a random per-install JWT secret generated and persisted on first boot
+  whenever the operator has not configured one.
+- *(web)* **Account** is a top-level menu outside Settings: profile, password
+  and personal API keys for everyone, plus user management (create, disable,
+  role assignment with a live last-admin guard) for administrators. A
+  first-sign-in gate blocks the whole console behind the change-password
+  dialog until the password is replaced.
+
 ## [PingWAF 0.22.0] — 2026-10-07
 
 ### ⛰️ Features

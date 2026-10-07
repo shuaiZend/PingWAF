@@ -49,11 +49,18 @@ Authenticate and receive tokens.
     "email": "admin@pingwaf.local",
     "name": "Administrator",
     "role": "admin",
+    "must_change_password": false,
+    "disabled": false,
     "created_at": "2024-01-01T00:00:00Z",
     "updated_at": "2024-01-01T00:00:00Z"
   }
 }
 ```
+
+The user object (also returned by `GET /auth/me`) carries two extra flags:
+`must_change_password` is `true` for freshly seeded accounts — the server
+rejects every write until the password is changed — and `disabled` accounts
+cannot sign in at all.
 
 ### POST /auth/register
 
@@ -98,7 +105,8 @@ Check if setup is needed, and which credential types this deployment offers.
 
 ### GET /auth/me
 
-Get current user profile.
+Get current user profile. Same shape as the `user` object above, including the
+`must_change_password` and `disabled` flags.
 
 ### PUT /auth/me
 
@@ -126,7 +134,48 @@ Change password. The new password must be at least 8 characters.
 **Response (204):** empty.
 
 A wrong `current_password` is a `400` (not a `401`), so clients do not treat a
-typo as a dead session. Answers `204` on success.
+typo as a dead session. Answers `204` on success. Changing the password also
+clears the account's `must_change_password` flag, which is what releases a
+first sign-in from the forced password change.
+
+---
+
+## Users
+
+Dashboard user administration. Every route here requires the `admin` role.
+Self-lockout is prevented: an administrator can neither change their own role
+nor disable themselves, and the last enabled administrator can never be
+downgraded or disabled.
+
+Roles: `admin` (read and write everything), `auditor` (read-only across all
+resources) and `viewer` (read-only).
+
+### GET /users
+
+List users (paginated).
+
+### POST /users
+
+Create an account. `role` defaults to `viewer`; `password` must be at least 8
+characters. The new account starts with `must_change_password: true`.
+
+**Request:**
+```json
+{
+  "email": "auditor@example.com",
+  "password": "start-up-password",
+  "name": "Compliance",
+  "role": "auditor"
+}
+```
+
+**Response (201):** the created user object (same shape as `GET /auth/me`).
+
+### PUT /users/{user_id}
+
+Update `name`, `role` and/or `disabled`. An administrator cannot change their
+own `role`/`disabled` (`400`); downgrading or disabling the last enabled
+administrator is rejected with `400` as well.
 
 ---
 
@@ -338,6 +387,9 @@ List sites (paginated).
       "status": "active",
       "plan": "free",
       "user_id": "uuid",
+      "trust_proxy_headers": false,
+      "trusted_header": "",
+      "trust_last_hop": false,
       "created_at": "...",
       "updated_at": "..."
     }
@@ -383,6 +435,14 @@ Update site fields, including the status that pauses and resumes a site:
 Only the fields present in the body are touched. `alternate_domains` replaces
 the whole list when present; `[]` clears it. Changing `domain` or
 `alternate_domains` re-runs the cross-site hostname checks above.
+
+Reverse-proxy trust fields: set `trust_proxy_headers: true` when the site is
+behind a CDN/reverse proxy and `trusted_header` names the header the client IP
+is resolved from (`x-forwarded-for` default; `cf-connecting-ip`, `x-real-ip`,
+`true-client-ip`, `forwarded` accepted). `trust_last_hop: true` restricts the
+lookup to the right-most value. With trust enabled, IP block lists, rate
+limiting and logged client IPs derive from that header instead of the TCP
+peer.
 
 ### DELETE /sites/{site_id}
 
