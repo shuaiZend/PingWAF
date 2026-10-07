@@ -9,7 +9,10 @@
 2. Log in with the seeded credentials:
    - Email: `admin@pingwaf.local`
    - Password: `pingwaf123`
-3. **Immediately change your password**: Profile → Change Password
+3. **Change your password when prompted**: the console blocks every write
+   operation behind a change-password dialog on the first sign-in. Pick a new
+   password and the console unlocks immediately — the flag is stored per
+   account, not per browser
 
 ### Dashboard Overview
 
@@ -18,7 +21,9 @@ The dashboard provides:
 - **Sites**: Manage protected websites
 - **Agents**: Monitor connected data-plane agents
 - **Logs**: Security events and access logs
-- **Settings**: Elasticsearch, API keys, global preferences
+- **Account**: Profile, password, personal API keys and (for
+  administrators) user management
+- **Settings**: Elasticsearch, global preferences, control-plane HTTPS
 
 ## Adding a Website
 
@@ -58,7 +63,26 @@ See [SSL Certificate Management](#ssl-certificate-management) below.
 
 ## Origin Pools & Routes
 
-Open **Sites → [your site] → Origin** to manage origin pools, load balancing and route dispatch.
+Open **Sites → [your site] → Basic** to manage origin pools, load balancing,
+route dispatch and reverse-proxy trust.
+
+### Reverse-Proxy Trust
+
+When the site sits behind a CDN or a reverse proxy (Cloudflare, nginx, a load
+balancer), the TCP peer address is the proxy, not the visitor. Enable
+**Reverse-proxy trust** on the Basic page to resolve the client IP from a
+trusted header instead:
+
+| Setting | Description |
+|---------|-------------|
+| Front-end CDN / reverse proxy | Enables header-based client IP resolution |
+| Trusted header | Which header carries the client IP; defaults to `X-Forwarded-For` (`CF-Connecting-IP`, `X-Real-IP`, `True-Client-IP` and `Forwarded` are also offered) |
+| Trust last hop only | Use only the right-most value of the header and discard everything else |
+
+With trust enabled, IP block lists, rate limiting (CC), access rules and the
+client IP recorded in logs are all derived from that header. Only enable it
+when every request really passes through the proxy — otherwise visitors could
+spoof their IP by sending the header themselves.
 
 ### Origin Pools
 
@@ -158,7 +182,7 @@ PingWAF includes built-in protection against SQL injection, XSS, remote code exe
 
 **Built-in rules**: each of the built-in managed rules has its own Block / Log-only switch, independent of the category switches. Batch buttons switch all rules at once. Because a family's rules (SQLi, XSS, RCE score gates) and its category switch control the same signature surface, downgrading a category also flips its family rules to log-only; switching the category back removes those per-rule downgrades, resetting any individual overrides made in between.
 
-**Deep inspection** enables the strict managed rule set plus deep request-body inspection. Higher interception rate at a proportional performance cost.
+**Deep inspection** enables the strict managed rule set plus deep request-body inspection. Higher interception rate at a proportional performance cost. Custom rules receive the same request-body evaluation while deep inspection is on, so body-carrying bypass attempts are caught by user-defined expressions too. On the page the two posture switches — **Under-attack mode** and **Deep inspection** — sit side by side on one row.
 
 **Backend stacks** (`java`, `php`, `python`, `node`) downgrade stack-specific detections the same way; language-agnostic detections are never affected by a stack switch. Stack switches are collapsed by default.
 
@@ -392,11 +416,61 @@ Purge old logs:
 Logs → Purge (select age threshold)
 ```
 
+## Account & User Management
+
+**Account** is a top-level menu, separate from Settings. It holds the signed-in
+user's profile, password, API keys, and — for administrators — the user list.
+
+### Profile & Password
+
+Update your display name and email, or change your password (current password
+required; the new one must be at least 8 characters). Your personal API keys
+live on the same page: any account can mint keys for itself, with `read` or
+`write` permission — a key with `write` is only accepted when its owner is an
+administrator.
+
+### User Management (administrators)
+
+Administrators see a **Users** card on the Account page:
+
+- **Create** accounts with an email, initial password and role
+- **Disable** accounts — a disabled account cannot sign in, and its existing
+  tokens are refused on every request
+- **Change role** or profile details
+
+Roles:
+
+| Role | Capabilities |
+|------|--------------|
+| `admin` | Read and write everything, manage users |
+| `auditor` | Read-only across every resource — for review/compliance access |
+| `viewer` | Read-only |
+
+Self-lockout is prevented: an administrator can neither downgrade nor disable
+their own account, and the last enabled administrator can never lose admin
+access.
+
+### Forced First-Sign-In Password Change
+
+Every account starts with a `must change password` flag. On the first sign-in
+the console blocks all other pages behind a change-password dialog, and the
+server rejects every write until the password is replaced. Changing the
+password clears the flag immediately.
+
+### JWT Secret Provisioning
+
+On the very first boot, if no JWT secret is configured (via
+`PINGWAF_JWT_SECRET`), the control plane generates a random 256-bit secret and
+persists it in the database; every later boot reuses it. This removes the
+historical default-secret foot-gun in open-source deployments: without an
+explicitly configured secret, tokens are still signed by a unique per-install
+key. An explicitly configured secret always wins.
+
 ## Agent Management
 
 ### Adding Agents
 
-1. Generate an API key: **Settings → API Keys → Create**
+1. Generate an API key: **Account → API keys → Create**
 2. Install the agent on the edge server:
    ```bash
    pingwaf agent --server-url http://control-plane:9090 --api-key YOUR_KEY
@@ -525,7 +599,7 @@ Settings → MCP server
 
 Every deployment hosts an MCP (Model Context Protocol) endpoint at `/mcp` on the console origin, so external AI agents — Claude Code, IDE copilots, scripts — can inspect and operate the firewall. The Settings card shows the live endpoint, the tool inventory (write tools tagged), and copy-paste client snippets.
 
-To connect a client you need an API key (**Settings → API keys**) with the `read` permission; add `write`, whose owner must be an administrator, for the two tools that change state. Then paste the card's JSON into the client, or for Claude Code run:
+To connect a client you need an API key (**Account → API keys**) with the `read` permission; add `write`, whose owner must be an administrator, for the two tools that change state. Then paste the card's JSON into the client, or for Claude Code run:
 
 ```bash
 claude mcp add --transport http pingwaf https://waf.example.com:9080/mcp \
