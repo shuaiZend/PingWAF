@@ -24,7 +24,7 @@ export interface PaginationQuery {
 
 /* ── Auth ─────────────────────────────────────────────────────────── */
 
-export type UserRole = 'admin' | 'viewer'
+export type UserRole = 'admin' | 'auditor' | 'viewer'
 
 /** `api::auth::UserResponse` */
 export interface User {
@@ -32,6 +32,10 @@ export interface User {
   email: string
   name: string | null
   role: UserRole | string
+  /** First sign-in gate: the account must replace its password. */
+  must_change_password: boolean
+  /** Disabled accounts cannot sign in (admin user list only). */
+  disabled: boolean
   created_at: string
   updated_at: string
 }
@@ -77,6 +81,21 @@ export interface ChangePasswordRequest {
   new_password: string
 }
 
+/** `api::users::CreateUserRequest` */
+export interface CreateUserRequest {
+  email: string
+  password: string
+  name?: string
+  role?: string
+}
+
+/** `api::users::UpdateUserRequest` */
+export interface UpdateUserRequest {
+  name?: string
+  role?: string
+  disabled?: boolean
+}
+
 export interface UpdateProfileRequest {
   name?: string | null
 }
@@ -97,6 +116,12 @@ export interface Site {
   plan: string
   /** Disk budget, in MiB, the agents may use for this site's cache. */
   cache_quota_mb: number
+  /** Site sits behind a CDN/proxy: derive the client IP from `trusted_header`. */
+  trust_proxy_headers: boolean
+  /** Forwarded header trusted when `trust_proxy_headers` is on. */
+  trusted_header: string
+  /** Trust only the most recent hop of `x-forwarded-for`. */
+  trust_last_hop: boolean
   user_id: string
   created_at: string
   updated_at: string
@@ -195,6 +220,12 @@ export interface UpdateSiteRequest {
   alternate_domains?: string[]
   status?: string
   plan?: string
+  /** Site sits behind a CDN/proxy: derive the client IP from `trusted_header`. */
+  trust_proxy_headers?: boolean
+  /** Forwarded header trusted when `trust_proxy_headers` is on. */
+  trusted_header?: string
+  /** Trust only the most recent hop of `x-forwarded-for`. */
+  trust_last_hop?: boolean
 }
 
 export interface CreateUpstreamRequest {

@@ -69,7 +69,7 @@ export function SiteDetailPage() {
 
   const base = `/sites/${siteId}`
   const tabs = [
-    { to: `${base}/origin`, label: t('nav.origin'), icon: Network },
+    { to: `${base}/basic`, label: t('nav.basic'), icon: Network },
     {
       to: `${base}/security/protection`,
       label: t('nav.securityProtection'),
