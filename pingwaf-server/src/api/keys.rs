@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::api::common::{
-    non_empty, parse_datetime, parse_uuid, require_write, Page, Pagination,
+    non_empty, parse_datetime, parse_uuid, Page, Pagination,
 };
 use crate::api::error::ApiError;
 use crate::api::state::AppState;
@@ -125,7 +125,8 @@ async fn create(
     current: AuthUser,
     Json(payload): Json<CreateKeyRequest>,
 ) -> Result<Response, ApiError> {
-    require_write(&current)?;
+    // Every account may mint its own keys; the permissions granted are
+    // capped at the caller's own power (see below).
 
     let name = payload.name.trim().to_string();
     if name.is_empty() || name.len() > 100 {
@@ -134,11 +135,21 @@ async fn create(
         ));
     }
 
-    let permissions = normalise_permissions(&payload.permissions)?;
+    let mut permissions = normalise_permissions(&payload.permissions)?;
     if permissions.is_empty() {
         return Err(ApiError::BadRequest(
             "at least one permission is required".to_string(),
         ));
+    }
+    // Self-service keys for read-only roles never exceed read: agents need
+    // the `agent` permission, which only admins may delegate.
+    if !current.is_admin() {
+        if current.must_change_password {
+            return Err(ApiError::Forbidden(
+                "change your password before creating API keys".to_string(),
+            ));
+        }
+        permissions = vec![permission::READ.to_string()];
     }
 
     let expires_at = match non_empty(&payload.expires_at) {
@@ -168,7 +179,8 @@ async fn remove(
     current: AuthUser,
     Path(key_id): Path<String>,
 ) -> Result<Response, ApiError> {
-    require_write(&current)?;
+    // Any account may revoke its own keys; the filter below already restricts
+    // non-admins to their own rows.
     let id = parse_uuid(&key_id, "key id")?;
 
     let mut query = api_key::Entity::delete_by_id(id);
@@ -283,7 +295,12 @@ pub async fn authenticate_api_key(
                     "API key owner no longer exists".to_string(),
                 )
             })?;
-        if owner.role != role::ADMIN && owner.role != role::VIEWER {
+        if owner.disabled {
+            return Err(ApiError::Unauthorized(
+                "API key owner is disabled".to_string(),
+            ));
+        }
+        if !role::is_valid(&owner.role) {
             return Err(ApiError::Unauthorized(
                 "API key owner has an unknown role".to_string(),
             ));

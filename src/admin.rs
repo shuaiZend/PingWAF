@@ -203,6 +203,8 @@ async fn add_admin(opts: AddAdminOpts) -> anyhow::Result<()> {
                 .unwrap_or_else(|| "Administrator".to_string()),
         )),
         role: Set(role::ADMIN.to_string()),
+        disabled: Set(false),
+        must_change_password: Set(true),
         created_at: Set(now),
         updated_at: Set(now),
     }

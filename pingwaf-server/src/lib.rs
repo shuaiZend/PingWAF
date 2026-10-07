@@ -39,7 +39,7 @@ use crate::api::state::AppState;
 use crate::es::{ensure_index_template, ElasticsearchClient};
 use crate::grpc::{AgentRegistry, ControlPlaneService};
 use crate::migration::Migrator;
-use crate::models::{role, user};
+use crate::models::{instance_setting, role, user};
 
 /// Starts the PingWAF control plane server.
 ///
@@ -50,14 +50,9 @@ use crate::models::{role, user};
 /// 4. Seeds the default administrator account when the database is empty
 /// 5. Boots the HTTP REST API and gRPC control plane in parallel
 /// 6. Blocks until `SIGINT` / `SIGTERM`
-pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
+pub async fn start_server(mut config: ServerConfig) -> anyhow::Result<()> {
     // ── 1. Validate ──────────────────────────────────────────────────────────
     config.validate()?;
-    if config.uses_default_jwt_secret() {
-        tracing::warn!(
-            "using the built-in JWT secret — set PINGWAF_JWT_SECRET for production"
-        );
-    }
 
     tracing::info!(
         http_addr = %config.http_addr,
@@ -82,6 +77,9 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
         .await
         .map_err(|err| anyhow::anyhow!("migration failed: {err}"))?;
     tracing::info!("schema migrations applied");
+
+    // ── 3b. Pin the JWT secret for the life of the instance ────────────────
+    resolve_jwt_secret(&db, &mut config).await?;
 
     // ── 4. Seed default admin ────────────────────────────────────────────────
     seed_admin(&db, &config).await?;
@@ -296,6 +294,53 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Pins the JWT signing secret for the lifetime of the instance.
+///
+/// The project is open source, so the built-in default secret is public and
+/// must never secure a real deployment. When the operator did not configure a
+/// secret, a random one is generated on first boot and persisted in
+/// `instance_settings`; every later boot reuses it. Explicit configuration
+/// always wins.
+async fn resolve_jwt_secret(
+    db: &sea_orm::DatabaseConnection,
+    config: &mut ServerConfig,
+) -> anyhow::Result<()> {
+    use sea_orm::{ActiveModelTrait, EntityTrait, Set};
+
+    const JWT_SECRET_KEY: &str = "jwt_secret";
+
+    if !config.uses_default_jwt_secret() {
+        return Ok(());
+    }
+
+    let existing = instance_setting::Entity::find_by_id(JWT_SECRET_KEY)
+        .one(db)
+        .await?;
+    if let Some(row) = existing {
+        config.jwt_secret = row.value;
+        tracing::info!("reusing the JWT secret generated on first boot");
+        return Ok(());
+    }
+
+    // 256 bits of entropy from two UUIDv4 payloads, the same generator the
+    // API keys use.
+    let secret = format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    );
+    instance_setting::ActiveModel {
+        key: Set(JWT_SECRET_KEY.to_string()),
+        value: Set(secret.clone()),
+        updated_at: Set(chrono::Utc::now()),
+    }
+    .insert(db)
+    .await?;
+    config.jwt_secret = secret;
+    tracing::info!("generated and persisted a random JWT secret (first boot)");
+    Ok(())
+}
+
 /// Seeds the default administrator account if the users table is empty.
 async fn seed_admin(
     db: &sea_orm::DatabaseConnection,
@@ -330,6 +375,10 @@ async fn seed_admin(
         password_hash: sea_orm::Set(password_hash),
         name: sea_orm::Set(Some("Administrator".to_string())),
         role: sea_orm::Set(role::ADMIN.to_string()),
+        disabled: sea_orm::Set(false),
+        // The default password ships in the repository: force a change on
+        // first login.
+        must_change_password: sea_orm::Set(true),
         created_at: sea_orm::Set(now),
         updated_at: sea_orm::Set(now),
     };
