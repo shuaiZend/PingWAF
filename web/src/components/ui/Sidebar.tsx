@@ -16,6 +16,7 @@ import {
   IdentificationCard,
   FunnelSimple,
   CaretDown,
+  UserCircle,
   Network,
   FlowArrow,
   Sparkle,
@@ -98,7 +99,7 @@ export function Sidebar({ collapsed, onNavigate }: SidebarProps) {
         },
       ],
     },
-    { kind: 'leaf', to: site('origin'), labelKey: 'nav.origin', icon: Network, requiresSite: true },
+    { kind: 'leaf', to: site('basic'), labelKey: 'nav.basic', icon: Network, requiresSite: true },
     { kind: 'leaf', to: site('caching'), labelKey: 'nav.caching', icon: Lightning, requiresSite: true },
     { kind: 'leaf', to: '/ip-groups', labelKey: 'nav.ipGroups', icon: FunnelSimple },
     // SSL/TLS and traffic in the sidebar are the *global* surfaces; each site's
@@ -109,6 +110,7 @@ export function Sidebar({ collapsed, onNavigate }: SidebarProps) {
     { kind: 'leaf', to: '/assistant', labelKey: 'nav.assistant', icon: Sparkle },
     { kind: 'leaf', to: '/agents', labelKey: 'nav.agents', icon: Desktop },
     { kind: 'leaf', to: '/lifecycle', labelKey: 'nav.lifecycle', icon: FlowArrow },
+    { kind: 'leaf', to: '/account', labelKey: 'nav.account', icon: UserCircle },
     { kind: 'leaf', to: '/settings', labelKey: 'nav.settings', icon: Gear },
   ]
 

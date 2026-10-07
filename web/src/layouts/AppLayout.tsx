@@ -8,7 +8,6 @@ import {
   Sun,
   CaretDown,
   UserCircle,
-  Gear,
   SignOut,
   Translate,
   ShieldCheck,
@@ -19,6 +18,7 @@ import { Breadcrumb, type BreadcrumbItem } from '@/components/ui/Breadcrumb'
 import { Button } from '@/components/ui/Button'
 import { useThemeStore } from '@/stores/themeStore'
 import { useAuthStore } from '@/stores/authStore'
+import { ForceChangePasswordDialog } from '@/components/ForceChangePasswordDialog'
 import { supportedLanguages } from '@/i18n'
 
 const langLabels: Record<string, string> = {
@@ -43,6 +43,7 @@ const crumbKeys: Record<string, string> = {
   rules: 'nav.security',
   rewrite: 'pages.rewrite.title',
   'error-pages': 'pages.errorPages.title',
+  account: 'pages.account.title',
   settings: 'pages.settings.title',
   logs: 'pages.logs.title',
   assistant: 'pages.assistant.title',
@@ -251,10 +252,10 @@ export function AppLayout() {
                     </p>
                   </div>
                   <DropdownItem
-                    icon={<Gear className="h-4 w-4" />}
+                    icon={<UserCircle className="h-4 w-4" />}
                     onClick={() => {
                       setUserMenuOpen(false)
-                      navigate('/settings')
+                      navigate('/account')
                     }}
                   >
                     {t('user.account')}
@@ -277,6 +278,10 @@ export function AppLayout() {
           </div>
         </main>
       </div>
+
+      {/* First sign-in gate: blocks the whole console until the password is
+          replaced; the server refuses writes in the meantime. */}
+      <ForceChangePasswordDialog />
     </div>
   )
 }
