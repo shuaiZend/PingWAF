@@ -1839,18 +1839,24 @@ impl WafPlugin {
                 context: None,
             };
         };
-        let fallback = |site_id: String| {
+        let fallback = |host: String| {
             // Without synced rules the request would be proxied by the base
             // engine alone. An edge that must fail closed refuses instead;
-            // fail-open edges keep serving, exactly as they did before.
-            let choice = if agent.config.fail_open || agent.is_connected() {
+            // the decision is the site's own failover policy when the
+            // registry knows the domain, else the control-plane-wide
+            // default from the last sync, else the agent's local
+            // `--fail-open` setting. A connected agent always keeps
+            // serving, whatever the policies say.
+            let choice = if agent.is_connected()
+                || agent.effective_fail_open(&host)
+            {
                 EngineChoice::Base
             } else {
                 EngineChoice::FailClosed
             };
             ResolvedSite {
                 choice,
-                site_id,
+                site_id: host,
                 context: None,
             }
         };
@@ -3611,6 +3617,71 @@ advanced_mode = true
             run_request(&plugin, "203.0.113.7").await
                 == RequestPluginResult::Continue
         );
+    }
+
+    #[tokio::test]
+    async fn test_fail_closed_registry_overrides_the_local_fallback() {
+        // Even with a fail-open local default, a site the registry marks
+        // fail-closed is refused while disconnected; the global default
+        // covers every other host.
+        let dir = tempfile::tempdir().unwrap();
+        let config = AgentConfig {
+            cache_dir: dir.path().to_string_lossy().to_string(),
+            fail_open: true,
+            ..Default::default()
+        };
+        let (_guard, _agent, _dir) =
+            install_test_agent_with(config, dir).await;
+        let agent = PingWafAgent::instance().unwrap();
+        agent
+            .rule_cache
+            .update_from_bundle(&proto::RuleBundle {
+                site_id: "site-1".to_string(),
+                config_hash: "hash-1".to_string(),
+                site_policies: vec![proto::SitePolicy {
+                    domain: "example.com".to_string(),
+                    alternate_domains: Vec::new(),
+                    mode: proto::FailoverMode::FailoverClosed as i32,
+                }],
+                default_fail_open: Some(true),
+                ..Default::default()
+            })
+            .unwrap();
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        // The registered host follows its own policy…
+        let RequestPluginResult::Respond(resp) =
+            run_request(&plugin, "203.0.113.7").await
+        else {
+            panic!("expected the registry-closed host to be refused");
+        };
+        assert_eq!(http::StatusCode::SERVICE_UNAVAILABLE, resp.status);
+
+        // …and once the registry no longer marks it closed, the global
+        // default (fail open) applies again.
+        agent
+            .rule_cache
+            .update_from_bundle(&proto::RuleBundle {
+                site_id: "site-1".to_string(),
+                config_hash: "hash-2".to_string(),
+                site_policies: vec![proto::SitePolicy {
+                    domain: "example.com".to_string(),
+                    alternate_domains: Vec::new(),
+                    mode: proto::FailoverMode::FailoverOpen as i32,
+                }],
+                default_fail_open: Some(true),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(
+            run_request(&plugin, "203.0.113.7").await
+                == RequestPluginResult::Continue
+        );
+
+        PingWafAgent::set_agent_instance(None);
     }
 
     /// A blocked request logs the page the client received, so the dashboard

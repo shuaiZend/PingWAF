@@ -331,6 +331,25 @@ impl PingWafAgent {
         self.client.is_connected()
     }
 
+    /// Whether `domain` should keep being served while the control plane is
+    /// unreachable and no synced rules exist for it.
+    ///
+    /// Resolution order: the site's own failover policy from the registry
+    /// (primary or alternate domain match), then the control-plane-wide
+    /// default from the last sync, then this agent's local `--fail-open`
+    /// setting — which is the only layer available in standalone mode or
+    /// before the first sync completes.
+    pub fn effective_fail_open(&self, domain: &str) -> bool {
+        match self.rule_cache.failover_for_domain(domain) {
+            Some(cache::FailoverMode::Open) => return true,
+            Some(cache::FailoverMode::Closed) => return false,
+            Some(cache::FailoverMode::Inherit) | None => {},
+        }
+        self.rule_cache
+            .global_fail_open()
+            .unwrap_or(self.config.fail_open)
+    }
+
     /// Get the current config hash (for delta sync). Cheap: clones the `Arc`,
     /// not the string.
     pub fn config_hash(&self) -> Arc<str> {
@@ -405,6 +424,98 @@ pub fn agent_instance() -> Option<Arc<PingWafAgent>> {
 #[cfg(test)]
 mod tests {
     use super::combine_headers;
+    use super::*;
+    use pingwaf_proto::control_plane as proto;
+
+    /// Builds an offline agent whose cache carries the given failover
+    /// registry and global default.
+    fn agent_with(
+        dir: &std::path::Path,
+        local_fail_open: bool,
+        policies: Vec<proto::SitePolicy>,
+        global: Option<bool>,
+    ) -> PingWafAgent {
+        let mut config = AgentConfig::default();
+        config.fail_open = local_fail_open;
+        let rule_cache =
+            RuleCache::new(dir.to_path_buf(), "test".to_string()).unwrap();
+        let metrics = Arc::new(MetricsCollector::new());
+        let client = Arc::new(ControlPlaneClient::new(
+            config.clone(),
+            Arc::clone(&rule_cache),
+            Arc::clone(&metrics),
+        ));
+        rule_cache
+            .update_from_bundle(&proto::RuleBundle {
+                site_id: "site-1".to_string(),
+                site_policies: policies,
+                default_fail_open: global,
+                ..Default::default()
+            })
+            .unwrap();
+        PingWafAgent {
+            config,
+            client,
+            rule_cache,
+            metrics,
+        }
+    }
+
+    #[test]
+    fn failover_resolution_prefers_site_then_global_then_local() {
+        let policy = |domain: &str, mode: proto::FailoverMode| {
+            proto::SitePolicy {
+                domain: domain.to_string(),
+                alternate_domains: Vec::new(),
+                mode: mode as i32,
+            }
+        };
+
+        // Site policy wins over everything, in both directions. Every case
+        // gets its own cache dir: the cache persists to disk, so sharing a
+        // directory would leak one case's synced default into the next.
+        let dir = tempfile::tempdir().unwrap();
+        let agent = agent_with(
+            dir.path(),
+            true,
+            vec![
+                policy("closed.example.com", proto::FailoverMode::FailoverClosed),
+                policy("open.example.com", proto::FailoverMode::FailoverOpen),
+            ],
+            Some(true),
+        );
+        assert!(!agent.effective_fail_open("closed.example.com"));
+        assert!(agent.effective_fail_open("open.example.com"));
+
+        // Alternate domains resolve to the same policy.
+        let dir = tempfile::tempdir().unwrap();
+        let agent = agent_with(
+            dir.path(),
+            false,
+            vec![proto::SitePolicy {
+                domain: "example.com".to_string(),
+                alternate_domains: vec!["m.example.com".to_string()],
+                mode: proto::FailoverMode::FailoverOpen as i32,
+            }],
+            Some(false),
+        );
+        assert!(agent.effective_fail_open("m.example.com"));
+
+        // Unknown domain: the synced global default applies, beating the
+        // local setting.
+        let dir = tempfile::tempdir().unwrap();
+        let agent = agent_with(dir.path(), true, Vec::new(), Some(false));
+        assert!(!agent.effective_fail_open("unknown.example.com"));
+
+        // No synced global default (old control plane): the local fallback
+        // decides.
+        let dir = tempfile::tempdir().unwrap();
+        let agent = agent_with(dir.path(), false, Vec::new(), None);
+        assert!(!agent.effective_fail_open("unknown.example.com"));
+        let dir = tempfile::tempdir().unwrap();
+        let agent = agent_with(dir.path(), true, Vec::new(), None);
+        assert!(agent.effective_fail_open("unknown.example.com"));
+    }
 
     #[test]
     fn repeated_headers_join_with_a_comma() {
