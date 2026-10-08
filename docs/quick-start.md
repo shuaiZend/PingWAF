@@ -614,7 +614,8 @@ simplest possible operations story, or are evaluating PingWAF.
 
 A central control plane stores configuration in PostgreSQL and pushes rules to
 any number of edge agents over gRPC. Agents cache rules locally and keep
-proxying (`fail_open = true` by default) if the control plane is unreachable.
+proxying if the control plane is unreachable (fail-open by default; per-site
+failover policies and the global default are configurable in the console).
 
 ```bash
 # Central control plane
@@ -708,7 +709,7 @@ the agent log settings with a dash in the `Environment` column are
 | `--server-url` | `PINGWAF_SERVER_URL` | `http://localhost:9090` | Control plane gRPC URL |
 | `--api-key` | `PINGWAF_API_KEY` | `""` | Agent authentication key (empty = auto-register over loopback in all-in-one) |
 | `--cache-dir` | `PINGWAF_CACHE_DIR` | `./data/cache` | Local rule cache directory |
-| `--fail-open` | `PINGWAF_FAIL_OPEN` | `true` | Keep proxying when the control plane is unreachable |
+| `--fail-open` | `PINGWAF_FAIL_OPEN` | `true` | Fallback policy when disconnected with no synced rules for a host; per-site failover policies and the control-plane default win once synced |
 | `--heartbeat-interval-secs` | `PINGWAF_HEARTBEAT_INTERVAL` | `30` | Fallback heartbeat frequency, used only when the control plane hands no interval down at registration |
 | `--metrics-ship-interval-secs` | `PINGWAF_METRICS_SHIP_INTERVAL` | `30` | Edge-metrics ship interval; `0` disables shipping |
 | `--log-batch-size` | — | `100` | Log entries per flush |

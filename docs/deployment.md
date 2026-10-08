@@ -181,7 +181,7 @@ server-side log batch size (`500`) are compiled-in constants with no override.
 | `server_ca_cert` | string | — | PEM file with the CA that signed the control plane's TLS certificate (required for private CAs; bundled roots are used otherwise) |
 | `api_key` | string | `""` | Agent authentication key (empty = auto-register over loopback in all-in-one) |
 | `cache_dir` | string | `./data/cache` | Local rule cache directory |
-| `fail_open` | bool | `true` | While disconnected: `true` keeps serving with the last synced rules; `false` answers 503 for hosts without synced rules |
+| `fail_open` | bool | `true` | Local fallback while disconnected: `true` keeps serving with the last synced rules; `false` answers 503 for hosts without synced rules. The per-site failover policy (console → site → basic) and the control-plane-wide default (settings → defense) take precedence once synced |
 | `heartbeat_interval_secs` | int | `30` | Fallback heartbeat frequency, used only when the control plane hands no interval down at registration |
 | `log_batch_size` | int | `100` | Log entries before flush |
 | `log_flush_interval_secs` | int | `5` | Max time between flushes |
@@ -413,12 +413,15 @@ A hardening pass before exposing the control plane beyond localhost:
   loopback by default; set `POSTGRES_BIND=0.0.0.0` only when another host
   genuinely needs the database, and then with a strong password and
   firewall rules in front of it.
-- **Choose `fail_open` deliberately.** `true` (default) keeps sites serving
-  with the last synced rules while the agent is disconnected; `false`
-  refuses traffic (`503`) for hosts without synced rules, trading
-  availability for guaranteeing the WAF sees every request. With `false`,
-  remember the window between agent start and first sync refuses traffic
-  for all hosts.
+- **Choose `fail_open` deliberately.** Disconnected behaviour is resolved per
+  host: the site's failover policy (console → site → basic settings) wins,
+  then the control-plane-wide default (settings → defense), then the agent's
+  local `--fail-open` flag. `true` (default at every layer) keeps sites
+  serving with the last synced rules while the agent is disconnected;
+  `false` refuses traffic (`503`) for hosts without synced rules, trading
+  availability for guaranteeing the WAF sees every request. With a closed
+  policy, remember the window between agent start and first sync refuses
+  traffic for all hosts.
 - **Session revocation semantics.** Accounts carry a token version;
   changing a password, disabling an account, or changing its role bumps the
   version and immediately invalidates that account's access and refresh
