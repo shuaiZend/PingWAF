@@ -337,11 +337,16 @@ Build metadata.
 ```json
 {
   "name": "pingwaf-server",
-  "version": "0.24.1",
+  "version": "0.25.0",
   "api": "/api/v1",
-  "registration_open": true
+  "registration_open": true,
+  "grpc_tls": true
 }
 ```
+
+`grpc_tls` reports whether the gRPC control plane serves TLS. `false` means
+plaintext traffic (degraded mode) — agents connect unencrypted; the console
+surfaces this as a warning on the agents page and the settings "About" card.
 
 ---
 
@@ -398,6 +403,8 @@ List sites (paginated).
       "trust_proxy_headers": false,
       "trusted_header": "",
       "trust_last_hop": false,
+      "trusted_proxy_ranges": [],
+      "trusted_proxy_group_ids": [],
       "created_at": "...",
       "updated_at": "..."
     }
@@ -451,6 +458,16 @@ is resolved from (`x-forwarded-for` default; `cf-connecting-ip`, `x-real-ip`,
 lookup to the right-most value. With trust enabled, IP block lists, rate
 limiting and logged client IPs derive from that header instead of the TCP
 peer.
+
+Trust is **strict**: the direct TCP peer must fall inside `trusted_proxy_ranges`
+(a list of CIDRs, e.g. `173.245.48.0/20`) for the trusted header to be
+believed; otherwise the connection's own address is used and the header is
+ignored. An empty list therefore means "trust no one" — set the ranges of
+every proxy that can reach the listener. `trusted_proxy_group_ids` references
+IP groups (see [IP Groups](#ip-groups)); the union of the group's ranges and
+the hand-entered `trusted_proxy_ranges` forms the effective trust scope. The
+console's Cloudflare subscription group covers the official CDN ranges for
+exactly this purpose.
 
 ### DELETE /sites/{site_id}
 
@@ -1032,13 +1049,15 @@ List registered agents.
       "site_domain": "example.com",
       "hostname": "edge-01",
       "ip_address": "10.0.1.5",
-      "version": "0.24.1",
+      "version": "0.25.0",
       "os_info": "Linux 6.1.0",
       "cpu_cores": 4,
       "memory_bytes": 8589934592,
       "status": "online",
       "last_heartbeat": "2024-01-01T12:00:00Z",
       "registered_at": "2024-01-01T00:00:00Z",
+      "last_config_sync_at": "2024-01-01T11:58:00Z",
+      "last_policy_sync_at": "2024-01-01T11:58:00Z",
       "connected": true,
       "pending_commands": 0
     }
@@ -1156,6 +1175,73 @@ Send a command to an agent.
 | `restart_agent` | `{}` |
 
 ---
+
+## WAF Settings
+
+Per-site switches for the WAF engine and its judgement layers.
+
+### GET /sites/{site_id}/waf/settings
+
+Reads the site's WAF settings, creating the default row on first access.
+
+### PUT /sites/{site_id}/waf/settings
+
+Patch semantics: omitted fields keep their current value.
+
+**Request:**
+```json
+{
+  "waf_enabled": true,
+  "advanced_mode": false,
+  "monitor_categories": ["sqli"],
+  "monitor_stacks": ["java"],
+  "monitor_managed_rules": ["930120"]
+}
+```
+
+`waf_enabled` is the explicit engine switch (`true` default). With it off the
+data plane skips WAF evaluation for the site entirely — custom rules, managed
+rules, CC and bot checks included. `advanced_mode` raises the managed ruleset
+to the Strict level with body deep inspection. The three `monitor_*` lists
+downgrade matching managed rules to observe-only, described in
+[Monitoring downgrades](#waf-rules).
+
+### GET /sites/{site_id}/waf/posture
+
+The site's effective WAF posture — what the data plane enforces right now,
+aggregated from the engine switch, rules, rate limits, bot protection and the
+global observation mode. The dashboard renders this on the protection page;
+automation can poll it to detect configuration drift.
+
+**Response (200):**
+```json
+{
+  "engine": "on",
+  "detection": {
+    "managed": true,
+    "custom": true,
+    "deep_inspection": false,
+    "under_attack": false
+  },
+  "enforcement": {
+    "managed": { "sqli": "monitor", "xss": "block" },
+    "custom_rules": "block",
+    "cc": "block",
+    "bot": "challenge",
+    "observation_mode": false
+  }
+}
+```
+
+`engine` mirrors `waf_enabled`; when off, the rest still reports what *would*
+apply. `detection.managed` is always true (the managed ruleset ships with the
+binary); `custom` reflects enabled custom rules; `deep_inspection` mirrors
+`advanced_mode`; `under_attack` mirrors the challenge settings. In
+`enforcement`, `managed` maps each attack category to `block` or `monitor`,
+`custom_rules` aggregates custom-rule modes (block > monitor > off), `cc` is
+the strongest action among enabled rate-limit rules, and `bot` the bot
+protection action — both `"off"` when none apply. `observation_mode: true`
+means the global switch turns every protective action into logging.
 
 ## WAF Rules
 
@@ -1834,6 +1920,16 @@ Lift a dynamic block: an `UnblockIp` command goes to every agent still enforcing
 
 Named collections of IP ranges, global (`is_global`, applied to all sites) or per-site. Each group carries an `action` of `block` or `allow`, and can subscribe to an external list via `source_url` with a `sync_interval_minutes` refresh interval (`null` = manual sync only).
 
+Groups can also be **subscription-backed** (`subscription_kind`): `builtin`
+groups ship with the control plane — Google, Yandex, DuckDuckGo and Cloudflare
+verifier/CDN ranges as static snapshots, seeded on first start — and `url`
+groups pull a plain-text or CIDR list over HTTP. Both are refreshed
+automatically by a daily background job (`subscription_enabled: false` opts
+out); `last_synced_at` and `last_sync_error` report the last run. Range
+changes propagate: sites that use the group for access rules, route gating,
+bot verification or proxy trust get their configuration re-pushed
+immediately.
+
 ### GET /ip-groups
 
 List IP groups (paginated), each with a `site_count`.
@@ -1862,6 +1958,8 @@ List IP groups (paginated), each with a `site_count`.
       "sync_interval_minutes": 1440,
       "last_synced_at": "2024-01-01T12:00:00Z",
       "last_sync_error": null,
+      "subscription_kind": "builtin",
+      "subscription_enabled": true,
       "enabled": false,
       "created_at": "2024-01-01T00:00:00Z",
       "updated_at": "2024-01-01T00:00:00Z",
@@ -2041,11 +2139,26 @@ Update bot protection.
   "enabled": true,
   "ua_analysis": true,
   "action": "challenge",
-  "known_bots_whitelist": ["Googlebot", "bingbot"]
+  "known_bots_whitelist": ["Googlebot", "bingbot"],
+  "ip_verification_enabled": true,
+  "dns_verification_enabled": true,
+  "verified_ip_group_id": "uuid"
 }
 ```
 
 `action` is `block`, `challenge`, `js_challenge`, `log` or `allow` and is applied to traffic classified as a bot (non-browser user agents). `known_bots_whitelist` is a JSON array of case-insensitive User-Agent substrings that always pass.
+
+Beyond the user agent — trivially spoofed — two stronger signals exist.
+`ip_verification_enabled` plus `verified_ip_group_id` treats client IPs inside
+the referenced group's ranges as verified bots (pick the built-in Google or
+Cloudflare subscription group). `dns_verification_enabled` adds reverse DNS:
+for a suspicious user agent the client's PTR record is resolved and forward-
+confirmed against the vendor's domain (`*.googlebot.com`, `yandex.com`,
+`duckduckgo.com`, …). Verification runs only when the UA already looks like a
+bot, results are cached, and a failed lookup falls back to the UA verdict
+rather than blocking the request. Signals compose in the order: IP match >
+confirmed DNS > UA whitelist > browser fingerprint heuristic > the configured
+action.
 
 ---
 
@@ -2656,8 +2769,15 @@ fall back to POST. The endpoint is stateless — no `Mcp-Session-Id` is issued.
 Authentication reuses the console credentials: `Authorization: Bearer` with
 either a `pwk_…` API key or a user JWT. A key needs the `read` permission (and
 its owner must be an administrator) to be accepted at all; the write tools
-additionally require the `write` permission on the key. JWT sessions use the
-token's role directly — administrators may call every tool, viewers none.
+additionally require the `write` permission on the key. Revoked or disabled
+keys are rejected. JWT sessions run through the same account checks as the
+REST API — disabled accounts and stale tokens (superseded by a newer sign-in)
+are refused, and an account that must change its password at next sign-in is
+rejected outright since MCP offers no way to complete that flow.
+
+The endpoint is rate limited alongside the REST API and capped for abuse
+resistance: a JSON-RPC batch may contain at most 16 calls (larger batches are
+rejected with `-32600`), and the request body is limited to 256 KiB.
 
 Supported methods: `initialize`, `ping`, `tools/list`, `tools/call`,
 `resources/list`, `resources/read`, `resources/templates/list`,

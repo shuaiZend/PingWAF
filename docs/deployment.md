@@ -60,7 +60,7 @@ Default credentials: `admin@pingwaf.local` / value of `$ADMIN_PASSWORD`
 curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh | bash
 
 # Or specify version and mode
-./install.sh --version 0.24.1 --mode all-in-one
+./install.sh --version 0.25.0 --mode all-in-one
 ```
 
 > Prebuilt release assets are published for **Linux** (amd64/arm64) only; on
@@ -143,7 +143,8 @@ file and in the environment is taken from the environment.
 | `db_url` | string | `postgres://pingwaf:pingwaf@localhost:5432/pingwaf` | PostgreSQL DSN |
 | `admin_addr` | string | `0.0.0.0:9080` | REST API + dashboard address |
 | `grpc_addr` | string | `0.0.0.0:9090` | gRPC control plane address |
-| `grpc_tls_cert` | string | — | PEM certificate enabling TLS on the gRPC listener (requires `grpc_tls_key`) |
+| `grpc_tls_mode` | string | `tls` | `tls` (default) or `off`. With `tls` and no certificate configured, a self-signed CA + server certificate is generated on first boot and reused after |
+| `grpc_tls_cert` | string | — | PEM certificate for the gRPC listener; takes priority over the self-signed pair (requires `grpc_tls_key`) |
 | `grpc_tls_key` | string | — | PEM private key for `grpc_tls_cert` |
 | `public_host` | string | — | Host the dashboard is reached under from the outside (optionally with port); pinned into the HTTP-to-HTTPS redirect instead of the client's `Host` header |
 | `jwt_secret` | string | `change-me-in-production` | JWT signing secret (≥16 chars, required) |
@@ -322,10 +323,17 @@ unavailable unless the proxy publishes an HTTPS origin and
 
 ### gRPC Control-Plane TLS
 
-The gRPC listener agents connect to (default `0.0.0.0:9090`) speaks plaintext
-h2c unless configured otherwise — acceptable for all-in-one deployments and
-private networks, but **agents connecting across untrusted networks must get
-TLS**. Point the server at a PEM certificate and key:
+The gRPC listener agents connect to (default `0.0.0.0:9090`) serves **TLS by
+default**. With no certificate configured, the first boot generates a
+self-signed CA plus server certificate (SANs: `localhost`, the hostname and
+the listener IPs), persists it in `instance_settings` and writes the PEM files
+to the data directory — the agent then only needs that CA to verify the
+server. The generated pair survives restarts; deleting it makes the next boot
+issue a fresh one (agents must be re-pointed at the new CA).
+
+For a publicly trusted certificate (e.g. issued for the control plane's
+hostname), point the server at a PEM certificate and key — explicit
+certificates take priority over the self-signed pair:
 
 ```bash
 pingwaf server \
@@ -338,20 +346,28 @@ Or set `grpc_tls_cert` / `grpc_tls_key` in `pingwaf.toml`, or the
 paths must be present; a mismatch or unreadable file aborts startup instead of
 falling back to plaintext.
 
+`grpc_tls_mode = "off"` (or `PINGWAF_GRPC_TLS_MODE=off`) reverts to plaintext
+h2c. The server logs a warning at startup and `GET /version` reports
+`grpc_tls: false`, which the console surfaces as a degraded-mode banner —
+acceptable for loopback all-in-one deployments, not for agents across
+untrusted networks.
+
 Agents switch to `https://` server URLs and either trust the bundled webpki
-roots (publicly trusted certificate) or load the signing CA:
+roots (publicly trusted certificate) or load the signing CA — the generated
+self-signed CA when the server auto-generates:
 
 ```bash
 pingwaf agent \
   --server-url "https://control-plane.example.com:9090" \
-  --server-ca-cert /etc/pingwaf/certs/grpc-ca.pem \
+  --server-ca-cert /var/lib/pingwaf/data/grpc-ca.pem \
   --api-key "your-agent-key"
 ```
 
 The certificate must carry a subject alternative name for whatever agents
 connect to: a DNS name for domain URLs, an IP SAN for `https://<ip>:9090`, and
 `127.0.0.1` for all-in-one mode — which switches its embedded agent to
-`https://127.0.0.1` automatically when gRPC TLS is configured.
+`https://127.0.0.1` automatically and wires up the generated CA, so a default
+all-in-one boots fully encrypted with no extra configuration.
 
 The API for all of this is documented in
 [`docs/api.md` → Control-plane certificate](./api.md#control-plane-certificate).
@@ -405,10 +421,11 @@ A hardening pass before exposing the control plane beyond localhost:
   cross-origin requests from any origin — acceptable when the embedded
   dashboard is the only client and served from the same origin, but list
   your dashboard origin(s) explicitly when anything else calls the API.
-- **Enable gRPC TLS for cross-network agents.** With `grpc_tls_cert` +
-  `grpc_tls_key`, registration keys, heartbeats and shipped logs travel
-  encrypted and agents verify the server; a loopback all-in-one deployment
-  can stay plaintext.
+- **Keep gRPC TLS on for cross-network agents.** It is the default: a
+  self-signed CA + server certificate is generated on first boot and agents
+  verify against it. Replace it with a publicly trusted certificate where
+  possible; only loopback all-in-one deployments may consider
+  `grpc_tls_mode = "off"`, which logs a warning and shows a degraded banner.
 - **Keep PostgreSQL off public interfaces.** The compose file binds 5432 to
   loopback by default; set `POSTGRES_BIND=0.0.0.0` only when another host
   genuinely needs the database, and then with a strong password and
