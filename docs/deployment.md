@@ -42,9 +42,11 @@ Default credentials: `admin@pingwaf.local` / value of `$ADMIN_PASSWORD`
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `POSTGRES_PASSWORD` | `pingwaf` | PostgreSQL password |
-| `JWT_SECRET` | `change-me-in-production-use-32-chars` | JWT signing secret (≥16 chars) |
+| `POSTGRES_BIND` | `127.0.0.1` | Host address the PostgreSQL port publishes on (`0.0.0.0` exposes it to the network) |
+| `POSTGRES_PORT` | `5432` | Host port for PostgreSQL |
+| `JWT_SECRET` | placeholder | JWT signing secret — leaving the placeholder is safe: a random secret is generated on first boot and persisted (≥16 chars when set) |
 | `ADMIN_EMAIL` | `admin@pingwaf.local` | Initial admin email |
-| `ADMIN_PASSWORD` | `pingwaf123` | Initial admin password |
+| `ADMIN_PASSWORD` | `pingwaf123` | Initial admin password (the dashboard forces a change at first login) |
 | `ALLOW_REGISTRATION` | `false` | Allow new user signups |
 | `HEARTBEAT_INTERVAL` | `15` | Agent heartbeat interval (seconds) |
 | `RUST_LOG` | `info,sqlx=warn` | Log level filter |
