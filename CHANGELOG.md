@@ -8,6 +8,37 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.24.1] — 2026-10-08
+
+A patch release with three fixes for regressions and gaps reported right
+after 0.24.0.
+
+### ⛰️ Features
+
+- *(server)* The account login name — the e-mail you sign in with — can now
+  be changed, from Settings → Account (confirming with the current password)
+  or by an administrator from the user management table. Changing it revokes
+  every outstanding session, since tokens carry the login name as a claim,
+  so holders must sign in again with the new name. This also removes the
+  brute-force exposure of the fixed `admin@pingwaf.local` default on docker
+  installs.
+
+### 🐛 Bug Fixes
+
+- *(web)* Clicking a site row navigated to `/sites/{id}/origin` — a route
+  that no longer exists after the 0.23.0 tab reorganisation — so every site
+  detail view answered "Page not found". Rows now open the basic tab.
+- *(server)* The pingwaf-* crates declared their own `version = "0.1.0"`
+  instead of inheriting the workspace version, so `GET /version`, the
+  dashboard "About" card and the agent heartbeat version all reported
+  `0.1.0`. The crates now use `version.workspace = true`.
+
+### 📚 Documentation
+
+- Version samples that had drifted (install examples, `/version` and agent
+  responses in the API reference, the SECURITY.md support table) are synced
+  to the current release line.
+
 ## [PingWAF 0.24.0] — 2026-10-08
 
 A security-hardening batch: fixes for the risks surfaced by a full control
