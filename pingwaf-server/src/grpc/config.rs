@@ -650,9 +650,13 @@ fn routes_to_proto(
         .collect()
 }
 
-/// Derives the site-wide WAF switches from the rules that are actually enabled,
-/// merged with the site's `waf_settings` posture row when present. A missing
-/// row keeps the historical behavior: everything enforced at the normal level.
+/// Builds the site's WAF configuration from the enabled rules, merged with
+/// the site's `waf_settings` posture row when present. A missing row keeps
+/// the historical behavior: everything enforced at the normal level.
+///
+/// The engine switch is explicit (`waf_settings.waf_enabled`, default on);
+/// the evaluation mode stays derived from the rules as a fallback for sites
+/// that never touched the mode selector.
 fn waf_config_to_proto(
     rules: &[WafRule],
     groups: &[rule_groups::Model],
@@ -681,6 +685,7 @@ fn waf_config_to_proto(
         groups.is_empty() || groups.iter().any(|group| group.enabled);
 
     let (
+        waf_enabled,
         advanced_mode,
         monitor_categories,
         monitor_stacks,
@@ -688,23 +693,18 @@ fn waf_config_to_proto(
     ) = settings
         .map(|s| {
             (
+                s.waf_enabled,
                 s.advanced_mode,
                 s.monitor_categories.clone(),
                 s.monitor_stacks.clone(),
                 s.monitor_managed_rules.clone(),
             )
         })
-        .unwrap_or_else(|| (false, Vec::new(), Vec::new(), Vec::new()));
+        .unwrap_or_else(|| (true, false, Vec::new(), Vec::new(), Vec::new()));
 
-    // Advanced mode (strict + body inspection) and monitor downgrades are
-    // meaningful only with the WAF on; a site with no custom rules but an
-    // explicit posture still gets the managed ruleset.
-    let enabled = (!active.is_empty()
-        || advanced_mode
-        || !monitor_categories.is_empty()
-        || !monitor_stacks.is_empty()
-        || !monitor_managed_rules.is_empty())
-        && any_group_enabled;
+    // The engine switch is explicit; rules only feed the mode fallback and
+    // the per-category switches below.
+    let enabled = waf_enabled && any_group_enabled;
 
     WafConfig {
         enabled,
@@ -883,18 +883,44 @@ async fn load_bot_protection(
         .await
 }
 
+/// Expands the IP group referenced by the bot protection row into the CIDR
+/// ranges the agent should treat as verified bot networks. Only enabled rows
+/// with IP verification turned on produce ranges.
+async fn load_verified_bot_ranges(
+    db: &DatabaseConnection,
+    row: Option<&bot_protection::Model>,
+) -> Result<Vec<String>, sea_orm::DbErr> {
+    let Some(gid) = row
+        .filter(|row| row.ip_verification_enabled)
+        .and_then(|row| row.verified_ip_group_id)
+    else {
+        return Ok(Vec::new());
+    };
+    let ranges = ip_groups::Entity::find_by_id(gid)
+        .filter(ip_groups::Column::Enabled.eq(true))
+        .one(db)
+        .await?
+        .map(|group| group.ip_ranges)
+        .unwrap_or_default();
+    Ok(ranges)
+}
+
 /// Converts stored bot protection settings into the protocol representation.
 ///
 /// The whitelist is stored as a JSON array of strings; malformed entries are
 /// skipped so a bad edit in the control plane can never break agent config.
 fn bot_protection_to_proto(
     row: Option<&bot_protection::Model>,
+    verified_bot_ranges: Vec<String>,
 ) -> BotProtectionConfig {
     let Some(row) = row else {
         return BotProtectionConfig {
             enabled: false,
             action: 0,
             known_bots_whitelist: Vec::new(),
+            ip_verification_enabled: false,
+            dns_verification_enabled: false,
+            verified_bot_ranges,
         };
     };
 
@@ -913,6 +939,9 @@ fn bot_protection_to_proto(
         enabled: row.enabled && row.ua_analysis,
         action: action::to_proto(&row.action),
         known_bots_whitelist,
+        ip_verification_enabled: row.ip_verification_enabled,
+        dns_verification_enabled: row.dns_verification_enabled,
+        verified_bot_ranges,
     }
 }
 
@@ -1003,6 +1032,8 @@ pub async fn build_rule_bundle(
     let err_pages = load_error_pages(db).await?;
     let certificates = load_certificates(db, site_row.id).await?;
     let bot = load_bot_protection(db, site_row.id).await?;
+    let verified_bot_ranges =
+        load_verified_bot_ranges(db, bot.as_ref()).await?;
     let mtls = load_mtls(db, site_row.id).await?;
     // A missing settings row means observation mode was never switched on, so
     // the data plane keeps enforcing.
@@ -1043,13 +1074,36 @@ pub async fn build_rule_bundle(
             .map(|row| ssl_to_proto(row, &certificates, &mtls)),
         upstreams: pools_to_proto(&pools, &upstreams),
         routes: routes_to_proto(&routes, &pools, &upstreams, &route_groups),
-        bot_protection: Some(bot_protection_to_proto(bot.as_ref())),
+        bot_protection: Some(bot_protection_to_proto(
+            bot.as_ref(),
+            verified_bot_ranges,
+        )),
         basic_auth: basic_auth_to_proto(basic_auth.as_ref()),
         observation_mode,
     };
 
     bundle.config_hash = fingerprint(&bundle);
     Ok(bundle)
+}
+
+/// Merges a site's hand-entered trusted-proxy ranges with the ranges of the
+/// IP groups it references. Only enabled groups contribute (a disabled group
+/// stops widening the trust scope); duplicates are removed. Agents receive
+/// only the merged flat list, so the data plane stays group-agnostic.
+fn merge_trusted_proxy_ranges(
+    site_ranges: &[String],
+    group_ids: &[Uuid],
+    groups: &HashMap<Uuid, Vec<String>>,
+) -> Vec<String> {
+    let mut merged = site_ranges.to_vec();
+    for group_id in group_ids {
+        if let Some(ranges) = groups.get(group_id) {
+            merged.extend(ranges.iter().cloned());
+        }
+    }
+    merged.sort();
+    merged.dedup();
+    merged
 }
 
 /// Builds a [`SiteConfig`] for the given sites, or for every site when
@@ -1075,6 +1129,27 @@ pub async fn build_site_config(
     }
     let rows = query.all(db).await?;
 
+    // Resolve every trusted-proxy IP group the sites reference in one query;
+    // disabled groups are skipped so they stop widening the trust scope.
+    let mut group_ids: Vec<Uuid> = rows
+        .iter()
+        .flat_map(|row| row.trusted_proxy_group_ids.iter().copied())
+        .collect();
+    group_ids.sort();
+    group_ids.dedup();
+    let group_ranges: HashMap<Uuid, Vec<String>> = if group_ids.is_empty() {
+        HashMap::new()
+    } else {
+        ip_groups::Entity::find()
+            .filter(ip_groups::Column::Enabled.eq(true))
+            .filter(ip_groups::Column::Id.is_in(group_ids))
+            .all(db)
+            .await?
+            .into_iter()
+            .map(|group| (group.id, group.ip_ranges))
+            .collect()
+    };
+
     let mut sites = Vec::with_capacity(rows.len());
     let mut updated_at = Utc.timestamp_opt(0, 0).unwrap();
     for row in &rows {
@@ -1092,6 +1167,11 @@ pub async fn build_site_config(
             trust_proxy_headers: row.trust_proxy_headers,
             trusted_header: row.trusted_header.clone(),
             trust_last_hop: row.trust_last_hop,
+            trusted_proxy_ranges: merge_trusted_proxy_ranges(
+                &row.trusted_proxy_ranges,
+                &row.trusted_proxy_group_ids,
+                &group_ranges,
+            ),
         });
     }
 
@@ -1166,6 +1246,9 @@ mod tests {
                 1,
                 "bingbot"
             ]),
+            verified_ip_group_id: None,
+            ip_verification_enabled: false,
+            dns_verification_enabled: false,
             updated_at: Utc::now(),
         }
     }
@@ -1173,7 +1256,7 @@ mod tests {
     #[test]
     fn bot_protection_proto_skips_malformed_whitelist_entries() {
         let row = bot_row(true, true);
-        let proto = bot_protection_to_proto(Some(&row));
+        let proto = bot_protection_to_proto(Some(&row), Vec::new());
         assert!(proto.enabled);
         assert_eq!(proto.action, action::to_proto("challenge"));
         assert_eq!(
@@ -1183,12 +1266,29 @@ mod tests {
 
         // UA analysis disabled means the data plane has nothing to enforce.
         let row = bot_row(true, false);
-        assert!(!bot_protection_to_proto(Some(&row)).enabled);
+        assert!(!bot_protection_to_proto(Some(&row), Vec::new()).enabled);
 
         // No row yet: disabled defaults.
-        let proto = bot_protection_to_proto(None);
+        let proto = bot_protection_to_proto(None, Vec::new());
         assert!(!proto.enabled);
         assert!(proto.known_bots_whitelist.is_empty());
+    }
+
+    #[test]
+    fn bot_protection_proto_carries_verification_flags() {
+        let mut row = bot_row(true, true);
+        row.ip_verification_enabled = true;
+        row.dns_verification_enabled = true;
+        let proto = bot_protection_to_proto(
+            Some(&row),
+            vec!["192.168.0.0/16".to_string()],
+        );
+        assert!(proto.ip_verification_enabled);
+        assert!(proto.dns_verification_enabled);
+        assert_eq!(
+            proto.verified_bot_ranges,
+            vec!["192.168.0.0/16".to_string()]
+        );
     }
 
     #[test]
@@ -1229,8 +1329,17 @@ mod tests {
         disabled.enabled = false;
         let config =
             waf_config_to_proto(&[rule_to_proto(&disabled)], &[], None);
-        assert!(!config.enabled);
+        // The engine switch is explicit now: a disabled rule only drops the
+        // derived mode, the managed engine itself stays on.
+        assert!(config.enabled);
         assert_eq!(config.mode, WAF_MODE_OFF);
+
+        // An explicit off switch turns the config off regardless of rules.
+        let mut off =
+            waf_settings_row(Uuid::nil(), true, Vec::new(), Vec::new());
+        off.waf_enabled = false;
+        let config = waf_config_to_proto(&monitoring, &[], Some(&off));
+        assert!(!config.enabled);
     }
 
     fn waf_settings_row(
@@ -1258,6 +1367,7 @@ mod tests {
         waf_settings::Model {
             id: Uuid::new_v4(),
             site_id,
+            waf_enabled: true,
             advanced_mode,
             monitor_categories: categories,
             monitor_stacks: stacks,
@@ -1322,9 +1432,11 @@ mod tests {
         assert!(config.enabled);
         assert_eq!(config.monitor_managed_rules, vec!["PINGWAF-1010"]);
 
-        // No rules and no settings row: the pre-existing disabled default.
+        // No rules and no settings row: the engine defaults to on — the
+        // managed ruleset ships enabled for every site until switched off.
         let config = waf_config_to_proto(&[], &[], None);
-        assert!(!config.enabled);
+        assert!(config.enabled);
+        assert_eq!(config.mode, WAF_MODE_OFF);
     }
 
     fn pool_model(
@@ -1469,6 +1581,8 @@ mod tests {
             ip_ranges: vec!["10.0.0.0/8".into(), "192.168.0.0/16".into()],
             action: "allow".into(),
             is_global: false,
+            subscription_kind: None,
+            subscription_enabled: true,
             source_url: None,
             sync_interval_minutes: None,
             last_synced_at: None,
@@ -1509,6 +1623,32 @@ mod tests {
         assert!(protos.is_empty());
     }
 
+    #[test]
+    fn trusted_proxy_ranges_merge_site_and_group_entries() {
+        let group_id = Uuid::nil();
+        let groups = HashMap::from([(
+            group_id,
+            vec!["10.0.0.0/8".to_string(), "203.0.113.0/24".to_string()],
+        )]);
+        let site = vec!["10.0.0.0/8".to_string(), "192.0.2.1/32".to_string()];
+
+        // Site entries and group ranges union; duplicates collapse.
+        let merged = merge_trusted_proxy_ranges(&site, &[group_id], &groups);
+        assert_eq!(
+            merged,
+            vec![
+                "10.0.0.0/8".to_string(),
+                "192.0.2.1/32".to_string(),
+                "203.0.113.0/24".to_string(),
+            ]
+        );
+
+        // A group the loader skipped (disabled or deleted) widens nothing.
+        let missing =
+            merge_trusted_proxy_ranges(&site, &[Uuid::max()], &groups);
+        assert_eq!(missing, site);
+    }
+
     fn ip_rule_model(
         group_id: Option<Uuid>,
         ip_ranges: Vec<String>,
@@ -1536,6 +1676,8 @@ mod tests {
             ip_ranges: ranges.iter().map(|r| r.to_string()).collect(),
             action: "allow".into(),
             is_global: false,
+            subscription_kind: None,
+            subscription_enabled: true,
             source_url: None,
             sync_interval_minutes: None,
             last_synced_at: None,
