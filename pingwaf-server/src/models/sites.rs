@@ -64,6 +64,15 @@ pub mod sites {
         /// Take the last XFF entry (nearest proxy) instead of the first one,
         /// which the client can spoof.
         pub trust_last_hop: bool,
+        /// CIDR ranges of proxies allowed to influence the resolved client
+        /// IP. Only connections from these peers read the forwarded header;
+        /// an empty list trusts nothing.
+        pub trusted_proxy_ranges: Vec<String>,
+        /// IP groups whose ranges are merged into `trusted_proxy_ranges`
+        /// when the agent configuration is built. Lets operators track
+        /// vendor-published proxy networks (e.g. the built-in Cloudflare
+        /// subscription) instead of pasting CIDRs by hand.
+        pub trusted_proxy_group_ids: Vec<Uuid>,
         pub created_at: DateTimeUtc,
         pub updated_at: DateTimeUtc,
     }
