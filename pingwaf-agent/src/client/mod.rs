@@ -448,6 +448,7 @@ impl ControlPlaneClient {
             return Ok(());
         }
         let mut client = ProtoClient::new(channel);
+        let agent_token = self.agent_token.load_full();
 
         let mut interval =
             tokio::time::interval(Duration::from_secs(interval_secs.max(1)));
@@ -465,7 +466,9 @@ impl ControlPlaneClient {
 
             let batch = self.build_metric_batch(agent_id);
             let count = batch.metrics.len();
-            match client.ship_metrics(tokio_stream::once(batch)).await {
+            let mut request = tonic::Request::new(tokio_stream::once(batch));
+            attach_agent_token(&mut request, &agent_token);
+            match client.ship_metrics(request).await {
                 Ok(response) => {
                     let ack = response.into_inner();
                     debug!(
@@ -784,6 +787,7 @@ impl ControlPlaneClient {
         agent_id: &str,
     ) -> anyhow::Result<()> {
         let mut client = ProtoClient::new(channel);
+        let agent_token = self.agent_token.load_full();
         let mut receiver = self.log_receiver.lock().await;
         let mut batch: Vec<proto::LogEntry> =
             Vec::with_capacity(self.config.log_batch_size);
@@ -798,7 +802,8 @@ impl ControlPlaneClient {
             if self.shutdown_signal.load(Ordering::Relaxed) {
                 // Flush remaining logs before shutdown
                 if !batch.is_empty() {
-                    Self::flush_logs(&mut client, &mut batch).await;
+                    Self::flush_logs(&mut client, &mut batch, &agent_token)
+                        .await;
                 }
                 break;
             }
@@ -813,7 +818,12 @@ impl ControlPlaneClient {
 
                             // Flush when batch is full
                             if batch.len() >= self.config.log_batch_size {
-                                Self::flush_logs(&mut client, &mut batch).await;
+                                Self::flush_logs(
+                                    &mut client,
+                                    &mut batch,
+                                    &agent_token,
+                                )
+                                .await;
                             }
                         }
                         None => {
@@ -826,12 +836,14 @@ impl ControlPlaneClient {
                 _ = interval.tick() => {
                     // Periodic flush
                     if !batch.is_empty() {
-                        Self::flush_logs(&mut client, &mut batch).await;
+                        Self::flush_logs(&mut client, &mut batch, &agent_token)
+                            .await;
                     }
                 }
                 _ = self.wait_for_shutdown() => {
                     if !batch.is_empty() {
-                        Self::flush_logs(&mut client, &mut batch).await;
+                        Self::flush_logs(&mut client, &mut batch, &agent_token)
+                            .await;
                     }
                     break;
                 }
@@ -845,6 +857,7 @@ impl ControlPlaneClient {
     async fn flush_logs(
         client: &mut ProtoClient<Channel>,
         batch: &mut Vec<proto::LogEntry>,
+        agent_token: &Option<Arc<String>>,
     ) {
         if batch.is_empty() {
             return;
@@ -854,8 +867,9 @@ impl ControlPlaneClient {
         let count = entries.len();
 
         // Use client-streaming RPC for log shipping
-        let stream = tokio_stream::iter(entries);
-        match client.ship_logs(stream).await {
+        let mut request = tonic::Request::new(tokio_stream::iter(entries));
+        attach_agent_token(&mut request, agent_token);
+        match client.ship_logs(request).await {
             Ok(response) => {
                 let ack = response.into_inner();
                 if ack.success {
@@ -889,6 +903,7 @@ impl ControlPlaneClient {
         agent_id: &str,
     ) -> anyhow::Result<()> {
         let mut client = ProtoClient::new(channel);
+        let agent_token = self.agent_token.load_full();
 
         let flush_interval =
             Duration::from_secs(self.config.log_flush_interval_secs.max(1));
@@ -900,7 +915,8 @@ impl ControlPlaneClient {
             if self.shutdown_signal.load(Ordering::Relaxed) {
                 let entries = cert_event_buffer().drain(agent_id);
                 if !entries.is_empty() {
-                    Self::flush_cert_events(&mut client, entries).await;
+                    Self::flush_cert_events(&mut client, entries, &agent_token)
+                        .await;
                 }
                 break;
             }
@@ -909,13 +925,15 @@ impl ControlPlaneClient {
                 _ = interval.tick() => {
                     let entries = cert_event_buffer().drain(agent_id);
                     if !entries.is_empty() {
-                        Self::flush_cert_events(&mut client, entries).await;
+                        Self::flush_cert_events(&mut client, entries, &agent_token)
+                            .await;
                     }
                 }
                 _ = self.wait_for_shutdown() => {
                     let entries = cert_event_buffer().drain(agent_id);
                     if !entries.is_empty() {
-                        Self::flush_cert_events(&mut client, entries).await;
+                        Self::flush_cert_events(&mut client, entries, &agent_token)
+                            .await;
                     }
                     break;
                 }
@@ -929,10 +947,12 @@ impl ControlPlaneClient {
     async fn flush_cert_events(
         client: &mut ProtoClient<Channel>,
         entries: Vec<proto::CertEventEntry>,
+        agent_token: &Option<Arc<String>>,
     ) {
         let count = entries.len();
-        let stream = tokio_stream::iter(entries);
-        match client.ship_cert_events(stream).await {
+        let mut request = tonic::Request::new(tokio_stream::iter(entries));
+        attach_agent_token(&mut request, agent_token);
+        match client.ship_cert_events(request).await {
             Ok(response) => {
                 let ack = response.into_inner();
                 if ack.success {
@@ -1027,6 +1047,20 @@ impl ControlPlaneClient {
 // ─────────────────────────────────────────────────────────────
 // Helper functions for system information
 // ─────────────────────────────────────────────────────────────
+
+/// Attaches the agent token as `x-agent-token` metadata — the transport-level
+/// credential the control plane authenticates the shipping streams with (the
+/// ship message bodies carry no token field).
+fn attach_agent_token<T>(
+    request: &mut tonic::Request<T>,
+    token: &Option<Arc<String>>,
+) {
+    if let Some(token) = token {
+        if let Ok(value) = token.parse() {
+            request.metadata_mut().insert("x-agent-token", value);
+        }
+    }
+}
 
 /// Enables TLS for `https://` server URLs.
 ///
@@ -1191,6 +1225,19 @@ fn get_total_memory() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attach_agent_token_sets_the_metadata() {
+        let mut request = tonic::Request::new(());
+        attach_agent_token(&mut request, &None);
+        assert!(request.metadata().get("x-agent-token").is_none());
+        let token = Some(Arc::new("abc.def.ghi".to_string()));
+        attach_agent_token(&mut request, &token);
+        assert_eq!(
+            request.metadata().get("x-agent-token").unwrap(),
+            "abc.def.ghi"
+        );
+    }
 
     #[test]
     fn plaintext_urls_skip_tls_config() {
