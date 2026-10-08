@@ -117,7 +117,7 @@ export function SitesListPage() {
       toast.success(t('pages.sites.created'), site.domain)
       closeDialog()
       invalidate()
-      navigate(`/sites/${site.id}/origin`)
+      navigate(`/sites/${site.id}/basic`)
     },
   })
 
@@ -441,7 +441,7 @@ export function SitesListPage() {
                 data={sites}
                 rowKey={(r) => r.id}
                 pageSize={20}
-                onRowClick={(r) => navigate(`/sites/${r.id}/origin`)}
+                onRowClick={(r) => navigate(`/sites/${r.id}/basic`)}
               />
             )}
           </CardBody>
