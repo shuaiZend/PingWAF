@@ -262,6 +262,11 @@ pingwaf agent --server-url "http://control-plane:9090" --api-key "your-agent-key
 
 Generate an agent API key from the dashboard: **Settings → API Keys → Create Key**.
 
+The log, certificate-event and metric shipping streams authenticate with the
+agent token sent as `x-agent-token` gRPC metadata. **Upgrade agents before
+the control plane** in distributed deployments: a new server rejects shipping
+streams that carry no token, while an old server simply ignores the metadata.
+
 ## SSL/TLS Configuration
 
 ### Automatic (ACME / Let's Encrypt)

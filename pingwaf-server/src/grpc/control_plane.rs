@@ -150,6 +150,18 @@ impl ControlPlaneService {
             })
     }
 
+    /// Reads the agent token from the `x-agent-token` request metadata, the
+    /// transport-level credential for the client-streaming ship RPCs (their
+    /// message bodies carry no token field).
+    fn metadata_token<T>(request: &Request<T>) -> String {
+        request
+            .metadata()
+            .get("x-agent-token")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string()
+    }
+
     /// Sites this agent is allowed to see: its own binding, or every site owned
     /// by the user that issued its API key.
     async fn visible_sites(
@@ -466,6 +478,8 @@ impl ControlPlaneTrait for ControlPlaneService {
         &self,
         request: Request<Streaming<LogEntry>>,
     ) -> Result<Response<LogAck>, Status> {
+        let agent = self.authorize(&Self::metadata_token(&request)).await?;
+        let authenticated_id = agent.id;
         let mut inbound = request.into_inner();
         let batch_size = self.config.log_batch_size.max(1);
 
@@ -488,6 +502,18 @@ impl ControlPlaneTrait for ControlPlaneService {
                     }));
                 },
             };
+            if !message.agent_id.is_empty()
+                && message.agent_id != authenticated_id.to_string()
+            {
+                // A foreign stamp is dropped rather than persisted under the
+                // authenticated identity; the rest of the batch continues.
+                tracing::warn!(
+                    claimed = %message.agent_id,
+                    agent_id = %authenticated_id,
+                    "log entry stamped with a foreign agent_id"
+                );
+                continue;
+            }
             received += 1;
 
             let site_id = parse_optional_uuid(&message.site_id);
@@ -545,6 +571,8 @@ impl ControlPlaneTrait for ControlPlaneService {
         &self,
         request: Request<Streaming<CertEventEntry>>,
     ) -> Result<Response<CertEventAck>, Status> {
+        let agent = self.authorize(&Self::metadata_token(&request)).await?;
+        let authenticated_id = agent.id;
         let mut inbound = request.into_inner();
         let batch_size = self.config.log_batch_size.max(1);
         let mut received: u64 = 0;
@@ -568,6 +596,16 @@ impl ControlPlaneTrait for ControlPlaneService {
                     }));
                 },
             };
+            if !message.agent_id.is_empty()
+                && message.agent_id != authenticated_id.to_string()
+            {
+                tracing::warn!(
+                    claimed = %message.agent_id,
+                    agent_id = %authenticated_id,
+                    "certificate event stamped with a foreign agent_id"
+                );
+                continue;
+            }
             received += 1;
             batch.push(certificate_events::ActiveModel {
                 id: Set(Uuid::new_v4()),
@@ -606,6 +644,8 @@ impl ControlPlaneTrait for ControlPlaneService {
         &self,
         request: Request<Streaming<MetricBatch>>,
     ) -> Result<Response<MetricAck>, Status> {
+        let agent = self.authorize(&Self::metadata_token(&request)).await?;
+        let authenticated_id = agent.id;
         let mut inbound = request.into_inner();
         let batch_size = self.config.log_batch_size.max(1);
 
@@ -620,6 +660,14 @@ impl ControlPlaneTrait for ControlPlaneService {
             let Some(agent_id) = parse_optional_uuid(&batch.agent_id) else {
                 continue;
             };
+            if agent_id != authenticated_id {
+                tracing::warn!(
+                    claimed = %batch.agent_id,
+                    agent_id = %authenticated_id,
+                    "metric batch stamped with a foreign agent_id"
+                );
+                continue;
+            }
 
             // Metrics double as liveness proof: touching the heartbeat keeps an
             // agent that only ships metrics from being marked offline, and the
@@ -1565,6 +1613,22 @@ fn positive_i32(value: i64) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn metadata_token_reads_the_x_agent_token_header() {
+        let mut request = tonic::Request::new(());
+        request
+            .metadata_mut()
+            .insert("x-agent-token", "abc.def.ghi".parse().unwrap());
+        assert_eq!(
+            ControlPlaneService::metadata_token(&request),
+            "abc.def.ghi"
+        );
+        assert_eq!(
+            ControlPlaneService::metadata_token(&tonic::Request::new(())),
+            ""
+        );
+    }
 
     #[test]
     fn blanks_become_nulls() {
