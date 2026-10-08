@@ -14,6 +14,7 @@ import { Input } from '@/components/ui/Input'
 import { Select } from '@/components/ui/Select'
 import { Badge } from '@/components/ui/Badge'
 import { Dialog } from '@/components/ui/Dialog'
+import { Switch } from '@/components/ui/Switch'
 import { Table, type Column } from '@/components/ui/Table'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { EmptyState } from '@/components/ui/EmptyState'
@@ -99,6 +100,17 @@ export function IpGroupsPage() {
       toast.error(error.message || t('pages.ipGroups.syncFailed')),
   })
 
+  const subscriptionToggleMutation = useMutation({
+    mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) =>
+      ipGroupsApi.update(id, { subscription_enabled: enabled }),
+    onSuccess: () => invalidate(),
+    onError: () =>
+      toast.error(t('pages.ipGroups.subscriptionUpdateFailed')),
+  })
+
+  const hasSubscription = (row: IpGroupResponse) =>
+    row.subscription_kind !== null || row.source_url !== null
+
   const columns: Column<IpGroupResponse>[] = useMemo(
     () => [
       {
@@ -137,15 +149,43 @@ export function IpGroupsPage() {
       {
         key: 'source',
         header: t('pages.ipGroups.colSource'),
-        accessor: (row) => row.source_url ?? '',
-        cell: (row) =>
-          row.source_url ? (
-            <span className="truncate text-xs text-fg-subtle" title={row.source_url}>
-              {row.source_url}
-            </span>
-          ) : (
-            <span className="text-fg-subtle">—</span>
-          ),
+        accessor: (row) => row.subscription_kind ?? row.source_url ?? '',
+        cell: (row) => (
+          <div className="flex items-center gap-2">
+            {row.subscription_kind === 'builtin' ? (
+              <Badge tone="info">{t('pages.ipGroups.subBuiltin')}</Badge>
+            ) : row.source_url ? (
+              <span
+                className="max-w-52 truncate text-xs text-fg-subtle"
+                title={row.source_url}
+              >
+                {row.source_url}
+              </span>
+            ) : (
+              <span className="text-fg-subtle">—</span>
+            )}
+            {canWrite && hasSubscription(row) && (
+              <span
+                title={
+                  row.subscription_enabled
+                    ? t('pages.ipGroups.subOn')
+                    : t('pages.ipGroups.subOff')
+                }
+              >
+                <Switch
+                  size="sm"
+                  checked={row.subscription_enabled}
+                  onCheckedChange={(value) =>
+                    subscriptionToggleMutation.mutate({
+                      id: row.id,
+                      enabled: value,
+                    })
+                  }
+                />
+              </span>
+            )}
+          </div>
+        ),
       },
       {
         key: 'lastSync',
@@ -177,7 +217,7 @@ export function IpGroupsPage() {
         width: '1%',
         cell: (row) => (
           <div className="flex items-center justify-end gap-1">
-            {row.source_url && (
+            {(row.source_url || row.subscription_kind === 'builtin') && (
               <Button
                 size="sm"
                 variant="ghost"
@@ -211,7 +251,7 @@ export function IpGroupsPage() {
         ),
       },
     ],
-    [t, canWrite, syncMutation],
+    [t, canWrite, syncMutation, subscriptionToggleMutation],
   )
 
   return (
@@ -335,6 +375,10 @@ function GroupDialog({ initial, sites, onClose, onSaved }: GroupDialogProps) {
   const toast = useToast()
   const queryClient = useQueryClient()
   const isEdit = Boolean(initial)
+  // Built-in snapshot groups: the source URL and interval are owned by the
+  // seeder, so the dialog neither edits nor submits them.
+  const isBuiltin =
+    isEdit && initial?.subscription_kind === 'builtin'
 
   const [name, setName] = useState(initial?.name ?? '')
   const [description, setDescription] = useState(initial?.description ?? '')
@@ -374,12 +418,14 @@ function GroupDialog({ initial, sites, onClose, onSaved }: GroupDialogProps) {
         ip_ranges: ipRanges,
         action,
         is_global: isGlobal,
-        source_url: sourceUrl.trim() || null,
-        // 0 = manual; the server maps it to a null interval.
-        sync_interval_minutes: sourceUrl.trim()
-          ? Number(syncInterval)
-          : 0,
         enabled,
+      }
+      if (!isBuiltin) {
+        payload.source_url = sourceUrl.trim() || null
+        // 0 = manual; the server maps it to a null interval.
+        payload.sync_interval_minutes = sourceUrl.trim()
+          ? Number(syncInterval)
+          : 0
       }
 
       if (isEdit && initial) {
@@ -542,23 +588,31 @@ function GroupDialog({ initial, sites, onClose, onSaved }: GroupDialogProps) {
           </div>
         )}
 
-        <Input
-          label={t('pages.ipGroups.fieldSourceUrl')}
-          value={sourceUrl}
-          onChange={(e) => setSourceUrl(e.target.value)}
-          placeholder={t('pages.ipGroups.fieldSourceUrlPh')}
-        />
+        {isBuiltin ? (
+          <p className="rounded-md border border-border bg-recessed px-3 py-2 text-xs text-fg-subtle">
+            {t('pages.ipGroups.builtinNote')}
+          </p>
+        ) : (
+          <>
+            <Input
+              label={t('pages.ipGroups.fieldSourceUrl')}
+              value={sourceUrl}
+              onChange={(e) => setSourceUrl(e.target.value)}
+              placeholder={t('pages.ipGroups.fieldSourceUrlPh')}
+            />
 
-        {sourceUrl.trim() && (
-          <Select
-            label={t('pages.ipGroups.fieldSyncInterval')}
-            value={syncInterval}
-            onChange={(e) => setSyncInterval(e.target.value)}
-            options={SYNC_INTERVAL_OPTIONS.map((option) => ({
-              value: option.value,
-              label: t(`pages.ipGroups.${option.labelKey}`),
-            }))}
-          />
+            {sourceUrl.trim() && (
+              <Select
+                label={t('pages.ipGroups.fieldSyncInterval')}
+                value={syncInterval}
+                onChange={(e) => setSyncInterval(e.target.value)}
+                options={SYNC_INTERVAL_OPTIONS.map((option) => ({
+                  value: option.value,
+                  label: t(`pages.ipGroups.${option.labelKey}`),
+                }))}
+              />
+            )}
+          </>
         )}
 
         <div className="flex justify-end gap-2 pt-2">

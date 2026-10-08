@@ -2676,6 +2676,12 @@ function AboutCard() {
           <SkeletonRows rows={3} columns={2} />
         ) : (
           <>
+            {!view.grpc_tls && (
+              <p className="flex items-start gap-2 rounded-md border border-warning/40 bg-warning/8 px-3 py-2 text-[13px] leading-relaxed text-fg">
+                <Warning weight="duotone" className="mt-0.5 h-4 w-4 shrink-0 text-fg-warning" />
+                {t('pages.settings.aboutGrpcPlaintext')}
+              </p>
+            )}
             <dl className="grid gap-4 text-[13px] sm:grid-cols-2">
               <div>
                 <dt className="text-xs font-medium text-fg-subtle">{t('pages.settings.aboutProduct')}</dt>
