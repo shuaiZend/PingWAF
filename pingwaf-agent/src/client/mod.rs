@@ -217,6 +217,7 @@ impl ControlPlaneClient {
             endpoint,
             &self.config.server_url,
             &self.config.server_ca_cert,
+            &self.config.server_ca_pem,
         )?;
 
         let channel = endpoint.connect().await?;
@@ -621,6 +622,18 @@ impl ControlPlaneClient {
                         .iter()
                         .map(to_proto_blocked_ip)
                         .collect(),
+                    last_config_sync_at: rule_cache.config_synced_at().map(
+                        |at| prost_types::Timestamp {
+                            seconds: at.timestamp(),
+                            nanos: 0,
+                        },
+                    ),
+                    last_policy_sync_at: rule_cache.policy_synced_at().map(
+                        |at| prost_types::Timestamp {
+                            seconds: at.timestamp(),
+                            nanos: 0,
+                        },
+                    ),
                 };
 
                 if hb_tx.send(hb).await.is_err() {
@@ -1065,19 +1078,22 @@ fn attach_agent_token<T>(
 /// Enables TLS for `https://` server URLs.
 ///
 /// `Endpoint::from_shared` does not do this on its own — without the explicit
-/// config the agent would speak cleartext h2 into a TLS port. With a
-/// configured CA file that file is the only trust anchor; otherwise the
-/// bundled webpki roots apply.
+/// config the agent would speak cleartext h2 into a TLS port. With inline CA
+/// PEM (all-in-one) or a configured CA file that material is the only trust
+/// anchor; otherwise the bundled webpki roots apply.
 fn apply_client_tls(
     endpoint: Endpoint,
     server_url: &str,
     ca_cert_path: &Option<String>,
+    ca_cert_pem: &Option<String>,
 ) -> anyhow::Result<Endpoint> {
     if !server_url.starts_with("https://") {
         return Ok(endpoint);
     }
     let mut tls = ClientTlsConfig::new();
-    if let Some(path) = ca_cert_path {
+    if let Some(pem) = ca_cert_pem {
+        tls = tls.ca_certificate(Certificate::from_pem(pem));
+    } else if let Some(path) = ca_cert_path {
         let pem = std::fs::read_to_string(path).map_err(|err| {
             anyhow::anyhow!(
                 "failed to read server CA certificate {path}: {err}"
@@ -1249,9 +1265,13 @@ mod tests {
     #[test]
     fn plaintext_urls_skip_tls_config() {
         let endpoint = Endpoint::from_shared("http://localhost:9090").unwrap();
-        assert!(
-            apply_client_tls(endpoint, "http://localhost:9090", &None).is_ok()
-        );
+        assert!(apply_client_tls(
+            endpoint,
+            "http://localhost:9090",
+            &None,
+            &None
+        )
+        .is_ok());
     }
 
     #[test]
@@ -1261,6 +1281,7 @@ mod tests {
         assert!(apply_client_tls(
             endpoint,
             "https://waf.example.com:9090",
+            &None,
             &None
         )
         .is_ok());
@@ -1274,9 +1295,26 @@ mod tests {
             endpoint,
             "https://waf.example.com:9090",
             &Some("/nonexistent/ca.pem".to_string()),
+            &None,
         )
         .expect_err("a missing CA file must fail before connecting");
         assert!(err.to_string().contains("/nonexistent/ca.pem"));
+    }
+
+    #[test]
+    fn inline_ca_pem_wins_over_the_file() {
+        let endpoint = Endpoint::from_shared("https://127.0.0.1:9090").unwrap();
+        // `Certificate::from_pem` is lazy — validity is checked at handshake —
+        // so an unusable inline PEM still configures successfully. The point
+        // of the test: the (missing) CA file is never read, proving the inline
+        // material takes precedence.
+        assert!(apply_client_tls(
+            endpoint,
+            "https://127.0.0.1:9090",
+            &Some("/nonexistent/ca.pem".to_string()),
+            &Some("not a pem".to_string()),
+        )
+        .is_ok());
     }
 
     fn test_client(initial_ms: u64, max_ms: u64) -> Arc<ControlPlaneClient> {

@@ -405,6 +405,7 @@ fn site_proxy_trust(host: &str) -> Option<ProxyTrust> {
             trust.enabled,
             trust.effective_header(),
             trust.last_hop_only,
+            &trust.trusted_ranges,
         )
     })
 }
@@ -981,6 +982,7 @@ cookie_secret = "test-secret"
                         trust_proxy_headers: false,
                         trusted_header: String::new(),
                         trust_last_hop: false,
+                        trusted_proxy_ranges: Vec::new(),
                     },
                     proto::Site {
                         id: "site-2".to_string(),
@@ -996,6 +998,7 @@ cookie_secret = "test-secret"
                         trust_proxy_headers: false,
                         trusted_header: String::new(),
                         trust_last_hop: false,
+                        trusted_proxy_ranges: Vec::new(),
                     },
                 ],
                 config_hash: "hash-1".to_string(),
