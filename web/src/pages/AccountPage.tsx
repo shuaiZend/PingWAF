@@ -1,10 +1,12 @@
 import { useMemo, useState, type FormEvent } from 'react'
 import { useTranslation } from 'react-i18next'
+import { useNavigate } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   BookOpen,
   Check,
   Copy,
+  EnvelopeSimple,
   Eye,
   EyeSlash,
   Key,
@@ -76,9 +78,11 @@ export function AccountPage() {
 function AccountCard() {
   const { t } = useTranslation()
   const toast = useToast()
+  const navigate = useNavigate()
   const queryClient = useQueryClient()
   const user = useAuthStore((s) => s.user)
   const setUser = useAuthStore((s) => s.setUser)
+  const logout = useAuthStore((s) => s.logout)
 
   const [name, setName] = useState('')
   const [currentPassword, setCurrentPassword] = useState('')
@@ -86,14 +90,23 @@ function AccountCard() {
   const [confirmPassword, setConfirmPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
   const [passwordError, setPasswordError] = useState<string | null>(null)
+  const [email, setEmail] = useState('')
+  const [emailPassword, setEmailPassword] = useState('')
+  const [emailError, setEmailError] = useState<string | null>(null)
 
-  // `null` until the first seed: a name already present at mount must still
-  // reach the form.
+  // `null` until the first seed: a name/e-mail already present at mount must
+  // still reach the form.
   const serverName = user?.name ?? ''
   const [lastServerName, setLastServerName] = useState<string | null>(null)
   if (serverName !== lastServerName) {
     setLastServerName(serverName)
     setName(serverName)
+  }
+  const serverEmail = user?.email ?? ''
+  const [lastServerEmail, setLastServerEmail] = useState<string | null>(null)
+  if (serverEmail !== lastServerEmail) {
+    setLastServerEmail(serverEmail)
+    setEmail(serverEmail)
   }
 
   const profile = useMutation({
@@ -104,6 +117,46 @@ function AccountCard() {
       toast.success(t('pages.settings.profileSaved'))
     },
   })
+
+  const loginName = useMutation({
+    mutationFn: () =>
+      authApi.updateProfile({
+        email: email.trim(),
+        current_password: emailPassword,
+      }),
+    meta: { silentToast: true },
+    // The token bump on the server killed every session, including this one —
+    // sign out and send the operator to the login form.
+    onSuccess: () => {
+      logout()
+      navigate('/login')
+      toast.success(t('pages.settings.loginNameChanged'))
+    },
+    onError: (err) => {
+      const message = errorMessage(err)
+      setEmailError(
+        /current password is incorrect/i.test(message)
+          ? t('pages.settings.passwordWrongCurrent')
+          : message,
+      )
+    },
+  })
+
+  const submitLoginName = (event: FormEvent) => {
+    event.preventDefault()
+    if (loginName.isPending) return
+    setEmailError(null)
+    const trimmed = email.trim()
+    if (trimmed === (user?.email ?? '')) {
+      setEmailError(t('pages.settings.loginNameUnchanged'))
+      return
+    }
+    if (!emailPassword) {
+      setEmailError(t('pages.settings.loginNamePasswordRequired'))
+      return
+    }
+    loginName.mutate()
+  }
 
   const password = useMutation({
     mutationFn: () =>
@@ -188,6 +241,38 @@ function AccountCard() {
             {t('common.save')}
           </Button>
         </div>
+
+        <form onSubmit={submitLoginName} className="border-t border-line pt-4">
+          <div className="grid max-w-3xl grid-cols-1 gap-4 sm:grid-cols-2">
+            <Input
+              type="email"
+              label={t('pages.settings.loginName')}
+              value={email}
+              autoComplete="username"
+              hint={t('pages.settings.loginNameHint')}
+              prefixIcon={<EnvelopeSimple weight="duotone" />}
+              error={emailError ?? undefined}
+              onChange={(e) => setEmail(e.target.value)}
+            />
+            <Input
+              type="password"
+              label={t('pages.settings.currentPassword')}
+              value={emailPassword}
+              autoComplete="current-password"
+              onChange={(e) => setEmailPassword(e.target.value)}
+            />
+          </div>
+          <div className="mt-4 flex flex-wrap items-center gap-3">
+            <Button
+              type="submit"
+              variant="secondary"
+              loading={loginName.isPending}
+              disabled={email.trim() === (user?.email ?? '') || !emailPassword}
+            >
+              {t('common.save')}
+            </Button>
+          </div>
+        </form>
 
         <div className="border-t border-line pt-4">
           <p className="mb-3 text-[13px] font-medium text-fg">
@@ -277,6 +362,7 @@ function UsersAdminCard() {
   const [role, setRole] = useState<string>('viewer')
   const [editing, setEditing] = useState<User | null>(null)
   const [editName, setEditName] = useState('')
+  const [editEmail, setEditEmail] = useState('')
   const [editRole, setEditRole] = useState<string>('viewer')
   const [pendingDisable, setPendingDisable] = useState<User | null>(null)
 
@@ -317,6 +403,7 @@ function UsersAdminCard() {
   const openEdit = (user: User) => {
     setEditing(user)
     setEditName(user.name ?? '')
+    setEditEmail(user.email)
     setEditRole(USER_ROLES.includes(user.role as (typeof USER_ROLES)[number]) ? user.role : 'viewer')
   }
 
@@ -533,13 +620,12 @@ function UsersAdminCard() {
               onClick={() => {
                 if (!editing) return
                 const isSelf = editing.id === me?.id
-                update.mutate({
-                  id: editing.id,
-                  data: {
-                    name: editName.trim(),
-                    ...(isSelf ? {} : { role: editRole }),
-                  },
-                })
+                const data: UpdateUserRequest = { name: editName.trim() }
+                if (editEmail.trim() !== editing.email) {
+                  data.email = editEmail.trim()
+                }
+                if (!isSelf) data.role = editRole
+                update.mutate({ id: editing.id, data })
               }}
             >
               {t('common.save')}
@@ -549,6 +635,14 @@ function UsersAdminCard() {
       >
         {editing && (
           <div className="flex flex-col gap-4">
+            <Input
+              type="email"
+              label={t('pages.settings.loginName')}
+              value={editEmail}
+              autoComplete="off"
+              hint={t('pages.account.users.emailHint')}
+              onChange={(e) => setEditEmail(e.target.value)}
+            />
             <Input
               label={t('pages.settings.displayName')}
               value={editName}

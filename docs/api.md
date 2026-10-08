@@ -110,12 +110,18 @@ Get current user profile. Same shape as the `user` object above, including the
 
 ### PUT /auth/me
 
-Update current user profile.
+Update current user profile. Optionally change the login name (the `email`)
+by supplying `email` together with `current_password` — the server answers
+`400` when the password is missing or wrong and `409` when the login name is
+already taken. A login-name change revokes every outstanding token, so the
+console must sign in again.
 
 **Request:**
 ```json
 {
-  "name": "New Name"
+  "name": "New Name",
+  "email": "new-login-name@example.com",
+  "current_password": "current-password"
 }
 ```
 
@@ -173,9 +179,11 @@ characters. The new account starts with `must_change_password: true`.
 
 ### PUT /users/{user_id}
 
-Update `name`, `role` and/or `disabled`. An administrator cannot change their
-own `role`/`disabled` (`400`); downgrading or disabling the last enabled
-administrator is rejected with `400` as well.
+Update `name`, `role`, `disabled` and/or `email` (the login name). An
+administrator cannot change their own `role`/`disabled` (`400`); downgrading
+or disabling the last enabled administrator is rejected with `400` as well.
+A login-name change revokes the account's outstanding tokens; a duplicate
+login name is rejected with `409`.
 
 ---
 
