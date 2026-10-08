@@ -13,7 +13,9 @@
 services:
   # ─── PingWAF All-in-One (control plane + data plane) ───────────────────────
   pingwaf:
-    image: ghcr.io/shuaizend/pingwaf:latest
+    # Pin a released version for production (e.g. :0.23.0) — :latest tracks
+    # the newest release; :main is the unstable amd64 snapshot of main.
+    image: ghcr.io/shuaizend/pingwaf:${PINGWAF_TAG:-latest}
     # To build from source instead of pulling the pre-built image, uncomment:
     # build:
     #   context: .
@@ -98,7 +100,7 @@ services:
   # PINGWAF_MODE to "server" (control plane only).
   #
   # pingwaf-agent:
-  #   image: ghcr.io/shuaizend/pingwaf:latest
+  #   image: ghcr.io/shuaizend/pingwaf:${PINGWAF_TAG:-latest}
   #   # build:
   #   #   context: .
   #   #   dockerfile: Dockerfile

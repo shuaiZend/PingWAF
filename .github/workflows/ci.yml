@@ -119,10 +119,12 @@ jobs:
       - name: Build
         run: npm run build
 
-  # Verifies the multi-stage Dockerfile still builds and pushes :latest to GHCR.
-  # Only on main: a PR run would burn a lot of minutes for little signal.
+  # Verifies the multi-stage Dockerfile still builds and pushes the amd64
+  # :main snapshot to GHCR. Only on main: a PR run would burn a lot of minutes
+  # for little signal. The :latest tag belongs to the release pipeline, which
+  # publishes a multi-arch manifest — tagging it here would clobber that.
   docker:
-    name: Docker build & push :latest
+    name: Docker build & push :main
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -147,6 +149,6 @@ jobs:
           file: ./Dockerfile
           platforms: linux/amd64
           push: true
-          tags: ghcr.io/shuaizend/pingwaf:latest
+          tags: ghcr.io/shuaizend/pingwaf:main
           cache-from: type=gha,scope=docker
           cache-to: type=gha,scope=docker,mode=max
