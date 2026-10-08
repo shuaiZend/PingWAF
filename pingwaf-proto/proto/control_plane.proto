@@ -261,6 +261,32 @@ message RuleBundle {
   // Observation mode: every protection (WAF, IP/geo rules, bot protection,
   // rate limiting) keeps detecting but only records; the request proceeds.
   bool observation_mode = 23;
+
+  // Per-site failover policy registry: every bundle carries the complete
+  // domain → policy map for ALL sites, so the agent can resolve a site's
+  // disconnected behaviour even for hosts whose rule bundle was never
+  // synced (the only situation in which the policy is consulted).
+  repeated SitePolicy site_policies = 24;
+
+  // Control-plane-wide default for hosts absent from `site_policies`.
+  // Explicit presence (`optional`): an old server leaves the field unset,
+  // which the agent must distinguish from an explicit `false`.
+  optional bool default_fail_open = 25;
+}
+
+// How one site behaves while the control plane is unreachable and the host
+// has no synced rule bundle.
+enum FailoverMode {
+  FAILOVER_INHERIT = 0;  // Follow `default_fail_open`
+  FAILOVER_OPEN = 1;     // Keep proxying through the base engine
+  FAILOVER_CLOSED = 2;   // Answer 503
+}
+
+// One site's entry in the failover policy registry.
+message SitePolicy {
+  string domain = 1;
+  repeated string alternate_domains = 2;
+  FailoverMode mode = 3;
 }
 
 // Site-wide HTTP basic authentication. Enforced by the WAF plugin, which sits

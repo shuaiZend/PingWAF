@@ -12,9 +12,10 @@ use base64::Engine;
 use chrono::{DateTime, TimeZone, Utc};
 use pingwaf_proto::control_plane::{
     BasicAuthConfig, BasicAuthCredential, BotProtectionConfig, CacheRule,
-    ChallengeConfig, CustomErrorPage, GeoConfig, IpAccessRule, RateLimitRule,
-    RewriteOperation, RewriteRule, RouteConfig, RuleBundle, Site, SiteConfig,
-    SslConfig, UpstreamConfig, UpstreamPeer, WafConfig, WafRule,
+    ChallengeConfig, CustomErrorPage, FailoverMode, GeoConfig, IpAccessRule,
+    RateLimitRule, RewriteOperation, RewriteRule, RouteConfig, RuleBundle,
+    Site, SiteConfig, SitePolicy, SslConfig, UpstreamConfig, UpstreamPeer,
+    WafConfig, WafRule,
 };
 use prost::Message;
 use prost_types::Timestamp;
@@ -1005,11 +1006,20 @@ pub async fn build_rule_bundle(
     let bot = load_bot_protection(db, site_row.id).await?;
     let mtls = load_mtls(db, site_row.id).await?;
     // A missing settings row means observation mode was never switched on, so
-    // the data plane keeps enforcing.
-    let observation_mode = defense_settings::Entity::find_by_id(1)
+    // the data plane keeps enforcing; the failover default likewise falls
+    // back to fail-open.
+    let defense_row = defense_settings::Entity::find_by_id(1)
         .one(db)
-        .await?
+        .await?;
+    let observation_mode = defense_row
+        .as_ref()
         .is_some_and(|row| row.observation_mode);
+    let default_fail_open =
+        defense_row.as_ref().is_none_or(|row| row.default_fail_open);
+    // Every bundle carries the complete domain → failover policy registry so
+    // the agent can resolve a site's disconnected behaviour even for hosts
+    // whose rule bundle was never synced.
+    let site_policies = load_site_policies(db).await?;
 
     let custom_rules: Vec<WafRule> =
         rules_rows.iter().map(rule_to_proto).collect();
@@ -1046,10 +1056,41 @@ pub async fn build_rule_bundle(
         bot_protection: Some(bot_protection_to_proto(bot.as_ref())),
         basic_auth: basic_auth_to_proto(basic_auth.as_ref()),
         observation_mode,
+        site_policies,
+        default_fail_open: Some(default_fail_open),
     };
 
     bundle.config_hash = fingerprint(&bundle);
     Ok(bundle)
+}
+
+/// Maps a `sites.failover_policy` string onto the proto enum; unknown values
+/// degrade to `inherit`, matching the agent-side fallback direction.
+fn failover_mode_of(policy: &str) -> FailoverMode {
+    match policy {
+        "open" => FailoverMode::FailoverOpen,
+        "closed" => FailoverMode::FailoverClosed,
+        _ => FailoverMode::FailoverInherit,
+    }
+}
+
+/// Builds the complete domain → failover-policy registry across all sites.
+/// One lightweight query; the result rides in every `RuleBundle`.
+async fn load_site_policies(
+    db: &DatabaseConnection,
+) -> Result<Vec<SitePolicy>, sea_orm::DbErr> {
+    let rows = site::Entity::find()
+        .order_by_asc(site::Column::Domain)
+        .all(db)
+        .await?;
+    Ok(rows
+        .iter()
+        .map(|row| SitePolicy {
+            domain: row.domain.clone(),
+            alternate_domains: row.alternate_domains.clone(),
+            mode: failover_mode_of(&row.failover_policy) as i32,
+        })
+        .collect())
 }
 
 /// Builds a [`SiteConfig`] for the given sites, or for every site when
@@ -1140,6 +1181,55 @@ mod tests {
         let mut other = bundle.clone();
         other.site_id = Uuid::new_v4().to_string();
         assert_ne!(fingerprint(&bundle), fingerprint(&other));
+    }
+
+    #[test]
+    fn failover_fields_change_the_fingerprint() {
+        let bundle = RuleBundle {
+            site_id: Uuid::nil().to_string(),
+            ..Default::default()
+        };
+
+        // A site switching its policy must re-push its bundle.
+        let mut per_site = bundle.clone();
+        per_site.site_policies = vec![SitePolicy {
+            domain: "shop.example.com".to_string(),
+            alternate_domains: vec!["m.shop.example.com".to_string()],
+            mode: failover_mode_of("closed") as i32,
+        }];
+        assert_ne!(fingerprint(&bundle), fingerprint(&per_site));
+        // INHERIT degrades to the same encoding as the field's absence, so a
+        // no-op edit does not manufacture a spurious hash change.
+        let mut inherit = bundle.clone();
+        inherit.site_policies = vec![SitePolicy {
+            domain: "shop.example.com".to_string(),
+            alternate_domains: Vec::new(),
+            mode: failover_mode_of("inherit") as i32,
+        }];
+        assert_ne!(fingerprint(&bundle), fingerprint(&inherit));
+
+        // The global default is `optional`: set is encoded, unset is not.
+        let mut default_open = bundle.clone();
+        default_open.default_fail_open = Some(false);
+        assert_ne!(fingerprint(&bundle), fingerprint(&default_open));
+    }
+
+    #[test]
+    fn unknown_failover_policies_degrade_to_inherit() {
+        assert_eq!(
+            failover_mode_of("open"),
+            FailoverMode::FailoverOpen
+        );
+        assert_eq!(
+            failover_mode_of("closed"),
+            FailoverMode::FailoverClosed
+        );
+        for policy in ["inherit", "", "bogus"] {
+            assert_eq!(
+                failover_mode_of(policy),
+                FailoverMode::FailoverInherit
+            );
+        }
     }
 
     #[test]

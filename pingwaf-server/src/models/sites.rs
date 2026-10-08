@@ -64,6 +64,10 @@ pub mod sites {
         /// Take the last XFF entry (nearest proxy) instead of the first one,
         /// which the client can spoof.
         pub trust_last_hop: bool,
+        /// Behaviour while the control plane is unreachable and the host has
+        /// no synced rule bundle: `inherit` (follow the global default),
+        /// `open` (keep proxying) or `closed` (answer 503).
+        pub failover_policy: String,
         pub created_at: DateTimeUtc,
         pub updated_at: DateTimeUtc,
     }

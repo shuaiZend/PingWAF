@@ -36,6 +36,7 @@ pub mod rules;
 pub mod self_protection;
 pub mod settings;
 pub mod site_basic_auth;
+pub mod site_failover;
 pub mod sites;
 pub mod ssl;
 pub mod state;
@@ -95,6 +96,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(bot::routes())
         .merge(challenge::routes())
         .merge(waf_settings::routes())
+        .merge(site_failover::routes())
         .merge(rewrite::routes())
         .merge(error_pages::routes())
         .merge(debug::routes())

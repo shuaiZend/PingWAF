@@ -593,6 +593,7 @@ mod tests {
             trust_proxy_headers: false,
             trusted_header: crate::models::trusted_header::DEFAULT.to_string(),
             trust_last_hop: true,
+            failover_policy: "inherit".to_string(),
             created_at: timestamp,
             updated_at: timestamp,
         };
