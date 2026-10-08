@@ -143,6 +143,9 @@ file and in the environment is taken from the environment.
 | `db_url` | string | `postgres://pingwaf:pingwaf@localhost:5432/pingwaf` | PostgreSQL DSN |
 | `admin_addr` | string | `0.0.0.0:9080` | REST API + dashboard address |
 | `grpc_addr` | string | `0.0.0.0:9090` | gRPC control plane address |
+| `grpc_tls_cert` | string | — | PEM certificate enabling TLS on the gRPC listener (requires `grpc_tls_key`) |
+| `grpc_tls_key` | string | — | PEM private key for `grpc_tls_cert` |
+| `public_host` | string | — | Host the dashboard is reached under from the outside (optionally with port); pinned into the HTTP-to-HTTPS redirect instead of the client's `Host` header |
 | `jwt_secret` | string | `change-me-in-production` | JWT signing secret (≥16 chars, required) |
 | `admin_email` | string | `admin@pingwaf.local` | Seeded admin email |
 | `admin_password` | string | `pingwaf123` | Seeded admin password |

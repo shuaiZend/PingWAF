@@ -122,6 +122,7 @@ pub fn build_router(state: AppState) -> Router {
 
     let redirect = RedirectState {
         tls_enabled: state.control_tls.is_enabled(),
+        public_host: config.public_host.clone(),
     };
     root.layer(middleware::from_fn_with_state(
         redirect,
@@ -200,9 +201,12 @@ fn build_cors(origins: &[String]) -> CorsLayer {
 ///
 /// Deliberately smaller than [`AppState`] — the middleware needs no database,
 /// which is what lets its connection handling be tested over real sockets.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct RedirectState {
     pub tls_enabled: bool,
+    /// Pinned redirect target (`PINGWAF_PUBLIC_HOST`); `None` reuses the
+    /// request's `Host` header.
+    pub public_host: Option<String>,
 }
 
 /// Sends cleartext requests to the HTTPS listener.
@@ -231,7 +235,7 @@ async fn redirect_cleartext_to_https(
         return next.run(request).await;
     }
 
-    match https_location(&request) {
+    match https_location(&state, &request) {
         // `308` keeps the method and body, which a `301` would not.
         Some(location) => (
             StatusCode::PERMANENT_REDIRECT,
@@ -246,12 +250,21 @@ async fn redirect_cleartext_to_https(
 }
 
 /// The `https://` URL of the request, when the Host header allows building one.
-fn https_location(request: &Request) -> Option<HeaderValue> {
-    let host = request
-        .headers()
-        .get(axum::http::header::HOST)?
-        .to_str()
-        .ok()?;
+///
+/// A configured `PINGWAF_PUBLIC_HOST` pins the target instead: behind a
+/// reverse proxy the client's `Host` header is whatever the caller sent, and
+/// an attacker controlling it would otherwise steer the redirect — and every
+/// client that follows it — anywhere they like.
+fn https_location(state: &RedirectState, request: &Request) -> Option<HeaderValue> {
+    let host = match &state.public_host {
+        Some(host) => host.clone(),
+        None => request
+            .headers()
+            .get(axum::http::header::HOST)?
+            .to_str()
+            .ok()?
+            .to_string(),
+    };
     let target = request
         .uri()
         .path_and_query()
@@ -329,12 +342,19 @@ mod tests {
         let _ = build_cors(&["not a header value".to_string()]);
     }
 
+    fn redirect_state(public_host: Option<&str>) -> RedirectState {
+        RedirectState {
+            tls_enabled: true,
+            public_host: public_host.map(str::to_string),
+        }
+    }
+
     #[test]
     fn the_redirect_target_keeps_the_path_query_and_port() {
-        let location = https_location(&request(
-            "/api/v1/sites?page=2",
-            Some("waf.example.com:9080"),
-        ))
+        let location = https_location(
+            &redirect_state(None),
+            &request("/api/v1/sites?page=2", Some("waf.example.com:9080")),
+        )
         .unwrap();
         assert_eq!(
             location,
@@ -343,11 +363,37 @@ mod tests {
 
         // An empty path still points at the root.
         assert_eq!(
-            https_location(&request("/", Some("localhost:9080"))).unwrap(),
+            https_location(
+                &redirect_state(None),
+                &request("/", Some("localhost:9080"))
+            )
+            .unwrap(),
             "https://localhost:9080/"
         );
         // Without a Host header there is nothing to redirect to.
-        assert!(https_location(&request("/", None)).is_none());
+        assert!(
+            https_location(&redirect_state(None), &request("/", None)).is_none()
+        );
+    }
+
+    #[test]
+    fn the_public_host_pins_the_redirect_target() {
+        // The caller-supplied Host is ignored when one is configured — the
+        // redirect cannot be steered by the request.
+        let location = https_location(
+            &redirect_state(Some("waf.example.com")),
+            &request("/api/v1/sites", Some("attacker.example.net")),
+        )
+        .unwrap();
+        assert_eq!(location, "https://waf.example.com/api/v1/sites");
+
+        // It also covers requests that carry no Host header at all, which the
+        // Host-based fallback would have to let through unredirected.
+        assert_eq!(
+            https_location(&redirect_state(Some("waf.example.com")), &request("/", None))
+                .unwrap(),
+            "https://waf.example.com/"
+        );
     }
 
     #[test]
@@ -385,7 +431,10 @@ mod tests {
             .route("/dashboard", get(|| async { "ok" }))
             .route("/healthz", get(|| async { "ok" }))
             .layer(middleware::from_fn_with_state(
-                RedirectState { tls_enabled: true },
+                RedirectState {
+                    tls_enabled: true,
+                    public_host: None,
+                },
                 redirect_cleartext_to_https,
             ));
 

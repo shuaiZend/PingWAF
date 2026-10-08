@@ -107,6 +107,12 @@ pub struct CommonOpts {
     /// comma separated (DNS names and IP addresses)
     #[arg(long, env = "PINGWAF_TLS_SANS", value_delimiter = ',')]
     pub tls_sans: Vec<String>,
+
+    /// Host the dashboard is reached under from the outside, optionally with
+    /// a port. Pinned into the HTTP-to-HTTPS redirect target instead of the
+    /// client's Host header.
+    #[arg(long, env = "PINGWAF_PUBLIC_HOST")]
+    pub public_host: Option<String>,
 }
 
 /// Control plane server options.

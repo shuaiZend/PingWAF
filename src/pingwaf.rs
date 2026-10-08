@@ -104,6 +104,7 @@ fn apply_tls_opts(config: &mut ServerConfig, opts: &CommonOpts) {
     if !opts.tls_sans.is_empty() {
         config.tls_sans = opts.tls_sans.clone();
     }
+    config.public_host = opts.public_host.clone();
 }
 
 /// Convert CLI agent options into an `AgentConfig`.
