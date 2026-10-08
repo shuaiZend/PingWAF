@@ -352,7 +352,7 @@ async fn update(
 
     let updated = active.update(&state.db).await?;
     tracing::info!(group_id = %target, "IP group updated");
-    propagate_group_change(&state, target).await;
+    propagate_group_change(&state, target, Some(&_current.email)).await;
 
     Ok(Json(updated))
 }
@@ -383,7 +383,7 @@ async fn remove(
         .await?;
 
     tracing::info!(group_id = %target, "IP group deleted");
-    propagate_group_change(&state, target).await;
+    propagate_group_change(&state, target, Some(&_current.email)).await;
 
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -430,7 +430,11 @@ async fn affected_sites(
 
 /// Touches and notifies every site affected by a group change. Best-effort:
 /// the mutation itself already succeeded, so failures only warn.
-async fn propagate_group_change(state: &AppState, group_id: Uuid) {
+async fn propagate_group_change(
+    state: &AppState,
+    group_id: Uuid,
+    actor: Option<&str>,
+) {
     let site_ids = match affected_sites(&state.db, group_id).await {
         Ok(ids) => ids,
         Err(err) => {
@@ -450,7 +454,7 @@ async fn propagate_group_change(state: &AppState, group_id: Uuid) {
                 "failed to touch site after IP group change"
             );
         }
-        notify_config_changed(state, sid).await;
+        notify_config_changed(state, sid, actor).await;
     }
 }
 
@@ -545,7 +549,7 @@ async fn set_sites(
     affected.dedup();
     for sid in affected {
         touch_site(&state, sid).await?;
-        notify_config_changed(&state, sid).await;
+        notify_config_changed(&state, sid, Some(&_current.email)).await;
     }
 
     Ok(StatusCode::NO_CONTENT.into_response())
@@ -563,7 +567,9 @@ async fn sync_now(
     let group = find_group(&state, target).await?;
 
     let updated =
-        sync_subscription(&state, group).await.map_err(|message| {
+        sync_subscription(&state, group, Some(&_current.email))
+            .await
+            .map_err(|message| {
             tracing::warn!(
                 group_id = %target,
                 error = %message,
@@ -587,6 +593,7 @@ async fn sync_now(
 async fn sync_subscription(
     state: &AppState,
     group: ip_groups::Model,
+    actor: Option<&str>,
 ) -> Result<ip_groups::Model, String> {
     let source_url = match &group.source_url {
         Some(url) => url.clone(),
@@ -613,7 +620,7 @@ async fn sync_subscription(
                 .await
                 .map_err(|err| err.to_string())?;
             if changed {
-                propagate_group_change(state, group.id).await;
+                propagate_group_change(state, group.id, actor).await;
             }
             tracing::info!(
                 group_id = %group.id,
@@ -718,7 +725,7 @@ async fn sync_due_groups(state: &AppState) -> Result<(), sea_orm::DbErr> {
             name = %group.name,
             "syncing IP group subscription"
         );
-        if let Err(message) = sync_subscription(state, group).await {
+        if let Err(message) = sync_subscription(state, group, None).await {
             tracing::warn!(
                 error = %message,
                 "scheduled IP group subscription sync failed"

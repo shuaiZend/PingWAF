@@ -7,6 +7,7 @@ use arc_swap::ArcSwap;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use pingap_cache::quota;
+use pingap_core::normalize_host;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
@@ -190,16 +191,18 @@ impl From<i32> for FailoverMode {
 }
 
 /// Folds the per-site policy registry of one bundle into a domain-keyed map,
-/// covering primary and alternate domains alike.
+/// covering primary and alternate domains alike. Keys are normalised
+/// (lowercase) to match what `pingap_core::get_host` produces on the lookup
+/// side, so a `EXAMPLE.com` entry in the control plane still resolves.
 fn failover_registry_from(
     policies: &[proto::SitePolicy],
 ) -> HashMap<String, FailoverMode> {
     let mut registry = HashMap::with_capacity(policies.len());
     for policy in policies {
         let mode = FailoverMode::from(policy.mode);
-        registry.insert(policy.domain.clone(), mode);
+        registry.insert(normalize_host(&policy.domain), mode);
         for alt in &policy.alternate_domains {
-            registry.insert(alt.clone(), mode);
+            registry.insert(normalize_host(alt), mode);
         }
     }
     registry
@@ -959,28 +962,34 @@ impl RuleCache {
         // Swap in updated rules
         self.inner.rcu(|current| {
             let mut updated = (**current).clone();
-            // Remove old domain index entries for this site
+            // Remove old domain index entries for this site. Removal keys
+            // are normalised the same way as insertion keys below, so an
+            // entry written as `EXAMPLE.com` is still findable for cleanup.
             if let Some(old_site) = updated.sites.get(&site_id) {
-                updated.domain_index.remove(&old_site.domain);
+                updated
+                    .domain_index
+                    .remove(&normalize_host(&old_site.domain));
                 for alt in &old_site.alternate_domains {
-                    updated.domain_index.remove(alt);
+                    updated.domain_index.remove(&normalize_host(alt));
                 }
             }
             // Insert new site
-            updated.domain_index.insert(domain.clone(), site_id.clone());
+            updated
+                .domain_index
+                .insert(normalize_host(&domain), site_id.clone());
             for alt in &alternate_domains {
-                updated.domain_index.insert(alt.clone(), site_id.clone());
+                updated
+                    .domain_index
+                    .insert(normalize_host(alt), site_id.clone());
             }
             updated
                 .sites
                 .insert(site_id.clone(), Arc::clone(&site_rules));
             // Every bundle carries the complete failover registry, so one
-            // push refreshes it wholesale. An absent `default_fail_open`
-            // (old control plane) keeps the previous value untouched.
-            if !bundle.site_policies.is_empty() {
-                updated.failover_registry =
-                    failover_registry_from(&bundle.site_policies);
-            }
+            // push refreshes it wholesale — including wholesale deletions
+            // (an empty registry must replace a stale non-empty one).
+            updated.failover_registry =
+                failover_registry_from(&bundle.site_policies);
             if let Some(default_fail_open) = bundle.default_fail_open {
                 updated.global_fail_open = Some(default_fail_open);
             }
@@ -1014,13 +1023,13 @@ impl RuleCache {
             updated.updated_at = Utc::now();
 
             // The bundles embed the same registry in every site; one pass
-            // over whichever bundle carries it is enough.
+            // over whichever bundle carries it is enough. Replacement is
+            // unconditional so deleting the last policy also clears the
+            // agent-side registry.
             for site in &config.sites {
                 if let Some(ref bundle) = site.rules {
-                    if !bundle.site_policies.is_empty() {
-                        updated.failover_registry =
-                            failover_registry_from(&bundle.site_policies);
-                    }
+                    updated.failover_registry =
+                        failover_registry_from(&bundle.site_policies);
                     if let Some(default_fail_open) = bundle.default_fail_open {
                         updated.global_fail_open = Some(default_fail_open);
                     }
@@ -1034,7 +1043,9 @@ impl RuleCache {
                     // Override domain from site-level field
                     if !site.domain.is_empty() {
                         // Remove old domain index
-                        updated.domain_index.remove(&site_rules.domain);
+                        updated
+                            .domain_index
+                            .remove(&normalize_host(&site_rules.domain));
                         site_rules.domain = site.domain.clone();
                     }
                     site_rules.site_id = site.id.clone();
@@ -1050,11 +1061,11 @@ impl RuleCache {
                     // Update domain index
                     updated
                         .domain_index
-                        .insert(site_rules.domain.clone(), site.id.clone());
+                        .insert(normalize_host(&site_rules.domain), site.id.clone());
                     for alt in &site_rules.alternate_domains {
                         updated
                             .domain_index
-                            .insert(alt.clone(), site.id.clone());
+                            .insert(normalize_host(alt), site.id.clone());
                     }
                     updated.sites.insert(site.id.clone(), Arc::new(site_rules));
                 }

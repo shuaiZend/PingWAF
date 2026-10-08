@@ -170,11 +170,11 @@ async fn rollback_version(
     match outcome.scope {
         VersionScope::Site(site_id) => {
             touch_site(&state, site_id).await?;
-            notify_config_changed(&state, site_id).await;
+            notify_config_changed(&state, site_id, Some(&current.email)).await;
         },
         VersionScope::Global => {
             // The restored global settings ride in every bundle.
-            notify_all_config_changed(&state).await;
+            notify_all_config_changed(&state, Some(&current.email)).await;
         },
     }
 

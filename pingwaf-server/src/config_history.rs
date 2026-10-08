@@ -46,6 +46,28 @@ pub const MAX_VERSIONS_PER_SCOPE: u64 = 50;
 /// Versions older than this are pruned regardless of count.
 pub const VERSION_RETENTION_DAYS: i64 = 30;
 
+/// Site tables whose rows carry private key material. Snapshots store these
+/// rows **without** the `key_pem` column — a version snapshot is API-readable
+/// and long-retained, and private keys must never enter either. Restoring
+/// re-arms the keys from the live rows (see `restore_site_rows`).
+pub const PRIVATE_KEY_TABLES: [&str; 3] =
+    ["site_ssl", "mtls_cas", "mtls_client_certificates"];
+
+/// Removes the `key_pem` column from every row of the private-key tables in a
+/// captured snapshot document.
+fn strip_private_keys(tables: &mut BTreeMap<String, Value>) {
+    for name in PRIVATE_KEY_TABLES {
+        if let Some(rows) = tables.get_mut(name).and_then(Value::as_array_mut)
+        {
+            for row in rows.iter_mut() {
+                if let Some(object) = row.as_object_mut() {
+                    object.remove("key_pem");
+                }
+            }
+        }
+    }
+}
+
 /// The scope a version covers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VersionScope {
@@ -131,6 +153,9 @@ pub async fn capture_site_snapshot(
     snapshot_table!(db, tables, rewrite_rules, Id, "rewrite_rules", site_id);
     snapshot_table!(db, tables, mtls_ca, Id, "mtls_cas", site_id);
     snapshot_table!(db, tables, mtls_client_certificate, Id, "mtls_client_certificates", site_id);
+    // Private keys never enter a snapshot: the column is dropped here and
+    // re-filled from the live rows on restore.
+    strip_private_keys(&mut tables);
 
     let site_value = serde_json::to_value(&site_row)
         .map_err(|err| DbErr::Custom(err.to_string()))?;
@@ -294,12 +319,46 @@ macro_rules! delete_site_table {
     }};
 }
 
+/// Reads one site-scoped table's live rows into the decode underlay, keyed by
+/// the JSON `id` field (tables without an `id` column get an empty underlay,
+/// so their rows decode exactly as stored).
+macro_rules! collect_live_rows {
+    ($txn:expr, $map:expr, $module:ident, $name:literal, $site_id:expr) => {{
+        let rows = $module::Entity::find()
+            .filter($module::Column::SiteId.eq($site_id))
+            .all($txn)
+            .await?;
+        let mut by_id = std::collections::HashMap::new();
+        for row in rows {
+            let value = serde_json::to_value(&row)
+                .map_err(|err| DbErr::Custom(err.to_string()))?;
+            by_id.insert(value.get("id").cloned(), value);
+        }
+        $map.insert($name, by_id);
+    }};
+}
+
 macro_rules! restore_site_table {
-    ($txn:expr, $tables:expr, $module:ident, $name:literal) => {{
+    ($txn:expr, $tables:expr, $live:expr, $module:ident, $name:literal) => {{
         if let Some(rows) = $tables.get($name).and_then(Value::as_array) {
             for row in rows {
+                // The live row (when the row still exists) is the decode
+                // underlay: fields the snapshot predates — and private keys
+                // stripped at capture time — are filled from it, so old
+                // snapshots stay restorable across schema growth.
+                let underlay = row.get("id").cloned().and_then(|id| {
+                    $live.get($name).and_then(|by_id| by_id.get(&Some(id)))
+                });
+                let merged = match underlay {
+                    Some(base) => {
+                        let mut merged = base.clone();
+                        merge_objects(&mut merged, row);
+                        merged
+                    },
+                    None => row.clone(),
+                };
                 let model: $module::Model =
-                    serde_json::from_value(row.clone()).map_err(|err| {
+                    serde_json::from_value(merged).map_err(|err| {
                         DbErr::Custom(format!(
                             "cannot decode {} row: {err}",
                             $name
@@ -323,7 +382,34 @@ async fn restore_site_rows(
     let tables = snapshot
         .get("tables")
         .and_then(Value::as_object)
+        .cloned()
         .ok_or_else(|| DbErr::Custom("snapshot has no tables".to_string()))?;
+
+    // The live rows are read before the deletes below and become the decode
+    // underlay for every restored row.
+    let mut live: std::collections::HashMap<
+        &'static str,
+        std::collections::HashMap<Option<Value>, Value>,
+    > = std::collections::HashMap::new();
+    collect_live_rows!(txn, live, rule_groups, "rule_groups", site_id);
+    collect_live_rows!(txn, live, rule, "rules", site_id);
+    collect_live_rows!(txn, live, rate_limit_rules, "rate_limit_rules", site_id);
+    collect_live_rows!(txn, live, cache_rules, "cache_rules", site_id);
+    collect_live_rows!(txn, live, site_routes, "site_routes", site_id);
+    collect_live_rows!(txn, live, site_upstreams, "site_upstreams", site_id);
+    collect_live_rows!(txn, live, site_upstream_pools, "site_upstream_pools", site_id);
+    collect_live_rows!(txn, live, site_ssl, "site_ssl", site_id);
+    collect_live_rows!(txn, live, site_certificates, "site_certificates", site_id);
+    collect_live_rows!(txn, live, ip_access_rules, "ip_access_rules", site_id);
+    collect_live_rows!(txn, live, ip_group_sites, "ip_group_sites", site_id);
+    collect_live_rows!(txn, live, waf_settings, "waf_settings", site_id);
+    collect_live_rows!(txn, live, challenge_settings, "challenge_settings", site_id);
+    collect_live_rows!(txn, live, bot_protection, "bot_protection", site_id);
+    collect_live_rows!(txn, live, geo_rules, "geo_rules", site_id);
+    collect_live_rows!(txn, live, site_basic_auth, "site_basic_auth", site_id);
+    collect_live_rows!(txn, live, rewrite_rules, "rewrite_rules", site_id);
+    collect_live_rows!(txn, live, mtls_ca, "mtls_cas", site_id);
+    collect_live_rows!(txn, live, mtls_client_certificate, "mtls_client_certificates", site_id);
 
     // Down (children first).
     delete_site_table!(txn, rule, site_id);
@@ -347,25 +433,25 @@ async fn restore_site_rows(
     delete_site_table!(txn, mtls_ca, site_id);
 
     // Up (parents first).
-    restore_site_table!(txn, tables, rule_groups, "rule_groups");
-    restore_site_table!(txn, tables, rule, "rules");
-    restore_site_table!(txn, tables, rate_limit_rules, "rate_limit_rules");
-    restore_site_table!(txn, tables, cache_rules, "cache_rules");
-    restore_site_table!(txn, tables, site_upstream_pools, "site_upstream_pools");
-    restore_site_table!(txn, tables, site_upstreams, "site_upstreams");
-    restore_site_table!(txn, tables, site_routes, "site_routes");
-    restore_site_table!(txn, tables, site_ssl, "site_ssl");
-    restore_site_table!(txn, tables, site_certificates, "site_certificates");
-    restore_site_table!(txn, tables, ip_access_rules, "ip_access_rules");
-    restore_site_table!(txn, tables, ip_group_sites, "ip_group_sites");
-    restore_site_table!(txn, tables, waf_settings, "waf_settings");
-    restore_site_table!(txn, tables, challenge_settings, "challenge_settings");
-    restore_site_table!(txn, tables, bot_protection, "bot_protection");
-    restore_site_table!(txn, tables, geo_rules, "geo_rules");
-    restore_site_table!(txn, tables, site_basic_auth, "site_basic_auth");
-    restore_site_table!(txn, tables, rewrite_rules, "rewrite_rules");
-    restore_site_table!(txn, tables, mtls_ca, "mtls_cas");
-    restore_site_table!(txn, tables, mtls_client_certificate, "mtls_client_certificates");
+    restore_site_table!(txn, tables, live, rule_groups, "rule_groups");
+    restore_site_table!(txn, tables, live,rule, "rules");
+    restore_site_table!(txn, tables, live,rate_limit_rules, "rate_limit_rules");
+    restore_site_table!(txn, tables, live,cache_rules, "cache_rules");
+    restore_site_table!(txn, tables, live,site_upstream_pools, "site_upstream_pools");
+    restore_site_table!(txn, tables, live,site_upstreams, "site_upstreams");
+    restore_site_table!(txn, tables, live,site_routes, "site_routes");
+    restore_site_table!(txn, tables, live,site_ssl, "site_ssl");
+    restore_site_table!(txn, tables, live,site_certificates, "site_certificates");
+    restore_site_table!(txn, tables, live,ip_access_rules, "ip_access_rules");
+    restore_site_table!(txn, tables, live,ip_group_sites, "ip_group_sites");
+    restore_site_table!(txn, tables, live,waf_settings, "waf_settings");
+    restore_site_table!(txn, tables, live,challenge_settings, "challenge_settings");
+    restore_site_table!(txn, tables, live,bot_protection, "bot_protection");
+    restore_site_table!(txn, tables, live,geo_rules, "geo_rules");
+    restore_site_table!(txn, tables, live,site_basic_auth, "site_basic_auth");
+    restore_site_table!(txn, tables, live,rewrite_rules, "rewrite_rules");
+    restore_site_table!(txn, tables, live,mtls_ca, "mtls_cas");
+    restore_site_table!(txn, tables, live,mtls_client_certificate, "mtls_client_certificates");
 
     // The site row itself: overlay the snapshot onto the live row so columns
     // added after the snapshot keep their current values.
@@ -596,5 +682,79 @@ mod tests {
         let id = Uuid::new_v4();
         assert_eq!(VersionScope::Site(id).column_value(), Some(id));
         assert_eq!(VersionScope::Global.column_value(), None);
+    }
+
+    #[test]
+    fn strip_private_keys_removes_pem_from_all_private_tables() {
+        let mut tables = BTreeMap::from([
+            (
+                "site_ssl".to_string(),
+                json!([ { "id": "1", "key_pem": "PRIVATE", "cert_pem": "CERT" } ]),
+            ),
+            (
+                "mtls_cas".to_string(),
+                json!([ { "id": "2", "key_pem": "CA-KEY" } ]),
+            ),
+            (
+                "mtls_client_certificates".to_string(),
+                json!([
+                    { "id": "3", "key_pem": "K1" },
+                    { "id": "4", "key_pem": "K2" },
+                ]),
+            ),
+            // Non-private tables are untouched, including same-named fields.
+            (
+                "site_routes".to_string(),
+                json!([ { "id": "5", "key_pem": "NOT-A-KEY" } ]),
+            ),
+        ]);
+        strip_private_keys(&mut tables);
+        assert!(tables["site_ssl"][0].get("key_pem").is_none());
+        assert_eq!(tables["site_ssl"][0]["cert_pem"], json!("CERT"));
+        assert!(tables["mtls_cas"][0].get("key_pem").is_none());
+        assert!(tables["mtls_client_certificates"][0].get("key_pem").is_none());
+        assert!(tables["mtls_client_certificates"][1].get("key_pem").is_none());
+        // Only the three private tables are stripped.
+        assert_eq!(tables["site_routes"][0]["key_pem"], json!("NOT-A-KEY"));
+    }
+
+    #[test]
+    fn strip_private_keys_handles_missing_or_non_array_tables() {
+        let mut tables = BTreeMap::from([
+            ("mtls_cas".to_string(), json!(null)),
+            ("site_ssl".to_string(), json!("not-an-array")),
+        ]);
+        // Must not panic on absent or malformed shapes.
+        strip_private_keys(&mut tables);
+        assert_eq!(tables["mtls_cas"], json!(null));
+        assert_eq!(tables["site_ssl"], json!("not-an-array"));
+    }
+
+    #[test]
+    fn underlay_lookup_falls_back_when_row_is_absent() {
+        // Mirrors the underlay resolution inside restore_site_table!: a row
+        // deleted since the snapshot has no live underlay and must decode
+        // exactly as stored.
+        let mut by_id = std::collections::HashMap::new();
+        by_id.insert(Some(json!("kept")), json!({ "id": "kept", "key_pem": "LIVE" }));
+        let live: BTreeMap<&str, std::collections::HashMap<_, _>> =
+            BTreeMap::from([("site_ssl", by_id)]);
+
+        let deleted_row = json!({ "id": "deleted", "name": "gone" });
+        let underlay = deleted_row.get("id").cloned().and_then(|id| {
+            live.get("site_ssl").and_then(|by_id| by_id.get(&Some(id)))
+        });
+        assert!(underlay.is_none());
+
+        let kept_row = json!({ "id": "kept", "name": "renamed" });
+        let underlay = kept_row.get("id").cloned().and_then(|id| {
+            live.get("site_ssl").and_then(|by_id| by_id.get(&Some(id)))
+        });
+        assert!(underlay.is_some());
+        let mut merged = underlay.unwrap().clone();
+        merge_objects(&mut merged, &kept_row);
+        // Stripped key comes back from the live row; snapshot fields win.
+        assert_eq!(merged["key_pem"], json!("LIVE"));
+        assert_eq!(merged["name"], json!("renamed"));
     }
 }

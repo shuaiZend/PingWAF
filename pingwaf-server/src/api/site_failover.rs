@@ -88,7 +88,7 @@ async fn update_failover(
 
     tracing::info!(site_id = %id, policy = %updated.failover_policy, "failover policy updated");
     touch_site(&state, id).await?;
-    notify_config_changed(&state, id).await;
+    notify_config_changed(&state, id, Some(&current.email)).await;
 
     Ok(Json(FailoverSettings {
         failover_policy: updated.failover_policy,

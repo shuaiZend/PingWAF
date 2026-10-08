@@ -13,6 +13,9 @@ test-util = []
 [dependencies]
 pingwaf-proto = { path = "../pingwaf-proto" }
 pingap-cache = { workspace = true }
+# Host-keyed caches must key on the same canonical form the request path
+# produces (`pingap_core::get_host` → `normalize_host`).
+pingap-core = { workspace = true }
 tonic = { workspace = true, features = ["tls-ring", "tls-webpki-roots"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "signal", "fs"] }
 tokio-stream = { workspace = true, features = ["sync"] }

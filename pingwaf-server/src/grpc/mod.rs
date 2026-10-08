@@ -38,7 +38,11 @@ use crate::models::{agent, config_version};
 /// A successful build also records a configuration version (unless the latest
 /// version already carries this fingerprint), which is what makes the console
 /// and the `pingwaf config` CLI able to list and roll back changes.
-pub async fn notify_config_changed(state: &AppState, site_id: Uuid) {
+pub async fn notify_config_changed(
+    state: &AppState,
+    site_id: Uuid,
+    actor: Option<&str>,
+) {
     // Build the new configuration. If the database is unhappy there is nothing
     // worth sending, so bail out with a warning.
     let site_config = match build_site_config(&state.db, Some(&[site_id])).await
@@ -56,7 +60,7 @@ pub async fn notify_config_changed(state: &AppState, site_id: Uuid) {
         &state.db,
         VersionScope::Site(site_id),
         config_version::source::API,
-        None,
+        actor,
         &site_config.config_hash,
     )
     .await
@@ -114,7 +118,7 @@ pub async fn notify_config_changed(state: &AppState, site_id: Uuid) {
 /// table and built in one pass; each agent then receives only its own site, the
 /// same payload a normal push carries, so an agent's cache never grows beyond
 /// the site it is bound to.
-pub async fn notify_all_config_changed(state: &AppState) {
+pub async fn notify_all_config_changed(state: &AppState, actor: Option<&str>) {
     let agents = match agent::Entity::find().all(&state.db).await {
         Ok(rows) => rows,
         Err(err) => {
@@ -143,7 +147,7 @@ pub async fn notify_all_config_changed(state: &AppState) {
         &state.db,
         VersionScope::Global,
         config_version::source::API,
-        None,
+        actor,
         &config.config_hash,
     )
     .await

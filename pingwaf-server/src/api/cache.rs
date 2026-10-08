@@ -211,7 +211,7 @@ async fn create(
 
     tracing::info!(site_id = %id, rule_id = %model.id, "cache rule created");
     touch_site(&state, id).await?;
-    notify_config_changed(&state, id).await;
+    notify_config_changed(&state, id, Some(&current.email)).await;
 
     Ok((StatusCode::CREATED, Json(model)).into_response())
 }
@@ -278,7 +278,7 @@ async fn update(
     let updated = active.update(&state.db).await?;
     tracing::info!(site_id = %id, rule_id = %target, "cache rule updated");
     touch_site(&state, id).await?;
-    notify_config_changed(&state, id).await;
+    notify_config_changed(&state, id, Some(&current.email)).await;
 
     Ok(Json(updated))
 }
@@ -300,7 +300,7 @@ async fn remove(
 
     tracing::info!(site_id = %id, rule_id = %target, "cache rule deleted");
     touch_site(&state, id).await?;
-    notify_config_changed(&state, id).await;
+    notify_config_changed(&state, id, Some(&current.email)).await;
 
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -502,7 +502,7 @@ async fn update_settings(
 
         tracing::info!(site_id = %id, quota_mb = quota, "cache quota updated");
         touch_site(&state, id).await?;
-        notify_config_changed(&state, id).await;
+        notify_config_changed(&state, id, Some(&current.email)).await;
     }
 
     let refreshed = load_site_read(&state.db, id, &current).await?;
@@ -810,7 +810,7 @@ async fn seed_defaults(
 
     if inserted > 0 {
         touch_site(&state, id).await?;
-        notify_config_changed(&state, id).await;
+        notify_config_changed(&state, id, Some(&current.email)).await;
     }
 
     Ok(Json(serde_json::json!({

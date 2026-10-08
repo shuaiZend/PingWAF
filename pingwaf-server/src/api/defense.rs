@@ -90,7 +90,7 @@ async fn update(
     // The flag rides inside every rule bundle, so each site's fingerprint
     // changes; push the new configuration now instead of waiting for the
     // watcher or the next periodic sync.
-    notify_all_config_changed(&state).await;
+    notify_all_config_changed(&state, None).await;
 
     Ok(Json(updated))
 }
@@ -120,7 +120,7 @@ pub async fn start_watch_task(state: AppState) -> tokio::task::JoinHandle<()> {
                 observation_mode = row.observation_mode,
                 "defense settings changed outside the API, pushing to agents"
             );
-            notify_all_config_changed(&state).await;
+            notify_all_config_changed(&state, None).await;
         }
     })
 }
