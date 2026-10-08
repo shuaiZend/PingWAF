@@ -1373,6 +1373,12 @@ Request and response bodies are prefixes: the agent stores at most
 the real size and a `*_truncated` flag, so a short body is never mistaken for a
 complete one.
 
+Repeated header names are folded into the single value the stored map accepts:
+most headers join with `, ` (the way HTTP prescribes), while `Set-Cookie`
+values join with a newline (`\n`) — cookie values routinely carry commas of
+their own inside `Expires` attributes, so a comma join would make the pairs
+indistinguishable.
+
 **Console search syntax.** The log pages accept one Kibana-style query string and
 translate it into the parameters below, so the same filters are reachable from
 the API:
@@ -1502,7 +1508,7 @@ List access logs, newest first.
       "request_body": "q=hello",
       "request_body_size": 7,
       "request_body_truncated": false,
-      "response_headers": {"content-type": "text/html", "set-cookie": "…"},
+      "response_headers": {"content-type": "text/html", "set-cookie": "a=1; Path=/\nb=2; Expires=Wed, 21 Oct 2026 07:28:00 GMT"},
       "response_body": "<!doctype html>…",
       "response_body_size": 5120,
       "response_body_truncated": true
