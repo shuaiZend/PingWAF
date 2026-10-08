@@ -31,6 +31,8 @@ hex = { workspace = true }
 hmac = { workspace = true }
 # AES-256-GCM at-rest sealing of notification channel secrets.
 ring = { workspace = true }
+# GeoIP lookup for login anomaly detection (uploaded mmdb + fallback db).
+maxminddb = { workspace = true }
 # SMTP client behind the notification system's e-mail channel.
 lettre = { workspace = true }
 jsonwebtoken = { workspace = true }

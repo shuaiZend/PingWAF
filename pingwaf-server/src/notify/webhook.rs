@@ -331,7 +331,7 @@ mod tests {
 
     #[test]
     fn private_addresses_are_blocked() {
-        use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+        use std::net::IpAddr;
         let blocked = [
             "127.0.0.1", "10.1.2.3", "172.16.0.9", "172.31.255.1",
             "192.168.1.1", "169.254.169.254", "0.0.0.0", "100.64.0.1",

@@ -301,6 +301,9 @@ pub async fn start_server(mut config: ServerConfig) -> anyhow::Result<()> {
     // ── 9c. Start the log retention sweeper ─────────────────────────────────
     let _retention_handle = api::logs::start_retention_scheduler(state.clone());
 
+    // ── 9d. Start the certificate expiry scanner ────────────────────────────
+    let _cert_expiry_handle = notify::cert_expiry::start(db.clone());
+
     // ── 10. Spawn and wait for shutdown ─────────────────────────────────────
     tokio::select! {
         result = serve_http(http_listener, router, control_tls.clone()) => {

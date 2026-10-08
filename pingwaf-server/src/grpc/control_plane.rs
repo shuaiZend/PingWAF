@@ -905,7 +905,15 @@ async fn persist_site_certificates(
                     "recorded edge certificate state"
                 );
                 notify_certificate_state(
-                    site_id, row_status, expires_at, now,
+                    site_id,
+                    row_status,
+                    expires_at,
+                    now,
+                    crate::notify::global()
+                        .map(|manager| {
+                            manager.settings().cert_expiry_warn_days
+                        })
+                        .unwrap_or(30),
                 )
                 .await;
             },
@@ -922,13 +930,14 @@ async fn persist_site_certificates(
 }
 
 /// Raises certificate alerts when the edge reports a state transition:
-/// expiry inside the 30-day warning window, or a certificate that has
-/// expired. Repeats are suppressed by the notification dedup.
+/// expiry inside the configurable warning window, or a certificate that
+/// has expired. Repeats are suppressed by the notification dedup.
 async fn notify_certificate_state(
     site_id: Uuid,
     status: &str,
     expires_at: DateTime<Utc>,
     now: DateTime<Utc>,
+    warn_days: u32,
 ) {
     if status == cert_status::EXPIRED {
         crate::notify::emit(crate::notify::AlertEvent {
@@ -943,13 +952,16 @@ async fn notify_certificate_state(
                 "site_id": site_id,
                 "expires_at": expires_at.to_rfc3339(),
             })),
-            dedup_key: Some(site_id.to_string()),
+            // Same shape as the hourly scanner's key, so a heartbeat and a
+            // sweep describing the same expiry suppress each other.
+            dedup_key: Some(format!("{site_id}:{}", expires_at.date_naive())),
         })
         .await;
         return;
     }
 
-    let warn_from = now + chrono::Duration::days(30);
+    let warn_from =
+        now + chrono::Duration::days(i64::from(warn_days));
     if status == cert_status::ACTIVE && expires_at <= warn_from {
         let days_left = (expires_at - now).num_days().max(0);
         crate::notify::emit(crate::notify::AlertEvent {
