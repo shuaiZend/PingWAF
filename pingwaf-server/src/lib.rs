@@ -391,6 +391,14 @@ async fn seed_admin(
     use sea_orm::ActiveModelTrait;
     admin.insert(db).await?;
 
+    if config.default_admin_password == config::DEFAULT_ADMIN_PASSWORD {
+        tracing::warn!(
+            email = %config.default_admin_email,
+            "default administrator credentials are active; the dashboard \
+             forces a password change at first login"
+        );
+    }
+
     tracing::info!(
         email = %config.default_admin_email,
         "default administrator account created"
