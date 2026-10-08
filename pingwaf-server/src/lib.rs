@@ -313,6 +313,11 @@ async fn resolve_jwt_secret(
         return Ok(());
     }
 
+    tracing::warn!(
+        "JWT secret is the public placeholder; a random secret is persisted \
+         and used instead"
+    );
+
     let existing = instance_setting::Entity::find_by_id(JWT_SECRET_KEY)
         .one(db)
         .await?;
