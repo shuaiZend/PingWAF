@@ -19,6 +19,7 @@ pub mod bot_protection;
 pub mod certificate_events;
 pub mod certificates;
 pub mod challenge_settings;
+pub mod config_versions;
 pub mod control_plane_tls;
 pub mod defense_settings;
 pub mod error_pages;
@@ -30,6 +31,7 @@ pub mod ip_group_sites;
 pub mod ip_groups;
 pub mod log_retention;
 pub mod mtls;
+pub mod notifications;
 pub mod passkeys;
 pub mod rate_limit_stats;
 pub mod rewrite_rules;
@@ -52,9 +54,14 @@ pub use api_protection::{
     control_plane_access_logs as control_plane_access_log,
 };
 pub use certificates::site_certificates;
+pub use config_versions as config_version;
 pub use control_plane_tls::{
     control_plane_certificates as control_plane_certificate,
     source as tls_source,
+};
+pub use notifications::{
+    channel_kind, event_type, notification_channels as notification_channel,
+    notification_events as notification_event, severity,
 };
 pub use host_samples::host_samples as host_sample;
 pub use instance_settings::instance_settings as instance_setting;

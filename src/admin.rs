@@ -38,13 +38,17 @@ use pingwaf_server::api::self_protection::{self, effective_allowlist};
 use pingwaf_server::auth::password::{
     MAX_PASSWORD_BYTES, hash_password, validate_password,
 };
+use pingwaf_server::config_history::{self, VersionScope};
 use pingwaf_server::models::{
-    api_protection_setting, defense_settings, ip_groups, role, user,
+    api_protection_setting, config_version, defense_settings, ip_groups,
+    role, site, user,
 };
 
 use crate::cli::{
-    AddAdminOpts, AllowlistOpts, DbOpts, ModeCommand, OnOff, PingWafCli,
-    PingWafCommand, ResetPasswordOpts, SecurityCommand, UserSubcommand,
+    AddAdminOpts, AllowlistOpts, ConfigCommand, ConfigHistoryOpts,
+    ConfigRollbackOpts, ConfigShowOpts, DbOpts, ModeCommand, OnOff,
+    PingWafCli, PingWafCommand, ResetPasswordOpts, SecurityCommand,
+    UserSubcommand,
 };
 
 /// Runs a maintenance subcommand.
@@ -57,6 +61,7 @@ pub async fn run(cli: PingWafCli) -> anyhow::Result<()> {
         PingWafCommand::User { command } => user_command(command).await,
         PingWafCommand::Mode { command } => mode_command(command).await,
         PingWafCommand::Security { command } => security_command(command).await,
+        PingWafCommand::Config { command } => config_command(command).await,
         PingWafCommand::Server(_)
         | PingWafCommand::Agent(_)
         | PingWafCommand::AllInOne(_) => {
@@ -409,6 +414,246 @@ async fn set_allowlist(opts: AllowlistOpts) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ─────────────────────────────────────────────────────────────
+// config (version history)
+// ─────────────────────────────────────────────────────────────
+
+async fn config_command(command: ConfigCommand) -> anyhow::Result<()> {
+    match command {
+        ConfigCommand::History(opts) => config_history_cmd(opts).await,
+        ConfigCommand::Show(opts) => config_show(opts).await,
+        ConfigCommand::Rollback(opts) => config_rollback(opts).await,
+    }
+}
+
+/// Resolves the `--site` filter to a scope: a site UUID, `global`, or
+/// `None` for "every scope".
+async fn resolve_scope(
+    db: &DatabaseConnection,
+    site_filter: Option<&str>,
+) -> anyhow::Result<Option<VersionScope>> {
+    let Some(raw) = site_filter else {
+        return Ok(None);
+    };
+    let raw = raw.trim();
+    if raw.eq_ignore_ascii_case("global") {
+        return Ok(Some(VersionScope::Global));
+    }
+    let id = Uuid::parse_str(raw)
+        .with_context(|| format!("'--site {raw}' is not a UUID or 'global'"))?;
+    let exists = site::Entity::find_by_id(id).one(db).await?.is_some();
+    if !exists {
+        bail!("no site with id {id}");
+    }
+    Ok(Some(VersionScope::Site(id)))
+}
+
+async fn config_history_cmd(opts: ConfigHistoryOpts) -> anyhow::Result<()> {
+    use sea_orm::{QueryFilter, QuerySelect};
+
+    let db = connect(&opts.db.db_url).await?;
+    let scope = resolve_scope(&db, opts.site.as_deref()).await?;
+
+    let mut query = config_version::Entity::find()
+        .order_by_desc(config_version::Column::Id)
+        .limit(u64::from(opts.limit.clamp(1, 200)));
+    query = match scope {
+        None => query,
+        Some(VersionScope::Global) => {
+            query.filter(config_version::Column::SiteId.is_null())
+        },
+        Some(VersionScope::Site(id)) => {
+            query.filter(config_version::Column::SiteId.eq(id))
+        },
+    };
+    let rows = query
+        .all(&db)
+        .await
+        .context("cannot read the config_versions table; has the control plane booted against this database?")?;
+
+    if rows.is_empty() {
+        println!("no configuration versions recorded yet");
+        return Ok(());
+    }
+
+    let referenced: Vec<Uuid> =
+        rows.iter().filter_map(|row| row.site_id).collect();
+    let domains: std::collections::HashMap<Uuid, String> =
+        site::Entity::find()
+            .filter(site::Column::Id.is_in(referenced))
+            .all(&db)
+            .await?
+            .into_iter()
+            .map(|row| (row.id, row.domain))
+            .collect();
+
+    println!(
+        "{:<6} {:<36} {:<18} {:<10} {:<24} {}",
+        "VERSION", "SCOPE", "CONFIG HASH", "SOURCE", "CREATED (UTC)", "CHANGES"
+    );
+    for row in &rows {
+        let scope_label = match row.site_id {
+            Some(id) => domains
+                .get(&id)
+                .cloned()
+                .unwrap_or_else(|| id.to_string()),
+            None => "global".to_string(),
+        };
+        let changes = row
+            .summary
+            .as_ref()
+            .and_then(|summary| summary.as_object())
+            .map(|entries| {
+                let mut parts: Vec<String> = entries
+                    .iter()
+                    .map(|(table, count)| {
+                        format!(
+                            "{table}={}",
+                            count.as_u64().unwrap_or(0)
+                        )
+                    })
+                    .collect();
+                parts.sort();
+                parts.join(",")
+            })
+            .unwrap_or_default();
+        println!(
+            "{:<6} {:<36} {:<18} {:<10} {:<24} {}",
+            row.id,
+            truncate_display(&scope_label, 36),
+            truncate_display(&row.config_hash, 18),
+            truncate_display(&row.source, 10),
+            row.created_at.format("%Y-%m-%d %H:%M:%S"),
+            changes
+        );
+    }
+    println!();
+    println!("{} version(s); details: pingwaf config show <version>", rows.len());
+    Ok(())
+}
+
+async fn config_show(opts: ConfigShowOpts) -> anyhow::Result<()> {
+    let db = connect(&opts.db.db_url).await?;
+    let row = config_version::Entity::find_by_id(opts.version)
+        .one(&db)
+        .await
+        .context("cannot read the config_versions table")?
+        .with_context(|| format!("no configuration version {}", opts.version))?;
+
+    if opts.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&row.snapshot).context(
+                "cannot serialise the snapshot"
+            )?
+        );
+        return Ok(());
+    }
+
+    let scope_label = match row.site_id {
+        Some(id) => format!("site {id}"),
+        None => "global".to_string(),
+    };
+    println!("version:      {}", row.id);
+    println!("scope:        {scope_label}");
+    println!("config hash:  {}", row.config_hash);
+    println!("source:       {}", row.source);
+    println!("actor:        {}", row.actor.as_deref().unwrap_or("-"));
+    println!(
+        "created at:   {}",
+        row.created_at.format("%Y-%m-%d %H:%M:%S UTC")
+    );
+    if let Some(entries) =
+        row.summary.as_ref().and_then(|summary| summary.as_object())
+    {
+        println!("snapshot summary:");
+        for (table, count) in entries {
+            println!(
+                "  {table:<32} {} row(s)",
+                count.as_u64().unwrap_or(0)
+            );
+        }
+    }
+    println!();
+    println!(
+        "full snapshot: pingwaf config show {} --json",
+        row.id
+    );
+    Ok(())
+}
+
+async fn config_rollback(opts: ConfigRollbackOpts) -> anyhow::Result<()> {
+    let db = connect(&opts.db.db_url).await?;
+    let row = config_version::Entity::find_by_id(opts.version)
+        .one(&db)
+        .await
+        .context("cannot read the config_versions table")?
+        .with_context(|| format!("no configuration version {}", opts.version))?;
+
+    let scope_label = match row.site_id {
+        Some(id) => format!("site {id}"),
+        None => "the global settings".to_string(),
+    };
+    if !opts.yes {
+        println!(
+            "This restores configuration version {} ({scope_label}, \
+             recorded {} from {}).",
+            row.id,
+            row.created_at.format("%Y-%m-%d %H:%M:%S UTC"),
+            row.source
+        );
+        print!("Type 'yes' to continue: ");
+        use std::io::Write as _;
+        std::io::stdout().flush().ok();
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        let answer = answer.trim();
+        if !(answer.eq_ignore_ascii_case("yes") || answer.eq_ignore_ascii_case("y"))
+        {
+            bail!("aborted");
+        }
+    }
+
+    let outcome =
+        config_history::rollback(&db, opts.version, Some("cli"))
+            .await
+            .map_err(|err| {
+                if matches!(
+                    err,
+                    sea_orm::DbErr::RecordNotFound(_)
+                ) {
+                    anyhow::anyhow!("no configuration version {}", opts.version)
+                } else {
+                    anyhow::anyhow!("rollback failed: {err}")
+                }
+            })?;
+
+    println!(
+        "restored configuration version {} ({})",
+        outcome.restored_version,
+        outcome.scope.describe()
+    );
+    if let Some(new_version) = outcome.new_version {
+        println!("recorded as new version {new_version}");
+    }
+    println!(
+        "note: a running control plane is not pushed this change; agents \
+         pick it up on their next full sync or restart. Use the console \
+         rollback for an immediate push."
+    );
+    Ok(())
+}
+
+/// Shortens a label for fixed-width table columns without cutting a
+/// multi-byte character.
+fn truncate_display(value: &str, max: usize) -> String {
+    if value.chars().count() <= max {
+        return value.to_string();
+    }
+    let cut: String = value.chars().take(max.saturating_sub(1)).collect();
+    format!("{cut}…")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -424,6 +669,17 @@ mod tests {
         assert!(normalise_email("@example.com").is_err());
         assert!(normalise_email("user@.example.com").is_err());
         assert!(normalise_email("user@example.com.").is_err());
+    }
+
+    #[test]
+    fn table_labels_are_truncated_on_char_boundaries() {
+        assert_eq!(truncate_display("short", 36), "short");
+        let long = "a-very-long-site-name-that-keeps-going.example.com";
+        let cut = truncate_display(long, 20);
+        assert!(cut.chars().count() <= 20);
+        assert!(cut.ends_with('…'));
+        let multi_byte = "站点名称".repeat(20);
+        assert!(truncate_display(&multi_byte, 10).chars().count() <= 10);
     }
 
     #[test]

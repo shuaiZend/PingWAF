@@ -632,6 +632,32 @@ async fn sync_subscription(
                     "failed to record the IP group sync error"
                 );
             }
+            // A stale allow/block list is a silent security drift: alert so
+            // an expired subscription URL is noticed. The notification dedup
+            // window keeps the periodic retry from repeating it.
+            crate::notify::emit(crate::notify::AlertEvent {
+                event_type: crate::models::event_type::CONFIG_SYNC_FAILED
+                    .to_string(),
+                severity: crate::models::severity::WARNING,
+                title: format!(
+                    "IP group '{}' subscription sync failed",
+                    group.name
+                ),
+                message: format!(
+                    "Refreshing the IP group '{}' from {} failed: \
+                     {message}. The group keeps serving its previous \
+                     ranges.",
+                    group.name,
+                    source_url
+                ),
+                details: Some(serde_json::json!({
+                    "group_id": group.id,
+                    "source_url": source_url,
+                    "error": message,
+                })),
+                dedup_key: Some(group.id.to_string()),
+            })
+            .await;
             Err(message)
         },
     }

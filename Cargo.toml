@@ -315,6 +315,16 @@ hex = "0.4.3"
 hickory-resolver = "0.26.3"
 http = "1.5.0"
 hmac = "0.13.0"
+# SMTP client for the notification system's e-mail channel. rustls keeps the
+# control plane free of OpenSSL, like every other TLS consumer in the tree.
+lettre = { version = "0.11", default-features = false, features = [
+    "builder",
+    "smtp-transport",
+    "tokio1",
+    "tokio1-rustls",
+    "ring",
+    "webpki-roots",
+] }
 hmac-sha256 = "1.1.14"
 hmac-sha512 = { version = "1.1.12", default-features = false }
 hostname = "0.4.2"
@@ -404,6 +414,7 @@ strum = { version = "0.28.0", features = ["derive"] }
 substring = "1.4.5"
 sysinfo = { version = "0.39.6", features = [
     "system",
+    "disk",
 ], default-features = false }
 tempfile = "3.27.0"
 tera = { version = "2", default-features = false }

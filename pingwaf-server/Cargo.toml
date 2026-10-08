@@ -27,6 +27,10 @@ chrono = { workspace = true }
 # Drives the provider response streams and the SSE chat endpoint.
 futures-util = { workspace = true }
 hex = { workspace = true }
+# HMAC-SHA256 signing of DingTalk webhook payloads.
+hmac = { workspace = true }
+# SMTP client behind the notification system's e-mail channel.
+lettre = { workspace = true }
 jsonwebtoken = { workspace = true }
 # Parses the API allowlist entries (addresses and CIDR ranges).
 ipnet = { workspace = true }
@@ -54,6 +58,8 @@ serde_json = { workspace = true }
 passkey-server = { version = "0.1.4", features = ["send"] }
 rcgen = { workspace = true }
 sha2 = { workspace = true }
+# Control plane self-monitoring: CPU, memory and disk utilisation samples.
+sysinfo = { workspace = true }
 time = { workspace = true }
 x509-parser = { workspace = true }
 # TLS termination for the dashboard listener. Same provider (`ring`) as the
