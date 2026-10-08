@@ -106,6 +106,10 @@ services:
   #   entrypoint: ["pingwaf", "agent"]
   #   command:
   #     - "--server-url=http://pingwaf:9090"
+  #     # When the control plane serves gRPC over TLS (grpc_tls_cert/key on the
+  #     # server), switch to --server-url=https://pingwaf:9090 and point this at
+  #     # the CA that signed its certificate:
+  #     # - "--server-ca-cert=/etc/pingwaf/certs/grpc-ca.pem"
   #     - "--api-key=${AGENT_API_KEY:-}"
   #     - "--cache-dir=/var/lib/pingwaf/cache"
   #     - "--heartbeat-interval-secs=30"

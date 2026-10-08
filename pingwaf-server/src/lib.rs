@@ -234,7 +234,34 @@ pub async fn start_server(mut config: ServerConfig) -> anyhow::Result<()> {
     let grpc_listener = TcpListener::bind(grpc_addr).await.map_err(|err| {
         anyhow::anyhow!("failed to bind gRPC address {grpc_addr}: {err}")
     })?;
-    tracing::info!(%grpc_addr, "gRPC control plane listening");
+
+    let mut grpc_builder = tonic::transport::Server::builder();
+    match (&shared_config.grpc_tls_cert, &shared_config.grpc_tls_key) {
+        (Some(cert_path), Some(key_path)) => {
+            let cert = std::fs::read_to_string(cert_path).map_err(|err| {
+                anyhow::anyhow!(
+                    "failed to read gRPC TLS certificate {cert_path}: {err}"
+                )
+            })?;
+            let key = std::fs::read_to_string(key_path).map_err(|err| {
+                anyhow::anyhow!("failed to read gRPC TLS key {key_path}: {err}")
+            })?;
+            let tls = tonic::transport::server::ServerTlsConfig::new()
+                .identity(tonic::transport::Identity::from_pem(cert, key));
+            grpc_builder = grpc_builder.tls_config(tls).map_err(|err| {
+                anyhow::anyhow!("failed to configure gRPC TLS: {err}")
+            })?;
+            tracing::info!(%grpc_addr, "gRPC control plane listening (TLS)");
+        },
+        (None, None) => {
+            tracing::info!(%grpc_addr, "gRPC control plane listening (plaintext)");
+        },
+        _ => {
+            return Err(anyhow::anyhow!(
+                "grpc_tls_cert and grpc_tls_key must be configured together"
+            ));
+        },
+    }
 
     let control_plane_service = ControlPlaneService::new(
         db.clone(),
@@ -269,7 +296,7 @@ pub async fn start_server(mut config: ServerConfig) -> anyhow::Result<()> {
                 tracing::error!(error = %err, "HTTP server error");
             }
         }
-        result = tonic::transport::Server::builder()
+        result = grpc_builder
             .add_service(grpc_server)
             .serve_with_incoming_shutdown(
                 TcpListenerStream::new(grpc_listener),

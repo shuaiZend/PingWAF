@@ -13,7 +13,7 @@ test-util = []
 [dependencies]
 pingwaf-proto = { path = "../pingwaf-proto" }
 pingap-cache = { workspace = true }
-tonic = { workspace = true }
+tonic = { workspace = true, features = ["tls-ring", "tls-webpki-roots"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "signal", "fs"] }
 tokio-stream = { workspace = true, features = ["sync"] }
 # "rc" adds serde impls for Arc, so the rule cache can store sites as

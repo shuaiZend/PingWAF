@@ -80,6 +80,15 @@ pub struct CommonOpts {
     #[arg(long, env = "PINGWAF_GRPC_ADDR", default_value = "0.0.0.0:9090")]
     pub grpc_addr: String,
 
+    /// Optional TLS for the gRPC control plane: PEM certificate chain, used
+    /// together with --grpc-tls-key. Agents then connect via `https://`.
+    #[arg(long, env = "PINGWAF_GRPC_TLS_CERT")]
+    pub grpc_tls_cert: Option<String>,
+
+    /// PEM private key for --grpc-tls-cert.
+    #[arg(long, env = "PINGWAF_GRPC_TLS_KEY")]
+    pub grpc_tls_key: Option<String>,
+
     /// Serve the admin dashboard and REST API over TLS. A self-signed
     /// certificate is generated on first boot; upload a real one from
     /// Settings → Control plane HTTPS. Set to false behind a reverse proxy
@@ -162,6 +171,11 @@ pub struct AgentOpts {
         default_value = "http://localhost:9090"
     )]
     pub server_url: String,
+
+    /// Optional PEM file with the CA (or chain) that signed the control
+    /// plane's gRPC certificate; defaults to the bundled webpki roots.
+    #[arg(long, env = "PINGWAF_SERVER_CA_CERT")]
+    pub server_ca_cert: Option<String>,
 
     /// API key for agent authentication
     #[arg(long, env = "PINGWAF_API_KEY", default_value = "")]

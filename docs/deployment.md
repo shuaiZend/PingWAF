@@ -311,6 +311,39 @@ terminates TLS. Passkeys require a secure origin, so with plain HTTP they are
 unavailable unless the proxy publishes an HTTPS origin and
 `PINGWAF_PASSKEY_TRUST_FORWARDED_PROTO=true` is set.
 
+### gRPC Control-Plane TLS
+
+The gRPC listener agents connect to (default `0.0.0.0:9090`) speaks plaintext
+h2c unless configured otherwise — acceptable for all-in-one deployments and
+private networks, but **agents connecting across untrusted networks must get
+TLS**. Point the server at a PEM certificate and key:
+
+```bash
+pingwaf server \
+  --grpc-tls-cert /etc/pingwaf/certs/grpc.pem \
+  --grpc-tls-key /etc/pingwaf/certs/grpc-key.pem
+```
+
+Or set `grpc_tls_cert` / `grpc_tls_key` in `pingwaf.toml`, or the
+`PINGWAF_GRPC_TLS_CERT` / `PINGWAF_GRPC_TLS_KEY` environment variables. Both
+paths must be present; a mismatch or unreadable file aborts startup instead of
+falling back to plaintext.
+
+Agents switch to `https://` server URLs and either trust the bundled webpki
+roots (publicly trusted certificate) or load the signing CA:
+
+```bash
+pingwaf agent \
+  --server-url "https://control-plane.example.com:9090" \
+  --server-ca-cert /etc/pingwaf/certs/grpc-ca.pem \
+  --api-key "your-agent-key"
+```
+
+The certificate must carry a subject alternative name for whatever agents
+connect to: a DNS name for domain URLs, an IP SAN for `https://<ip>:9090`, and
+`127.0.0.1` for all-in-one mode — which switches its embedded agent to
+`https://127.0.0.1` automatically when gRPC TLS is configured.
+
 The API for all of this is documented in
 [`docs/api.md` → Control-plane certificate](./api.md#control-plane-certificate).
 
