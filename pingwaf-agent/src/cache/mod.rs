@@ -28,6 +28,18 @@ pub struct CachedRules {
     pub sites: HashMap<String, Arc<SiteRules>>,
     /// Domain → site_id index for fast lookup
     pub domain_index: HashMap<String, String>,
+    /// Domain → disconnected (failover) policy, covering every site the
+    /// control plane knows about — including ones whose rule bundle this
+    /// agent has not (yet) received. Consulted when a host has no synced
+    /// rules, which is exactly when `sites` cannot answer.
+    #[serde(default)]
+    pub failover_registry: HashMap<String, FailoverMode>,
+    /// Control-plane-wide default for hosts absent from
+    /// `failover_registry`. `None` when the server never sent it (old
+    /// control plane), which makes the agent fall back to its local
+    /// `config.fail_open`.
+    #[serde(default)]
+    pub global_fail_open: Option<bool>,
     /// When the cache was last updated from the server
     pub updated_at: DateTime<Utc>,
     /// Hash of the configuration (for delta sync). An `Arc` so the hot path
@@ -40,6 +52,8 @@ impl Default for CachedRules {
         Self {
             sites: HashMap::new(),
             domain_index: HashMap::new(),
+            failover_registry: HashMap::new(),
+            global_fail_open: None,
             updated_at: Utc::now(),
             config_hash: Arc::from(""),
         }
@@ -137,6 +151,58 @@ impl SiteRules {
     pub fn is_paused(&self) -> bool {
         self.status == site_status::PAUSED
     }
+}
+
+/// How a host behaves while the control plane is unreachable and it has no
+/// synced rule bundle. Local mirror of `proto::FailoverMode`.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum FailoverMode {
+    /// Follow the control-plane-wide `global_fail_open` default.
+    #[default]
+    Inherit,
+    /// Keep proxying through the base engine.
+    Open,
+    /// Answer 503.
+    Closed,
+}
+
+impl From<i32> for FailoverMode {
+    fn from(value: i32) -> Self {
+        match value {
+            1 => FailoverMode::Open,
+            2 => FailoverMode::Closed,
+            0 => FailoverMode::Inherit,
+            // A newer control plane may know modes this agent does not.
+            // Failover is an availability switch, so degrade to the next
+            // resolution layer instead of guessing a stricter behaviour.
+            other => {
+                warn!(
+                    value = other,
+                    "unknown failover mode from the control plane, treating as inherit"
+                );
+                FailoverMode::Inherit
+            },
+        }
+    }
+}
+
+/// Folds the per-site policy registry of one bundle into a domain-keyed map,
+/// covering primary and alternate domains alike.
+fn failover_registry_from(
+    policies: &[proto::SitePolicy],
+) -> HashMap<String, FailoverMode> {
+    let mut registry = HashMap::with_capacity(policies.len());
+    for policy in policies {
+        let mode = FailoverMode::from(policy.mode);
+        registry.insert(policy.domain.clone(), mode);
+        for alt in &policy.alternate_domains {
+            registry.insert(alt.clone(), mode);
+        }
+    }
+    registry
 }
 
 /// Persisted site status values, matching `models::sites::site_status` on the
@@ -908,6 +974,16 @@ impl RuleCache {
             updated
                 .sites
                 .insert(site_id.clone(), Arc::clone(&site_rules));
+            // Every bundle carries the complete failover registry, so one
+            // push refreshes it wholesale. An absent `default_fail_open`
+            // (old control plane) keeps the previous value untouched.
+            if !bundle.site_policies.is_empty() {
+                updated.failover_registry =
+                    failover_registry_from(&bundle.site_policies);
+            }
+            if let Some(default_fail_open) = bundle.default_fail_open {
+                updated.global_fail_open = Some(default_fail_open);
+            }
             updated.config_hash = bundle.config_hash.as_str().into();
             updated.updated_at = Utc::now();
             Arc::new(updated)
@@ -936,6 +1012,21 @@ impl RuleCache {
             let mut updated = (**current).clone();
             updated.config_hash = config.config_hash.as_str().into();
             updated.updated_at = Utc::now();
+
+            // The bundles embed the same registry in every site; one pass
+            // over whichever bundle carries it is enough.
+            for site in &config.sites {
+                if let Some(ref bundle) = site.rules {
+                    if !bundle.site_policies.is_empty() {
+                        updated.failover_registry =
+                            failover_registry_from(&bundle.site_policies);
+                    }
+                    if let Some(default_fail_open) = bundle.default_fail_open {
+                        updated.global_fail_open = Some(default_fail_open);
+                    }
+                    break;
+                }
+            }
 
             for site in &config.sites {
                 if let Some(ref bundle) = site.rules {
@@ -994,6 +1085,22 @@ impl RuleCache {
         let rules = self.inner.load();
         let site_id = rules.domain_index.get(domain)?;
         rules.sites.get(site_id).cloned()
+    }
+
+    /// The site's disconnected policy for `domain`, when the control plane
+    /// has one registered (primary or alternate domain match).
+    pub fn failover_for_domain(&self, domain: &str) -> Option<FailoverMode> {
+        self.inner
+            .load()
+            .failover_registry
+            .get(domain)
+            .copied()
+    }
+
+    /// The control-plane-wide fail-open default, when it has ever been
+    /// synced. `None` means the agent must fall back to its local setting.
+    pub fn global_fail_open(&self) -> Option<bool> {
+        self.inner.load().global_fail_open
     }
 
     /// Look up site rules by site ID.
@@ -1583,6 +1690,38 @@ mod tests {
         assert_eq!(site.upstreams.len(), 1);
         assert!(site.upstreams[0].pool_id.is_empty());
         assert!(!site.upstreams[0].is_default);
+        // The failover fields default sensibly on a cache written before
+        // they existed: an empty registry and an unsynced global default.
+        assert!(cached.failover_registry.is_empty());
+        assert_eq!(cached.global_fail_open, None);
+    }
+
+    #[test]
+    fn failover_registry_covers_alternate_domains() {
+        use proto::SitePolicy;
+        let policies = [SitePolicy {
+            domain: "example.com".to_string(),
+            alternate_domains: vec!["m.example.com".to_string()],
+            mode: proto::FailoverMode::FailoverClosed as i32,
+        }];
+        let registry = failover_registry_from(&policies);
+        assert_eq!(
+            registry.get("example.com"),
+            Some(&FailoverMode::Closed)
+        );
+        assert_eq!(
+            registry.get("m.example.com"),
+            Some(&FailoverMode::Closed)
+        );
+        assert_eq!(registry.get("other.example.com"), None);
+    }
+
+    #[test]
+    fn unknown_failover_modes_degrade_to_inherit() {
+        assert_eq!(FailoverMode::from(0), FailoverMode::Inherit);
+        assert_eq!(FailoverMode::from(1), FailoverMode::Open);
+        assert_eq!(FailoverMode::from(2), FailoverMode::Closed);
+        assert_eq!(FailoverMode::from(99), FailoverMode::Inherit);
     }
 
     #[test]
@@ -1637,12 +1776,22 @@ mod tests {
             .into_iter()
             .collect(),
             domain_index: HashMap::new(),
+            failover_registry: HashMap::from([(
+                "example.com".to_string(),
+                FailoverMode::Closed,
+            )]),
+            global_fail_open: Some(true),
             updated_at: Utc::now(),
             config_hash: "abc".into(),
         };
         let json = serde_json::to_string(&cached).expect("serialize");
         let back: CachedRules =
             serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(
+            back.failover_registry.get("example.com"),
+            Some(&FailoverMode::Closed)
+        );
+        assert_eq!(back.global_fail_open, Some(true));
         let site = back.sites.get("site-1").expect("site present");
         assert_eq!(site.routes.len(), 1);
         assert_eq!(site.routes[0].path, "/api");

@@ -196,7 +196,9 @@ pub struct AgentOpts {
     #[arg(long, env = "PINGWAF_CACHE_DIR", default_value = "./data/cache")]
     pub cache_dir: String,
 
-    /// Allow traffic when disconnected from control plane
+    /// Fallback policy when disconnected with no synced rules for a host;
+    /// per-site failover policies and the control-plane default win when
+    /// they have been synced
     #[arg(
         long,
         env = "PINGWAF_FAIL_OPEN",
@@ -282,7 +284,9 @@ pub struct AllInOneOpts {
     #[arg(long, env = "PINGWAF_CACHE_DIR", default_value = "./data/cache")]
     pub cache_dir: String,
 
-    /// Allow traffic when disconnected from control plane
+    /// Fallback policy when disconnected with no synced rules for a host;
+    /// per-site failover policies and the control-plane default win when
+    /// they have been synced
     #[arg(
         long,
         env = "PINGWAF_FAIL_OPEN",
