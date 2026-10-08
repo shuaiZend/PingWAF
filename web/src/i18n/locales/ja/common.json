@@ -1272,14 +1272,18 @@
       "toolResult": "結果",
       "writeToolsOn": "書き込みツール有効",
       "writeToolsOff": "読み取り専用ツール",
-      "adminOnly": "管理者専用",
-      "adminOnlyDescription": "アシスタントはフリート全体で 1 つのプロバイダーキーを共有し、すべてのサイトを参照できるため、管理者に限定されています。外部エージェントは MCP を利用できます。",
       "notConfigured": "アシスタントは未設定です",
       "notConfiguredDescription": "OpenAI 互換のプロバイダー（ベース URL・API キー・モデル）を設定すると会話を開始できます。組み込みの MCP ツールでフリートを読み取ります。",
       "openSettings": "設定を開く",
       "deleteTitle": "会話を削除",
       "deleteDescription": "この会話とすべてのメッセージが削除されます。",
-      "deleted": "会話を削除しました"
+      "deleted": "会話を削除しました",
+      "open": "AIアシスタントを開く",
+      "close": "アシスタントを閉じる",
+      "history": "履歴",
+      "showHistory": "履歴を表示",
+      "hideHistory": "履歴を閉じる",
+      "disabledForUsers": "AIアシスタントは未設定です。管理者に設定を依頼してください。"
     },
     "basicAuth": {
       "saved": "Basic 認証の設定を保存しました",

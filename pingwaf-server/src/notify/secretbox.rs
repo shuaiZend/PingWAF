@@ -91,6 +91,48 @@ pub fn encryption_enabled() -> bool {
     instance_key().is_some()
 }
 
+/// Seals a single standalone secret (e.g. the AI provider API key). Without
+/// the instance key the input is returned unchanged (no-op seal, same
+/// semantics as [`seal_config`]); a value that is already sealed is left as
+/// is so double-saving cannot wrap the prefix twice.
+pub fn seal_string(plain: &str) -> String {
+    if plain.is_empty() || plain.starts_with(PREFIX) {
+        return plain.to_string();
+    }
+    let Some(key) = instance_key() else {
+        if MISSING_KEY_WARNED.set(()).is_ok() {
+            tracing::warn!(
+                "PINGWAF_SECRET_KEY is not set: secrets are stored in \
+                 clear text; set it to encrypt them at rest"
+            );
+        }
+        return plain.to_string();
+    };
+    seal_with(&LessSafeKey::new(key), &SystemRandom::new(), plain)
+}
+
+/// Opens a single sealed secret back to plain text. Clear-text values
+/// (legacy rows written before a key existed) pass through unchanged;
+/// sealed values that fail to open (corrupt, rotated key) yield `None` so
+/// the caller can fall back to its "missing credential" path.
+pub fn open_string(sealed: &str) -> Option<String> {
+    if sealed.is_empty() {
+        return Some(String::new());
+    }
+    if !sealed.starts_with(PREFIX) {
+        return Some(sealed.to_string());
+    }
+    let key = instance_key()?;
+    let opened = open_with(&LessSafeKey::new(key), sealed);
+    if opened.is_none() {
+        tracing::warn!(
+            "a sealed secret could not be opened; is PINGWAF_SECRET_KEY \
+             unchanged since it was stored?"
+        );
+    }
+    opened
+}
+
 /// Seals every secret field of a channel config in place. Clear-text values
 /// without the instance key are left untouched (deployment without at-rest
 /// encryption keeps working; the caller decides what to warn).
@@ -200,6 +242,18 @@ mod tests {
         assert!(open_with(&key, &tampered).is_none());
         assert!(open_with(&key, "enc:v1:not-base64!").is_none());
         assert!(open_with(&key, "plain-value").is_none());
+    }
+
+    #[test]
+    fn string_helpers_roundtrip_and_pass_clear_text_through() {
+        let sealed = seal_string("sk-abc123");
+        let opened = open_string(&sealed).unwrap();
+        assert_eq!(opened, "sk-abc123");
+        // Legacy clear-text values pass through untouched.
+        assert_eq!(open_string("sk-legacy").unwrap(), "sk-legacy");
+        assert_eq!(open_string("").unwrap(), "");
+        // Double-sealing cannot happen (already prefixed).
+        assert_eq!(seal_string(&sealed), sealed);
     }
 
     #[test]

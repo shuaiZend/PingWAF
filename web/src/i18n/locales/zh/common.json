@@ -1272,14 +1272,18 @@
       "toolResult": "结果",
       "writeToolsOn": "已启用写入工具",
       "writeToolsOff": "只读工具",
-      "adminOnly": "仅管理员可用",
-      "adminOnlyDescription": "助手全集群共用同一份模型密钥，且可读取所有站点数据，因此仅对管理员开放。三方 Agent 可通过 MCP 接入。",
       "notConfigured": "尚未配置 AI 助手",
       "notConfiguredDescription": "配置一个 OpenAI 兼容的服务（Base URL、API Key 与模型）即可开始对话；助手会使用内置的 MCP 工具读取整个集群。",
       "openSettings": "去配置",
       "deleteTitle": "删除会话",
       "deleteDescription": "该会话及其全部消息将被删除。",
-      "deleted": "会话已删除"
+      "deleted": "会话已删除",
+      "open": "打开 AI 助手",
+      "close": "关闭助手",
+      "history": "历史会话",
+      "showHistory": "展开历史会话",
+      "hideHistory": "收起历史会话",
+      "disabledForUsers": "AI 助手尚未启用，请联系管理员在「设置」中完成配置。"
     },
     "basicAuth": {
       "saved": "Basic 认证设置已保存",

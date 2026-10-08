@@ -11,6 +11,7 @@ import {
   SignOut,
   Translate,
   ShieldCheck,
+  Sparkle,
 } from '@phosphor-icons/react'
 import { cn } from '@/lib/utils'
 import { Sidebar } from '@/components/ui/Sidebar'
@@ -18,6 +19,8 @@ import { Breadcrumb, type BreadcrumbItem } from '@/components/ui/Breadcrumb'
 import { Button } from '@/components/ui/Button'
 import { useThemeStore } from '@/stores/themeStore'
 import { useAuthStore } from '@/stores/authStore'
+import { useAssistantWidgetStore } from '@/stores/assistantWidgetStore'
+import { AssistantWidget } from '@/components/assistant/AssistantWidget'
 import { ForceChangePasswordDialog } from '@/components/ForceChangePasswordDialog'
 import { supportedLanguages } from '@/i18n'
 
@@ -58,6 +61,7 @@ export function AppLayout() {
   const { resolved, toggle } = useThemeStore()
   const user = useAuthStore((s) => s.user)
   const logout = useAuthStore((s) => s.logout)
+  const toggleAssistant = useAssistantWidgetStore((s) => s.toggle)
 
   const [collapsed, setCollapsed] = useState(false)
   const [mobileOpen, setMobileOpen] = useState(false)
@@ -231,6 +235,16 @@ export function AppLayout() {
               }
             />
 
+            {/* AI assistant panel */}
+            <Button
+              size="icon"
+              variant="ghost"
+              aria-label={t('pages.assistant.open')}
+              title={t('pages.assistant.open')}
+              onClick={toggleAssistant}
+              icon={<Sparkle weight="duotone" className="h-5 w-5" />}
+            />
+
             {/* User menu */}
             <div className="relative" ref={userMenuRef}>
               <button
@@ -282,6 +296,10 @@ export function AppLayout() {
       {/* First sign-in gate: blocks the whole console until the password is
           replaced; the server refuses writes in the meantime. */}
       <ForceChangePasswordDialog />
+
+      {/* Floating AI assistant (ball + sliding panel, mounted for the whole
+          signed-in layout; streaming state survives open/close cycles). */}
+      <AssistantWidget />
     </div>
   )
 }

@@ -6,6 +6,7 @@
 
 pub mod agents;
 pub mod ai;
+pub mod ai_rate_limit;
 pub mod analytics;
 pub mod api_protection;
 pub mod auth;
