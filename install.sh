@@ -78,10 +78,13 @@ Examples:
   curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh | bash
 
   # Install a node as an agent, pointing at the control plane
-  ./install.sh --mode agent --server-url http://10.0.0.1:9090 --api-key pwk_xxx
+  # (the control plane serves gRPC over TLS by default — use https:// and
+  # download its CA from Settings -> Control plane HTTPS, then set it in
+  # /etc/pingwaf/pingwaf.toml as agent.server_ca_cert)
+  ./install.sh --mode agent --server-url https://10.0.0.1:9090 --api-key pwk_xxx
 
   # Install specific version as agent only
-  ./install.sh --version 0.24.1 --mode agent
+  ./install.sh --version 0.25.0 --mode agent
 
   # Custom database URL
   ./install.sh --db-url "postgres://user:pass@db-host:5432/pingwaf"
@@ -125,6 +128,9 @@ if [[ "$MODE" == "agent" ]]; then
     SERVER_URL="${SERVER_URL:-http://127.0.0.1:9090}"
     if [[ -z "$API_KEY" ]]; then
         warn "No --api-key given: start the agent with PINGWAF_API_KEY set, or it cannot register."
+    fi
+    if [[ "$SERVER_URL" == http:* ]]; then
+        warn "The control plane serves gRPC over TLS by default; a plain http:// server-url only works when the control plane sets grpc_tls_mode = \"off\". For TLS use https:// and configure agent.server_ca_cert with the control plane's certificate."
     fi
 fi
 
@@ -318,6 +324,10 @@ write_config() {
 db_url = "${DB_URL}"
 admin_addr = "0.0.0.0:9080"
 grpc_addr = "0.0.0.0:9090"
+# gRPC control plane TLS: "tls" (default) serves agents over TLS, reusing the
+# dashboard certificate — self-signed on first boot unless grpc_tls_cert/key
+# are configured. "off" serves plaintext and is logged as degraded.
+# grpc_tls_mode = "tls"
 # Dashboard + REST API over HTTPS (passkeys require a secure origin).
 # A self-signed certificate is generated on first boot; upload a real one in
 # Settings -> Control plane HTTPS. Add the hostname you use to reach the

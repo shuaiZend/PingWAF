@@ -47,6 +47,42 @@ const DEFAULT_PASSKEY_RP_NAME: &str = "PingWAF";
 /// generates when no certificate has been uploaded yet.
 pub const DEFAULT_TLS_COMMON_NAME: &str = "PingWAF Control Plane";
 
+/// Transport security of the gRPC control plane listener.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize,
+)]
+pub enum GrpcTlsMode {
+    /// TLS is on (the default): an explicitly configured certificate if one
+    /// is set, otherwise the control plane's stored certificate — generated
+    /// self-signed on first boot. Agents connect with `https://` URLs.
+    #[default]
+    #[serde(rename = "tls")]
+    Tls,
+    /// Plaintext, for isolated networks only. The deployment is marked
+    /// degraded at startup and in the API responses.
+    #[serde(rename = "off")]
+    Off,
+}
+
+impl GrpcTlsMode {
+    /// Parses a `PINGWAF_GRPC_TLS_MODE` value; unknown values fall back to
+    /// the TLS default.
+    pub fn from_env_value(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "off" | "false" | "disabled" | "plain" | "plaintext" => Self::Off,
+            _ => Self::Tls,
+        }
+    }
+}
+
+impl std::str::FromStr for GrpcTlsMode {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self::from_env_value(s))
+    }
+}
+
 fn default_db_url() -> String {
     DEFAULT_DB_URL.to_string()
 }
@@ -132,12 +168,19 @@ pub struct ServerConfig {
     pub grpc_addr: String,
     /// Optional PEM certificate enabling TLS on the gRPC listener. Both this
     /// and `grpc_tls_key` must be set; agents then connect with `https://`
-    /// URLs. Cross-network deployments should always enable it.
+    /// URLs. When absent, TLS (the default mode) reuses the control plane's
+    /// stored certificate.
     #[serde(default)]
     pub grpc_tls_cert: Option<String>,
     /// Optional PEM private key for `grpc_tls_cert`.
     #[serde(default)]
     pub grpc_tls_key: Option<String>,
+    /// Transport security of the gRPC listener: `tls` (the default) serves
+    /// the explicitly configured certificate or, absent one, the control
+    /// plane's stored certificate (self-signed on first boot); `off` serves
+    /// plaintext and marks the deployment degraded.
+    #[serde(default)]
+    pub grpc_tls_mode: GrpcTlsMode,
     /// HMAC secret used to sign access, refresh and agent tokens.
     #[serde(default = "default_jwt_secret")]
     pub jwt_secret: String,
@@ -235,6 +278,7 @@ impl Default for ServerConfig {
             grpc_addr: DEFAULT_GRPC_ADDR.to_string(),
             grpc_tls_cert: None,
             grpc_tls_key: None,
+            grpc_tls_mode: GrpcTlsMode::default(),
             jwt_secret: DEFAULT_JWT_SECRET.to_string(),
             jwt_expiration_hours: DEFAULT_JWT_EXPIRATION_HOURS,
             refresh_token_expiration_hours: DEFAULT_REFRESH_EXPIRATION_HOURS,
@@ -291,6 +335,9 @@ impl ServerConfig {
         }
         if let Ok(value) = std::env::var("PINGWAF_GRPC_TLS_KEY") {
             config.grpc_tls_key = non_empty_env(&value);
+        }
+        if let Ok(value) = std::env::var("PINGWAF_GRPC_TLS_MODE") {
+            config.grpc_tls_mode = GrpcTlsMode::from_env_value(&value);
         }
         if let Ok(value) = std::env::var("PINGWAF_PUBLIC_HOST") {
             config.public_host = non_empty_env(&value);
@@ -444,6 +491,12 @@ impl ServerConfig {
     /// The configured list is widened with the machine's hostname and the
     /// configured passkey relying party, so a first boot produces a certificate
     /// the dashboard can be reached under in the common deployments.
+    /// Whether the gRPC listener terminates TLS. `true` unless the operator
+    /// explicitly opted out with `grpc_tls_mode = "off"`.
+    pub fn grpc_tls_enabled(&self) -> bool {
+        self.grpc_tls_mode == GrpcTlsMode::Tls
+    }
+
     pub fn effective_tls_sans(&self) -> Vec<String> {
         // Trim and drop blanks: a half-written entry would otherwise reach the
         // certificate as an empty subject alternative name.

@@ -89,6 +89,12 @@ pub struct CommonOpts {
     #[arg(long, env = "PINGWAF_GRPC_TLS_KEY")]
     pub grpc_tls_key: Option<String>,
 
+    /// Transport security of the gRPC control plane: `tls` (the default)
+    /// serves the configured certificate or, absent one, the self-signed
+    /// control-plane certificate; `off` serves plaintext (degraded).
+    #[arg(long, env = "PINGWAF_GRPC_TLS_MODE", default_value = "tls")]
+    pub grpc_tls_mode: pingwaf_server::config::GrpcTlsMode,
+
     /// Serve the admin dashboard and REST API over TLS. A self-signed
     /// certificate is generated on first boot; upload a real one from
     /// Settings → Control plane HTTPS. Set to false behind a reverse proxy
