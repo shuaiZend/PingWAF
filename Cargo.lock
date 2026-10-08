@@ -5419,6 +5419,7 @@ dependencies = [
  "dashmap 6.2.1",
  "futures",
  "pingap-cache",
+ "pingap-core",
  "pingwaf-proto",
  "prost-types 0.14.4",
  "rand 0.10.3",

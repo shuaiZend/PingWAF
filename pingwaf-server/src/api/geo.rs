@@ -173,7 +173,7 @@ async fn update_geo(
     let updated = active.update(&state.db).await?;
     tracing::info!(site_id = %id, "geo rules updated");
     touch_site(&state, id).await?;
-    notify_config_changed(&state, id).await;
+    notify_config_changed(&state, id, Some(&current.email)).await;
 
     Ok(Json(updated))
 }

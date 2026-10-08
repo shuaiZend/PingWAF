@@ -72,23 +72,42 @@ type Result<T, E = Error> = std::result::Result<T, E>;
 /// A type alias for a tuple representing an HTTP header.
 pub type HttpHeader = (HeaderName, HeaderValue);
 
+/// Normalises a host so every consumer — site rule indexes, failover
+/// registries, caches — keys on one canonical form: lowercased, the trailing
+/// root dot dropped (`EXAMPLE.com.` → `example.com`), port untouched (callers
+/// strip it beforehand via `strip_port`). This mirrors nginx's `$host`
+/// semantics and must be applied on **both** sides of a host-keyed lookup.
+pub fn normalize_host(host: &str) -> String {
+    // ASCII fast path: hosts are IDN A-labels in practice, never UTF-8.
+    host.to_ascii_lowercase()
+}
+
 /// Gets the request host by checking the URI first, then falling back to the "Host" header.
 ///
 /// This function follows the common practice of prioritizing the host from the absolute URI
 /// (e.g., in `GET http://example.com/path HTTP/1.1`) over the `Host` header field.
-pub fn get_host(header: &RequestHeader) -> Option<&str> {
+///
+/// The returned host is normalised (lowercase, no trailing root dot); see
+/// `normalize_host`.
+pub fn get_host(header: &RequestHeader) -> Option<String> {
     // First, try to get the host directly from the parsed URI.
     // http2 will always have a host in the uri
-    if let Some(host) = header.uri.host() {
-        return Some(host);
+    let raw = if let Some(host) = header.uri.host() {
+        host
+    } else {
+        // If not in the URI, fall back to the "Host" header.
+        header
+            .headers
+            .get(http::header::HOST)
+            // Convert the header value to a string slice.
+            .and_then(|value| value.to_str().ok())?
+    };
+    let host = strip_port(raw);
+    let host = host.strip_suffix('.').unwrap_or(host);
+    if host.is_empty() {
+        return None;
     }
-    // If not in the URI, fall back to the "Host" header.
-    header
-        .headers
-        .get(http::header::HOST)
-        // Convert the header value to a string slice.
-        .and_then(|value| value.to_str().ok())
-        .map(strip_port)
+    Some(normalize_host(host))
 }
 
 /// Drops the `:port` suffix of a `Host` value. An IPv6 literal keeps its
@@ -228,7 +247,8 @@ pub fn convert_header_value(
 
     // Match the entire byte slice against the predefined variable tags.
     match buf {
-        HOST_TAG => get_host(session.req_header()).and_then(to_header_value),
+        HOST_TAG => get_host(session.req_header())
+            .and_then(|host| to_header_value(&host)),
         SCHEME_TAG => Some(if ctx.conn.tls_version.is_some() {
             SCHEME_HTTPS.clone()
         } else {
@@ -983,7 +1003,10 @@ mod tests {
         let session =
             new_test_session(&["Host: pingap.io"], "/vicanso/pingap?size=1")
                 .await;
-        assert_eq!(get_host(session.req_header()), Some("pingap.io"));
+        assert_eq!(
+            get_host(session.req_header()),
+            Some("pingap.io".to_string())
+        );
     }
 
     #[test]
@@ -1096,7 +1119,10 @@ mod tests {
         let mut req_with_authority =
             RequestHeader::build("GET", b"/path", None).unwrap();
         req_with_authority.set_uri(uri);
-        assert_eq!(get_host(&req_with_authority), Some("authority.com"));
+        assert_eq!(
+            get_host(&req_with_authority),
+            Some("authority.com".to_string())
+        );
 
         // Case 2: Host is in the "Host" header.
         let mut req_with_host_header =
@@ -1104,23 +1130,36 @@ mod tests {
         req_with_host_header
             .insert_header("Host", "header-host.com:8080")
             .unwrap();
-        assert_eq!(get_host(&req_with_host_header), Some("header-host.com"));
+        assert_eq!(
+            get_host(&req_with_host_header),
+            Some("header-host.com".to_string())
+        );
 
         // Case 3: No host information available.
         let req_no_host = RequestHeader::build("GET", b"/path", None).unwrap();
         assert_eq!(get_host(&req_no_host), None);
 
         // Case 4: IPv6 literals keep their brackets and lose only the port.
+        // Cases 5-7: hosts are normalised — lowercased and the trailing
+        // root dot dropped — so `EXAMPLE.com.` and `example.com` hit the
+        // same site-rule or failover-registry key.
         for (host, expected) in [
             ("[::1]:8080", "[::1]"),
             ("[::1]", "[::1]"),
             ("[2001:db8::1]:443", "[2001:db8::1]"),
             ("example.com", "example.com"),
             ("example.com:8080", "example.com"),
+            ("EXAMPLE.com:8080", "example.com"),
+            ("Example.COM.", "example.com"),
+            ("MiXeD.CaSe.Example.ORG.", "mixed.case.example.org"),
         ] {
             let mut req = RequestHeader::build("GET", b"/path", None).unwrap();
             req.insert_header("Host", host).unwrap();
-            assert_eq!(get_host(&req), Some(expected), "{host}");
+            assert_eq!(
+                get_host(&req),
+                Some(expected.to_string()),
+                "{host}"
+            );
         }
     }
 

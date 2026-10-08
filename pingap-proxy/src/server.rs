@@ -739,12 +739,13 @@ impl Server {
         // the first full match equals a linear scan of `route.ordered`.
         let matched_info = route
             .host_index
-            .candidate_indices(host)
+            .candidate_indices(&host)
             .into_iter()
             .find_map(|idx| {
                 let name = route.ordered.get(idx)?;
                 let location = self.location_provider.get(name)?;
-                let (matched, captures) = location.match_host_path(host, path);
+                let (matched, captures) =
+                    location.match_host_path(&host, path);
                 if matched && location.match_conditions(header, client_ip) {
                     Some((location, captures))
                 } else {

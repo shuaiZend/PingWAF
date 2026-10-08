@@ -801,7 +801,7 @@ async fn create(
     }
 
     tracing::info!(%id, %domain, upstream = %upstream_address, owner = %current.id, "site created");
-    notify_config_changed(&state, id).await;
+    notify_config_changed(&state, id, Some(&current.email)).await;
 
     Ok((StatusCode::CREATED, Json(SiteResponse::from(model))).into_response())
 }
@@ -935,7 +935,7 @@ async fn update(
 
     let updated = active.update(&state.db).await?;
     tracing::info!(%id, "site updated");
-    notify_config_changed(&state, id).await;
+    notify_config_changed(&state, id, Some(&current.email)).await;
 
     Ok(Json(updated.into()))
 }
@@ -953,7 +953,7 @@ async fn remove(
     site::Entity::delete_by_id(id).exec(&state.db).await?;
 
     tracing::info!(%id, owner = %current.id, "site deleted");
-    notify_config_changed(&state, id).await;
+    notify_config_changed(&state, id, Some(&current.email)).await;
 
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -1006,7 +1006,7 @@ async fn create_upstream(
 
     tracing::info!(site_id = %id, upstream = %model.id, pool = %pool_id, "upstream added");
     touch_site(&state, id).await?;
-    notify_config_changed(&state, id).await;
+    notify_config_changed(&state, id, Some(&current.email)).await;
 
     Ok((StatusCode::CREATED, Json(model)).into_response())
 }
@@ -1061,7 +1061,7 @@ async fn update_upstream(
 
     tracing::info!(site_id = %id, upstream = %target, "upstream updated");
     touch_site(&state, id).await?;
-    notify_config_changed(&state, id).await;
+    notify_config_changed(&state, id, Some(&current.email)).await;
 
     Ok(Json(updated))
 }
@@ -1086,7 +1086,7 @@ async fn delete_upstream(
 
     tracing::info!(site_id = %id, upstream = %target, "upstream removed");
     touch_site(&state, id).await?;
-    notify_config_changed(&state, id).await;
+    notify_config_changed(&state, id, Some(&current.email)).await;
 
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -1142,7 +1142,7 @@ async fn create_pool(
 
     tracing::info!(site_id = %id, pool = %model.id, "origin pool added");
     touch_site(&state, id).await?;
-    notify_config_changed(&state, id).await;
+    notify_config_changed(&state, id, Some(&current.email)).await;
 
     Ok((StatusCode::CREATED, Json(model)).into_response())
 }
@@ -1190,7 +1190,7 @@ async fn update_pool(
 
     tracing::info!(site_id = %id, pool = %target, "origin pool updated");
     touch_site(&state, id).await?;
-    notify_config_changed(&state, id).await;
+    notify_config_changed(&state, id, Some(&current.email)).await;
 
     Ok(Json(updated))
 }
@@ -1244,7 +1244,7 @@ async fn delete_pool(
 
     tracing::info!(site_id = %id, pool = %target, "origin pool removed");
     touch_site(&state, id).await?;
-    notify_config_changed(&state, id).await;
+    notify_config_changed(&state, id, Some(&current.email)).await;
 
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -1303,7 +1303,7 @@ async fn create_route(
 
     tracing::info!(site_id = %id, route = %model.id, "route added");
     touch_site(&state, id).await?;
-    notify_config_changed(&state, id).await;
+    notify_config_changed(&state, id, Some(&current.email)).await;
 
     Ok((StatusCode::CREATED, Json(model)).into_response())
 }
@@ -1368,7 +1368,7 @@ async fn update_route(
 
     tracing::info!(site_id = %id, route = %target, "route updated");
     touch_site(&state, id).await?;
-    notify_config_changed(&state, id).await;
+    notify_config_changed(&state, id, Some(&current.email)).await;
 
     Ok(Json(updated))
 }
@@ -1393,7 +1393,7 @@ async fn delete_route(
 
     tracing::info!(site_id = %id, route = %target, "route removed");
     touch_site(&state, id).await?;
-    notify_config_changed(&state, id).await;
+    notify_config_changed(&state, id, Some(&current.email)).await;
 
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -1535,7 +1535,7 @@ async fn upsert_ssl(
 
     // Bump the site so that agents notice the configuration changed.
     touch_site(&state, id).await?;
-    notify_config_changed(&state, id).await;
+    notify_config_changed(&state, id, Some(&current.email)).await;
 
     Ok(Json(model.into()))
 }
@@ -1556,7 +1556,7 @@ async fn delete_ssl(
 
     tracing::info!(site_id = %id, "SSL configuration removed");
     touch_site(&state, id).await?;
-    notify_config_changed(&state, id).await;
+    notify_config_changed(&state, id, Some(&current.email)).await;
 
     Ok(StatusCode::NO_CONTENT.into_response())
 }

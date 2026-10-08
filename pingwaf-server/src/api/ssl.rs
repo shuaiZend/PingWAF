@@ -286,7 +286,9 @@ async fn create_certificate(
     let id = parse_uuid(&site_id, "site id")?;
     let site = load_site_write(&state.db, id, &current).await?;
 
-    let model = insert_certificate(&state, &site, payload).await?;
+    let model =
+        insert_certificate(&state, &site, payload, Some(&current.email))
+            .await?;
     Ok(
         (StatusCode::CREATED, Json(CertificateResponse::from(model)))
             .into_response(),
@@ -298,6 +300,7 @@ async fn insert_certificate(
     state: &AppState,
     site: &site::Model,
     payload: CreateCertificateRequest,
+    actor: Option<&str>,
 ) -> Result<site_certificates::Model, ApiError> {
     let site_id = site.id;
     let domain = payload.domain.trim().to_lowercase();
@@ -366,7 +369,7 @@ async fn insert_certificate(
     )
     .await;
     touch_site(state, site_id).await?;
-    notify_config_changed(state, site_id).await;
+    notify_config_changed(state, site_id, actor).await;
 
     Ok(model)
 }
@@ -477,7 +480,7 @@ async fn update_certificate(
     let updated = active.update(&state.db).await?;
     tracing::info!(site_id = %id, cert_id = %target, "certificate updated");
     touch_site(&state, id).await?;
-    notify_config_changed(&state, id).await;
+    notify_config_changed(&state, id, Some(&current.email)).await;
 
     Ok(Json(CertificateResponse::from(updated)))
 }
@@ -508,7 +511,7 @@ async fn delete_certificate(
     )
     .await;
     touch_site(&state, id).await?;
-    notify_config_changed(&state, id).await;
+    notify_config_changed(&state, id, Some(&current.email)).await;
 
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -585,7 +588,7 @@ async fn update_ssl_settings(
     let posture = save_tls_posture(&state, &site, &payload).await?;
     tracing::info!(site_id = %id, "SSL settings updated");
     touch_site(&state, id).await?;
-    notify_config_changed(&state, id).await;
+    notify_config_changed(&state, id, Some(&current.email)).await;
 
     Ok(Json(posture.into()))
 }
@@ -731,7 +734,9 @@ async fn create_global_certificate(
     let site = load_site_write(&state.db, site_id, &current).await?;
     let activate = payload.activate;
 
-    let model = insert_certificate(&state, &site, payload).await?;
+    let model =
+        insert_certificate(&state, &site, payload, Some(&current.email))
+            .await?;
 
     if activate {
         let posture = TlsPostureRequest {
@@ -742,7 +747,7 @@ async fn create_global_certificate(
         save_tls_posture(&state, &site, &posture).await?;
         tracing::info!(site_id = %site_id, cert_id = %model.id, "certificate activated");
         touch_site(&state, site_id).await?;
-        notify_config_changed(&state, site_id).await;
+        notify_config_changed(&state, site_id, Some(&current.email)).await;
     }
 
     Ok(

@@ -39,6 +39,10 @@ const MAX_EVENT_ROWS: u64 = 5000;
 const EVENT_RETENTION_DAYS: i64 = 30;
 /// At most one prune per hour.
 const PRUNE_INTERVAL: Duration = Duration::from_secs(3600);
+/// Persisted message cap (characters, ~8 KB worst case with multi-byte
+/// text): the message quotes attacker-influenced traffic, so an unbounded
+/// rule message could bloat the history table.
+const MAX_MESSAGE_CHARS: usize = 2000;
 
 /// An alert raised somewhere in the control plane.
 #[derive(Debug, Clone)]
@@ -179,6 +183,11 @@ impl NotificationManager {
     pub fn new(db: DatabaseConnection) -> Self {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
+            // Webhooks are operator-configured but admin-writable: a 302 from
+            // a public host could otherwise bounce the request into an
+            // internal service, bypassing the SSRF address checks in
+            // `webhook::ensure_public_webhook`.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap_or_default();
         Self {
@@ -316,12 +325,16 @@ impl NotificationManager {
 
     /// Writes the alert into `notification_events`, best-effort.
     async fn persist_event(&self, event: &AlertEvent) {
+        // Message originates from attacker-influenced traffic details (rule
+        // ids, sample snippets); cap it so one noisy rule cannot inflate the
+        // history table. Characters (not bytes) keeps multi-byte text intact.
+        let message: String = event.message.chars().take(MAX_MESSAGE_CHARS).collect();
         let row = notification_event::ActiveModel {
             id: Set(Uuid::new_v4()),
             event_type: Set(event.event_type.clone()),
             severity: Set(event.severity.to_string()),
             title: Set(event.title.chars().take(200).collect()),
-            message: Set(event.message.clone()),
+            message: Set(message),
             details: Set(event.details.clone()),
             created_at: Set(chrono::Utc::now()),
         };

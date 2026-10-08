@@ -112,7 +112,7 @@ async fn update_bot(
     let updated = active.update(&state.db).await?;
     tracing::info!(site_id = %id, "bot protection updated");
     touch_site(&state, id).await?;
-    notify_config_changed(&state, id).await;
+    notify_config_changed(&state, id, Some(&current.email)).await;
 
     Ok(Json(updated))
 }
