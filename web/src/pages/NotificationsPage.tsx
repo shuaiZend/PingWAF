@@ -132,7 +132,7 @@ export function NotificationsPage() {
       {
         key: 'enabled',
         header: t('pages.notifications.colEnabled'),
-        accessor: (row) => row.enabled,
+        accessor: (row) => (row.enabled ? 1 : 0),
         cell: (row) => (
           <Badge tone={row.enabled ? 'success' : 'neutral'}>
             {row.enabled ? t('common.enabled') : t('common.disabled')}
@@ -624,7 +624,7 @@ function ChannelDialog({ initial, onClose, onSaved }: ChannelDialogProps) {
             value={fieldValue('secret')}
             onChange={(e) => setField('secret', e.target.value)}
             placeholder="SEC…"
-            tips={t('pages.notifications.dingtalkSecretHint')}
+            hint={t('pages.notifications.dingtalkSecretHint')}
           />
         )}
         {kind === 'webhook' && (
@@ -632,7 +632,7 @@ function ChannelDialog({ initial, onClose, onSaved }: ChannelDialogProps) {
             label={t('pages.notifications.webhookToken')}
             value={fieldValue('secret_token')}
             onChange={(e) => setField('secret_token', e.target.value)}
-            tips={t('pages.notifications.webhookTokenHint')}
+            hint={t('pages.notifications.webhookTokenHint')}
           />
         )}
 

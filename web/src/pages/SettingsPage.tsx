@@ -1791,8 +1791,10 @@ function ObservationModeCard({ canWrite }: { canWrite: boolean }) {
   })
 
   const save = useMutation({
-    mutationFn: (observation_mode: boolean) =>
-      apiProtectionApi.updateDefense(observation_mode),
+    mutationFn: (payload: {
+      observation_mode?: boolean
+      default_fail_open?: boolean
+    }) => apiProtectionApi.updateDefense(payload),
     onSuccess: (row) => {
       queryClient.setQueryData(apiProtectionKeys.defense(), row)
       toast.success(t('pages.settings.observationModeSaved'))
@@ -1800,6 +1802,7 @@ function ObservationModeCard({ canWrite }: { canWrite: boolean }) {
   })
 
   const enabled = settings.data?.observation_mode ?? false
+  const defaultFailOpen = settings.data?.default_fail_open ?? true
 
   return (
     <Card>
@@ -1831,9 +1834,18 @@ function ObservationModeCard({ canWrite }: { canWrite: boolean }) {
             <Switch
               checked={enabled}
               disabled={!canWrite || save.isPending}
-              onCheckedChange={(next) => save.mutate(next)}
+              onCheckedChange={(next) => save.mutate({ observation_mode: next })}
               label={t('pages.settings.observationModeToggle')}
               description={t('pages.settings.observationModeToggleHint')}
+            />
+            <Switch
+              checked={defaultFailOpen}
+              disabled={!canWrite || save.isPending}
+              onCheckedChange={(next) =>
+                save.mutate({ default_fail_open: next })
+              }
+              label={t('pages.settings.defaultFailOpen')}
+              description={t('pages.settings.defaultFailOpenHint')}
             />
             {enabled && (
               <p className="flex items-start gap-2 rounded-md border border-warning/40 bg-warning/8 px-3 py-2 text-[13px] text-fg">

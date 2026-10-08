@@ -262,6 +262,20 @@
       "blockedToday": "本日のブロック"
     },
     "sites": {
+      "failover": {
+        "title": "切断時の動作（フェイルオーバー）",
+        "description": "コントロールプレーンに到達できず、同期済みルールがない場合にこのサイトが返す応答。",
+        "policyLabel": "フェイルオーバーポリシー",
+        "policy": {
+          "inherit": "グローバル既定値に従う",
+          "open": "転送を継続（フェイルオープン）",
+          "closed": "503 で拒否（フェイルクローズ）"
+        },
+        "defaultOpen": "グローバル既定値：切断中も転送を継続。",
+        "defaultClosed": "グローバル既定値：切断中は 503 で拒否。",
+        "inheritHint": "現在はグローバル既定値に従っています（{{default}}）。",
+        "saved": "フェイルオーバーポリシーを更新しました"
+      },
       "title": "サイト",
       "description": "PingWAF に保護されているすべてのウェブサイト。",
       "addSite": "サイトを追加",
@@ -1407,6 +1421,8 @@
       "observationModeBanner": "観察モードが有効です。WAF・IP/地域ルール・Bot 対策・レート制限は遮断せず記録のみ行います。mTLS・Basic 認証・停止中のサイトは引き続き適用されます。",
       "observationModeHint": "CLI の `pingwaf mode observe` と同じ切り替えです。コントロールプレーンに到達できない場合は CLI が復旧手段になります。",
       "observationModeSaved": "観察モードを更新しました",
+      "defaultFailOpen": "フェイルオープン既定値",
+      "defaultFailOpenHint": "フェイルオーバーポリシーが「継承」のサイトが、切断中かつ同期済みルールがない場合に取る動作：オンで転送を継続、オフで 503 を返します。変更は次回の設定同期で全エージェントに反映されます。",
       "apiProtection": "API 保護",
       "apiProtectionDescription": "コントロールプレーン自身の保護：アクセスログ、IP 許可リスト、WAF。",
       "apiProtectionAccessLog": "アクセスログ",
