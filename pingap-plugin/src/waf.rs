@@ -30,7 +30,7 @@ use super::{
 };
 use crate::challenge::{
     ChallengeKind, VERIFY_ENDPOINT, basic_auth_page, block_page,
-    build_challenge_response, paused_page, rate_limit_page,
+    build_challenge_response, fail_closed_page, paused_page, rate_limit_page,
     resolve_cookie_secret,
 };
 use async_trait::async_trait;
@@ -85,6 +85,10 @@ enum EngineChoice {
     Site(Arc<WafEngine>),
     /// WAF explicitly disabled for this site by the control plane.
     Disabled,
+    /// The edge is configured to fail closed (`fail_open = false`) and has
+    /// lost its control plane: the host has no synced rules to protect it,
+    /// so every request is refused before any rule runs.
+    FailClosed,
 }
 
 /// Client certificate policy of a site, built from its SSL posture. The
@@ -1826,13 +1830,29 @@ impl WafPlugin {
     /// Resolve the site data for `host`, consulting the agent rule cache when
     /// available and caching compiled contexts per domain.
     fn resolve_site(&self, host: &str) -> ResolvedSite {
-        let fallback = |site_id: String| ResolvedSite {
-            choice: EngineChoice::Base,
-            site_id,
-            context: None,
-        };
         let Some(agent) = PingWafAgent::instance() else {
-            return fallback(host.to_string());
+            // Standalone mode has no control plane to lose: the locally
+            // configured engine always serves.
+            return ResolvedSite {
+                choice: EngineChoice::Base,
+                site_id: host.to_string(),
+                context: None,
+            };
+        };
+        let fallback = |site_id: String| {
+            // Without synced rules the request would be proxied by the base
+            // engine alone. An edge that must fail closed refuses instead;
+            // fail-open edges keep serving, exactly as they did before.
+            let choice = if agent.config.fail_open || agent.is_connected() {
+                EngineChoice::Base
+            } else {
+                EngineChoice::FailClosed
+            };
+            ResolvedSite {
+                choice,
+                site_id,
+                context: None,
+            }
         };
         if host.is_empty() {
             return fallback(String::new());
@@ -1974,6 +1994,47 @@ impl WafPlugin {
             rule_name,
             event_type,
         );
+    }
+
+    /// Reports a fail-closed refusal. No rule produced this decision — the
+    /// edge simply cannot protect the site without its control plane — so
+    /// the event is written directly instead of through the verdict
+    /// pipeline.
+    fn log_fail_closed(
+        agent: &PingWafAgent,
+        site_id: &str,
+        request_id: &str,
+        host: &str,
+        request_data: &RequestData,
+    ) {
+        agent.record_request(true);
+        agent.log_security_event(SecurityEvent {
+            site_id: site_id.to_string(),
+            request_id: request_id.to_string(),
+            client_ip: request_data.client_ip.clone(),
+            method: request_data.method.clone(),
+            scheme: request_data.scheme.clone(),
+            protocol: request_data.protocol.clone(),
+            host: host.to_string(),
+            path: request_data.path.clone(),
+            query_string: request_data.query.clone(),
+            rule_id: String::new(),
+            rule_name: String::new(),
+            event_type: "fail_closed".to_string(),
+            action: "block".to_string(),
+            score: 0,
+            details: "control plane unreachable and fail_open is disabled"
+                .to_string(),
+            response_status: 503,
+            user_agent: request_data
+                .headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("user-agent"))
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default(),
+            country_code: request_data.country_code.clone().unwrap_or_default(),
+            matched_tags: Vec::new(),
+        });
     }
 
     /// Answers a request stopped by an access restriction: security event,
@@ -2334,6 +2395,26 @@ impl Plugin for WafPlugin {
             return Ok(RequestPluginResult::Respond(response));
         }
 
+        // ── Fail-closed edges: an agent configured with `fail_open = false`
+        // that has lost its control plane refuses traffic it has no synced
+        // rules for, instead of proxying it unprotected. Like the paused
+        // page this keeps TLS and the log pipeline alive, and every refusal
+        // is reported as a `fail_closed` security event. ──
+        if matches!(choice, EngineChoice::FailClosed) {
+            let response = fail_closed_page(&request_id);
+            emit_generated_access(agent.as_ref(), &request_id, &response);
+            if let Some(agent) = &agent {
+                Self::log_fail_closed(
+                    agent,
+                    &site_id,
+                    &request_id,
+                    &host,
+                    &request_data,
+                );
+            }
+            return Ok(RequestPluginResult::Respond(response));
+        }
+
         // ── Dynamic IP blocks: an IP the edge already refused (an auto-block
         // from an earlier WAF/rate-limit verdict or a server-issued block
         // command) is rejected before any rule runs. Like the paused-site
@@ -2666,6 +2747,7 @@ impl Plugin for WafPlugin {
                 guard.inspect(&request_data)
             },
             EngineChoice::Disabled => unreachable!("handled above"),
+            EngineChoice::FailClosed => unreachable!("handled above"),
         };
 
         // Custom rule ids carry no name of their own; the site context maps
@@ -3237,12 +3319,25 @@ advanced_mode = true
         Arc<PingWafAgent>,
         tempfile::TempDir,
     ) {
-        let lock = lock_agent().await;
         let dir = tempfile::tempdir().unwrap();
         let config = AgentConfig {
             cache_dir: dir.path().to_string_lossy().to_string(),
             ..Default::default()
         };
+        install_test_agent_with(config, dir).await
+    }
+
+    /// Same, with a caller-supplied config. It should point `cache_dir` at
+    /// `dir` so the temporary rules are cleaned up with it.
+    pub(crate) async fn install_test_agent_with(
+        config: AgentConfig,
+        dir: tempfile::TempDir,
+    ) -> (
+        tokio::sync::MutexGuard<'static, ()>,
+        Arc<PingWafAgent>,
+        tempfile::TempDir,
+    ) {
+        let lock = lock_agent().await;
         let rule_cache =
             RuleCache::new(dir.path().to_path_buf(), "test-agent".to_string())
                 .unwrap();
@@ -3417,6 +3512,105 @@ advanced_mode = true
         );
         assert!(!entry.response_body_truncated);
         assert!(agent.client.pop_log().await.is_none());
+    }
+
+    /// An edge configured to fail closed refuses hosts without synced rules
+    /// while its control plane is unreachable and reports each refusal;
+    /// fail-open edges (the default) and hosts with synced rules are
+    /// unaffected. The test agent never connects, so it stays permanently
+    /// "disconnected".
+    #[tokio::test]
+    async fn test_fail_closed_when_disconnected() {
+        // Baseline: the default fail-open agent is also permanently
+        // disconnected, and the unknown host still falls through to the
+        // base engine.
+        {
+            let (_guard, _agent, _dir) = install_test_agent().await;
+            let plugin = WafPlugin::new(
+                &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+            )
+            .unwrap();
+            assert!(
+                run_request(&plugin, "203.0.113.7").await
+                    == RequestPluginResult::Continue
+            );
+        }
+
+        // Flipping to fail-closed turns the same miss into a refusal.
+        let dir = tempfile::tempdir().unwrap();
+        let config = AgentConfig {
+            cache_dir: dir.path().to_string_lossy().to_string(),
+            fail_open: false,
+            ..Default::default()
+        };
+        let (_guard, agent, _dir) = install_test_agent_with(config, dir).await;
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        let RequestPluginResult::Respond(resp) =
+            run_request(&plugin, "203.0.113.7").await
+        else {
+            panic!("expected the fail-closed edge to refuse the request");
+        };
+        assert_eq!(http::StatusCode::SERVICE_UNAVAILABLE, resp.status);
+        let retry_after = resp.headers.as_ref().and_then(|headers| {
+            headers
+                .iter()
+                .find(|(name, _)| name.as_str() == "retry-after")
+                .map(|(_, value)| {
+                    value.to_str().unwrap_or_default().to_string()
+                })
+        });
+        assert_eq!(Some("30".to_string()), retry_after);
+
+        // The refusal ships an access row plus a `fail_closed` security
+        // event.
+        let access = agent.client.pop_log().await.unwrap();
+        assert_eq!(503, access.response_status);
+        assert_eq!(String::new(), access.waf_event_type);
+        let event = agent.client.pop_log().await.unwrap();
+        assert_eq!("fail_closed", event.waf_event_type);
+        assert_eq!("block", event.waf_action);
+        assert_eq!("example.com", event.host);
+        assert!(agent.client.pop_log().await.is_none());
+
+        // Hosts the cache knows about keep their synced configuration: once
+        // the site is synced the same request flows again.
+        agent
+            .rule_cache
+            .update_from_site_config(&proto::SiteConfig {
+                sites: vec![proto::Site {
+                    id: "site-1".to_string(),
+                    name: "example".to_string(),
+                    domain: "example.com".to_string(),
+                    alternate_domains: Vec::new(),
+                    status: 0,
+                    rules: Some(proto::RuleBundle {
+                        site_id: "site-1".to_string(),
+                        config_hash: "hash-1".to_string(),
+                        ..Default::default()
+                    }),
+                    trust_proxy_headers: false,
+                    trusted_header: String::new(),
+                    trust_last_hop: false,
+                }],
+                config_hash: "hash-1".to_string(),
+                updated_at: None,
+            })
+            .unwrap();
+        assert!(
+            run_request(&plugin, "203.0.113.7").await
+                == RequestPluginResult::Continue
+        );
+
+        // Standalone edges have no control plane to lose and never refuse.
+        PingWafAgent::set_agent_instance(None);
+        assert!(
+            run_request(&plugin, "203.0.113.7").await
+                == RequestPluginResult::Continue
+        );
     }
 
     /// A blocked request logs the page the client received, so the dashboard

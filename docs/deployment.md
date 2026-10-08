@@ -175,9 +175,10 @@ server-side log batch size (`500`) are compiled-in constants with no override.
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `server_url` | string | `http://localhost:9090` | Control plane gRPC URL |
+| `server_ca_cert` | string | — | PEM file with the CA that signed the control plane's TLS certificate (required for private CAs; bundled roots are used otherwise) |
 | `api_key` | string | `""` | Agent authentication key (empty = auto-register over loopback in all-in-one) |
 | `cache_dir` | string | `./data/cache` | Local rule cache directory |
-| `fail_open` | bool | `true` | Allow traffic when disconnected |
+| `fail_open` | bool | `true` | While disconnected: `true` keeps serving with the last synced rules; `false` answers 503 for hosts without synced rules |
 | `heartbeat_interval_secs` | int | `30` | Fallback heartbeat frequency, used only when the control plane hands no interval down at registration |
 | `log_batch_size` | int | `100` | Log entries before flush |
 | `log_flush_interval_secs` | int | `5` | Max time between flushes |

@@ -38,7 +38,11 @@ pub struct AgentConfig {
     /// Maximum reconnection delay in milliseconds
     #[serde(default = "default_reconnect_max_delay")]
     pub reconnect_max_delay_ms: u64,
-    /// Whether to fail-open when disconnected (true = allow traffic, false = use cached rules)
+    /// Traffic policy while the control plane is unreachable. `true` (the
+    /// default) keeps proxying with the last synced rules and lets hosts
+    /// without rules fall through to the base engine; `false` answers 503
+    /// for any host without synced rules — which is every host right after
+    /// a cold start, before the first sync completes.
     #[serde(default = "default_fail_open")]
     pub fail_open: bool,
     /// Host probe sampling interval in seconds

@@ -241,6 +241,28 @@ pub(crate) fn paused_page(request_id: &str) -> HttpResponse {
         .finish()
 }
 
+/// A 503 page served by edges configured to fail closed: the control plane
+/// is unreachable and the site has no synced rules, so the request is refused
+/// instead of proxied unprotected.
+pub(crate) fn fail_closed_page(request_id: &str) -> HttpResponse {
+    const RETRY_AFTER_SECS: &str = "30";
+    let body = format!(
+        "<html><body><h1>503 Service Unavailable</h1>\
+<p>This site is temporarily unavailable: the edge node cannot reach its \
+control plane and is configured to refuse traffic in the meantime.</p>\
+<p>Request ID: {request_id}</p></body></html>"
+    );
+    HttpResponse::builder(StatusCode::SERVICE_UNAVAILABLE)
+        .body(body)
+        .header(HTTP_HEADER_CONTENT_HTML.clone())
+        .header((
+            header::RETRY_AFTER,
+            HeaderValue::from_static(RETRY_AFTER_SECS),
+        ))
+        .no_store()
+        .finish()
+}
+
 /// A 429 HTML page for requests stopped by a rate limit rule, telling the
 /// client when it may retry.
 pub(crate) fn rate_limit_page(
