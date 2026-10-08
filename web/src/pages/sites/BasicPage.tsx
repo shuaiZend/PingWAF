@@ -28,6 +28,7 @@ import { useToast } from '@/components/ui/Toast'
 import { ErrorState } from '@/components/ErrorState'
 import { sitesApi, siteKeys } from '@/api/sites'
 import { ipGroupsApi, ipGroupKeys } from '@/api/ipGroups'
+import { FailoverPanel } from './FailoverPanel'
 import { errorMessage } from '@/api/errors'
 import { useCanWrite } from '@/hooks'
 import { formatDateTime } from '@/lib/format'
@@ -991,6 +992,9 @@ export function BasicPage() {
 
       {/* ── Trusted proxy ── */}
       {siteQuery.data && <ProxyTrustCard site={siteQuery.data.site} />}
+
+      {/* ── Disconnected (failover) policy ── */}
+      <FailoverPanel />
 
       {/* ── Origin pools ── */}
       {poolsQuery.isError && !poolsQuery.data ? (

@@ -262,6 +262,20 @@
       "blockedToday": "Blocked today"
     },
     "sites": {
+      "failover": {
+        "title": "Disconnected behaviour (failover)",
+        "description": "What this site serves while the control plane is unreachable and the host has no synced rule bundle.",
+        "policyLabel": "Failover policy",
+        "policy": {
+          "inherit": "Follow the global default",
+          "open": "Keep serving (fail open)",
+          "closed": "Refuse with 503 (fail closed)"
+        },
+        "defaultOpen": "Global default: keep serving while disconnected.",
+        "defaultClosed": "Global default: refuse with 503 while disconnected.",
+        "inheritHint": "Following the global default ({{default}}).",
+        "saved": "Failover policy updated"
+      },
       "title": "Sites",
       "description": "All websites protected by PingWAF.",
       "addSite": "Add site",
@@ -1407,6 +1421,8 @@
       "observationModeBanner": "Observation mode is on: WAF, IP and geo rules, bot protection and rate limiting only record what they would have blocked. mTLS, basic authentication and suspended sites still enforce.",
       "observationModeHint": "Console equivalent of `pingwaf mode observe`. The CLI stays available as the recovery path when the control plane is unreachable.",
       "observationModeSaved": "Observation mode updated",
+      "defaultFailOpen": "Fail-open default",
+      "defaultFailOpenHint": "How sites whose failover policy is \"inherit\" behave while disconnected with no synced rules: keep proxying (on) or answer 503 (off). Changes reach every agent with the next configuration sync.",
       "apiProtection": "API protection",
       "apiProtectionDescription": "Self-protection of the control plane listener: access logging, an IP allowlist and the WAF.",
       "apiProtectionAccessLog": "Access log",

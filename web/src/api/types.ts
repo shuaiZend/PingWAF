@@ -1054,7 +1054,24 @@ export interface DefenseSettings {
   id: number
   /** When true, every protection detects but nothing is enforced. */
   observation_mode: boolean
+  /**
+   * Default disconnected behaviour for sites whose failover policy is
+   * `inherit`: true keeps proxying, false answers 503.
+   */
+  default_fail_open: boolean
   updated_at: string
+}
+
+/* ── Per-site failover policy ─────────────────────────────────────── */
+
+/** How a site behaves while disconnected with no synced rule bundle. */
+export type FailoverPolicy = 'inherit' | 'open' | 'closed'
+
+/** `api::site_failover::FailoverSettings` — the site policy plus the
+ * global default it inherits from. */
+export interface FailoverSettings {
+  failover_policy: FailoverPolicy
+  default_fail_open: boolean
 }
 
 /* ── Control-plane certificate ────────────────────────────────────── */

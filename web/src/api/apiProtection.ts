@@ -33,8 +33,10 @@ export const apiProtectionApi = {
 
   getDefense: () => apiClient.get<DefenseSettings>('/settings/defense'),
 
-  updateDefense: (observation_mode: boolean) =>
-    apiClient.put<DefenseSettings>('/settings/defense', { observation_mode }),
+  updateDefense: (payload: {
+    observation_mode?: boolean
+    default_fail_open?: boolean
+  }) => apiClient.put<DefenseSettings>('/settings/defense', payload),
 }
 
 export const apiProtectionKeys = {

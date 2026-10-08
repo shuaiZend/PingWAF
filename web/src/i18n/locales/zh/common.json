@@ -262,6 +262,20 @@
       "blockedToday": "今日拦截"
     },
     "sites": {
+      "failover": {
+        "title": "断连行为（failover）",
+        "description": "控制面不可达且该站点主机没有同步规则时，本站点如何响应。",
+        "policyLabel": "断连策略",
+        "policy": {
+          "inherit": "跟随全局默认",
+          "open": "继续转发（fail-open）",
+          "closed": "返回 503 拒绝（fail-closed）"
+        },
+        "defaultOpen": "全局默认：断连时继续转发。",
+        "defaultClosed": "全局默认：断连时返回 503 拒绝。",
+        "inheritHint": "当前跟随全局默认（{{default}}）。",
+        "saved": "断连策略已更新"
+      },
       "title": "站点",
       "description": "所有受 PingWAF 保护的网站。",
       "addSite": "添加站点",
@@ -1407,6 +1421,8 @@
       "observationModeBanner": "观察模式已开启：WAF、IP/地域规则、Bot 防护与限流只记录本应拦截的请求，不做拦截。mTLS、基本认证和已暂停的站点仍然强制执行。",
       "observationModeHint": "等同于命令行 `pingwaf mode observe`；控制面不可用时仍可用该命令恢复。",
       "observationModeSaved": "观察模式已更新",
+      "defaultFailOpen": "断连默认策略（fail-open）",
+      "defaultFailOpenHint": "站点断连策略为\"跟随全局\"时，控制面不可达且无同步规则的行为：开启则继续转发，关闭则返回 503。变更随下次配置同步下发到所有节点。",
       "apiProtection": "API 防护",
       "apiProtectionDescription": "控制面监听器自身的防护：访问日志、IP 白名单与 WAF。",
       "apiProtectionAccessLog": "访问日志",
