@@ -22,6 +22,9 @@ tls_enabled = true
 # Names the generated self-signed certificate covers. Add the hostname you
 # open the dashboard on, otherwise the browser warns about a name mismatch.
 # tls_sans = ["waf.example.com"]
+# Host the dashboard is reached under from the outside (optionally with port).
+# Pinned into the HTTP-to-HTTPS redirect instead of the client's Host header.
+# public_host = "waf.example.com"
 # gRPC control plane listen address (agents connect here)
 grpc_addr = "0.0.0.0:9090"
 # Optional TLS for the gRPC control plane (PEM paths; both must be set).

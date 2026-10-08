@@ -217,6 +217,14 @@ pub struct ServerConfig {
     /// browser to accept the connection without a warning.
     #[serde(default = "default_tls_sans")]
     pub tls_sans: Vec<String>,
+    /// Host (optionally with port) the dashboard is reached under from the
+    /// outside, e.g. `waf.example.com` or `waf.example.com:9080`.
+    ///
+    /// Pinned into the cleartext-to-HTTPS redirect target; when unset the
+    /// redirect reuses the request's `Host` header, which a reverse proxy in
+    /// front of the control plane should be trusted to forward accurately.
+    #[serde(default)]
+    pub public_host: Option<String>,
 }
 
 impl Default for ServerConfig {
@@ -248,6 +256,7 @@ impl Default for ServerConfig {
             passkey_trust_forwarded_proto: false,
             tls_enabled: true,
             tls_sans: default_tls_sans(),
+            public_host: None,
         }
     }
 }
@@ -282,6 +291,9 @@ impl ServerConfig {
         }
         if let Ok(value) = std::env::var("PINGWAF_GRPC_TLS_KEY") {
             config.grpc_tls_key = non_empty_env(&value);
+        }
+        if let Ok(value) = std::env::var("PINGWAF_PUBLIC_HOST") {
+            config.public_host = non_empty_env(&value);
         }
         if let Ok(value) = std::env::var("PINGWAF_JWT_SECRET") {
             config.jwt_secret = value;
