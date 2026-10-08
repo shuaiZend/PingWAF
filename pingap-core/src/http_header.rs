@@ -460,7 +460,11 @@ pub fn get_client_ip(session: &Session) -> String {
 ///
 /// Sites behind a CDN or reverse proxy ask the plugin to derive the client IP
 /// from a forwarded header instead of the direct TCP peer, so that IP access
-/// rules, rate limiting and logs all key on the real client address.
+/// rules, rate limiting and logs all key on the real client address. Trust is
+/// scoped: only a connection whose direct peer falls inside one of the
+/// configured CIDR ranges may influence the resolution at all, so a client
+/// that connects directly — skipping the proxy — cannot spoof its IP through
+/// forwarded headers.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProxyTrust {
     /// Whether per-site proxy trust is enabled.
@@ -471,32 +475,66 @@ pub struct ProxyTrust {
     /// `X-Forwarded-For` (appended by the closest proxy, so a client cannot
     /// spoof it) instead of the first.
     pub last_hop_only: bool,
+    /// CIDR ranges of trusted proxies. An empty list trusts nothing.
+    pub trusted_ranges: Vec<IpNet>,
 }
 
 impl ProxyTrust {
-    /// Normalises a header name from configuration (trimmed, lower-cased).
-    pub fn new(enabled: bool, header: &str, last_hop_only: bool) -> Self {
+    /// Builds trust settings from configuration; a bare IP is treated as a
+    /// /32 (or /128) host range, and unparsable entries are dropped rather
+    /// than failing the whole site.
+    pub fn new(
+        enabled: bool,
+        header: &str,
+        last_hop_only: bool,
+        trusted_ranges: &[String],
+    ) -> Self {
         Self {
             enabled,
             header: header.trim().to_ascii_lowercase(),
             last_hop_only,
+            trusted_ranges: trusted_ranges
+                .iter()
+                .filter_map(|range| {
+                    let raw = range.trim();
+                    raw.parse::<IpNet>()
+                        .map(|net| net.trunc())
+                        .or_else(|_| raw.parse::<IpAddr>().map(IpNet::from))
+                        .ok()
+                })
+                .collect(),
         }
+    }
+
+    /// Whether the direct peer is allowed to influence the client-IP
+    /// resolution. An empty range list trusts nothing.
+    pub fn peer_is_trusted(&self, peer: IpAddr) -> bool {
+        self.trusted_ranges.iter().any(|net| net.contains(&peer))
     }
 }
 
 /// Resolves the client IP from the site-trusted forwarded header.
 ///
-/// Returns `None` when proxy trust is disabled or the header is absent or
-/// does not parse as an IP address; callers then keep the default
-/// [`get_client_ip`] resolution. Unlike the global resolution this helper
-/// never consults the direct TCP peer — it must only be used for sites where
-/// the operator has confirmed a trusted proxy sits in front.
+/// Trust is strict: the direct TCP peer must fall inside one of the
+/// configured proxy ranges for the forwarded header to be read at all.
+/// Anything else — a client connecting directly, or an unparsable header
+/// from an otherwise trusted proxy — resolves to the TCP peer itself, never
+/// to a client-supplied header value. Returns `None` when proxy trust is
+/// disabled or no peer address is available; callers then keep the default
+/// [`get_client_ip`] resolution.
 pub fn resolve_client_ip_with_trust(
     session: &Session,
     trust: &ProxyTrust,
 ) -> Option<String> {
     if !trust.enabled || trust.header.is_empty() {
         return None;
+    }
+    let peer = session
+        .client_addr()
+        .and_then(|addr| addr.as_inet())
+        .map(|addr| addr.ip())?;
+    if !trust.peer_is_trusted(peer) {
+        return Some(peer.to_string());
     }
     let value = session.get_header(trust.header.as_str())?;
     let value = value.to_str().ok()?;
@@ -511,7 +549,12 @@ pub fn resolve_client_ip_with_trust(
     } else {
         value
     };
-    raw.trim().parse::<IpAddr>().ok().map(|ip| ip.to_string())
+    match raw.trim().parse::<IpAddr>() {
+        Ok(ip) => Some(ip.to_string()),
+        // A trusted proxy sent something unusable: fall back to its own
+        // address rather than to a spoofable header.
+        Err(_) => Some(peer.to_string()),
+    }
 }
 
 /// A convenient helper to get a header value as a `&str` from a `RequestHeader`.
@@ -635,14 +678,43 @@ pub fn remove_query_from_header(
 mod tests {
     use super::*;
     use crate::{ConnectionInfo, UpstreamInfo, new_test_session};
+    use pingora::protocols::SocketDigest;
+    use pingora::protocols::l4::socket::SocketAddr;
     use pretty_assertions::assert_eq;
+
+    /// Builds a mock session whose direct TCP peer is `peer`.
+    ///
+    /// `new_test_session` has no socket, so the digest is synthesized to
+    /// let the strict proxy-trust resolution see a peer address.
+    async fn new_test_session_with_peer(
+        headers: &[&str],
+        url: &str,
+        peer: IpAddr,
+    ) -> pingora::proxy::Session {
+        let mut session = new_test_session(headers, url).await;
+        let socket_digest = SocketDigest::from_raw_fd(-1);
+        socket_digest
+            .peer_addr
+            .set(Some(SocketAddr::Inet(std::net::SocketAddr::new(peer, 0))))
+            .expect("peer addr is unset on a fresh digest");
+        session
+            .as_downstream_mut()
+            .digest_mut()
+            .expect("the h1 session always carries a digest")
+            .socket_digest = Some(Arc::new(socket_digest));
+        session
+    }
 
     #[tokio::test]
     async fn test_resolve_client_ip_with_trust() {
-        let trust = ProxyTrust::new(true, "x-forwarded-for", true);
-        let session = new_test_session(
+        // The mock peer sits inside the trusted ranges, so forwarded
+        // headers are honored.
+        let ranges = &["10.0.0.0/8".to_string()];
+        let trust = ProxyTrust::new(true, "x-forwarded-for", true, ranges);
+        let session = new_test_session_with_peer(
             &["Host: github.com", "X-Forwarded-For: 1.2.3.4, 10.0.0.1"],
             "/",
+            "10.0.0.1".parse().unwrap(),
         )
         .await;
         assert_eq!(
@@ -650,16 +722,17 @@ mod tests {
             resolve_client_ip_with_trust(&session, &trust)
         );
 
-        let trust = ProxyTrust::new(true, "x-forwarded-for", false);
+        let trust = ProxyTrust::new(true, "x-forwarded-for", false, ranges);
         assert_eq!(
             Some("1.2.3.4".to_string()),
             resolve_client_ip_with_trust(&session, &trust)
         );
 
-        let trust = ProxyTrust::new(true, "cf-connecting-ip", true);
-        let session = new_test_session(
+        let trust = ProxyTrust::new(true, "cf-connecting-ip", true, ranges);
+        let session = new_test_session_with_peer(
             &["Host: github.com", "CF-Connecting-IP: 203.0.113.7"],
             "/",
+            "10.0.0.1".parse().unwrap(),
         )
         .await;
         assert_eq!(
@@ -667,10 +740,11 @@ mod tests {
             resolve_client_ip_with_trust(&session, &trust)
         );
 
-        let trust = ProxyTrust::new(true, "x-real-ip", true);
-        let session = new_test_session(
+        let trust = ProxyTrust::new(true, "x-real-ip", true, ranges);
+        let session = new_test_session_with_peer(
             &["Host: github.com", "X-Real-IP: 198.51.100.9"],
             "/",
+            "10.0.0.1".parse().unwrap(),
         )
         .await;
         assert_eq!(
@@ -681,8 +755,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_client_ip_with_trust_fallbacks() {
-        // Disabled or unknown header never resolves.
-        let trust = ProxyTrust::new(false, "x-forwarded-for", true);
+        // Disabled trust never resolves through the trusted header.
+        let trust = ProxyTrust::new(true, "x-forwarded-for", true, &[]);
         let session = new_test_session(
             &["Host: github.com", "X-Forwarded-For: 1.2.3.4"],
             "/",
@@ -690,17 +764,86 @@ mod tests {
         .await;
         assert_eq!(None, resolve_client_ip_with_trust(&session, &trust));
 
-        let trust = ProxyTrust::new(true, "x-forwarded-for", true);
-        // Absent header.
+        let trust = ProxyTrust::new(true, "x-forwarded-for", true, &[]);
+        // A trusted proxy that sends no header falls back to the default
+        // resolution.
         let session = new_test_session(&["Host: github.com"], "/").await;
         assert_eq!(None, resolve_client_ip_with_trust(&session, &trust));
-        // Not an IP address (header injection attempt).
-        let session = new_test_session(
-            &["Host: github.com", "X-Forwarded-For: evil.example.com"],
+    }
+
+    #[tokio::test]
+    async fn test_resolve_client_ip_strict_peer_scope() {
+        // Spoofed header: the direct peer is NOT a trusted proxy, so the
+        // forwarded header must be ignored in favor of the peer address.
+        let ranges = &["10.0.0.0/8".to_string()];
+        let trust = ProxyTrust::new(true, "x-forwarded-for", false, ranges);
+        let session = new_test_session_with_peer(
+            &["Host: github.com", "X-Forwarded-For: 1.2.3.4"],
             "/",
+            "203.0.113.50".parse().unwrap(),
         )
         .await;
-        assert_eq!(None, resolve_client_ip_with_trust(&session, &trust));
+        assert_eq!(
+            Some("203.0.113.50".to_string()),
+            resolve_client_ip_with_trust(&session, &trust)
+        );
+
+        // Empty ranges trust nothing: same spoofing attempt resolves to
+        // the peer even though trust is nominally enabled.
+        let trust = ProxyTrust::new(true, "x-forwarded-for", false, &[]);
+        let session = new_test_session_with_peer(
+            &["Host: github.com", "X-Forwarded-For: 1.2.3.4"],
+            "/",
+            "203.0.113.50".parse().unwrap(),
+        )
+        .await;
+        assert_eq!(
+            Some("203.0.113.50".to_string()),
+            resolve_client_ip_with_trust(&session, &trust)
+        );
+
+        // A trusted proxy that sends an unparsable header must not
+        // surface the injection attempt; the peer address wins.
+        let ranges = &["10.0.0.0/8".to_string()];
+        let trust = ProxyTrust::new(true, "x-forwarded-for", false, ranges);
+        let session = new_test_session_with_peer(
+            &["Host: github.com", "X-Forwarded-For: evil.example.com"],
+            "/",
+            "10.0.0.1".parse().unwrap(),
+        )
+        .await;
+        assert_eq!(
+            Some("10.0.0.1".to_string()),
+            resolve_client_ip_with_trust(&session, &trust)
+        );
+    }
+
+    #[test]
+    fn test_proxy_trust_range_parsing() {
+        let trust = ProxyTrust::new(
+            true,
+            " X-Forwarded-For ",
+            true,
+            &[
+                "10.0.0.0/8".to_string(),
+                " 2001:db8::/32 ".to_string(),
+                "not-a-range".to_string(),
+            ],
+        );
+        assert_eq!("x-forwarded-for", trust.header);
+        assert_eq!(2, trust.trusted_ranges.len());
+        assert!(trust.peer_is_trusted("10.1.2.3".parse().unwrap()));
+        assert!(trust.peer_is_trusted("2001:db8::1".parse().unwrap()));
+        assert!(!trust.peer_is_trusted("192.168.1.1".parse().unwrap()));
+        // A bare IP is normalized to a /32 (or /128) host range.
+        let trust = ProxyTrust::new(
+            true,
+            "x-real-ip",
+            false,
+            &["203.0.113.7".to_string()],
+        );
+        assert!(trust.peer_is_trusted("203.0.113.7".parse().unwrap()));
+        assert!(!trust.peer_is_trusted("203.0.113.8".parse().unwrap()));
     }
 
     #[test]

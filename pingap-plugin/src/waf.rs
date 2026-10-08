@@ -28,6 +28,7 @@ use super::{
     Error, get_bool_conf, get_hash_key, get_int_conf_or_default, get_str_conf,
     get_str_slice_conf,
 };
+use crate::bot_dns::{DnsVerdict, bot_dns_verifier, known_bot_family};
 use crate::challenge::{
     ChallengeKind, VERIFY_ENDPOINT, basic_auth_page, block_page,
     build_challenge_response, fail_closed_page, paused_page, rate_limit_page,
@@ -36,6 +37,7 @@ use crate::challenge::{
 use async_trait::async_trait;
 use bytes::{BufMut, BytesMut};
 use dashmap::DashMap;
+use ipnet::IpNet;
 use pingap_config::{PluginCategory, PluginConf};
 use pingap_core::{
     Ctx, HTTP_HEADER_NAME_X_REQUEST_ID, HttpResponse, Plugin, PluginStep,
@@ -336,6 +338,7 @@ impl SiteContext {
                 site_rules.proxy_trust.enabled,
                 site_rules.proxy_trust.effective_header(),
                 site_rules.proxy_trust.last_hop_only,
+                &site_rules.proxy_trust.trusted_ranges,
             ),
         }
     }
@@ -638,11 +641,18 @@ enum BotAction {
 }
 
 /// Bot protection compiled from the site bundle: verified-bot user agent
-/// substrings normalised for case-insensitive matching plus the action for
-/// everything that does not look like a browser.
+/// substrings normalised for case-insensitive matching, trusted crawler IP
+/// ranges, and the action for everything that does not look like a browser.
 struct BotPolicy {
     whitelist: Vec<String>,
     action: BotAction,
+    /// Client IPs inside any of these ranges count as verified bots without
+    /// further inspection. The control plane expands the configured IP group
+    /// and only fills this when IP verification is enabled.
+    verified_ranges: Vec<IpNet>,
+    /// When set, user agents claiming a well-known crawler family are only
+    /// trusted after a DNS reverse + forward confirmation of the client IP.
+    dns_verification: bool,
 }
 
 /// Outcome of classifying one request's user agent.
@@ -672,14 +682,70 @@ impl BotPolicy {
                 .filter(|ua| !ua.is_empty())
                 .collect(),
             action,
+            verified_ranges: cfg
+                .verified_bot_ranges
+                .iter()
+                .filter_map(|range| {
+                    let raw = range.trim();
+                    raw.parse::<IpNet>()
+                        .or_else(|_| raw.parse::<IpAddr>().map(IpNet::from))
+                        .ok()
+                })
+                .collect(),
+            dns_verification: cfg.dns_verification_enabled,
         }
     }
 
-    /// Classifies one request. Whitelisted verified bots pass first, then real
-    /// browsers; everything else receives the configured action. Matching is
-    /// ASCII case-insensitive without lowercasing, so the common
-    /// pass-through path allocates nothing.
-    fn evaluate(&self, user_agent: &str) -> BotDecision {
+    fn denial(&self, detail: String) -> Denial {
+        Denial {
+            rule_id: "bot_protection".to_string(),
+            rule_name: "Bot protection".to_string(),
+            detail,
+            challenge: self.action == BotAction::Challenge,
+            basic_auth: false,
+        }
+    }
+
+    fn decide(&self, denial: Denial) -> BotDecision {
+        match self.action {
+            BotAction::Log => BotDecision::LogOnly(denial),
+            _ => BotDecision::Deny(denial),
+        }
+    }
+
+    /// Classifies one request. Verified bots pass first — by trusted IP
+    /// range, then by DNS-confirmed crawler family — followed by
+    /// user-agent whitelisted bots and real browsers; everything else
+    /// receives the configured action. User-agent matching is ASCII
+    /// case-insensitive without lowercasing, so the common pass-through
+    /// path allocates nothing.
+    async fn evaluate(
+        &self,
+        client_ip: Option<IpAddr>,
+        user_agent: &str,
+    ) -> BotDecision {
+        if let Some(ip) = client_ip
+            && self.verified_ranges.iter().any(|range| range.contains(&ip))
+        {
+            return BotDecision::Pass;
+        }
+        // A claim of a well-known crawler family is only trusted when the
+        // client IP proves it; a resolver outage degrades to the
+        // user-agent-only verdict instead of blocking on it.
+        if self.dns_verification
+            && let Some(ip) = client_ip
+            && let Some((token, _)) = known_bot_family(user_agent)
+        {
+            match bot_dns_verifier().verify(ip, token).await {
+                DnsVerdict::Confirmed => return BotDecision::Pass,
+                DnsVerdict::Refuted => {
+                    return self.decide(self.denial(format!(
+                        "user agent claims to be a '{token}' crawler but {ip} does not resolve to its network"
+                    )));
+                },
+                DnsVerdict::Unknown => {},
+            }
+        }
         if self
             .whitelist
             .iter()
@@ -690,23 +756,14 @@ impl BotPolicy {
         if is_browser_ua(user_agent) {
             return BotDecision::Pass;
         }
-        let denial = Denial {
-            rule_id: "bot_protection".to_string(),
-            rule_name: "Bot protection".to_string(),
-            detail: if user_agent.is_empty() {
-                "the request carries no user agent".to_string()
-            } else {
-                format!(
-                    "user agent '{user_agent}' is neither a verified bot nor a browser"
-                )
-            },
-            challenge: self.action == BotAction::Challenge,
-            basic_auth: false,
+        let detail = if user_agent.is_empty() {
+            "the request carries no user agent".to_string()
+        } else {
+            format!(
+                "user agent '{user_agent}' is neither a verified bot nor a browser"
+            )
         };
-        match self.action {
-            BotAction::Log => BotDecision::LogOnly(denial),
-            _ => BotDecision::Deny(denial),
-        }
+        self.decide(self.denial(detail))
     }
 }
 
@@ -727,7 +784,7 @@ fn is_browser_ua(ua: &str) -> bool {
 /// ASCII case-insensitive `contains`: user agents are ASCII in practice, and
 /// this spares the classification path a `to_lowercase` allocation per
 /// request.
-fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
+pub(crate) fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
     let haystack = haystack.as_bytes();
     let needle = needle.as_bytes();
     !needle.is_empty()
@@ -2544,7 +2601,7 @@ impl Plugin for WafPlugin {
         // ── Bot protection: UA classification runs after IP/geo and before
         // the engine, applying whether or not the WAF engine is enabled ──
         if let Some(bot) = context.as_ref().and_then(|ctx| ctx.bot.as_ref()) {
-            match bot.evaluate(&user_agent) {
+            match bot.evaluate(client_addr, &user_agent).await {
                 BotDecision::Pass => {},
                 BotDecision::Deny(denial) => {
                     if observe {
@@ -3403,6 +3460,7 @@ advanced_mode = true
                     trust_proxy_headers: false,
                     trusted_header: String::new(),
                     trust_last_hop: false,
+                    trusted_proxy_ranges: Vec::new(),
                 }],
                 config_hash: "hash-1".to_string(),
                 updated_at: None,
@@ -3445,6 +3503,7 @@ advanced_mode = true
                     trust_proxy_headers: false,
                     trusted_header: String::new(),
                     trust_last_hop: false,
+                    trusted_proxy_ranges: Vec::new(),
                 }],
                 config_hash: "hash-1".to_string(),
                 updated_at: None,
@@ -3595,6 +3654,7 @@ advanced_mode = true
                     trust_proxy_headers: false,
                     trusted_header: String::new(),
                     trust_last_hop: false,
+                    trusted_proxy_ranges: Vec::new(),
                 }],
                 config_hash: "hash-1".to_string(),
                 updated_at: None,
@@ -3703,6 +3763,7 @@ advanced_mode = true
                     trust_proxy_headers: false,
                     trusted_header: String::new(),
                     trust_last_hop: false,
+                    trusted_proxy_ranges: Vec::new(),
                 }],
                 config_hash,
                 updated_at: None,
@@ -3876,6 +3937,7 @@ advanced_mode = true
                     trust_proxy_headers: false,
                     trusted_header: String::new(),
                     trust_last_hop: false,
+                    trusted_proxy_ranges: Vec::new(),
                 }],
                 config_hash,
                 updated_at: None,
@@ -4158,6 +4220,7 @@ advanced_mode = true
                     trust_proxy_headers: false,
                     trusted_header: String::new(),
                     trust_last_hop: false,
+                    trusted_proxy_ranges: Vec::new(),
                 }],
                 config_hash: "hash-1".to_string(),
                 updated_at: None,
@@ -4213,6 +4276,7 @@ advanced_mode = true
                     trust_proxy_headers: false,
                     trusted_header: String::new(),
                     trust_last_hop: false,
+                    trusted_proxy_ranges: Vec::new(),
                 }],
                 config_hash: "hash-1".to_string(),
                 updated_at: None,
@@ -4603,12 +4667,14 @@ advanced_mode = true
                             enabled: true,
                             action: action as i32,
                             known_bots_whitelist: vec!["Googlebot".to_string()],
+                            ..Default::default()
                         }),
                         ..Default::default()
                     }),
                     trust_proxy_headers: false,
                     trusted_header: String::new(),
                     trust_last_hop: false,
+                    trusted_proxy_ranges: Vec::new(),
                 }],
                 config_hash: "hash-1".to_string(),
                 updated_at: None,
@@ -4617,41 +4683,106 @@ advanced_mode = true
         installed
     }
 
-    #[test]
-    fn bot_ua_classification() {
+    #[tokio::test]
+    async fn bot_ua_classification() {
         let policy = BotPolicy::build(&CacheBotProtection {
             enabled: true,
             action: CacheWafAction::Block,
             known_bots_whitelist: vec!["Googlebot".to_string()],
+            verified_bot_ranges: Vec::new(),
+            dns_verification_enabled: false,
         });
 
         assert!(matches!(
-            policy.evaluate(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
-            ),
+            policy
+                .evaluate(
+                    None,
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+                )
+                .await,
             BotDecision::Pass
         ));
         assert!(matches!(
-            policy.evaluate("Mozilla/5.0 (compatible; Googlebot/2.1)"),
+            policy
+                .evaluate(None, "Mozilla/5.0 (compatible; Googlebot/2.1)")
+                .await,
             BotDecision::Pass
         ));
         assert!(matches!(
-            policy.evaluate("curl/8.4.0"),
+            policy.evaluate(None, "curl/8.4.0").await,
             BotDecision::Deny(_)
         ));
-        assert!(matches!(policy.evaluate(""), BotDecision::Deny(_)));
         assert!(matches!(
-            policy.evaluate("python-requests/2.31.0"),
+            policy.evaluate(None, "").await,
+            BotDecision::Deny(_)
+        ));
+        assert!(matches!(
+            policy.evaluate(None, "python-requests/2.31.0").await,
             BotDecision::Deny(_)
         ));
         // Matching is case-insensitive without lowercasing the agent.
         assert!(matches!(
-            policy.evaluate("mOzIlLa/5.0 (compatible; googlEBot/2.1)"),
+            policy
+                .evaluate(None, "mOzIlLa/5.0 (compatible; googlEBot/2.1)")
+                .await,
             BotDecision::Pass
         ));
         assert!(matches!(
-            policy.evaluate("MOZILLA/5.0 (X11; Linux) FIREFOX/128.0"),
+            policy
+                .evaluate(None, "MOZILLA/5.0 (X11; Linux) FIREFOX/128.0")
+                .await,
             BotDecision::Pass
+        ));
+    }
+
+    /// Verified crawler IP ranges pass without any user-agent signal, and a
+    /// miss falls through to the user-agent classification. Bare IPs compile
+    /// into /32 host ranges; malformed entries are dropped at build time.
+    #[tokio::test]
+    async fn bot_ip_verification_range_hit_passes() {
+        let policy = BotPolicy::build(&CacheBotProtection {
+            enabled: true,
+            action: CacheWafAction::Block,
+            known_bots_whitelist: Vec::new(),
+            verified_bot_ranges: vec![
+                "203.0.113.0/24".to_string(),
+                "2001:db8::/32".to_string(),
+                "10.20.30.40".to_string(),
+                "not-a-range".to_string(),
+            ],
+            dns_verification_enabled: false,
+        });
+        assert_eq!(policy.verified_ranges.len(), 3);
+
+        // Inside the published range: a scripted client nobody whitelisted.
+        assert!(matches!(
+            policy
+                .evaluate(Some("203.0.113.7".parse().unwrap()), "curl/8.4.0")
+                .await,
+            BotDecision::Pass
+        ));
+        // Bare IPs act as host ranges.
+        assert!(matches!(
+            policy
+                .evaluate(Some("10.20.30.40".parse().unwrap()), "")
+                .await,
+            BotDecision::Pass
+        ));
+        assert!(matches!(
+            policy
+                .evaluate(
+                    Some("2001:db8:1::5".parse().unwrap()),
+                    "python-requests/2.31.0"
+                )
+                .await,
+            BotDecision::Pass
+        ));
+        // Outside every range: back to the user-agent verdict.
+        assert!(matches!(
+            policy
+                .evaluate(Some("198.51.100.9".parse().unwrap()), "curl/8.4.0")
+                .await,
+            BotDecision::Deny(_)
         ));
     }
 
@@ -4797,6 +4928,7 @@ advanced_mode = true
                     trust_proxy_headers: false,
                     trusted_header: String::new(),
                     trust_last_hop: false,
+                    trusted_proxy_ranges: Vec::new(),
                 }],
                 config_hash: "hash-1".to_string(),
                 updated_at: None,

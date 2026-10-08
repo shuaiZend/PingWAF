@@ -80,6 +80,11 @@ message AgentHeartbeat {
   // block commands plus auto-blocks triggered by WAF/rate-limit verdicts.
   // The control plane reconciles its copy of the list against this report.
   repeated BlockedIp blocked_ips = 15;
+
+  // When the agent last applied a full site config / a per-site rule
+  // bundle from the control plane. Absent = never synced.
+  google.protobuf.Timestamp last_config_sync_at = 16;
+  google.protobuf.Timestamp last_policy_sync_at = 17;
 }
 
 // One dynamically blocked IP as enforced at the edge.
@@ -453,6 +458,16 @@ message BotProtectionConfig {
   bool enabled = 1;
   WafAction action = 2;                      // Applied to non-browser user agents
   repeated string known_bots_whitelist = 3;  // Case-insensitive UA substrings of verified bots
+  // Verify claiming bots by their client IP: a request whose IP falls inside
+  // `verified_bot_ranges` is treated as a verified bot regardless of its UA.
+  bool ip_verification_enabled = 4;
+  // Confirm whitelisted bot user agents via reverse DNS (PTR must resolve
+  // back to a known bot domain that also points at the client IP).
+  bool dns_verification_enabled = 5;
+  // CIDR ranges of verified bot networks, expanded by the control plane from
+  // the IP group the site's bot protection references (the agent never sees
+  // group identities).
+  repeated string verified_bot_ranges = 6;
 }
 
 message RewriteRule {
@@ -622,6 +637,10 @@ message Site {
   // Trust the last XFF entry (appended by the nearest proxy) instead of the
   // client-supplied first one.
   bool trust_last_hop = 9;
+  // CIDR ranges of proxies allowed to influence the resolved client IP.
+  // Only a direct peer inside one of these ranges may set the forwarded
+  // header; an empty list means no proxy is trusted.
+  repeated string trusted_proxy_ranges = 10;
 }
 
 enum SiteStatusEnum {
