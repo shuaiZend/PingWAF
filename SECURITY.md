@@ -64,7 +64,8 @@ from which it inherits the proxy data plane.
 | Version | Status | Receives security fixes |
 | --- | --- | --- |
 | `main` | Active development | Yes — but expect breaking changes |
-| `0.24.x` (current release line, 0.24.1) | Supported | **Yes** |
+| `0.25.x` (current release line, 0.25.0) | Supported | **Yes** |
+| `0.24.x` | Security fixes only | No |
 | `0.23.x` | Security fixes only | No |
 | `0.22.x` | Security fixes only | No |
 | `0.21.x` | Security fixes only | No |
@@ -91,7 +92,8 @@ The following are in scope for this policy:
   rule engine (`pingwaf-waf`) and reach the origin unblocked.
 - **Authentication and authorisation** — JWT issuance/validation, session and
   refresh-token handling, role checks, user registration controls in the
-  control-plane REST API (`/api/v1`).
+  control-plane REST API (`/api/v1`), and the MCP endpoint's credential
+  handling at `/mcp`.
 - **Control-plane protocol** — the gRPC channel between agents and the server:
   agent authentication and API keys, rule/config push integrity, command
   execution (block IP, purge cache, restart agent).
@@ -181,8 +183,22 @@ control.**
       and force HTTPS with HSTS — see
       [`docs/user-guide.md` → SSL Certificate Management](./docs/user-guide.md#ssl-certificate-management).
 - [ ] Set the minimum TLS version to 1.2 or 1.3 per site.
+- [ ] Keep gRPC control-plane TLS enabled (the default; a self-signed CA is
+      generated on first boot). Do not set `grpc_tls_mode = "off"` for agents
+      connecting over any network you do not fully control — the server warns
+      at startup and the console shows a degraded banner while it is off.
 - [ ] Protect ACME/DNS provider credentials as you would protect TLS private
       keys.
+
+### Reverse-proxy trust
+
+- [ ] When a site sets `trust_proxy_headers: true`, also list the proxy/CDN
+      source ranges in `trusted_proxy_ranges` (or reference an IP group such
+      as the built-in Cloudflare subscription via `trusted_proxy_group_ids`).
+      Trust is strict: with no ranges configured the forwarded client-IP
+      header is ignored and the TCP peer is used, so sites upgraded from
+      earlier releases must add their proxy ranges to keep CDN-aware rules
+      (rate limiting, allowlists, geo) working.
 
 ### Availability trade-offs
 

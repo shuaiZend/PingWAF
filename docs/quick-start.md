@@ -617,16 +617,20 @@ any number of edge agents over gRPC. Agents cache rules locally and keep
 proxying (`fail_open = true` by default) if the control plane is unreachable.
 
 ```bash
-# Central control plane
+# Central control plane — gRPC TLS is on by default; the first boot generates
+# a self-signed CA + certificate into the data directory
 pingwaf server \
   --db-url "postgres://pingwaf:pingwaf@localhost:5432/pingwaf" \
   --admin-addr 0.0.0.0:9080 \
   --grpc-addr 0.0.0.0:9090 \
   --jwt-secret "$(openssl rand -hex 32)"
 
-# Each edge node — create the API key in Settings → API Keys → Create Key
+# Each edge node — create the API key in Settings → API Keys → Create Key.
+# Point --server-ca-cert at the CA the server generated
+# (e.g. /var/lib/pingwaf/data/grpc-ca.pem on the control plane)
 pingwaf agent \
-  --server-url "http://control-plane:9090" \
+  --server-url "https://control-plane:9090" \
+  --server-ca-cert /etc/pingwaf/grpc-ca.pem \
   --api-key "YOUR_AGENT_KEY" \
   --cache-dir /var/lib/pingwaf/cache
 ```
@@ -826,14 +830,17 @@ a certificate that includes it.
 ### Agent cannot connect to the server
 
 ```bash
-RUST_LOG=debug pingwaf agent --server-url http://control-plane:9090 --api-key YOUR_KEY
+RUST_LOG=debug pingwaf agent --server-url https://control-plane:9090 --server-ca-cert /etc/pingwaf/grpc-ca.pem --api-key YOUR_KEY
 ```
 
 Checklist:
 
 1. Port `9090` reachable from the agent host: `nc -vz control-plane 9090`.
 2. `--server-url` uses the **gRPC** port (9090), not the dashboard port (9080),
-   and includes the `http://` scheme.
+   and the scheme matches the server's gRPC TLS mode — `https://` with the
+   default TLS (hand the agent the server's CA via `--server-ca-cert`, e.g.
+   `/var/lib/pingwaf/data/grpc-ca.pem` on the control plane), `http://` only
+   when the server runs `grpc_tls_mode = "off"`.
 3. The API key is valid — regenerate it in **Settings → API Keys**.
 4. The server was started in `server` or `all-in-one` mode.
 5. Clocks are synchronised (NTP); skewed clocks break TLS and token checks.
@@ -875,7 +882,7 @@ from [GitHub Releases](https://github.com/shuaiZend/PingWAF/releases), so it
 works on Linux (amd64/arm64) only — on macOS,
 [build from source](#path-2-build-from-source) instead. If the script cannot
 determine the latest version, pass one explicitly:
-`./install.sh --version 0.24.1`.
+`./install.sh --version 0.25.0`.
 
 ### High memory or disk usage
 
