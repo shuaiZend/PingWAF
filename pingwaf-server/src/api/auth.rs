@@ -22,6 +22,7 @@ use crate::auth::middleware::AuthUser;
 use crate::auth::password::{
     hash_password, validate_password, verify_password,
 };
+use crate::auth::token_version_valid;
 use crate::auth::{create_refresh_token, create_token, verify_refresh_token};
 use crate::models::{role, user};
 
@@ -249,6 +250,12 @@ async fn refresh(
     if account.disabled {
         return Err(ApiError::Unauthorized("account is disabled".to_string()));
     }
+    if !token_version_valid(claims.ver, &account) {
+        return Err(ApiError::Unauthorized(
+            "session revoked: credentials changed since this token was issued"
+                .to_string(),
+        ));
+    }
     if !role::is_valid(&account.role) {
         return Err(ApiError::Unauthorized(format!(
             "account has an unknown role '{}'",
@@ -347,6 +354,9 @@ async fn change_password(
         .map_err(|err| ApiError::BadRequest(err.to_string()))?);
     // The first-login gate only demands one successful change.
     active.must_change_password = Set(false);
+    // A password change revokes every token minted before it, including the
+    // one this request was authenticated with.
+    active.token_version = Set(active.token_version.unwrap() + 1);
     active.updated_at = Set(Utc::now());
     active.update(&state.db).await?;
 
@@ -405,6 +415,7 @@ pub async fn create_user(
         role: Set(assigned_role.to_string()),
         disabled: Set(false),
         must_change_password: Set(false),
+        token_version: Set(0),
         created_at: Set(timestamp),
         updated_at: Set(timestamp),
     };
@@ -424,6 +435,7 @@ pub(crate) fn issue_tokens(
         account.id,
         &account.email,
         &account.role,
+        account.token_version,
         secret,
         state.jwt_expiration_hours(),
     )
@@ -432,6 +444,7 @@ pub(crate) fn issue_tokens(
         account.id,
         &account.email,
         &account.role,
+        account.token_version,
         secret,
         state.refresh_expiration_hours(),
     )
@@ -475,6 +488,7 @@ mod tests {
             role: role::ADMIN.into(),
             disabled: false,
             must_change_password: false,
+            token_version: 0,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };

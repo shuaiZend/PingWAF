@@ -217,6 +217,7 @@ mod tests {
             role: role.to_string(),
             disabled: false,
             must_change_password: false,
+            token_version: 0,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -270,6 +271,7 @@ mod tests {
             iat: 0,
             iss: String::new(),
             typ: String::new(),
+            ver: 0,
         };
         assert!(jwt_principal(&claims).unwrap().can_write);
 

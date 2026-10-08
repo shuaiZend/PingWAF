@@ -411,6 +411,7 @@ async fn seed_admin(
         // The default password ships in the repository: force a change on
         // first login.
         must_change_password: sea_orm::Set(true),
+        token_version: sea_orm::Set(0),
         created_at: sea_orm::Set(now),
         updated_at: sea_orm::Set(now),
     };
