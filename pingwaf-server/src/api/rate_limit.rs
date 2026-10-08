@@ -75,7 +75,10 @@ static COUNTERS: LazyLock<Mutex<Counters>> =
 /// Passkey logins replace password logins for the same accounts, so they
 /// share the login bucket; passkey *registration* mutates an
 /// already-authenticated session and stays unlimited.
-fn bucket_for(method: &axum::http::Method, path: &str) -> Option<(&'static str, Rate)> {
+fn bucket_for(
+    method: &axum::http::Method,
+    path: &str,
+) -> Option<(&'static str, Rate)> {
     match (method.as_str(), path) {
         ("POST", "/auth/login")
         | ("POST", "/auth/passkey/login/begin")
@@ -97,19 +100,21 @@ fn consume(
     now: Instant,
 ) -> Result<(), u64> {
     if !counters.contains_key(&(bucket, ip)) && counters.len() >= MAX_ENTRIES {
-        counters.retain(|_, entry| now.duration_since(entry.window_start) < MAX_WINDOW);
+        counters.retain(|_, entry| {
+            now.duration_since(entry.window_start) < MAX_WINDOW
+        });
         if counters.len() >= MAX_ENTRIES {
-            tracing::debug!("rate-limit table full; admitting peer without tracking");
+            tracing::debug!(
+                "rate-limit table full; admitting peer without tracking"
+            );
             return Ok(());
         }
     }
 
-    let entry = counters
-        .entry((bucket, ip))
-        .or_insert(Entry {
-            window_start: now,
-            count: 0,
-        });
+    let entry = counters.entry((bucket, ip)).or_insert(Entry {
+        window_start: now,
+        count: 0,
+    });
     if now.duration_since(entry.window_start) >= rate.window {
         entry.window_start = now;
         entry.count = 0;
@@ -126,7 +131,9 @@ fn consume(
 
 /// `axum` middleware limiting the credential endpoints; see the module docs.
 pub(crate) async fn auth_rate_limit(request: Request, next: Next) -> Response {
-    let Some((bucket, rate)) = bucket_for(request.method(), request.uri().path()) else {
+    let Some((bucket, rate)) =
+        bucket_for(request.method(), request.uri().path())
+    else {
         return next.run(request).await;
     };
     let Some(ip) = peer_addr(&request).map(|addr| addr.ip()) else {
@@ -138,7 +145,8 @@ pub(crate) async fn auth_rate_limit(request: Request, next: Next) -> Response {
     };
 
     let verdict = {
-        let mut counters = COUNTERS.lock().expect("rate-limit counters poisoned");
+        let mut counters =
+            COUNTERS.lock().expect("rate-limit counters poisoned");
         consume(&mut counters, bucket, rate, ip, Instant::now())
     };
 
@@ -172,7 +180,11 @@ mod tests {
         addr.parse().unwrap()
     }
 
-    fn request(method: axum::http::Method, path: &str, peer_ip: &str) -> Request {
+    fn request(
+        method: axum::http::Method,
+        path: &str,
+        peer_ip: &str,
+    ) -> Request {
         Request::builder()
             .method(method)
             .uri(path)
@@ -187,29 +199,42 @@ mod tests {
     #[test]
     fn only_credential_endpoints_are_limited() {
         assert!(bucket_for(&axum::http::Method::POST, "/auth/login").is_some());
+        assert!(bucket_for(
+            &axum::http::Method::POST,
+            "/auth/passkey/login/begin"
+        )
+        .is_some());
+        assert!(bucket_for(
+            &axum::http::Method::POST,
+            "/auth/passkey/login/finish"
+        )
+        .is_some());
         assert!(
-            bucket_for(&axum::http::Method::POST, "/auth/passkey/login/begin").is_some()
+            bucket_for(&axum::http::Method::POST, "/auth/register").is_some()
         );
         assert!(
-            bucket_for(&axum::http::Method::POST, "/auth/passkey/login/finish").is_some()
+            bucket_for(&axum::http::Method::POST, "/auth/refresh").is_some()
         );
-        assert!(bucket_for(&axum::http::Method::POST, "/auth/register").is_some());
-        assert!(bucket_for(&axum::http::Method::POST, "/auth/refresh").is_some());
-        assert!(bucket_for(&axum::http::Method::PUT, "/auth/password").is_some());
+        assert!(
+            bucket_for(&axum::http::Method::PUT, "/auth/password").is_some()
+        );
 
         // Read-only or already-authenticated surfaces stay unlimited.
         assert!(bucket_for(&axum::http::Method::GET, "/auth/status").is_none());
         assert!(bucket_for(&axum::http::Method::GET, "/auth/me").is_none());
-        assert!(
-            bucket_for(&axum::http::Method::POST, "/auth/passkey/register/begin")
-                .is_none()
-        );
-        assert!(
-            bucket_for(&axum::http::Method::POST, "/auth/passkey/register/finish")
-                .is_none()
-        );
+        assert!(bucket_for(
+            &axum::http::Method::POST,
+            "/auth/passkey/register/begin"
+        )
+        .is_none());
+        assert!(bucket_for(
+            &axum::http::Method::POST,
+            "/auth/passkey/register/finish"
+        )
+        .is_none());
         assert!(bucket_for(&axum::http::Method::POST, "/auth/other").is_none());
-        assert!(bucket_for(&axum::http::Method::PUT, "/auth/password/reset").is_none());
+        assert!(bucket_for(&axum::http::Method::PUT, "/auth/password/reset")
+            .is_none());
     }
 
     #[test]
@@ -217,17 +242,24 @@ mod tests {
         let mut counters = Counters::new();
         let start = Instant::now();
         for _ in 0..LOGIN.limit {
-            assert!(
-                consume(&mut counters, "login", LOGIN, ip("10.77.0.1"), start).is_ok()
-            );
+            assert!(consume(
+                &mut counters,
+                "login",
+                LOGIN,
+                ip("10.77.0.1"),
+                start
+            )
+            .is_ok());
         }
         assert!(
-            consume(&mut counters, "login", LOGIN, ip("10.77.0.1"), start).is_err()
+            consume(&mut counters, "login", LOGIN, ip("10.77.0.1"), start)
+                .is_err()
         );
 
         let later = start + LOGIN.window;
         assert!(
-            consume(&mut counters, "login", LOGIN, ip("10.77.0.1"), later).is_ok()
+            consume(&mut counters, "login", LOGIN, ip("10.77.0.1"), later)
+                .is_ok()
         );
     }
 
@@ -236,22 +268,29 @@ mod tests {
         let mut counters = Counters::new();
         let now = Instant::now();
         for _ in 0..LOGIN.limit {
-            assert!(
-                consume(&mut counters, "login", LOGIN, ip("10.77.0.2"), now).is_ok()
-            );
+            assert!(consume(
+                &mut counters,
+                "login",
+                LOGIN,
+                ip("10.77.0.2"),
+                now
+            )
+            .is_ok());
         }
-        assert!(
-            consume(&mut counters, "login", LOGIN, ip("10.77.0.2"), now).is_err()
-        );
+        assert!(consume(&mut counters, "login", LOGIN, ip("10.77.0.2"), now)
+            .is_err());
 
         // A different peer and a different bucket each start fresh.
-        assert!(
-            consume(&mut counters, "login", LOGIN, ip("10.77.0.3"), now).is_ok()
-        );
-        assert!(
-            consume(&mut counters, "register", REGISTER, ip("10.77.0.2"), now)
-                .is_ok()
-        );
+        assert!(consume(&mut counters, "login", LOGIN, ip("10.77.0.3"), now)
+            .is_ok());
+        assert!(consume(
+            &mut counters,
+            "register",
+            REGISTER,
+            ip("10.77.0.2"),
+            now
+        )
+        .is_ok());
     }
 
     #[test]
@@ -262,11 +301,19 @@ mod tests {
             limit: 1,
         };
         let start = Instant::now();
-        assert!(consume(&mut counters, "login", rate, ip("10.77.0.4"), start).is_ok());
+        assert!(
+            consume(&mut counters, "login", rate, ip("10.77.0.4"), start)
+                .is_ok()
+        );
 
-        let retry =
-            consume(&mut counters, "login", rate, ip("10.77.0.4"), start + Duration::from_secs(10))
-                .unwrap_err();
+        let retry = consume(
+            &mut counters,
+            "login",
+            rate,
+            ip("10.77.0.4"),
+            start + Duration::from_secs(10),
+        )
+        .unwrap_err();
         assert!((49..=50).contains(&retry), "{retry}");
     }
 
@@ -289,14 +336,20 @@ mod tests {
         }
 
         // A fresh peer is admitted without growing the table.
-        assert!(consume(&mut counters, "login", rate, ip("10.79.0.1"), now).is_ok());
+        assert!(
+            consume(&mut counters, "login", rate, ip("10.79.0.1"), now).is_ok()
+        );
         assert_eq!(counters.len(), MAX_ENTRIES);
 
         // Once its entry expires, the peer is tracked again.
-        assert!(
-            consume(&mut counters, "login", rate, ip("10.79.0.1"), now + MAX_WINDOW)
-                .is_ok()
-        );
+        assert!(consume(
+            &mut counters,
+            "login",
+            rate,
+            ip("10.79.0.1"),
+            now + MAX_WINDOW
+        )
+        .is_ok());
         assert!(counters.contains_key(&("login", ip("10.79.0.1"))));
     }
 

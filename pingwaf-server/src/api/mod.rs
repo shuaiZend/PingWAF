@@ -52,6 +52,9 @@ use axum::routing::get;
 use axum::Json;
 use axum::Router;
 use serde_json::json;
+use std::future::Future;
+use std::sync::{LazyLock, Mutex};
+use std::time::Duration;
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
@@ -255,7 +258,10 @@ async fn redirect_cleartext_to_https(
 /// reverse proxy the client's `Host` header is whatever the caller sent, and
 /// an attacker controlling it would otherwise steer the redirect — and every
 /// client that follows it — anywhere they like.
-fn https_location(state: &RedirectState, request: &Request) -> Option<HeaderValue> {
+fn https_location(
+    state: &RedirectState,
+    request: &Request,
+) -> Option<HeaderValue> {
     let host = match &state.public_host {
         Some(host) => host.clone(),
         None => request
@@ -279,22 +285,68 @@ pub(crate) fn is_health_probe(path: &str) -> bool {
 }
 
 /// `GET /healthz` and `GET /api/v1/health` — verifies the database is reachable.
+///
+/// Answers are reused for a few seconds: container and load-balancer probes
+/// hit these paths on a short schedule, and without a cache a database that
+/// has slowed down turns every probe into one more query piling onto it.
 async fn health(State(state): State<AppState>) -> Response {
-    match state.db.ping().await {
-        Ok(()) => (
+    let healthy = health_probe(
+        &HEALTH_CACHE,
+        HEALTH_CACHE_TTL,
+        std::time::Instant::now(),
+        || state.db.ping(),
+    )
+    .await;
+    if healthy {
+        (
             StatusCode::OK,
             Json(json!({ "status": "ok", "database": "up" })),
         )
-            .into_response(),
-        Err(err) => {
-            tracing::error!(error = %err, "database health check failed");
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({ "status": "degraded", "database": "down" })),
-            )
-                .into_response()
-        },
+            .into_response()
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "status": "degraded", "database": "down" })),
+        )
+            .into_response()
     }
+}
+
+/// How long a health answer is reused before the database is probed again.
+const HEALTH_CACHE_TTL: Duration = Duration::from_secs(5);
+
+/// Outcome of the last health probe: when it was taken and what it found.
+static HEALTH_CACHE: LazyLock<Mutex<Option<(std::time::Instant, bool)>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+/// Answers from `cache` while it is fresh, otherwise awaits `probe` and
+/// records its outcome. `now` is injected so tests can age the cache.
+async fn health_probe<F, Fut, E>(
+    cache: &Mutex<Option<(std::time::Instant, bool)>>,
+    ttl: Duration,
+    now: std::time::Instant,
+    probe: F,
+) -> bool
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<(), E>>,
+    E: std::fmt::Display,
+{
+    let cached = cache
+        .lock()
+        .expect("health cache poisoned")
+        .filter(|(at, _)| now.duration_since(*at) < ttl);
+    if let Some((_, healthy)) = cached {
+        return healthy;
+    }
+
+    let result = probe().await;
+    let healthy = result.is_ok();
+    if let Err(err) = result {
+        tracing::error!(error = %err, "database health check failed");
+    }
+    *cache.lock().expect("health cache poisoned") = Some((now, healthy));
+    healthy
 }
 
 /// `GET /api/v1/version` — build metadata the frontend shows in the footer.
@@ -371,9 +423,8 @@ mod tests {
             "https://localhost:9080/"
         );
         // Without a Host header there is nothing to redirect to.
-        assert!(
-            https_location(&redirect_state(None), &request("/", None)).is_none()
-        );
+        assert!(https_location(&redirect_state(None), &request("/", None))
+            .is_none());
     }
 
     #[test]
@@ -390,10 +441,80 @@ mod tests {
         // It also covers requests that carry no Host header at all, which the
         // Host-based fallback would have to let through unredirected.
         assert_eq!(
-            https_location(&redirect_state(Some("waf.example.com")), &request("/", None))
-                .unwrap(),
+            https_location(
+                &redirect_state(Some("waf.example.com")),
+                &request("/", None)
+            )
+            .unwrap(),
             "https://waf.example.com/"
         );
+    }
+
+    #[tokio::test]
+    async fn the_health_answer_is_cached_for_the_ttl() {
+        let cache: std::sync::Mutex<Option<(std::time::Instant, bool)>> =
+            std::sync::Mutex::new(None);
+        let calls = std::cell::Cell::new(0u32);
+        let start = std::time::Instant::now();
+        let probe = || {
+            calls.set(calls.get() + 1);
+            async { Err::<(), _>("db down") }
+        };
+
+        // Unhealthy answers are cached like any other outcome.
+        assert!(
+            !health_probe(&cache, Duration::from_secs(5), start, probe).await
+        );
+        assert!(
+            !health_probe(
+                &cache,
+                Duration::from_secs(5),
+                start + Duration::from_secs(4),
+                probe
+            )
+            .await
+        );
+        assert_eq!(calls.get(), 1);
+
+        // Once the ttl has passed a fresh probe runs.
+        assert!(
+            !health_probe(
+                &cache,
+                Duration::from_secs(5),
+                start + Duration::from_secs(5),
+                probe
+            )
+            .await
+        );
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_fresh_healthy_answer_short_circuits_the_probe() {
+        let cache: std::sync::Mutex<Option<(std::time::Instant, bool)>> =
+            std::sync::Mutex::new(None);
+        let calls = std::cell::Cell::new(0u32);
+        let start = std::time::Instant::now();
+        let probe = || {
+            calls.set(calls.get() + 1);
+            async { Ok::<(), std::convert::Infallible>(()) }
+        };
+
+        assert!(
+            health_probe(&cache, Duration::from_secs(5), start, probe).await
+        );
+        // While the cache is fresh the database is not asked again — that is
+        // the point: probes must not pile onto a struggling database.
+        assert!(
+            health_probe(
+                &cache,
+                Duration::from_secs(5),
+                start + Duration::from_secs(1),
+                || async { Err::<(), _>("no connection") }
+            )
+            .await
+        );
+        assert_eq!(calls.get(), 1);
     }
 
     #[test]
