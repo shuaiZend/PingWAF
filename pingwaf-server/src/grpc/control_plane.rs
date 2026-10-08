@@ -288,6 +288,8 @@ impl ControlPlaneTrait for ControlPlaneService {
                     config_hash: Set(None),
                     last_heartbeat: Set(Some(now)),
                     registered_at: Set(now),
+                    last_config_sync_at: Set(None),
+                    last_policy_sync_at: Set(None),
                     public_ip: Set(optional(&payload.public_ip)),
                     private_ip: Set(optional(&payload.private_ip)),
                 }
@@ -783,6 +785,23 @@ async fn persist_heartbeat(
     }
     if message.memory_usage_bytes > 0 {
         active.memory_bytes = Set(Some(message.memory_usage_bytes as i64));
+    }
+    // Sync timestamps come from the agent's own clock, but they only feed
+    // the dashboard's "last synced" display, so a skewed clock cannot make
+    // a healthy agent look offline.
+    if let Some(ts) = message.last_config_sync_at {
+        if let Some(at) =
+            DateTime::from_timestamp(ts.seconds, ts.nanos.max(0) as u32)
+        {
+            active.last_config_sync_at = Set(Some(at));
+        }
+    }
+    if let Some(ts) = message.last_policy_sync_at {
+        if let Some(at) =
+            DateTime::from_timestamp(ts.seconds, ts.nanos.max(0) as u32)
+        {
+            active.last_policy_sync_at = Set(Some(at));
+        }
     }
 
     if let Err(err) = active.update(db).await {

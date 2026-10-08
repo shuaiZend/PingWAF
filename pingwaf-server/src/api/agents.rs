@@ -61,11 +61,18 @@ pub struct AgentResponse {
     pub api_key_id: Option<Uuid>,
     pub config_hash: Option<String>,
     pub last_heartbeat: Option<DateTime<Utc>>,
+    /// When the agent last applied a full site config; null = never synced.
+    pub last_config_sync_at: Option<DateTime<Utc>>,
+    /// When the agent last applied a per-site rule bundle; null = never.
+    pub last_policy_sync_at: Option<DateTime<Utc>>,
     pub registered_at: DateTime<Utc>,
     /// True while the agent holds an open heartbeat stream.
     pub connected: bool,
     /// Commands waiting for the agent to reconnect.
     pub pending_commands: usize,
+    /// Whether the gRPC control plane the agents connect to serves TLS.
+    /// `false` means plaintext traffic (degraded mode).
+    pub grpc_tls: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -629,9 +636,12 @@ async fn enrich(
             api_key_id: row.api_key_id,
             config_hash: row.config_hash,
             last_heartbeat: row.last_heartbeat,
+            last_config_sync_at: row.last_config_sync_at,
+            last_policy_sync_at: row.last_policy_sync_at,
             registered_at: row.registered_at,
             connected,
             pending_commands: state.agents.pending_count(&row.id).await,
+            grpc_tls: state.config.grpc_tls_enabled(),
         });
     }
     Ok(out)

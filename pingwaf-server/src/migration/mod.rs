@@ -41,6 +41,12 @@ pub mod m20240101_000033_site_proxy_trust;
 pub mod m20240101_000034_user_account_controls;
 pub mod m20240101_000035_instance_settings;
 pub mod m20240101_000036_users_token_version;
+pub mod m20240101_000037_site_trusted_proxy_ranges;
+pub mod m20240101_000038_bot_ip_dns_verification;
+pub mod m20240101_000039_ip_group_subscriptions;
+pub mod m20240101_000040_waf_engine_switch;
+pub mod m20240101_000041_site_trusted_proxy_group_ids;
+pub mod m20240101_000042_agent_sync_timestamps;
 
 use sea_orm_migration::prelude::*;
 
@@ -91,6 +97,12 @@ impl MigratorTrait for Migrator {
             Box::new(m20240101_000034_user_account_controls::Migration),
             Box::new(m20240101_000035_instance_settings::Migration),
             Box::new(m20240101_000036_users_token_version::Migration),
+            Box::new(m20240101_000037_site_trusted_proxy_ranges::Migration),
+            Box::new(m20240101_000038_bot_ip_dns_verification::Migration),
+            Box::new(m20240101_000039_ip_group_subscriptions::Migration),
+            Box::new(m20240101_000040_waf_engine_switch::Migration),
+            Box::new(m20240101_000041_site_trusted_proxy_group_ids::Migration),
+            Box::new(m20240101_000042_agent_sync_timestamps::Migration),
         ]
     }
 }
@@ -102,7 +114,7 @@ mod tests {
     #[test]
     fn migrations_are_ordered_and_unique() {
         let migrations = Migrator::migrations();
-        assert_eq!(migrations.len(), 36);
+        assert_eq!(migrations.len(), 42);
         let names: Vec<String> =
             migrations.iter().map(|m| m.name().to_owned()).collect();
         let mut sorted = names.clone();
