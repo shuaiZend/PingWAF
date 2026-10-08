@@ -88,3 +88,5 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# Drives `ServiceExt::oneshot` requests through middleware in unit tests.
+tower = { workspace = true }

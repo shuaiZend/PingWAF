@@ -27,6 +27,7 @@ pub mod logs;
 pub mod mcp;
 pub mod mtls;
 pub mod passkeys;
+pub mod rate_limit;
 pub mod rate_limiting;
 pub mod rewrite;
 pub mod rules;
@@ -99,7 +100,11 @@ pub fn build_router(state: AppState) -> Router {
         .merge(mcp::routes())
         .route("/health", get(health))
         .route("/version", get(version))
-        .fallback(api_not_found);
+        .fallback(api_not_found)
+        // The limiter covers the whole API surface but only ever matches the
+        // credential endpoints (see `bucket_for`), which is also what keeps
+        // passkey logins — registered by a different module — covered.
+        .layer(middleware::from_fn(rate_limit::auth_rate_limit));
 
     let mut root = Router::new()
         .nest(API_PREFIX, api)
