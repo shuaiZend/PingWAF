@@ -519,7 +519,7 @@ fn exempt(path: &str) -> bool {
 }
 
 /// The peer address of the connection, when the serve layer provided one.
-fn peer_addr(request: &Request) -> Option<std::net::SocketAddr> {
+pub(crate) fn peer_addr(request: &Request) -> Option<std::net::SocketAddr> {
     request
         .extensions()
         .get::<ConnectInfo<ConnInfo>>()

@@ -371,6 +371,19 @@ sudo ufw allow 9080/tcp
 sudo ufw allow 9090/tcp  # Only if agents connect remotely
 ```
 
+### Login Rate Limiting
+
+The control plane rate-limits its credential endpoints (`login`, passkey
+login, `register`, token `refresh`, password change) per source address:
+10 login attempts/min, 5 registrations/hour, 30 refreshes/min, 10 password
+changes/min. The limit is keyed by the real TCP peer address — forwarding
+headers are never trusted — so a proxy in front of the dashboard must not be
+shared by other clients that would otherwise be throttled together. Behind a
+large NAT exit (offices, campus networks) all users share one address and can
+exhaust the login budget with legitimate traffic; give the dashboard a
+dedicated ingress address in that case. Exceeding a limit answers `429` with
+a `Retry-After` header.
+
 ## Backup & Recovery
 
 ### Database Backup
