@@ -62,9 +62,11 @@ heartbeat_interval_secs = 30
 log_batch_size = 100
 log_flush_interval_secs = 5
 max_body_log_size = 8192
-# While disconnected from the control plane: `true` keeps serving with the
-# last synced rules (fail-open, default); `false` answers 503 for any host
-# without synced rules until the connection is back (fail-closed)
+# Local fallback while disconnected from the control plane: `true` keeps
+# serving with the last synced rules (fail-open, default); `false` answers 503
+# for any host without synced rules until the connection is back. Per-site
+# failover policies and the control-plane default (console → settings) take
+# precedence once synced; this only applies standalone or before first sync.
 fail_open = true
 # Metrics shipping interval in seconds (0 disables metric shipping)
 metrics_ship_interval_secs = 30

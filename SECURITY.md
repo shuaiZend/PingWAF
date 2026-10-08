@@ -186,11 +186,14 @@ control.**
 
 ### Availability trade-offs
 
-- [ ] `--fail-open` defaults to `true`: an agent keeps proxying traffic when it
-      cannot reach the control plane, which favours availability over
-      enforcement. For high-security deployments where unfiltered traffic is
-      unacceptable, start agents with `--fail-open=false` and accept the
-      availability trade-off.
+- [ ] Disconnected behaviour defaults to fail-open at every layer: an agent
+      keeps proxying traffic when it cannot reach the control plane, which
+      favours availability over enforcement. Per-site failover policies and
+      the control-plane-wide default (console → settings) override the
+      agent's local `--fail-open` once synced. For high-security deployments
+      where unfiltered traffic is unacceptable, set the global default — or
+      individual sites — to fail-closed, or start agents with
+      `--fail-open=false`, and accept the availability trade-off.
 - [ ] Right-size `--log-batch-size`, `--max-body-log-size` and
       `PINGWAF_DB_MAX_CONNECTIONS`; consider shipping logs to Elasticsearch
       instead of retaining everything in PostgreSQL.
