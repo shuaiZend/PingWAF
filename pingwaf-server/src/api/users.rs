@@ -162,6 +162,9 @@ async fn update(
         _ => None,
     };
     let disabling = payload.disabled.unwrap_or(false);
+    // A role change or a disable revokes the account's outstanding tokens;
+    // renames and re-enables do not.
+    let revoking = new_role.is_some() || (disabling && !account.disabled);
     let loses_admin = account.role == role::ADMIN
         && !account.disabled
         && ((new_role.is_some() && new_role.as_deref() != Some(role::ADMIN))
@@ -192,6 +195,9 @@ async fn update(
         if disabled {
             tracing::info!(user_id = %id, "account disabled by administrator");
         }
+    }
+    if revoking {
+        active.token_version = Set(active.token_version.unwrap() + 1);
     }
     active.updated_at = Set(Utc::now());
 

@@ -208,6 +208,12 @@ where
                 "account is disabled".to_string(),
             ));
         }
+        if !super::token_version_valid(claims.ver, &account) {
+            return Err(AuthError::InvalidToken(
+                "session revoked: credentials changed since this token was issued"
+                    .to_string(),
+            ));
+        }
         if !role::is_valid(&account.role) {
             return Err(AuthError::InvalidToken(format!(
                 "account has an unknown role '{}'",
