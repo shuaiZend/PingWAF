@@ -387,6 +387,43 @@ exhaust the login budget with legitimate traffic; give the dashboard a
 dedicated ingress address in that case. Exceeding a limit answers `429` with
 a `Retry-After` header.
 
+## Security Checklist
+
+A hardening pass before exposing the control plane beyond localhost:
+
+- **Change the default administrator.** First boot seeds
+  `admin@pingwaf.local` / `pingwaf123` — the server logs a warning while that
+  password is active, and the dashboard forces a password change on first
+  login, but do not leave the seed in place. `pingwaf user add` can create
+  administrators before boot instead.
+- **Give the control plane a real JWT secret.** A placeholder secret (the
+  `change-me-…` default or the compose value) makes the server generate and
+  persist a random one on first boot, which is safe but rotates whenever the
+  persisted copy is lost; set `PINGWAF_JWT_SECRET` explicitly when tokens
+  must survive re-provisioning or be shared across instances.
+- **Restrict CORS.** With no `PINGWAF_CORS_ORIGINS` the API answers
+  cross-origin requests from any origin — acceptable when the embedded
+  dashboard is the only client and served from the same origin, but list
+  your dashboard origin(s) explicitly when anything else calls the API.
+- **Enable gRPC TLS for cross-network agents.** With `grpc_tls_cert` +
+  `grpc_tls_key`, registration keys, heartbeats and shipped logs travel
+  encrypted and agents verify the server; a loopback all-in-one deployment
+  can stay plaintext.
+- **Keep PostgreSQL off public interfaces.** The compose file binds 5432 to
+  loopback by default; set `POSTGRES_BIND=0.0.0.0` only when another host
+  genuinely needs the database, and then with a strong password and
+  firewall rules in front of it.
+- **Choose `fail_open` deliberately.** `true` (default) keeps sites serving
+  with the last synced rules while the agent is disconnected; `false`
+  refuses traffic (`503`) for hosts without synced rules, trading
+  availability for guaranteeing the WAF sees every request. With `false`,
+  remember the window between agent start and first sync refuses traffic
+  for all hosts.
+- **Session revocation semantics.** Accounts carry a token version;
+  changing a password, disabling an account, or changing its role bumps the
+  version and immediately invalidates that account's access and refresh
+  tokens. Password changes by the user do the same for their own sessions.
+
 ## Backup & Recovery
 
 ### Database Backup
