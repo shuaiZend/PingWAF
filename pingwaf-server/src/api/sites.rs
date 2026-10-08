@@ -756,6 +756,7 @@ async fn create(
         trust_proxy_headers: Set(false),
         trusted_header: Set(crate::models::trusted_header::DEFAULT.to_string()),
         trust_last_hop: Set(true),
+        failover_policy: Set("inherit".to_string()),
         created_at: Set(timestamp),
         updated_at: Set(timestamp),
     }
