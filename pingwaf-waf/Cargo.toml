@@ -1,6 +1,6 @@
 [package]
 name = "pingwaf-waf"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 description = "PingWAF detection engine: normalization, signature matching, rule evaluation and anomaly scoring"
 license = "Apache-2.0"

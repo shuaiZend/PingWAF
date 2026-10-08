@@ -364,7 +364,7 @@ pingap-sentry = { version = "0.24.0", path = "pingap-sentry" }
 pingap-upstream = { version = "0.24.0", path = "pingap-upstream", default-features = false }
 pingap-util = { version = "0.24.0", path = "pingap-util" }
 pingap-webhook = { version = "0.24.0", path = "pingap-webhook" }
-pingwaf-pprof = { version = "0.1.0", path = "pingwaf-pprof" }
+pingwaf-pprof = { version = "0.24.0", path = "pingwaf-pprof" }
 # Released crates.io versions; all three must stay on the same version so cargo
 # resolves one copy of pingora-core.
 # The TLS backend (`openssl` or `rustls`) is chosen by the top-level
