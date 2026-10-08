@@ -92,12 +92,16 @@ export interface CreateUserRequest {
 /** `api::users::UpdateUserRequest` */
 export interface UpdateUserRequest {
   name?: string
+  email?: string
   role?: string
   disabled?: boolean
 }
 
 export interface UpdateProfileRequest {
   name?: string | null
+  /** Changing the login name requires the current password. */
+  email?: string
+  current_password?: string
 }
 
 /* ── Sites ────────────────────────────────────────────────────────── */

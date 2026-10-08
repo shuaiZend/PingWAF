@@ -98,6 +98,12 @@ pub struct ChangePasswordRequest {
 pub struct UpdateProfileRequest {
     #[serde(default)]
     pub name: Option<String>,
+    /// The login name. Changing it requires `current_password` and revokes
+    /// every outstanding token (their e-mail claim goes stale).
+    #[serde(default)]
+    pub email: Option<String>,
+    #[serde(default)]
+    pub current_password: Option<String>,
 }
 
 /// Bootstrap status, consumed by the frontend before showing the login form.
@@ -317,6 +323,8 @@ async fn update_profile(
         .await?
         .ok_or_else(|| ApiError::NotFound("account not found".to_string()))?;
 
+    let old_email = account.email.clone();
+    let password_hash = account.password_hash.clone();
     let mut active: user::ActiveModel = account.into();
     if let Some(name) = payload.name {
         let trimmed = name.trim();
@@ -330,6 +338,41 @@ async fn update_profile(
         } else {
             Some(trimmed.to_string())
         });
+    }
+    if let Some(raw) = payload.email {
+        let email = normalise_email(&raw)?;
+        if email != old_email {
+            // Changing the login name is a sensitive identity change: the
+            // current password keeps a hijacked session from locking the
+            // operator out, and the token bump invalidates every token whose
+            // e-mail claim went stale — the console must sign in again.
+            require_current_password(
+                payload.current_password.as_deref().ok_or_else(|| {
+                    ApiError::BadRequest(
+                        "the current password is required to change the login name"
+                            .to_string(),
+                    )
+                })?,
+                &password_hash,
+            )?;
+            let taken = user::Entity::find()
+                .filter(user::Column::Email.eq(email.clone()))
+                .one(&state.db)
+                .await?;
+            if taken.is_some() {
+                return Err(ApiError::Conflict(format!(
+                    "an account for {email} already exists"
+                )));
+            }
+            active.email = Set(email.clone());
+            active.token_version = Set(active.token_version.unwrap() + 1);
+            tracing::info!(
+                user_id = %current.id,
+                old_email = %old_email,
+                new_email = %email,
+                "login name changed"
+            );
+        }
     }
     active.updated_at = Set(Utc::now());
 

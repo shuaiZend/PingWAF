@@ -47,6 +47,11 @@ pub struct CreateUserRequest {
 pub struct UpdateUserRequest {
     #[serde(default)]
     pub name: Option<String>,
+    /// The login name. Changing it revokes the account's outstanding tokens
+    /// (their e-mail claim goes stale); no password confirmation is needed
+    /// because only administrators reach this endpoint.
+    #[serde(default)]
+    pub email: Option<String>,
     #[serde(default)]
     pub role: Option<String>,
     #[serde(default)]
@@ -161,10 +166,31 @@ async fn update(
         },
         _ => None,
     };
+    let new_email = match payload.email.as_deref() {
+        Some(raw) => {
+            let email = normalise_email(raw)?;
+            (email != account.email).then_some(email)
+        },
+        None => None,
+    };
+    if let Some(email) = &new_email {
+        let taken = user::Entity::find()
+            .filter(user::Column::Email.eq(email.clone()))
+            .filter(user::Column::Id.ne(id))
+            .one(&state.db)
+            .await?;
+        if taken.is_some() {
+            return Err(ApiError::Conflict(format!(
+                "an account for {email} already exists"
+            )));
+        }
+    }
     let disabling = payload.disabled.unwrap_or(false);
-    // A role change or a disable revokes the account's outstanding tokens;
-    // renames and re-enables do not.
-    let revoking = new_role.is_some() || (disabling && !account.disabled);
+    // A role change, a disable or a login-name change revokes the account's
+    // outstanding tokens; renames and re-enables do not.
+    let revoking = new_role.is_some()
+        || (disabling && !account.disabled)
+        || new_email.is_some();
     let loses_admin = account.role == role::ADMIN
         && !account.disabled
         && ((new_role.is_some() && new_role.as_deref() != Some(role::ADMIN))
@@ -189,6 +215,10 @@ async fn update(
     }
     if let Some(new_role) = new_role {
         active.role = Set(new_role);
+    }
+    if let Some(email) = new_email {
+        active.email = Set(email);
+        tracing::info!(user_id = %id, "login name changed by administrator");
     }
     if let Some(disabled) = payload.disabled {
         active.disabled = Set(disabled);
