@@ -8,11 +8,11 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use uuid::Uuid;
 
-use sea_orm::EntityTrait;
+use sea_orm::{DatabaseConnection, EntityTrait};
 
 use crate::api::error::error_response;
 use crate::api::state::AppState;
-use crate::auth::jwt::{verify_user_token, JwtError};
+use crate::auth::jwt::{verify_user_token, Claims, JwtError};
 use crate::models::{role, user};
 
 /// Scheme prefix accepted in the `Authorization` header.
@@ -176,6 +176,50 @@ pub fn bearer_token(parts: &Parts) -> Result<String, AuthError> {
     Ok(token.to_string())
 }
 
+/// Resolves verified token claims against the account table: the token only
+/// proves the identity; the account row is the source of truth for
+/// existence, the disabled flag, the current role and the token version.
+/// Shared by the REST extractors and the MCP endpoint so both enforce the
+/// same database-level checks.
+pub async fn authenticate_user(
+    db: &DatabaseConnection,
+    claims: &Claims,
+) -> Result<AuthUser, AuthError> {
+    let id = claims.subject_id().map_err(|err| {
+        AuthError::InvalidToken(format!("subject is not a UUID: {err}"))
+    })?;
+
+    let account = user::Entity::find_by_id(id)
+        .one(db)
+        .await
+        .map_err(|err| AuthError::Internal(err.to_string()))?
+        .ok_or(AuthError::InvalidToken(
+            "account no longer exists".to_string(),
+        ))?;
+    if account.disabled {
+        return Err(AuthError::Forbidden("account is disabled".to_string()));
+    }
+    if !super::token_version_valid(claims.ver, &account) {
+        return Err(AuthError::InvalidToken(
+            "session revoked: credentials changed since this token was issued"
+                .to_string(),
+        ));
+    }
+    if !role::is_valid(&account.role) {
+        return Err(AuthError::InvalidToken(format!(
+            "account has an unknown role '{}'",
+            account.role
+        )));
+    }
+
+    Ok(AuthUser {
+        id,
+        email: account.email,
+        role: account.role,
+        must_change_password: account.must_change_password,
+    })
+}
+
 impl<S> FromRequestParts<S> for AuthUser
 where
     S: Send + Sync,
@@ -190,43 +234,7 @@ where
         let app_state = AppState::from_ref(state);
         let token = bearer_token(parts)?;
         let claims = verify_user_token(&token, app_state.jwt_secret())?;
-        let id = claims.subject_id().map_err(|err| {
-            AuthError::InvalidToken(format!("subject is not a UUID: {err}"))
-        })?;
-
-        // The token only proves the identity; the account row is the source
-        // of truth for existence, the disabled flag and the current role.
-        let account = user::Entity::find_by_id(id)
-            .one(&app_state.db)
-            .await
-            .map_err(|err| AuthError::Internal(err.to_string()))?
-            .ok_or(AuthError::InvalidToken(
-                "account no longer exists".to_string(),
-            ))?;
-        if account.disabled {
-            return Err(AuthError::Forbidden(
-                "account is disabled".to_string(),
-            ));
-        }
-        if !super::token_version_valid(claims.ver, &account) {
-            return Err(AuthError::InvalidToken(
-                "session revoked: credentials changed since this token was issued"
-                    .to_string(),
-            ));
-        }
-        if !role::is_valid(&account.role) {
-            return Err(AuthError::InvalidToken(format!(
-                "account has an unknown role '{}'",
-                account.role
-            )));
-        }
-
-        Ok(AuthUser {
-            id,
-            email: account.email,
-            role: account.role,
-            must_change_password: account.must_change_password,
-        })
+        authenticate_user(&app_state.db, &claims).await
     }
 }
 

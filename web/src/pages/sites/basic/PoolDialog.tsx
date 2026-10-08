@@ -1,0 +1,203 @@
+import { useState } from 'react'
+import { useTranslation } from 'react-i18next'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { Lock } from '@phosphor-icons/react'
+import { Dialog } from '@/components/ui/Dialog'
+import { Button } from '@/components/ui/Button'
+import { Input } from '@/components/ui/Input'
+import { Select } from '@/components/ui/Select'
+import { Switch } from '@/components/ui/Switch'
+import { useToast } from '@/components/ui/Toast'
+import { sitesApi, siteKeys } from '@/api/sites'
+import { errorMessage } from '@/api/errors'
+import type { CreatePoolRequest, UpdatePoolRequest, UpstreamPool } from '@/api/types'
+import {
+  emptyPoolForm,
+  isHashKeyType,
+  LB_OPTION_KEYS,
+  poolFormFromPool,
+  type PoolFormState,
+} from './types'
+
+export type PoolDialogRequest = { mode: 'create' } | { mode: 'edit'; pool: UpstreamPool }
+
+export function PoolDialog({
+  siteId,
+  request,
+  onClose,
+}: {
+  siteId: string
+  request: PoolDialogRequest
+  onClose: () => void
+}) {
+  const { t } = useTranslation()
+  const toast = useToast()
+  const queryClient = useQueryClient()
+  const editing = request.mode === 'edit' ? request.pool : null
+  const [form, setForm] = useState<PoolFormState>(() =>
+    request.mode === 'edit' ? poolFormFromPool(request.pool) : emptyPoolForm(),
+  )
+  const [error, setError] = useState<string | null>(null)
+
+  const save = useMutation({
+    mutationFn: (data: { id?: string; create?: CreatePoolRequest; update?: UpdatePoolRequest }) =>
+      data.id
+        ? sitesApi.updatePool(siteId, data.id, data.update ?? {})
+        : sitesApi.createPool(siteId, data.create!),
+    onSuccess: (pool, vars) => {
+      toast.success(
+        vars.id ? t('pages.basic.poolUpdated') : t('pages.basic.poolCreated'),
+        pool.name,
+      )
+      void queryClient.invalidateQueries({ queryKey: siteKeys.all })
+      onClose()
+    },
+    onError: (e) => setError(errorMessage(e)),
+  })
+
+  const submit = () => {
+    setError(null)
+    const name = form.name.trim()
+    if (!name || name.length > 100) {
+      setError(t('pages.basic.errors.nameRequired'))
+      return
+    }
+
+    const lbType = form.lbType
+    const hashKey = form.hashKey.trim()
+    let lbAlgorithm = lbType
+    if (isHashKeyType(lbType)) {
+      if (!hashKey) {
+        setError(t('pages.basic.errors.lbKeyRequired'))
+        return
+      }
+      lbAlgorithm = `${lbType}:${hashKey}`
+    }
+    if (lbAlgorithm.length > 64) {
+      setError(t('pages.basic.errors.lbKeyRequired'))
+      return
+    }
+
+    let sni: string | null = null
+    if (form.httpsOrigin) {
+      sni = form.sni.trim().toLowerCase()
+      if (!sni) {
+        setError(t('pages.basic.errors.sniRequired'))
+        return
+      }
+      if (sni.length > 255) {
+        setError(t('pages.basic.errors.sniTooLong'))
+        return
+      }
+      if (sni === '$host' || sni.includes('://') || sni.includes(':')) {
+        setError(t('pages.basic.errors.sniInvalid'))
+        return
+      }
+    }
+
+    if (editing) {
+      // Empty SNI clears the field server-side, disabling HTTPS origin.
+      save.mutate({
+        id: editing.id,
+        update: {
+          name,
+          lb_algorithm: lbAlgorithm,
+          sni: sni ?? '',
+          verify_cert: sni ? form.verifyCert : null,
+        },
+      })
+      return
+    }
+
+    save.mutate({
+      create: {
+        name,
+        lb_algorithm: lbAlgorithm,
+        sni,
+        verify_cert: sni ? form.verifyCert : null,
+      },
+    })
+  }
+
+  return (
+    <Dialog
+      open
+      onClose={save.isPending ? () => undefined : onClose}
+      title={editing ? t('pages.basic.editPool') : t('pages.basic.addPool')}
+      description={
+        editing ? t('pages.basic.poolEditDescription') : t('pages.basic.poolCreateDescription')
+      }
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose} disabled={save.isPending}>
+            {t('common.cancel')}
+          </Button>
+          <Button variant="primary" onClick={submit} loading={save.isPending}>
+            {editing ? t('common.save') : t('common.create')}
+          </Button>
+        </>
+      }
+    >
+      <div className="flex flex-col gap-4">
+        <Input
+          label={t('pages.basic.poolName')}
+          value={form.name}
+          placeholder={t('pages.basic.poolNamePlaceholder')}
+          onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
+          autoFocus
+          required
+        />
+        <Select
+          label={t('pages.basic.lbAlgorithm')}
+          value={form.lbType}
+          hint={t('pages.basic.lbHint')}
+          options={LB_OPTION_KEYS.map((o) => ({ value: o.value, label: t(o.labelKey) }))}
+          onChange={(e) => setForm((f) => ({ ...f, lbType: e.target.value }))}
+        />
+        {isHashKeyType(form.lbType) && (
+          <Input
+            label={t('pages.basic.lbKey')}
+            value={form.hashKey}
+            placeholder="x-user-id"
+            hint={t('pages.basic.lbKeyHint')}
+            onChange={(e) => setForm((f) => ({ ...f, hashKey: e.target.value }))}
+            required
+          />
+        )}
+        <Switch
+          checked={form.httpsOrigin}
+          onCheckedChange={(httpsOrigin) => setForm((f) => ({ ...f, httpsOrigin }))}
+          label={t('pages.basic.httpsOrigin')}
+          description={t('pages.basic.httpsOriginHint')}
+        />
+        {form.httpsOrigin && (
+          <>
+            <Input
+              label={t('pages.basic.sni')}
+              value={form.sni}
+              placeholder="origin.example.com"
+              hint={t('pages.basic.sniHint')}
+              prefixIcon={<Lock weight="duotone" />}
+              onChange={(e) => setForm((f) => ({ ...f, sni: e.target.value }))}
+              required
+            />
+            <Switch
+              checked={form.verifyCert}
+              onCheckedChange={(verifyCert) => setForm((f) => ({ ...f, verifyCert }))}
+              label={t('pages.basic.verifyCert')}
+              description={t('pages.basic.verifyCertHint')}
+            />
+          </>
+        )}
+        {error && (
+          <p
+            role="alert"
+            className="rounded-md border border-danger/40 bg-danger/8 px-3 py-2 text-[13px] text-fg-danger"
+          >
+            {error}
+          </p>
+        )}
+      </div>
+    </Dialog>
+  )
+}

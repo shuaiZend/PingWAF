@@ -1,13 +1,18 @@
 import { apiClient } from './client'
-import type { ManagedRule, UpdateWafSettingsRequest, WafSettings } from './types'
+import type {
+  ManagedRule,
+  UpdateWafSettingsRequest,
+  WafPosture,
+  WafSettings,
+} from './types'
 
 /**
  * Site-level WAF grading settings — `/api/v1/sites/{siteId}/waf/settings`.
  *
- * One per-site record holding the advanced (strict + body inspection) mode
- * switch and the attack-category / backend-stack / managed-rule monitor
- * lists. `GET` creates the row with defaults when absent; `PUT` has patch
- * semantics.
+ * One per-site record holding the engine switch, the advanced (strict + body
+ * inspection) mode switch and the attack-category / backend-stack /
+ * managed-rule monitor lists. `GET` creates the row with defaults when
+ * absent; `PUT` has patch semantics.
  */
 export const wafSettingsApi = {
   get: (siteId: string) =>
@@ -15,6 +20,9 @@ export const wafSettingsApi = {
 
   update: (siteId: string, data: UpdateWafSettingsRequest) =>
     apiClient.put<WafSettings>(`/sites/${siteId}/waf/settings`, data),
+
+  posture: (siteId: string) =>
+    apiClient.get<WafPosture>(`/sites/${siteId}/waf/posture`),
 }
 
 /** Built-in managed rules catalogue — `/api/v1/managed-rules`. */
@@ -27,6 +35,7 @@ export function defaultWafSettings(): WafSettings {
   return {
     id: '',
     site_id: '',
+    waf_enabled: true,
     advanced_mode: false,
     monitor_categories: [],
     monitor_stacks: [],
@@ -40,6 +49,8 @@ export const wafSettingsKeys = {
   all: (siteId: string) => ['sites', siteId, 'waf-settings'] as const,
   settings: (siteId: string) =>
     ['sites', siteId, 'waf-settings', 'settings'] as const,
+  posture: (siteId: string) =>
+    ['sites', siteId, 'waf-settings', 'posture'] as const,
   managedRules: () => ['managed-rules'] as const,
 }
 

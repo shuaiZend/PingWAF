@@ -1,17 +1,22 @@
 import { useEffect, useState } from 'react'
-import { Navigate, useLocation, useParams, useSearchParams } from 'react-router-dom'
+import { Navigate, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Cloud, Gauge, Lightning, ShieldCheck, Sliders, Warning } from '@phosphor-icons/react'
 import { PageHeader } from '@/components/PageHeader'
 import { Tabs } from '@/components/ui/Tabs'
 import { Switch } from '@/components/ui/Switch'
+import { Card, CardBody } from '@/components/ui/Card'
 import { SkeletonCard } from '@/components/ui/Skeleton'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { useToast } from '@/components/ui/Toast'
 import { challengeApi, challengeKeys } from '@/api/challenge'
 import { wafSettingsApi, wafSettingsKeys } from '@/api/wafSettings'
+import { ruleKeys, rulesApi } from '@/api/rules'
+import { RULE_MODES, type RuleMode } from '@/api/types'
 import { useCanWrite, useWafSettingsMutation } from '@/hooks'
+import { cn } from '@/lib/utils'
+import { PostureOverview, type PostureTarget } from './PostureOverview'
 import { ManagedRulesPanel } from './ManagedRulesPanel'
 import { CustomRulesPanel } from './CustomRulesPanel'
 import { MitigationPanel } from './MitigationPanel'
@@ -33,16 +38,27 @@ function parseTab(value: string | null): ProtectionTab {
     : 'managed'
 }
 
+function SectionHeading({ title, hint }: { title: string; hint?: string }) {
+  return (
+    <div className="mb-3">
+      <h2 className="text-sm font-semibold text-fg-strong">{title}</h2>
+      {hint && <p className="mt-0.5 text-[13px] text-fg-subtle">{hint}</p>}
+    </div>
+  )
+}
+
 /**
- * Web protection for one site: the built-in managed rules and attack
- * categories, the user's own WAF rules, and rate-limiting/challenge
- * mitigation under one roof, fronted by the under-attack banner.
+ * Web protection for one site, laid out around three concepts: the WAF
+ * engine switch, detection grading (under attack / deep inspection), and
+ * enforcement (managed categories, custom rules, rate limiting) — fronted by
+ * a live posture card aggregating what the data plane actually enforces.
  */
 export function ProtectionPage() {
   const { t } = useTranslation()
   const toast = useToast()
   const queryClient = useQueryClient()
   const canWrite = useCanWrite()
+  const navigate = useNavigate()
   const { siteId = '' } = useParams<{ siteId: string }>()
   const [searchParams, setSearchParams] = useSearchParams()
   const tab = parseTab(searchParams.get('tab'))
@@ -51,6 +67,14 @@ export function ProtectionPage() {
     const params = new URLSearchParams(searchParams)
     params.set('tab', next)
     setSearchParams(params, { replace: true })
+  }
+
+  const handlePostureNavigate = (target: PostureTarget) => {
+    if (target === 'bot') {
+      navigate(`/sites/${siteId}/security/bot`)
+    } else {
+      setTab(target)
+    }
   }
 
   // Rewrite a legacy `?tab=settings|rules` link in place so the address bar
@@ -75,6 +99,7 @@ export function ProtectionPage() {
   })
   const settings = settingsQuery.data
   const updateSettings = useWafSettingsMutation(siteId)
+  const engineOn = settings?.waf_enabled ?? true
 
   const underAttack = challengeQuery.data?.under_attack_mode ?? false
 
@@ -112,133 +137,200 @@ export function ProtectionPage() {
         description={t('pages.protection.description')}
       />
 
-      {/* ── Mitigation modes: under attack + deep inspection, side by side ── */}
-      <div className="mb-5 grid gap-4 lg:grid-cols-2">
-      {challengeQuery.isPending ? (
-        <SkeletonCard className="h-16" />
-      ) : (
-        <div
-          className={`flex flex-wrap items-center justify-between gap-4 rounded-lg border px-4 py-3 ${
-            underAttack
-              ? 'border-danger/45 bg-danger/10'
-              : 'border-line bg-elevated'
-          }`}
-        >
-          <span className="flex min-w-0 items-center gap-3">
-            <span
-              className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg ${
-                underAttack
-                  ? 'bg-danger/15 text-fg-danger'
-                  : 'bg-recessed text-fg-subtle'
-              }`}
-            >
-              {underAttack ? (
-                <Warning weight="fill" className="h-5 w-5" />
-              ) : (
-                <ShieldCheck weight="duotone" className="h-5 w-5" />
-              )}
-            </span>
-            <span className="min-w-0">
-              <span className="block text-sm font-semibold text-fg-strong">
-                {underAttack
-                  ? t('pages.protection.underAttackActive')
-                  : t('pages.protection.underAttackTitle')}
-              </span>
-              <span className="mt-0.5 block text-[13px] text-fg-subtle">
-                {underAttack
-                  ? t('pages.protection.underAttackActiveHint')
-                  : t('pages.protection.underAttackHint')}
-              </span>
-            </span>
-          </span>
-          {canWrite && (
-            <Switch
-              size="md"
-              checked={underAttack}
-              disabled={!canWrite || setUnderAttack.isPending}
-              aria-label={t('pages.protection.underAttackTitle')}
-              onCheckedChange={(enabled) => {
-                if (enabled) {
-                  setConfirmUnderAttack(true)
-                } else {
-                  setUnderAttack.mutate(false)
-                }
-              }}
-            />
-          )}
-        </div>
-      )}
-      {settingsQuery.isPending ? (
-        <SkeletonCard className="h-16" />
-      ) : (
-        <div
-          className={`flex flex-wrap items-center justify-between gap-4 rounded-lg border px-4 py-3 ${
-            settings?.advanced_mode
-              ? 'border-danger/45 bg-danger/10'
-              : 'border-line bg-elevated'
-          }`}
-        >
-          <span className="flex min-w-0 items-center gap-3">
-            <span
-              className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg ${
-                settings?.advanced_mode
-                  ? 'bg-danger/15 text-fg-danger'
-                  : 'bg-recessed text-fg-subtle'
-              }`}
-            >
-              <Lightning weight="duotone" className="h-5 w-5" />
-            </span>
-            <span className="min-w-0">
-              <span className="block text-sm font-semibold text-fg-strong">
-                {t('pages.protection.deepInspection')}
-              </span>
-              <span className="mt-0.5 block text-[13px] text-fg-subtle">
-                {t('pages.protection.deepInspectionHint')}
-              </span>
-              <span className="mt-1.5 flex items-center gap-1.5 text-xs text-fg-warning">
-                <Gauge weight="duotone" className="h-3.5 w-3.5 shrink-0" />
-                {t('pages.protection.performanceHint')}
-              </span>
-            </span>
-          </span>
-          <Switch
-            size="md"
-            checked={settings?.advanced_mode ?? false}
-            disabled={!canWrite || updateSettings.isPending}
-            aria-label={t('pages.protection.deepInspection')}
-            onCheckedChange={(advanced_mode) => updateSettings.mutate({ advanced_mode })}
-          />
-        </div>
-      )}
+      {/* ── Current effective posture ─────────────────────────────────── */}
+      <div className="mb-5">
+        <PostureOverview siteId={siteId} onNavigate={handlePostureNavigate} />
       </div>
 
-      <Tabs
-        variant="pill"
-        className="mb-5"
-        value={tab}
-        onChange={setTab}
-        items={[
-          {
-            value: 'managed',
-            label: t('pages.protection.tabManaged'),
-            icon: <Sliders weight="duotone" className="h-4 w-4" />,
-          },
-          {
-            value: 'custom',
-            label: t('pages.protection.tabCustom'),
-            icon: <ShieldCheck weight="duotone" className="h-4 w-4" />,
-          },
-          {
-            value: 'cc',
-            label: t('pages.protection.tabCc'),
-            icon: <Cloud weight="duotone" className="h-4 w-4" />,
-          },
-        ]}
-      />
+      {/* ── WAF Engine ────────────────────────────────────────────────── */}
+      <section className="mb-5">
+        <SectionHeading
+          title={t('pages.protection.engineTitle')}
+          hint={t('pages.protection.engineHint')}
+        />
+        {settingsQuery.isPending ? (
+          <SkeletonCard className="h-16" />
+        ) : (
+          <div
+            className={`flex flex-wrap items-center justify-between gap-4 rounded-lg border px-4 py-3 ${
+              engineOn ? 'border-line bg-elevated' : 'border-warning/45 bg-warning/10'
+            }`}
+          >
+            <span className="flex min-w-0 items-center gap-3">
+              <span
+                className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg ${
+                  engineOn ? 'bg-brand-soft text-brand' : 'bg-warning/15 text-fg-warning'
+                }`}
+              >
+                <ShieldCheck weight="duotone" className="h-5 w-5" />
+              </span>
+              <span className="min-w-0">
+                <span className="block text-sm font-semibold text-fg-strong">
+                  {t('pages.protection.engineTitle')}
+                </span>
+                <span className="mt-0.5 block text-[13px] text-fg-subtle">
+                  {t('pages.protection.engineCardHint')}
+                </span>
+                {!engineOn && (
+                  <span className="mt-1.5 block text-xs text-fg-warning">
+                    {t('pages.protection.engineOffWarn')}
+                  </span>
+                )}
+              </span>
+            </span>
+            <Switch
+              size="md"
+              checked={engineOn}
+              disabled={!canWrite || updateSettings.isPending}
+              aria-label={t('pages.protection.engineTitle')}
+              onCheckedChange={(waf_enabled) => updateSettings.mutate({ waf_enabled })}
+            />
+          </div>
+        )}
+      </section>
 
-      {tab === 'managed' && <ManagedRulesPanel />}
-      {tab === 'custom' && <CustomRulesPanel />}
-      {tab === 'cc' && <MitigationPanel />}
+      {/* ── Detection ─────────────────────────────────────────────────── */}
+      <section className="mb-5">
+        <SectionHeading
+          title={t('pages.protection.detectionTitle')}
+          hint={t('pages.protection.detectionHint')}
+        />
+        <div className="grid gap-4 lg:grid-cols-2">
+        {challengeQuery.isPending ? (
+          <SkeletonCard className="h-16" />
+        ) : (
+          <div
+            className={`flex flex-wrap items-center justify-between gap-4 rounded-lg border px-4 py-3 ${
+              underAttack
+                ? 'border-danger/45 bg-danger/10'
+                : 'border-line bg-elevated'
+            }`}
+          >
+            <span className="flex min-w-0 items-center gap-3">
+              <span
+                className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg ${
+                  underAttack
+                    ? 'bg-danger/15 text-fg-danger'
+                    : 'bg-recessed text-fg-subtle'
+                }`}
+              >
+                {underAttack ? (
+                  <Warning weight="fill" className="h-5 w-5" />
+                ) : (
+                  <ShieldCheck weight="duotone" className="h-5 w-5" />
+                )}
+              </span>
+              <span className="min-w-0">
+                <span className="block text-sm font-semibold text-fg-strong">
+                  {underAttack
+                    ? t('pages.protection.underAttackActive')
+                    : t('pages.protection.underAttackTitle')}
+                </span>
+                <span className="mt-0.5 block text-[13px] text-fg-subtle">
+                  {underAttack
+                    ? t('pages.protection.underAttackActiveHint')
+                    : t('pages.protection.underAttackHint')}
+                </span>
+              </span>
+            </span>
+            {canWrite && (
+              <Switch
+                size="md"
+                checked={underAttack}
+                disabled={!canWrite || setUnderAttack.isPending}
+                aria-label={t('pages.protection.underAttackTitle')}
+                onCheckedChange={(enabled) => {
+                  if (enabled) {
+                    setConfirmUnderAttack(true)
+                  } else {
+                    setUnderAttack.mutate(false)
+                  }
+                }}
+              />
+            )}
+          </div>
+        )}
+        {settingsQuery.isPending ? (
+          <SkeletonCard className="h-16" />
+        ) : (
+          <div
+            className={`flex flex-wrap items-center justify-between gap-4 rounded-lg border px-4 py-3 ${
+              settings?.advanced_mode
+                ? 'border-danger/45 bg-danger/10'
+                : 'border-line bg-elevated'
+            }`}
+          >
+            <span className="flex min-w-0 items-center gap-3">
+              <span
+                className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg ${
+                  settings?.advanced_mode
+                    ? 'bg-danger/15 text-fg-danger'
+                    : 'bg-recessed text-fg-subtle'
+                }`}
+              >
+                <Lightning weight="duotone" className="h-5 w-5" />
+              </span>
+              <span className="min-w-0">
+                <span className="block text-sm font-semibold text-fg-strong">
+                  {t('pages.protection.deepInspection')}
+                </span>
+                <span className="mt-0.5 block text-[13px] text-fg-subtle">
+                  {t('pages.protection.deepInspectionHint')}
+                </span>
+                <span className="mt-1.5 flex items-center gap-1.5 text-xs text-fg-warning">
+                  <Gauge weight="duotone" className="h-3.5 w-3.5 shrink-0" />
+                  {t('pages.protection.performanceHint')}
+                </span>
+              </span>
+            </span>
+            <Switch
+              size="md"
+              checked={settings?.advanced_mode ?? false}
+              disabled={!canWrite || updateSettings.isPending}
+              aria-label={t('pages.protection.deepInspection')}
+              onCheckedChange={(advanced_mode) => updateSettings.mutate({ advanced_mode })}
+            />
+          </div>
+        )}
+        </div>
+      </section>
+
+      {/* ── Enforcement ───────────────────────────────────────────────── */}
+      <section>
+        <SectionHeading
+          title={t('pages.protection.enforcementTitle')}
+          hint={t('pages.protection.enforcementHint')}
+        />
+        <EnforcementModeCard />
+
+        <Tabs
+          variant="pill"
+          className="mb-5"
+          value={tab}
+          onChange={setTab}
+          items={[
+            {
+              value: 'managed',
+              label: t('pages.protection.tabManaged'),
+              icon: <Sliders weight="duotone" className="h-4 w-4" />,
+            },
+            {
+              value: 'custom',
+              label: t('pages.protection.tabCustom'),
+              icon: <ShieldCheck weight="duotone" className="h-4 w-4" />,
+            },
+            {
+              value: 'cc',
+              label: t('pages.protection.tabCc'),
+              icon: <Cloud weight="duotone" className="h-4 w-4" />,
+            },
+          ]}
+        />
+
+        {tab === 'managed' && <ManagedRulesPanel />}
+        {tab === 'custom' && <CustomRulesPanel />}
+        {tab === 'cc' && <MitigationPanel />}
+      </section>
 
       <ConfirmDialog
         open={confirmUnderAttack}
@@ -254,6 +346,110 @@ export function ProtectionPage() {
         loading={setUnderAttack.isPending}
       />
     </div>
+  )
+}
+
+/**
+ * Enforcement mode for the site's custom rules — block > monitor > off,
+ * applied across the whole rule set. Moved out of the custom-rules panel so
+ * the Enforcement section opens with the posture-level control.
+ */
+function EnforcementModeCard() {
+  const { t } = useTranslation()
+  const toast = useToast()
+  const queryClient = useQueryClient()
+  const canWrite = useCanWrite()
+  const { siteId = '' } = useParams<{ siteId: string }>()
+
+  const rulesQuery = useQuery({
+    queryKey: ruleKeys.list(siteId),
+    queryFn: () => rulesApi.list(siteId),
+    select: (page) => page.items,
+    enabled: Boolean(siteId),
+  })
+  const allRules = rulesQuery.data ?? []
+  const loading = rulesQuery.isPending
+
+  // Derived exactly the way the control plane derives it: blocking wins.
+  const mode = allRules.some((r) => r.mode === 'block')
+    ? 'block'
+    : allRules.some((r) => r.mode === 'monitor')
+      ? 'monitor'
+      : 'off'
+
+  const applyMode = useMutation({
+    mutationFn: async (next: RuleMode) => {
+      const targets = allRules.filter((r) => r.mode !== next)
+      await Promise.all(targets.map((r) => rulesApi.setMode(siteId, r.id, next)))
+      return targets.length
+    },
+    onSuccess: (changed, next) => {
+      if (changed === 0) {
+        toast.info(t('pages.waf.modeAlready'), t(`pages.waf.mode_${next}`))
+      } else {
+        toast.success(t('pages.waf.modeApplied'), `${t(`pages.waf.mode_${next}`)} · ${changed}`)
+      }
+      void queryClient.invalidateQueries({ queryKey: ruleKeys.all(siteId) })
+    },
+  })
+
+  return (
+    <Card className="mb-5 max-w-2xl">
+      <div className="flex items-center justify-between gap-3 px-4 pt-4">
+        <div>
+          <h3 className="text-sm font-semibold text-fg-strong">
+            {t('pages.waf.mode')}
+          </h3>
+          <p className="mt-0.5 text-[13px] text-fg-subtle">
+            {t('pages.waf.modeCardHint')}
+          </p>
+        </div>
+        {rulesQuery.isFetching && (
+          <span className="text-xs text-fg-subtle">{t('pages.waf.applyingMode')}</span>
+        )}
+      </div>
+      <CardBody className="flex flex-col gap-3">
+        <div className="flex flex-col gap-2">
+          {RULE_MODES.map((m) => {
+            const active = mode === m
+            return (
+              <button
+                key={m}
+                type="button"
+                disabled={!canWrite || applyMode.isPending || loading}
+                onClick={() => applyMode.mutate(m as RuleMode)}
+                className={cn(
+                  'flex items-center justify-between gap-3 rounded-lg border px-3 py-2.5 text-left transition-all disabled:cursor-not-allowed disabled:opacity-60',
+                  active
+                    ? 'border-brand bg-brand-soft'
+                    : 'border-line hover:border-fill hover:bg-recessed',
+                )}
+              >
+                <span className="min-w-0">
+                  <span
+                    className={cn(
+                      'block text-sm font-medium',
+                      active ? 'text-brand' : 'text-fg',
+                    )}
+                  >
+                    {t(`pages.waf.mode_${m}`)}
+                  </span>
+                  <span className="block text-xs text-fg-subtle">
+                    {t(`pages.waf.modeHint_${m}`)}
+                  </span>
+                </span>
+                {active && <ShieldCheck weight="fill" className="h-4 w-4 shrink-0 text-brand" />}
+              </button>
+            )
+          })}
+        </div>
+        <div className="rounded-md border border-line bg-recessed px-3 py-2">
+          <p className="text-xs leading-relaxed text-fg-subtle">
+            {t('pages.waf.modeExplainer')}
+          </p>
+        </div>
+      </CardBody>
+    </Card>
   )
 }
 

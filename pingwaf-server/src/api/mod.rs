@@ -365,6 +365,9 @@ async fn version(State(state): State<AppState>) -> Json<serde_json::Value> {
         "version": env!("CARGO_PKG_VERSION"),
         "api": API_PREFIX,
         "registration_open": state.config.allow_registration,
+        // False = the gRPC control plane serves plaintext (degraded mode);
+        // the dashboard shows a banner so the operator notices.
+        "grpc_tls": state.config.grpc_tls_enabled(),
     }))
 }
 

@@ -27,8 +27,13 @@ tls_enabled = true
 # public_host = "waf.example.com"
 # gRPC control plane listen address (agents connect here)
 grpc_addr = "0.0.0.0:9090"
-# Optional TLS for the gRPC control plane (PEM paths; both must be set).
-# Agents then connect via https://. Cross-network deployments should enable it.
+# TLS for the gRPC control plane: "tls" (default) serves agents over TLS,
+# reusing the dashboard certificate — self-signed on first boot unless the
+# optional grpc_tls_cert/key below are configured. "off" serves plaintext
+# and is logged as degraded; agents then connect via http://.
+# grpc_tls_mode = "tls"
+# Explicit certificate pair (PEM paths; both must be set). When set, these
+# take precedence over the dashboard certificate.
 # grpc_tls_cert = "/etc/pingwaf/certs/grpc.pem"
 # grpc_tls_key = "/etc/pingwaf/certs/grpc-key.pem"
 # JWT signing secret (must be >= 16 characters, change in production!)
@@ -46,10 +51,13 @@ serve_frontend = true
 
 [agent]
 # Control plane gRPC URL — set by the `agent` mode; the all-in-one mode talks
-# to its own loopback gRPC address (`grpc_addr` above) instead.
-# server_url = "http://127.0.0.1:9090"
-# CA (or chain) that signed the control plane's gRPC certificate; without it
-# the bundled webpki roots apply (relevant when server grpc_tls_* is enabled).
+# to its own loopback gRPC address (`grpc_addr` above) instead. The control
+# plane serves TLS by default, so agents use https:// (all-in-one pins the
+# certificate automatically).
+# server_url = "https://127.0.0.1:9090"
+# CA (or chain) that signed the control plane's gRPC certificate — download
+# it from Settings → Control plane HTTPS. Without it the bundled webpki
+# roots apply (i.e. a real, publicly trusted certificate just works).
 # server_ca_cert = "/etc/pingwaf/certs/grpc-ca.pem"
 # API key for agent authentication (generated on first registration)
 api_key = ""

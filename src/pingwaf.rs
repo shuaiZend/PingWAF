@@ -71,6 +71,7 @@ fn server_config_from_opts(opts: &ServerOpts) -> ServerConfig {
     config.grpc_addr = opts.common.grpc_addr.clone();
     config.grpc_tls_cert = opts.common.grpc_tls_cert.clone();
     config.grpc_tls_key = opts.common.grpc_tls_key.clone();
+    config.grpc_tls_mode = opts.common.grpc_tls_mode;
     config.jwt_secret = opts.jwt_secret.clone();
     config.default_admin_email = opts.admin_email.clone();
     config.default_admin_password = opts.admin_password.clone();
@@ -87,6 +88,7 @@ fn server_config_from_all_in_one(opts: &AllInOneOpts) -> ServerConfig {
     config.grpc_addr = opts.common.grpc_addr.clone();
     config.grpc_tls_cert = opts.common.grpc_tls_cert.clone();
     config.grpc_tls_key = opts.common.grpc_tls_key.clone();
+    config.grpc_tls_mode = opts.common.grpc_tls_mode;
     config.jwt_secret = opts.jwt_secret.clone();
     config.default_admin_email = opts.admin_email.clone();
     config.default_admin_password = opts.admin_password.clone();
@@ -114,6 +116,7 @@ fn agent_config_from_opts(opts: &AgentOpts) -> AgentConfig {
         api_key: opts.api_key.clone(),
         agent_id: String::new(),
         server_ca_cert: opts.server_ca_cert.clone(),
+        server_ca_pem: None,
         heartbeat_interval_secs: opts.heartbeat_interval_secs,
         cache_dir: opts.cache_dir.clone(),
         log_batch_size: opts.log_batch_size,
@@ -130,10 +133,11 @@ fn agent_config_from_opts(opts: &AgentOpts) -> AgentConfig {
 
 /// Convert CLI all-in-one options into an `AgentConfig`.
 ///
-/// In all-in-one mode the agent connects to the local server via loopback;
-/// when the gRPC listener runs TLS, it switches to `https://` and trusts the
-/// server certificate through its own file (the certificate must carry an IP
-/// SAN for 127.0.0.1).
+/// In all-in-one mode the agent connects to the local server via loopback.
+/// TLS is the default: the URL switches to `https://` and the CA is resolved
+/// at boot (an explicitly configured certificate file is trusted directly;
+/// otherwise `run` injects the self-signed control-plane certificate as
+/// inline PEM once the database is reachable).
 fn agent_config_from_all_in_one(opts: &AllInOneOpts) -> AgentConfig {
     // Derive the loopback gRPC URL from the configured gRPC address
     let port = extract_port(&opts.common.grpc_addr);
@@ -142,13 +146,21 @@ fn agent_config_from_all_in_one(opts: &AllInOneOpts) -> AgentConfig {
             (Some(cert), Some(_)) => {
                 (format!("https://127.0.0.1:{port}"), Some(cert.clone()))
             },
-            _ => (format!("http://127.0.0.1:{port}"), None),
+            _ => match opts.common.grpc_tls_mode {
+                pingwaf_server::config::GrpcTlsMode::Off => {
+                    (format!("http://127.0.0.1:{port}"), None)
+                },
+                pingwaf_server::config::GrpcTlsMode::Tls => {
+                    (format!("https://127.0.0.1:{port}"), None)
+                },
+            },
         };
     AgentConfig {
         server_url,
         api_key: opts.api_key.clone(),
         agent_id: String::new(),
         server_ca_cert,
+        server_ca_pem: None,
         heartbeat_interval_secs: opts.heartbeat_interval_secs,
         cache_dir: opts.cache_dir.clone(),
         log_batch_size: opts.log_batch_size,
@@ -1310,6 +1322,23 @@ pub async fn run(mode: RunMode) -> anyhow::Result<()> {
                         error!(error = %e, "failed to create bootstrap API key for embedded agent");
                     },
                 }
+            }
+
+            // Pin the gRPC listener certificate: all-in-one serves TLS by
+            // default, so the embedded agent needs the console certificate
+            // (or the explicitly configured one) as its trust anchor.
+            match pingwaf_server::embedded_agent_ca_pem(&server_config).await {
+                Ok(Some(pem)) => {
+                    agent_config.server_ca_pem = Some(pem);
+                },
+                Ok(None) => {},
+                Err(e) => {
+                    error!(
+                        error = %e,
+                        "failed to resolve the gRPC CA for the embedded agent; \
+                         it will fall back to its configured CA settings"
+                    );
+                },
             }
 
             // Start the agent in the background first.

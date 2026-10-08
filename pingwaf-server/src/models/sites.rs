@@ -68,6 +68,15 @@ pub mod sites {
         /// no synced rule bundle: `inherit` (follow the global default),
         /// `open` (keep proxying) or `closed` (answer 503).
         pub failover_policy: String,
+        /// CIDR ranges of proxies allowed to influence the resolved client
+        /// IP. Only connections from these peers read the forwarded header;
+        /// an empty list trusts nothing.
+        pub trusted_proxy_ranges: Vec<String>,
+        /// IP groups whose ranges are merged into `trusted_proxy_ranges`
+        /// when the agent configuration is built. Lets operators track
+        /// vendor-published proxy networks (e.g. the built-in Cloudflare
+        /// subscription) instead of pasting CIDRs by hand.
+        pub trusted_proxy_group_ids: Vec<Uuid>,
         pub created_at: DateTimeUtc,
         pub updated_at: DateTimeUtc,
     }
