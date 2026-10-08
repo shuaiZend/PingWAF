@@ -107,7 +107,7 @@ async fn create(
     }
 
     let account = create_user(
-        &state,
+        &state.db,
         &email,
         &payload.password,
         payload.name.clone(),

@@ -9,8 +9,8 @@ use axum::Json;
 use axum::Router;
 use chrono::{DateTime, Utc};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter,
-    Set,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait,
+    PaginatorTrait, QueryFilter, Set, TransactionError, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -173,6 +173,11 @@ async fn login(
         .map(|body| (StatusCode::OK, Json(body)).into_response())
 }
 
+/// Advisory-lock key serialising first-account decisions across concurrent
+/// registrations. Arbitrary but process-independent; two control planes on
+/// the same database must agree on it, which a constant guarantees.
+const REGISTER_ADVISORY_LOCK_KEY: i64 = 0x5069_6E67_5741_4601;
+
 /// `POST /api/v1/auth/register`
 async fn register(
     State(state): State<AppState>,
@@ -182,39 +187,59 @@ async fn register(
     validate_password(&payload.password)
         .map_err(|err| ApiError::BadRequest(err.to_string()))?;
 
-    let existing = user::Entity::find().count(&state.db).await?;
-    if existing > 0 && !state.config.allow_registration {
-        return Err(ApiError::Forbidden(
-            "registration is disabled on this server".to_string(),
-        ));
-    }
+    // The "is this the first account" decision, the duplicate check and the
+    // insert run inside one transaction guarded by an advisory lock: two
+    // racing registrations must not both observe zero users and mint two
+    // administrators. The lock releases with the transaction; the e-mail
+    // unique constraint stays as the last line of defence.
+    let allow_registration = state.config.allow_registration;
+    let txn_email = email.clone();
+    let password = payload.password;
+    let name = non_empty(&payload.name);
+    let account = state
+        .db
+        .transaction(|txn| {
+            Box::pin(async move {
+                txn.execute_unprepared(&format!(
+                    "SELECT pg_advisory_xact_lock({REGISTER_ADVISORY_LOCK_KEY})"
+                ))
+                .await?;
 
-    let taken = user::Entity::find()
-        .filter(user::Column::Email.eq(email.clone()))
-        .one(&state.db)
-        .await?;
-    if taken.is_some() {
-        return Err(ApiError::Conflict(format!(
-            "an account for {email} already exists"
-        )));
-    }
+                let existing = user::Entity::find().count(txn).await?;
+                if existing > 0 && !allow_registration {
+                    return Err(ApiError::Forbidden(
+                        "registration is disabled on this server".to_string(),
+                    ));
+                }
 
-    // The very first account always becomes the administrator; everybody else
-    // is a read-only viewer until an admin promotes them.
-    let assigned_role = if existing == 0 {
-        role::ADMIN
-    } else {
-        role::VIEWER
-    };
+                let taken = user::Entity::find()
+                    .filter(user::Column::Email.eq(txn_email.clone()))
+                    .one(txn)
+                    .await?;
+                if taken.is_some() {
+                    return Err(ApiError::Conflict(format!(
+                        "an account for {txn_email} already exists"
+                    )));
+                }
 
-    let account = create_user(
-        &state,
-        &email,
-        &payload.password,
-        non_empty(&payload.name),
-        assigned_role,
-    )
-    .await?;
+                // The very first account always becomes the administrator;
+                // everybody else is a read-only viewer until an admin
+                // promotes them.
+                let assigned_role = if existing == 0 {
+                    role::ADMIN
+                } else {
+                    role::VIEWER
+                };
+
+                create_user(txn, &txn_email, &password, name, assigned_role)
+                    .await
+            })
+        })
+        .await
+        .map_err(|err| match err {
+            TransactionError::Connection(db) => ApiError::from(db),
+            TransactionError::Transaction(api) => api,
+        })?;
 
     tracing::info!(
         %email,
@@ -392,8 +417,11 @@ pub(crate) fn normalise_email(raw: &str) -> Result<String, ApiError> {
 }
 
 /// Inserts a new user row with a freshly hashed password.
+///
+/// Accepts any connection so the registration transaction can run it on its
+/// own transaction handle.
 pub async fn create_user(
-    state: &AppState,
+    db: &impl ConnectionTrait,
     email: &str,
     password: &str,
     name: Option<String>,
@@ -419,7 +447,7 @@ pub async fn create_user(
         created_at: Set(timestamp),
         updated_at: Set(timestamp),
     };
-    active.insert(&state.db).await.map_err(ApiError::from)
+    active.insert(db).await.map_err(ApiError::from)
 }
 
 /// Mints an access/refresh pair for `account`.
