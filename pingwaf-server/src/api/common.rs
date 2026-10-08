@@ -593,6 +593,8 @@ mod tests {
             trust_proxy_headers: false,
             trusted_header: crate::models::trusted_header::DEFAULT.to_string(),
             trust_last_hop: true,
+            trusted_proxy_ranges: Vec::new(),
+            trusted_proxy_group_ids: Vec::new(),
             created_at: timestamp,
             updated_at: timestamp,
         };
