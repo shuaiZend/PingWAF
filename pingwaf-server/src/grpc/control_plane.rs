@@ -443,6 +443,28 @@ impl ControlPlaneTrait for ControlPlaneService {
                 },
                 Err(err) => {
                     tracing::error!(site_id = %site_row.id, error = %err, "could not build rule bundle");
+                    crate::notify::emit(crate::notify::AlertEvent {
+                        event_type: crate::models::event_type::CONFIG_SYNC_FAILED.to_string(),
+                        severity: crate::models::severity::CRITICAL,
+                        title: format!(
+                            "Configuration sync failed for site {}",
+                            site_row.domain
+                        ),
+                        message: format!(
+                            "The rule bundle for site '{}' could not be \
+                             built; agents keep running their last synced \
+                             configuration. Error: {err}",
+                            site_row.domain
+                        ),
+                        details: Some(serde_json::json!({
+                            "site_id": site_row.id,
+                            "domain": site_row.domain,
+                            "agent_id": row.id,
+                            "error": err.to_string(),
+                        })),
+                        dedup_key: Some(site_row.id.to_string()),
+                    })
+                    .await;
                     bundles.push(Err(Status::internal(format!(
                         "could not build the rule bundle for site {}: {err}",
                         site_row.id
@@ -607,6 +629,34 @@ impl ControlPlaneTrait for ControlPlaneService {
                 continue;
             }
             received += 1;
+            // ACME failures surface as raw ERROR-level events: raise an
+            // alert so a renewal that keeps failing is not discovered
+            // through an expired certificate.
+            if message.level.eq_ignore_ascii_case("error") {
+                crate::notify::emit(crate::notify::AlertEvent {
+                    event_type: crate::models::event_type::CERT_RENEWAL_FAILED.to_string(),
+                    severity: crate::models::severity::CRITICAL,
+                    title: "Certificate renewal failed".to_string(),
+                    message: if message.message.is_empty() {
+                        "An ACME issuance or renewal attempt failed on the \
+                         edge; see the certificate events for details."
+                            .to_string()
+                    } else {
+                        message.message.clone()
+                    },
+                    details: Some(serde_json::json!({
+                        "agent_id": message.agent_id,
+                        "site_id": message.site_id,
+                        "certificate_id": message.certificate_id,
+                        "target": message.target,
+                    })),
+                    dedup_key: Some(format!(
+                        "{}:{}",
+                        message.site_id, message.target
+                    )),
+                })
+                .await;
+            }
             batch.push(certificate_events::ActiveModel {
                 id: Set(Uuid::new_v4()),
                 certificate_id: Set(parse_optional_uuid(
@@ -854,6 +904,10 @@ async fn persist_site_certificates(
                     %expires_at,
                     "recorded edge certificate state"
                 );
+                notify_certificate_state(
+                    site_id, row_status, expires_at, now,
+                )
+                .await;
             },
             Ok(_) => {},
             Err(err) => {
@@ -864,6 +918,60 @@ async fn persist_site_certificates(
                 );
             },
         }
+    }
+}
+
+/// Raises certificate alerts when the edge reports a state transition:
+/// expiry inside the 30-day warning window, or a certificate that has
+/// expired. Repeats are suppressed by the notification dedup.
+async fn notify_certificate_state(
+    site_id: Uuid,
+    status: &str,
+    expires_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+) {
+    if status == cert_status::EXPIRED {
+        crate::notify::emit(crate::notify::AlertEvent {
+            event_type: crate::models::event_type::CERT_EXPIRED.to_string(),
+            severity: crate::models::severity::CRITICAL,
+            title: format!("Certificate for {site_id} has expired"),
+            message: format!(
+                "The certificate of site {site_id} expired at {expires_at}. \
+                 Browsers will refuse connections until it is renewed."
+            ),
+            details: Some(serde_json::json!({
+                "site_id": site_id,
+                "expires_at": expires_at.to_rfc3339(),
+            })),
+            dedup_key: Some(site_id.to_string()),
+        })
+        .await;
+        return;
+    }
+
+    let warn_from = now + chrono::Duration::days(30);
+    if status == cert_status::ACTIVE && expires_at <= warn_from {
+        let days_left = (expires_at - now).num_days().max(0);
+        crate::notify::emit(crate::notify::AlertEvent {
+            event_type: crate::models::event_type::CERT_EXPIRING.to_string(),
+            severity: crate::models::severity::WARNING,
+            title: format!(
+                "Certificate for {site_id} expires in {days_left} day(s)"
+            ),
+            message: format!(
+                "The certificate of site {site_id} expires on {expires_at} \
+                 ({days_left} day(s) left). Check that automatic renewal is \
+                 succeeding; a failed renewal leads to an outage."
+            ),
+            details: Some(serde_json::json!({
+                "site_id": site_id,
+                "expires_at": expires_at.to_rfc3339(),
+                "days_left": days_left,
+            })),
+            // One alert per site and expiry date, not per heartbeat.
+            dedup_key: Some(format!("{site_id}:{}", expires_at.date_naive())),
+        })
+        .await;
     }
 }
 
@@ -898,6 +1006,7 @@ async fn persist_host_samples(
             })
             .collect()
     };
+    let latest = kept.last().copied();
     let rows: Vec<host_sample::ActiveModel> = kept
         .into_iter()
         .map(|sample| host_sample::ActiveModel {
@@ -938,7 +1047,94 @@ async fn persist_host_samples(
         return;
     }
 
+    // Threshold check on the newest sample of the batch.
+    if let Some(sample) = latest {
+        check_agent_resources(agent_id, sample).await;
+    }
+
     sweep_host_samples(db).await;
+}
+
+/// Consecutive over-threshold samples per agent and metric, so a single busy
+/// moment does not page anyone. Two samples in a row must breach.
+static RESOURCE_STRIKES: LazyLock<Mutex<HashMap<(Uuid, &'static str), u8>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Evaluates one agent sample against the notification thresholds and raises
+/// `agent.resource` alerts for metrics that stayed over for two samples.
+async fn check_agent_resources(agent_id: Uuid, sample: &HostSample) {
+    let Some(manager) = crate::notify::global() else {
+        return;
+    };
+    let settings = manager.settings();
+
+    let memory_percent = if sample.memory_total_bytes > 0 {
+        (sample.memory_used_bytes as f32
+            / sample.memory_total_bytes as f32)
+            * 100.0
+    } else {
+        0.0
+    };
+    let disk_percent = if sample.disk_total_bytes > 0 {
+        (sample.disk_used_bytes as f32 / sample.disk_total_bytes as f32)
+            * 100.0
+    } else {
+        0.0
+    };
+    let metrics: [(&'static str, f32, u8); 3] = [
+        (
+            "cpu",
+            sample.cpu_usage_percent as f32,
+            settings.cpu_percent,
+        ),
+        ("memory", memory_percent, settings.memory_percent),
+        ("disk", disk_percent, settings.disk_percent),
+    ];
+
+    for (metric, value, threshold) in metrics {
+        let key = (agent_id, metric);
+        let over = value >= f32::from(threshold);
+        let strikes = {
+            let mut map = RESOURCE_STRIKES
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let entry = map.entry(key).or_insert(0);
+            if over {
+                *entry = entry.saturating_add(1);
+            } else {
+                *entry = 0;
+            }
+            *entry
+        };
+        if over && strikes == 2 {
+            let severity = if value >= f32::from(threshold) + 5.0 {
+                crate::models::severity::CRITICAL
+            } else {
+                crate::models::severity::WARNING
+            };
+            manager
+                .dispatch(crate::notify::AlertEvent {
+                    event_type: crate::models::event_type::AGENT_RESOURCE
+                        .to_string(),
+                    severity,
+                    title: format!(
+                        "Agent {agent_id}: {metric} usage high"
+                    ),
+                    message: format!(
+                        "Agent {agent_id} reports {metric} usage at \
+                         {value:.1}% (threshold {threshold}%)."
+                    ),
+                    details: Some(serde_json::json!({
+                        "agent_id": agent_id,
+                        "metric": metric,
+                        "value_percent": format!("{value:.1}"),
+                        "threshold_percent": threshold,
+                    })),
+                    dedup_key: Some(format!("{agent_id}:{metric}")),
+                })
+                .await;
+        }
+    }
 }
 
 /// Ages out samples past the retention window, at most once an hour.

@@ -14,6 +14,7 @@ pub mod bot;
 pub mod cache;
 pub mod challenge;
 pub mod common;
+pub mod config_versions;
 pub mod debug;
 pub mod defense;
 pub mod error;
@@ -26,6 +27,7 @@ pub mod log_retention;
 pub mod logs;
 pub mod mcp;
 pub mod mtls;
+pub mod notifications;
 pub mod passkeys;
 pub mod rate_limit;
 pub mod rate_limiting;
@@ -101,6 +103,8 @@ pub fn build_router(state: AppState) -> Router {
         .merge(api_protection::routes())
         .merge(ai::routes())
         .merge(mcp::routes())
+        .merge(config_versions::routes())
+        .merge(notifications::routes())
         .route("/health", get(health))
         .route("/version", get(version))
         .fallback(api_not_found)

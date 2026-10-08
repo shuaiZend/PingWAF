@@ -25,14 +25,19 @@ use uuid::Uuid;
 
 use crate::api::agents::command_type;
 use crate::api::state::AppState;
+use crate::config_history::{self, VersionScope};
 use crate::grpc::config::{build_site_config, now_timestamp};
-use crate::models::agent;
+use crate::models::{agent, config_version};
 
 /// Notifies every connected agent that the configuration for `site_id` changed.
 ///
 /// This is a best-effort operation: it logs failures but never propagates them
 /// to the caller. The REST API handler has already committed the change; a push
 /// failure merely means the agent will pick it up on the next `sync_rules`.
+///
+/// A successful build also records a configuration version (unless the latest
+/// version already carries this fingerprint), which is what makes the console
+/// and the `pingwaf config` CLI able to list and roll back changes.
 pub async fn notify_config_changed(state: &AppState, site_id: Uuid) {
     // Build the new configuration. If the database is unhappy there is nothing
     // worth sending, so bail out with a warning.
@@ -44,6 +49,20 @@ pub async fn notify_config_changed(state: &AppState, site_id: Uuid) {
             return;
         },
     };
+
+    // Record the version before the push: the database is already committed,
+    // so the snapshot must land even if no agent is connected to receive it.
+    if let Err(err) = config_history::record_version(
+        &state.db,
+        VersionScope::Site(site_id),
+        config_version::source::API,
+        None,
+        &site_config.config_hash,
+    )
+    .await
+    {
+        tracing::warn!(%site_id, error = %err, "could not record the configuration version");
+    }
 
     // Find every agent whose site_id matches, then attempt delivery.
     let agents = match agent::Entity::find()
@@ -103,11 +122,6 @@ pub async fn notify_all_config_changed(state: &AppState) {
             return;
         },
     };
-    if agents.is_empty() {
-        tracing::debug!("no agents registered, skipping config push");
-        return;
-    }
-
     let site_ids: Vec<Uuid> = agents
         .iter()
         .filter_map(|row| row.site_id)
@@ -121,6 +135,26 @@ pub async fn notify_all_config_changed(state: &AppState) {
             return;
         },
     };
+
+    // Global settings (defense mode, error pages) get their own version,
+    // snapshotted from the tables that feed every site's bundle. Recorded
+    // before the empty-registry bail-out: the change is committed either way.
+    if let Err(err) = config_history::record_version(
+        &state.db,
+        VersionScope::Global,
+        config_version::source::API,
+        None,
+        &config.config_hash,
+    )
+    .await
+    {
+        tracing::warn!(error = %err, "could not record the global configuration version");
+    }
+
+    if agents.is_empty() {
+        tracing::debug!("no agents registered, skipping config push");
+        return;
+    }
 
     let mut delivered = 0usize;
     for row in &agents {

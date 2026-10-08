@@ -59,6 +59,11 @@ pub enum PingWafCommand {
         #[command(subcommand)]
         command: SecurityCommand,
     },
+    /// WAF configuration version history: list, inspect, roll back
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
 }
 
 /// Options shared by all PingWAF modes.
@@ -387,6 +392,63 @@ pub enum SecurityCommand {
     Allowlist(AllowlistOpts),
 }
 
+/// `config` — the WAF configuration version history.
+///
+/// Like the other maintenance commands it talks straight to PostgreSQL, so
+/// it keeps working when the control plane is down. Note that a *running*
+/// control plane is not notified of a CLI rollback (unlike the console
+/// rollback, which pushes to the agents immediately).
+#[derive(Subcommand, Debug)]
+pub enum ConfigCommand {
+    /// List recorded configuration versions, newest first
+    History(ConfigHistoryOpts),
+    /// Print one version's metadata and snapshot summary
+    Show(ConfigShowOpts),
+    /// Restore a recorded configuration version
+    Rollback(ConfigRollbackOpts),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct ConfigHistoryOpts {
+    #[command(flatten)]
+    pub db: DbOpts,
+
+    /// Restrict the history to one site: its UUID, or `global` for the
+    /// deployment-wide settings
+    #[arg(long)]
+    pub site: Option<String>,
+
+    /// How many versions to print
+    #[arg(long, default_value_t = 20)]
+    pub limit: u32,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct ConfigShowOpts {
+    #[command(flatten)]
+    pub db: DbOpts,
+
+    /// The version number to print
+    pub version: i64,
+
+    /// Print the full snapshot as JSON instead of a summary
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct ConfigRollbackOpts {
+    #[command(flatten)]
+    pub db: DbOpts,
+
+    /// The version number to restore
+    pub version: i64,
+
+    /// Skip the confirmation prompt
+    #[arg(long)]
+    pub yes: bool,
+}
+
 #[derive(clap::Args, Debug)]
 pub struct AllowlistOpts {
     #[command(flatten)]
@@ -411,7 +473,7 @@ pub enum OnOff {
 pub const RUN_MODES: [&str; 3] = ["server", "agent", "all-in-one"];
 
 /// The maintenance commands: they run against the database and exit.
-const MAINTENANCE_MODES: [&str; 3] = ["user", "mode", "security"];
+const MAINTENANCE_MODES: [&str; 4] = ["user", "mode", "security", "config"];
 
 /// Whether `value` names a PingWAF subcommand.
 fn is_mode(value: &str) -> bool {
@@ -619,6 +681,56 @@ mod tests {
         };
         assert_eq!(opts.state, OnOff::Off);
         assert!(!opts.force);
+    }
+
+    #[test]
+    fn config_commands_parse_with_their_filters() {
+        let PingWafCommand::Config { command } = parse(&[
+            "pingwaf",
+            "config",
+            "history",
+            "--site=global",
+            "--limit=5",
+            "--db-url=postgres://other/db",
+        ]) else {
+            panic!("expected the config command");
+        };
+        let ConfigCommand::History(opts) = command else {
+            panic!("expected history");
+        };
+        assert_eq!(opts.site.as_deref(), Some("global"));
+        assert_eq!(opts.limit, 5);
+        assert_eq!(opts.db.db_url, "postgres://other/db");
+
+        let PingWafCommand::Config { command } = parse(&[
+            "pingwaf",
+            "config",
+            "show",
+            "42",
+            "--json",
+        ]) else {
+            panic!("expected the config command");
+        };
+        let ConfigCommand::Show(opts) = command else {
+            panic!("expected show");
+        };
+        assert_eq!(opts.version, 42);
+        assert!(opts.json);
+
+        let PingWafCommand::Config { command } = parse(&[
+            "pingwaf",
+            "config",
+            "rollback",
+            "7",
+            "--yes",
+        ]) else {
+            panic!("expected the config command");
+        };
+        let ConfigCommand::Rollback(opts) = command else {
+            panic!("expected rollback");
+        };
+        assert_eq!(opts.version, 7);
+        assert!(opts.yes);
     }
 
     #[test]

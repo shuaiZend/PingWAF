@@ -41,6 +41,8 @@ pub mod m20240101_000033_site_proxy_trust;
 pub mod m20240101_000034_user_account_controls;
 pub mod m20240101_000035_instance_settings;
 pub mod m20240101_000036_users_token_version;
+pub mod m20240101_000037_config_versions;
+pub mod m20240101_000038_notifications;
 
 use sea_orm_migration::prelude::*;
 
@@ -91,6 +93,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20240101_000034_user_account_controls::Migration),
             Box::new(m20240101_000035_instance_settings::Migration),
             Box::new(m20240101_000036_users_token_version::Migration),
+            Box::new(m20240101_000037_config_versions::Migration),
+            Box::new(m20240101_000038_notifications::Migration),
         ]
     }
 }
@@ -102,7 +106,7 @@ mod tests {
     #[test]
     fn migrations_are_ordered_and_unique() {
         let migrations = Migrator::migrations();
-        assert_eq!(migrations.len(), 36);
+        assert_eq!(migrations.len(), 38);
         let names: Vec<String> =
             migrations.iter().map(|m| m.name().to_owned()).collect();
         let mut sorted = names.clone();

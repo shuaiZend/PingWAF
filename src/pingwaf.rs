@@ -188,7 +188,8 @@ pub fn build_run_mode(cli: PingWafCli) -> RunMode {
         },
         PingWafCommand::User { .. }
         | PingWafCommand::Mode { .. }
-        | PingWafCommand::Security { .. } => {
+        | PingWafCommand::Security { .. }
+        | PingWafCommand::Config { .. } => {
             unreachable!("maintenance commands do not build a run mode")
         },
     }

@@ -179,7 +179,9 @@ pub mod site_routes {
 pub mod site_ssl {
     use super::*;
 
-    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[derive(
+        Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize,
+    )]
     #[sea_orm(table_name = "site_ssl")]
     pub struct Model {
         #[sea_orm(primary_key, auto_increment = false)]

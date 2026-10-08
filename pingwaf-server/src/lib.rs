@@ -12,6 +12,7 @@ pub mod ai;
 pub mod api;
 pub mod auth;
 pub mod config;
+pub mod config_history;
 pub mod defaults;
 pub mod es;
 pub mod frontend;
@@ -20,6 +21,7 @@ pub mod mcp;
 pub mod migration;
 pub mod models;
 pub mod monitoring;
+pub mod notify;
 pub mod pki;
 pub mod subscription;
 pub mod tls;
@@ -183,6 +185,16 @@ pub async fn start_server(mut config: ServerConfig) -> anyhow::Result<()> {
     let _defense_watch_handle =
         api::defense::start_watch_task(state.clone()).await;
 
+    // ── 6f. Notification system ─────────────────────────────────────────────
+    // Installed once so REST handlers and the gRPC ingest can raise alerts
+    // without threading a handle through every constructor. The reload loop
+    // picks up channel edits (including from another instance), and the
+    // self-monitor watches the control plane host's own resources.
+    let notify_manager = notify::init(db.clone());
+    notify_manager.reload().await;
+    let _notify_reload_handle = start_notify_reload_loop(state.clone());
+    let _self_monitor_handle = notify::self_monitor::start(state.clone());
+
     if control_tls.is_enabled() {
         match api::system_tls::load_active_certificate(&state).await {
             Ok(Some(certificate)) => tracing::info!(
@@ -319,6 +331,22 @@ pub async fn start_server(mut config: ServerConfig) -> anyhow::Result<()> {
 
     tracing::info!("PingWAF control plane shut down");
     Ok(())
+}
+
+/// Reloads the notification channels and settings every minute, so edits made
+/// outside this process (the CLI, another instance) are picked up.
+fn start_notify_reload_loop(
+    state: AppState,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            if let Some(manager) = notify::global() {
+                manager.reload().await;
+            }
+            let _ = &state;
+        }
+    })
 }
 
 /// Pins the JWT signing secret for the lifetime of the instance.
