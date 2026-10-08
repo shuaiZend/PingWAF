@@ -29,6 +29,7 @@ import { SkeletonRows } from '@/components/ui/Skeleton'
 import { useToast } from '@/components/ui/Toast'
 import { ErrorState } from '@/components/ErrorState'
 import { AGENT_STATUSES, agentKeys, agentsApi, countByStatus } from '@/api/agents'
+import { systemApi } from '@/api/system'
 import { analyticsApi } from '@/api/analytics'
 import { useCanWrite, useDebouncedValue, useNow, useSitesList } from '@/hooks'
 import { cn } from '@/lib/utils'
@@ -90,6 +91,12 @@ export function AgentsPage() {
   const agents = useMemo(() => agentsQuery.data?.items ?? [], [agentsQuery.data])
   const total = agentsQuery.data?.total ?? 0
   const counts = useMemo(() => countByStatus(agents), [agents])
+
+  const versionQuery = useQuery({
+    queryKey: ['version'],
+    queryFn: () => systemApi.version(),
+    staleTime: 60_000,
+  })
 
   // Traffic served by the fleet, for the summary strip.
   const summaryQuery = useQuery({
@@ -259,17 +266,40 @@ export function AgentsPage() {
       ),
     },
     {
-      key: 'pending',
-      header: t('pages.agents.pendingCommands'),
-      accessor: (a) => a.pending_commands,
-      align: 'right',
+      key: 'sync',
+      header: t('pages.agents.lastSync'),
+      accessor: (a) => a.last_config_sync_at ?? '',
       width: '1%',
-      cell: (a) =>
-        a.pending_commands > 0 ? (
-          <Badge tone="warning">{a.pending_commands}</Badge>
-        ) : (
-          <span className="text-fg-subtle">—</span>
-        ),
+      cell: (a) => (
+        <div className="space-y-0.5">
+          <p
+            className="whitespace-nowrap text-[13px] text-fg"
+            title={
+              a.last_config_sync_at
+                ? formatDateTime(a.last_config_sync_at)
+                : undefined
+            }
+          >
+            <span className="text-fg-subtle">{t('pages.agents.syncConfig')}:</span>{' '}
+            {a.last_config_sync_at
+              ? formatRelative(a.last_config_sync_at, now)
+              : '—'}
+          </p>
+          <p
+            className="whitespace-nowrap text-[13px] text-fg"
+            title={
+              a.last_policy_sync_at
+                ? formatDateTime(a.last_policy_sync_at)
+                : undefined
+            }
+          >
+            <span className="text-fg-subtle">{t('pages.agents.syncPolicy')}:</span>{' '}
+            {a.last_policy_sync_at
+              ? formatRelative(a.last_policy_sync_at, now)
+              : '—'}
+          </p>
+        </div>
+      ),
     },
     {
       key: 'row-actions',
@@ -403,6 +433,13 @@ export function AgentsPage() {
             </strong>
           </span>
         </div>
+      )}
+
+      {versionQuery.data && !versionQuery.data.grpc_tls && (
+        <p className="flex items-start gap-2 rounded-md border border-warning/40 bg-warning/8 px-3 py-2 text-[13px] leading-relaxed text-fg">
+          <Warning weight="duotone" className="mt-0.5 h-4 w-4 shrink-0 text-fg-warning" />
+          {t('pages.agents.grpcPlaintext')}
+        </p>
       )}
 
       {/* Filters */}
@@ -573,6 +610,22 @@ export function AgentsPage() {
                   detail.last_heartbeat
                     ? `${formatRelative(detail.last_heartbeat, now)} · ${formatDateTime(detail.last_heartbeat)}`
                     : t('pages.agents.neverSeen')
+                }
+              />
+              <DetailRow
+                label={t('pages.agents.lastConfigSync')}
+                value={
+                  detail.last_config_sync_at
+                    ? `${formatRelative(detail.last_config_sync_at, now)} · ${formatDateTime(detail.last_config_sync_at)}`
+                    : t('pages.agents.neverSynced')
+                }
+              />
+              <DetailRow
+                label={t('pages.agents.lastPolicySync')}
+                value={
+                  detail.last_policy_sync_at
+                    ? `${formatRelative(detail.last_policy_sync_at, now)} · ${formatDateTime(detail.last_policy_sync_at)}`
+                    : t('pages.agents.neverSynced')
                 }
               />
               <DetailRow label={t('pages.agents.registeredAt')} value={formatDateTime(detail.registered_at)} />
