@@ -248,6 +248,7 @@ async fn login_begin(
 /// `POST /api/v1/auth/passkey/login/finish`
 async fn login_finish(
     State(state): State<AppState>,
+    connect_info: Option<axum::Extension<crate::tls::ConnInfo>>,
     headers: HeaderMap,
     Json(response): Json<LoginResponse>,
 ) -> Result<Response, ApiError> {
@@ -269,6 +270,25 @@ async fn login_finish(
         })?;
 
     tracing::info!(%user_id, "user logged in with a passkey");
+
+    // Passkey logins join the history (the baseline for password-login
+    // anomaly detection) but are never judged: the factor itself is
+    // already stronger than a location heuristic.
+    let db = state.db.clone();
+    let login_user_id = account.id;
+    let login_email = account.email.clone();
+    tokio::spawn(async move {
+        crate::notify::login_anomaly::record_login(
+            &db,
+            login_user_id,
+            &login_email,
+            &headers,
+            connect_info.map(|info| info.0.peer_addr.ip()),
+            false,
+        )
+        .await;
+    });
+
     let tokens = crate::api::auth::issue_tokens(&state, account)?;
     Ok((StatusCode::OK, Json(tokens)).into_response())
 }

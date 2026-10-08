@@ -355,6 +355,20 @@ pub struct UpdateSettingsRequest {
     pub memory_percent: Option<u8>,
     pub disk_percent: Option<u8>,
     pub dedup_window_secs: Option<u64>,
+    /// Noise master switch: `false` stops channel delivery (history is
+    /// still recorded).
+    pub enabled: Option<bool>,
+    pub notify_agent_offline: Option<bool>,
+    pub notify_agent_online: Option<bool>,
+    pub notify_agent_resource: Option<bool>,
+    pub notify_control_plane_resource: Option<bool>,
+    /// Gates `cert.expiring` and `cert.expired` together.
+    pub notify_cert_expiry: Option<bool>,
+    pub notify_cert_renewal_failed: Option<bool>,
+    pub notify_config_sync_failed: Option<bool>,
+    pub notify_site_failover_changed: Option<bool>,
+    pub notify_auth_login_anomaly: Option<bool>,
+    pub cert_expiry_warn_days: Option<u32>,
 }
 
 /// `PUT /api/v1/notifications/settings` — administrators only.
@@ -376,6 +390,39 @@ async fn update_settings(
     }
     if let Some(value) = payload.dedup_window_secs {
         settings.dedup_window_secs = value.min(86_400);
+    }
+    if let Some(value) = payload.enabled {
+        settings.enabled = value;
+    }
+    if let Some(value) = payload.notify_agent_offline {
+        settings.notify_agent_offline = value;
+    }
+    if let Some(value) = payload.notify_agent_online {
+        settings.notify_agent_online = value;
+    }
+    if let Some(value) = payload.notify_agent_resource {
+        settings.notify_agent_resource = value;
+    }
+    if let Some(value) = payload.notify_control_plane_resource {
+        settings.notify_control_plane_resource = value;
+    }
+    if let Some(value) = payload.notify_cert_expiry {
+        settings.notify_cert_expiry = value;
+    }
+    if let Some(value) = payload.notify_cert_renewal_failed {
+        settings.notify_cert_renewal_failed = value;
+    }
+    if let Some(value) = payload.notify_config_sync_failed {
+        settings.notify_config_sync_failed = value;
+    }
+    if let Some(value) = payload.notify_site_failover_changed {
+        settings.notify_site_failover_changed = value;
+    }
+    if let Some(value) = payload.notify_auth_login_anomaly {
+        settings.notify_auth_login_anomaly = value;
+    }
+    if let Some(value) = payload.cert_expiry_warn_days {
+        settings.cert_expiry_warn_days = value.clamp(1, 365);
     }
     settings.store(&state.db).await?;
     tracing::info!(actor = %current.email, "notification settings updated");

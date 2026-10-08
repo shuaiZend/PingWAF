@@ -25,6 +25,7 @@ pub mod ip_rules;
 pub mod keys;
 pub mod log_retention;
 pub mod logs;
+pub mod login_security;
 pub mod mcp;
 pub mod mtls;
 pub mod notifications;
@@ -107,6 +108,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(mcp::routes())
         .merge(config_versions::routes())
         .merge(notifications::routes())
+        .merge(login_security::routes())
         .route("/health", get(health))
         .route("/version", get(version))
         .fallback(api_not_found)

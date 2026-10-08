@@ -143,6 +143,10 @@ async fn status(
 /// `POST /api/v1/auth/login`
 async fn login(
     State(state): State<AppState>,
+    connect_info: Option<
+        axum::Extension<crate::tls::ConnInfo>,
+    >,
+    headers: axum::http::HeaderMap,
     Json(payload): Json<LoginRequest>,
 ) -> Result<Response, ApiError> {
     let email = normalise_email(&payload.email)?;
@@ -175,6 +179,24 @@ async fn login(
     }
 
     tracing::info!(%email, user_id = %account.id, role = %account.role, "user logged in");
+
+    // The login history + geo anomaly check runs detached: the response
+    // must not wait on an online geo API. Only *successful* logins are
+    // recorded — this is the audit baseline, not a brute-force log.
+    let db = state.db.clone();
+    let user_id = account.id;
+    let login_email = account.email.clone();
+    tokio::spawn(async move {
+        crate::notify::login_anomaly::record_login(
+            &db,
+            user_id,
+            &login_email,
+            &headers,
+            connect_info.map(|info| info.0.peer_addr.ip()),            true,
+        )
+        .await;
+    });
+
     issue_tokens(&state, account)
         .map(|body| (StatusCode::OK, Json(body)).into_response())
 }

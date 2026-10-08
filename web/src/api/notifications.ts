@@ -21,12 +21,24 @@ export type NotificationChannelInput = {
   enabled: boolean
 }
 
-/** Thresholds and suppression window shared by every alert check. */
+/** Thresholds, per-event delivery toggles and suppression windows. */
 export interface NotificationSettings {
+  /** Noise master switch: false stops channel delivery (history stays). */
+  enabled: boolean
   cpu_percent: number
   memory_percent: number
   disk_percent: number
   dedup_window_secs: number
+  notify_agent_offline: boolean
+  notify_agent_online: boolean
+  notify_agent_resource: boolean
+  notify_control_plane_resource: boolean
+  notify_cert_expiry: boolean
+  notify_cert_renewal_failed: boolean
+  notify_config_sync_failed: boolean
+  notify_site_failover_changed: boolean
+  notify_auth_login_anomaly: boolean
+  cert_expiry_warn_days: number
 }
 
 /** One row of the alert history. */
@@ -51,6 +63,7 @@ export const NOTIFICATION_EVENT_TYPES = [
   'cert.expired',
   'config.sync_failed',
   'site.failover_changed',
+  'auth.login_anomaly',
 ] as const
 
 /** The placeholder the server substitutes for stored secrets. */

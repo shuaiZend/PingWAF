@@ -35,8 +35,11 @@ pub mod event_type {
     /// A site's disconnected (failover) policy was changed — an
     /// availability/security-relevant decision worth an audit trail.
     pub const SITE_FAILOVER_CHANGED: &str = "site.failover_changed";
+    /// An admin signed in from a country outside their recent-login
+    /// baseline (see `crate::notify::login_anomaly`).
+    pub const AUTH_LOGIN_ANOMALY: &str = "auth.login_anomaly";
 
-    pub const ALL: [&str; 9] = [
+    pub const ALL: [&str; 10] = [
         AGENT_OFFLINE,
         AGENT_ONLINE,
         AGENT_RESOURCE,
@@ -46,6 +49,7 @@ pub mod event_type {
         CERT_EXPIRED,
         CONFIG_SYNC_FAILED,
         SITE_FAILOVER_CHANGED,
+        AUTH_LOGIN_ANOMALY,
     ];
 }
 

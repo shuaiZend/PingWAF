@@ -14,7 +14,9 @@
 //! per channel for a configurable window so a flapping agent cannot turn
 //! into a notification storm.
 
+pub mod cert_expiry;
 pub mod email;
+pub mod login_anomaly;
 pub mod secretbox;
 pub mod self_monitor;
 pub mod webhook;
@@ -69,26 +71,128 @@ impl AlertEvent {
     }
 }
 
-/// Thresholds and suppression windows shared by every check.
+/// serde default helpers — every settings field carries one so a stored
+/// JSON written by an older version (missing the newer fields) keeps
+/// parsing instead of resetting the whole struct to defaults.
+fn default_true() -> bool {
+    true
+}
+
+fn default_cert_expiry_warn_days() -> u32 {
+    30
+}
+
+/// Thresholds, per-event-type delivery toggles and suppression windows.
+///
+/// `enabled` is the noise master switch: `false` stops channel delivery for
+/// every event while the history table keeps receiving rows. The
+/// `notify_*` flags gate individual event types the same way.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NotificationSettings {
+    /// Master switch: deliver alerts to channels at all.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
     /// Alert when the control plane CPU usage exceeds this percentage.
+    #[serde(default = "default_cpu_percent")]
     pub cpu_percent: u8,
     /// Alert when the control plane memory usage exceeds this percentage.
+    #[serde(default = "default_cpu_percent")]
     pub memory_percent: u8,
     /// Alert when the root filesystem usage exceeds this percentage.
+    #[serde(default = "default_cpu_percent")]
     pub disk_percent: u8,
     /// Minimum seconds between two identical alerts on one channel.
+    #[serde(default = "default_dedup_window")]
     pub dedup_window_secs: u64,
+    /// Deliver agent-offline alerts.
+    #[serde(default = "default_true")]
+    pub notify_agent_offline: bool,
+    /// Deliver agent-back-online alerts.
+    #[serde(default = "default_true")]
+    pub notify_agent_online: bool,
+    /// Deliver agent resource alerts.
+    #[serde(default = "default_true")]
+    pub notify_agent_resource: bool,
+    /// Deliver control-plane resource alerts.
+    #[serde(default = "default_true")]
+    pub notify_control_plane_resource: bool,
+    /// Deliver certificate expiry alerts (`cert.expiring` and
+    /// `cert.expired` share this switch).
+    #[serde(default = "default_true")]
+    pub notify_cert_expiry: bool,
+    /// Deliver ACME/renewal failure alerts.
+    #[serde(default = "default_true")]
+    pub notify_cert_renewal_failed: bool,
+    /// Deliver config/IP-group sync failure alerts.
+    #[serde(default = "default_true")]
+    pub notify_config_sync_failed: bool,
+    /// Deliver failover-policy change alerts.
+    #[serde(default = "default_true")]
+    pub notify_site_failover_changed: bool,
+    /// Deliver anomalous-login alerts.
+    #[serde(default = "default_true")]
+    pub notify_auth_login_anomaly: bool,
+    /// Warn when a certificate expires within this many days.
+    #[serde(default = "default_cert_expiry_warn_days")]
+    pub cert_expiry_warn_days: u32,
+}
+
+fn default_cpu_percent() -> u8 {
+    90
+}
+
+fn default_dedup_window() -> u64 {
+    600
 }
 
 impl Default for NotificationSettings {
     fn default() -> Self {
         Self {
+            enabled: true,
             cpu_percent: 90,
             memory_percent: 90,
             disk_percent: 90,
             dedup_window_secs: 600,
+            notify_agent_offline: true,
+            notify_agent_online: true,
+            notify_agent_resource: true,
+            notify_control_plane_resource: true,
+            notify_cert_expiry: true,
+            notify_cert_renewal_failed: true,
+            notify_config_sync_failed: true,
+            notify_site_failover_changed: true,
+            notify_auth_login_anomaly: true,
+            cert_expiry_warn_days: 30,
+        }
+    }
+}
+
+impl NotificationSettings {
+    /// Whether an event may be delivered to channels. History rows are
+    /// always persisted regardless; this only gates the delivery step.
+    pub fn allows(&self, event_type: &str) -> bool {
+        use crate::models::event_type;
+        if !self.enabled {
+            return false;
+        }
+        match event_type {
+            event_type::AGENT_OFFLINE => self.notify_agent_offline,
+            event_type::AGENT_ONLINE => self.notify_agent_online,
+            event_type::AGENT_RESOURCE => self.notify_agent_resource,
+            event_type::CONTROL_PLANE_RESOURCE => {
+                self.notify_control_plane_resource
+            },
+            event_type::CERT_EXPIRING | event_type::CERT_EXPIRED => {
+                self.notify_cert_expiry
+            },
+            event_type::CERT_RENEWAL_FAILED => self.notify_cert_renewal_failed,
+            event_type::CONFIG_SYNC_FAILED => self.notify_config_sync_failed,
+            event_type::SITE_FAILOVER_CHANGED => {
+                self.notify_site_failover_changed
+            },
+            event_type::AUTH_LOGIN_ANOMALY => self.notify_auth_login_anomaly,
+            // Unknown types (e.g. the test button) are always delivered.
+            _ => true,
         }
     }
 }
@@ -231,6 +335,13 @@ impl NotificationManager {
     /// every matching channel. Never fails: delivery problems are logged.
     pub async fn dispatch(&self, event: AlertEvent) {
         self.persist_event(&event).await;
+
+        // Noise gate: the history above always lands, but delivery to the
+        // channels is skipped when the master switch or this event type's
+        // toggle is off (see `NotificationSettings::allows`).
+        if !self.settings().allows(&event.event_type) {
+            return;
+        }
 
         let channels = self.channels.load();
         let matching: Vec<&notification_channel::Model> = channels
@@ -515,5 +626,69 @@ mod tests {
         let a = dedup_key(Uuid::new_v4(), "agent.offline");
         let b = dedup_key(Uuid::new_v4(), "agent.offline");
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn old_settings_json_parses_with_new_defaults() {
+        // A settings row written before the toggles existed must keep its
+        // thresholds instead of resetting the whole struct.
+        let settings: NotificationSettings = serde_json::from_value(json!({
+            "cpu_percent": 77,
+            "memory_percent": 88,
+            "disk_percent": 95,
+            "dedup_window_secs": 300,
+        }))
+        .expect("old settings JSON must parse");
+        assert_eq!(settings.cpu_percent, 77);
+        assert_eq!(settings.memory_percent, 88);
+        assert_eq!(settings.disk_percent, 95);
+        assert_eq!(settings.dedup_window_secs, 300);
+        // New fields fall back to their defaults.
+        assert!(settings.enabled);
+        assert!(settings.notify_cert_expiry);
+        assert_eq!(settings.cert_expiry_warn_days, 30);
+    }
+
+    #[test]
+    fn allows_delivers_everything_by_default() {
+        let settings = NotificationSettings::default();
+        for event_type in crate::models::event_type::ALL {
+            assert!(settings.allows(event_type), "{event_type}");
+        }
+        // Unknown types (the test button) pass through.
+        assert!(settings.allows("notification.test"));
+    }
+
+    #[test]
+    fn master_switch_blocks_delivery_but_keeps_unknown_pass() {
+        let settings = NotificationSettings {
+            enabled: false,
+            ..NotificationSettings::default()
+        };
+        for event_type in crate::models::event_type::ALL {
+            assert!(!settings.allows(event_type), "{event_type}");
+        }
+    }
+
+    #[test]
+    fn a_single_toggle_only_blocks_its_own_type() {
+        let settings = NotificationSettings {
+            notify_agent_offline: false,
+            ..NotificationSettings::default()
+        };
+        assert!(!settings.allows("agent.offline"));
+        assert!(settings.allows("agent.online"));
+        assert!(settings.allows("cert.expiring"));
+    }
+
+    #[test]
+    fn cert_expiring_and_expired_share_one_toggle() {
+        let settings = NotificationSettings {
+            notify_cert_expiry: false,
+            ..NotificationSettings::default()
+        };
+        assert!(!settings.allows("cert.expiring"));
+        assert!(!settings.allows("cert.expired"));
+        assert!(settings.allows("cert.renewal_failed"));
     }
 }

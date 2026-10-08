@@ -30,6 +30,7 @@ pub mod ip_access_rules;
 pub mod ip_group_sites;
 pub mod ip_groups;
 pub mod log_retention;
+pub mod login_histories;
 pub mod mtls;
 pub mod notifications;
 pub mod passkeys;
@@ -65,6 +66,7 @@ pub use notifications::{
 };
 pub use host_samples::host_samples as host_sample;
 pub use instance_settings::instance_settings as instance_setting;
+pub use login_histories::{geo_source, login_history};
 pub use mtls::{
     ca_source, client_cert_status, mtls_cas as mtls_ca,
     mtls_client_certificates as mtls_client_certificate,
