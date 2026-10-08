@@ -31,6 +31,9 @@ services:
     environment:
       - PINGWAF_DB_URL=postgres://pingwaf:${POSTGRES_PASSWORD:-pingwaf}@postgres:5432/pingwaf
       - PINGWAF_MODE=all-in-one
+      # The placeholder is safe to keep: the control plane detects it and
+      # persists a random JWT secret on first boot. Set JWT_SECRET to pin your
+      # own instead.
       - PINGWAF_JWT_SECRET=${JWT_SECRET:-change-me-in-production-use-32-chars}
       - PINGWAF_ADMIN_ADDR=0.0.0.0:9080
       - PINGWAF_GRPC_ADDR=0.0.0.0:9090

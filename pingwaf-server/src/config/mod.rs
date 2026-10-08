@@ -402,9 +402,13 @@ impl ServerConfig {
         Ok(())
     }
 
-    /// True when the placeholder JWT secret is still in use.
+    /// True when a placeholder JWT secret is still in use.
+    ///
+    /// The placeholder prefix is public knowledge — it ships in the repository
+    /// and in the docker-compose fallback — so any value starting with it is
+    /// treated as "not configured" and replaced by a generated secret.
     pub fn uses_default_jwt_secret(&self) -> bool {
-        self.jwt_secret == DEFAULT_JWT_SECRET
+        self.jwt_secret.starts_with(DEFAULT_JWT_SECRET)
     }
 
     /// Subject names a generated self-signed certificate should carry.
@@ -586,6 +590,22 @@ mod tests {
         // TLS is on by default so a fresh deployment can use passkeys.
         assert!(config.tls_enabled);
         assert!(config.tls_sans.contains(&"localhost".to_string()));
+    }
+
+    #[test]
+    fn placeholder_secrets_are_treated_as_unconfigured() {
+        assert!(ServerConfig::default().uses_default_jwt_secret());
+        // The docker-compose fallback extends the built-in placeholder.
+        let composed = ServerConfig {
+            jwt_secret: format!("{DEFAULT_JWT_SECRET}-use-32-chars"),
+            ..Default::default()
+        };
+        assert!(composed.uses_default_jwt_secret());
+        let explicit = ServerConfig {
+            jwt_secret: "a-very-long-secret-value".to_string(),
+            ..Default::default()
+        };
+        assert!(!explicit.uses_default_jwt_secret());
     }
 
     #[test]
