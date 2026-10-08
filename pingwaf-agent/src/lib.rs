@@ -270,30 +270,8 @@ impl PingWafAgent {
 
     /// Log an access entry (non-blocking, queued for batch shipping).
     pub fn log_access(&self, entry: AccessLogEntry) {
-        // The wire format is a header map, so repeated names are combined the
-        // way HTTP semantics prescribe instead of silently dropping values.
-        let combine = |headers: Vec<(String, String)>| {
-            let mut map: std::collections::HashMap<String, String> =
-                std::collections::HashMap::with_capacity(headers.len());
-            for (name, value) in headers {
-                match map.entry(name) {
-                    std::collections::hash_map::Entry::Occupied(
-                        mut existing,
-                    ) => {
-                        let combined = existing.get_mut();
-                        combined.reserve(value.len() + 2);
-                        combined.push_str(", ");
-                        combined.push_str(&value);
-                    },
-                    std::collections::hash_map::Entry::Vacant(slot) => {
-                        slot.insert(value);
-                    },
-                }
-            }
-            map
-        };
-        let request_headers = combine(entry.request_headers);
-        let response_headers = combine(entry.response_headers);
+        let request_headers = combine_headers(entry.request_headers);
+        let response_headers = combine_headers(entry.response_headers);
         let log_entry = client::LogEntry {
             site_id: entry.site_id,
             request_id: entry.request_id,
@@ -375,6 +353,41 @@ impl PingWafAgent {
     }
 }
 
+/// Combines repeated header names into the single value the wire format's
+/// header map accepts.
+///
+/// `Set-Cookie` pairs are joined with a newline instead of the canonical
+/// comma: cookie values routinely carry `Expires`/`Path` attributes that
+/// contain commas of their own, so a comma join makes the pairs
+/// indistinguishable (`a=1, b=2` reads as one cookie or two depending on
+/// the attribute). Consumers split this header on `\n` and the rest on `, `.
+fn combine_headers(
+    headers: Vec<(String, String)>,
+) -> std::collections::HashMap<String, String> {
+    let mut map: std::collections::HashMap<String, String> =
+        std::collections::HashMap::with_capacity(headers.len());
+    for (name, value) in headers {
+        match map.entry(name) {
+            std::collections::hash_map::Entry::Occupied(mut existing) => {
+                let separator =
+                    if existing.key().eq_ignore_ascii_case("set-cookie") {
+                        "\n"
+                    } else {
+                        ", "
+                    };
+                let combined = existing.get_mut();
+                combined.reserve(value.len() + separator.len());
+                combined.push_str(separator);
+                combined.push_str(&value);
+            },
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(value);
+            },
+        }
+    }
+    map
+}
+
 /// Start the PingWAF agent with the given configuration.
 ///
 /// Convenience function that calls [`PingWafAgent::start`].
@@ -387,4 +400,38 @@ pub async fn start_agent(
 /// Get the global agent instance (shorthand for [`PingWafAgent::instance`]).
 pub fn agent_instance() -> Option<Arc<PingWafAgent>> {
     PingWafAgent::instance()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::combine_headers;
+
+    #[test]
+    fn repeated_headers_join_with_a_comma() {
+        let combined = combine_headers(vec![
+            ("accept".to_string(), "text/html".to_string()),
+            ("accept".to_string(), "application/json".to_string()),
+        ]);
+        assert_eq!(
+            combined.get("accept").unwrap(),
+            "text/html, application/json"
+        );
+    }
+
+    #[test]
+    fn set_cookie_pairs_stay_separated_by_newlines() {
+        let combined = combine_headers(vec![
+            ("set-cookie".to_string(), "a=1; Path=/".to_string()),
+            (
+                "set-cookie".to_string(),
+                "b=2; Expires=Wed, 21 Oct 2026 07:28:00 GMT".to_string(),
+            ),
+        ]);
+        // A comma join would make `b=2; Expires=Wed` and `21 Oct …` look like
+        // separate cookies; the newline keeps every pair recoverable.
+        assert_eq!(
+            combined.get("set-cookie").unwrap(),
+            "a=1; Path=/\nb=2; Expires=Wed, 21 Oct 2026 07:28:00 GMT"
+        );
+    }
 }
