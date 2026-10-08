@@ -1272,14 +1272,18 @@
       "toolResult": "Result",
       "writeToolsOn": "write tools enabled",
       "writeToolsOff": "read-only tools",
-      "adminOnly": "Administrators only",
-      "adminOnlyDescription": "The assistant shares one provider key across the fleet and can inspect every site, so it is restricted to administrators. External agents can use MCP instead.",
       "notConfigured": "The assistant is not set up yet",
       "notConfiguredDescription": "Add an OpenAI-compatible provider (base URL, API key and model) to start chatting. The assistant then reads your fleet through the built-in MCP tools.",
       "openSettings": "Open settings",
       "deleteTitle": "Delete conversation",
       "deleteDescription": "The conversation and every message in it will be removed.",
-      "deleted": "Conversation deleted"
+      "deleted": "Conversation deleted",
+      "open": "Open AI assistant",
+      "close": "Close assistant",
+      "history": "History",
+      "showHistory": "Show history",
+      "hideHistory": "Hide history",
+      "disabledForUsers": "The AI assistant is not enabled yet; contact an administrator to configure it."
     },
     "basicAuth": {
       "saved": "Basic auth settings saved",
