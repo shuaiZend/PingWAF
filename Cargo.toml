@@ -315,6 +315,8 @@ hex = "0.4.3"
 hickory-resolver = "0.26.3"
 http = "1.5.0"
 hmac = "0.13.0"
+# AES-256-GCM sealing of notification channel secrets at rest (secretbox).
+ring = "0.17"
 # SMTP client for the notification system's e-mail channel. rustls keeps the
 # control plane free of OpenSSL, like every other TLS consumer in the tree.
 lettre = { version = "0.11", default-features = false, features = [

@@ -29,6 +29,8 @@ futures-util = { workspace = true }
 hex = { workspace = true }
 # HMAC-SHA256 signing of DingTalk webhook payloads.
 hmac = { workspace = true }
+# AES-256-GCM at-rest sealing of notification channel secrets.
+ring = { workspace = true }
 # SMTP client behind the notification system's e-mail channel.
 lettre = { workspace = true }
 jsonwebtoken = { workspace = true }

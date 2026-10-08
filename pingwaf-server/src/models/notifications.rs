@@ -32,8 +32,11 @@ pub mod event_type {
     pub const CERT_EXPIRED: &str = "cert.expired";
     /// Syncing configuration or an IP group subscription to the edge failed.
     pub const CONFIG_SYNC_FAILED: &str = "config.sync_failed";
+    /// A site's disconnected (failover) policy was changed — an
+    /// availability/security-relevant decision worth an audit trail.
+    pub const SITE_FAILOVER_CHANGED: &str = "site.failover_changed";
 
-    pub const ALL: [&str; 8] = [
+    pub const ALL: [&str; 9] = [
         AGENT_OFFLINE,
         AGENT_ONLINE,
         AGENT_RESOURCE,
@@ -42,6 +45,7 @@ pub mod event_type {
         CERT_EXPIRING,
         CERT_EXPIRED,
         CONFIG_SYNC_FAILED,
+        SITE_FAILOVER_CHANGED,
     ];
 }
 

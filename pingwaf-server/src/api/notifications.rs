@@ -26,8 +26,9 @@ use crate::models::{
 };
 use crate::notify::NotificationSettings;
 
-/// Config keys that must never leave the server in plain text.
-const SECRET_KEYS: [&str; 3] = ["smtp_pass", "secret", "secret_token"];
+/// Config keys that must never leave the server in plain text. The stored
+/// value is additionally sealed at rest (see [`crate::notify::secretbox`]).
+use crate::notify::secretbox::SECRET_KEYS;
 /// Placeholder a client sends back to keep the stored secret.
 const REDACTED: &str = "__REDACTED__";
 
@@ -235,12 +236,17 @@ async fn create_channel(
     validate_config(&payload.kind, &payload.config)?;
     validate_events(&payload.events)?;
 
+    // Secrets are sealed before the row ever reaches the database; the
+    // response re-masks whatever is stored, so the API contract is unchanged.
+    let mut stored_config = payload.config;
+    crate::notify::secretbox::seal_config(&mut stored_config);
+
     let now = Utc::now();
     let row = notification_channel::ActiveModel {
         id: Set(Uuid::new_v4()),
         name: Set(name.to_string()),
         kind: Set(payload.kind),
-        config: Set(payload.config),
+        config: Set(stored_config),
         events: Set(payload.events),
         enabled: Set(payload.enabled),
         created_at: Set(now),
@@ -274,10 +280,14 @@ async fn update_channel(
     }
     let mut config = payload.config;
     // The client cannot echo a secret it never received; the placeholder
-    // means "keep the stored value".
-    unredact(&mut config, &row.config);
+    // means "keep the stored value". The stored row holds sealed secrets,
+    // so open them first — the unredacted values are then re-sealed below.
+    let mut stored = row.config.clone();
+    crate::notify::secretbox::open_config(&mut stored);
+    unredact(&mut config, &stored);
     validate_config(&payload.kind, &config)?;
     validate_events(&payload.events)?;
+    crate::notify::secretbox::seal_config(&mut config);
 
     let mut active: notification_channel::ActiveModel = row.into();
     active.name = Set(name.to_string());
