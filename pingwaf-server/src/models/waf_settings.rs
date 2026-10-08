@@ -18,6 +18,9 @@ pub struct Model {
     pub id: Uuid,
     #[sea_orm(unique)]
     pub site_id: Uuid,
+    /// Explicit engine switch; `false` short-circuits WAF evaluation for the
+    /// site regardless of rules or posture. A missing row means `true`.
+    pub waf_enabled: bool,
     pub advanced_mode: bool,
     pub monitor_categories: Vec<String>,
     pub monitor_stacks: Vec<String>,

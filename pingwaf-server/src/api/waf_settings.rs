@@ -35,6 +35,8 @@ pub const MANAGED_RULES: [&str; 14] = pingwaf_waf::MANAGED_RULE_IDS;
 #[derive(Debug, Deserialize)]
 pub struct UpdateWafSettingsRequest {
     #[serde(default)]
+    pub waf_enabled: Option<bool>,
+    #[serde(default)]
     pub advanced_mode: Option<bool>,
     #[serde(default)]
     pub monitor_categories: Option<Vec<String>>,
@@ -66,6 +68,7 @@ pub fn routes() -> Router<AppState> {
             "/sites/{site_id}/waf/settings",
             get(get_waf_settings).put(update_waf_settings),
         )
+        .route("/sites/{site_id}/waf/posture", get(get_waf_posture))
         .route("/managed-rules", get(list_managed_rules))
 }
 
@@ -120,6 +123,9 @@ async fn update_waf_settings(
     let row = find_or_create(&state, id).await?;
     let mut active: waf_settings::ActiveModel = row.into();
 
+    if let Some(waf_enabled) = payload.waf_enabled {
+        active.waf_enabled = Set(waf_enabled);
+    }
     if let Some(advanced) = payload.advanced_mode {
         active.advanced_mode = Set(advanced);
     }
@@ -148,6 +154,153 @@ async fn update_waf_settings(
     notify_config_changed(&state, id).await;
 
     Ok(Json(updated))
+}
+
+/* ── Effective posture ────────────────────────────────────────────── */
+
+/// The site's effective WAF posture: what the data plane actually enforces
+/// right now, aggregated from the rules, settings and global switches.
+#[derive(Debug, serde::Serialize)]
+pub struct WafPosture {
+    /// Explicit engine switch (`"on"` / `"off"`).
+    pub engine: &'static str,
+    pub detection: WafPostureDetection,
+    pub enforcement: WafPostureEnforcement,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct WafPostureDetection {
+    /// The managed ruleset is always loaded by the data plane.
+    pub managed: bool,
+    /// At least one enabled custom rule is active.
+    pub custom: bool,
+    /// Advanced mode: strict level + body deep inspection.
+    pub deep_inspection: bool,
+    /// Under Attack mode is on (challenge settings enabled and switched on).
+    pub under_attack: bool,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct WafPostureEnforcement {
+    /// Managed ruleset action per attack category (`sqli`, `xss`, ...):
+    /// `"monitor"` when the category is downgraded, `"block"` otherwise.
+    pub managed: std::collections::BTreeMap<String, String>,
+    /// Aggregate custom-rule mode: block > monitor > off.
+    pub custom_rules: String,
+    /// Strongest action among enabled rate-limit rules, or `"off"`.
+    pub cc: String,
+    /// Bot protection action, or `"off"` when disabled/absent.
+    pub bot: String,
+    /// Global observation mode: protective actions become observe-only.
+    pub observation_mode: bool,
+}
+
+/// Rate-limit actions ordered strongest-first; `allow` never mitigates and
+/// is treated as `off`.
+const CC_ACTION_STRENGTH: [&str; 4] =
+    ["block", "challenge", "js_challenge", "log"];
+
+/// `GET /api/v1/sites/{site_id}/waf/posture`
+async fn get_waf_posture(
+    State(state): State<AppState>,
+    current: AuthUser,
+    Path(site_id): Path<String>,
+) -> Result<Json<WafPosture>, ApiError> {
+    use crate::models::{
+        bot_protection, challenge_settings, defense_settings, mode,
+        rate_limit_rules, rule,
+    };
+
+    let id = parse_uuid(&site_id, "site id")?;
+    load_site_read(&state.db, id, &current).await?;
+
+    let settings = waf_settings::Entity::find()
+        .filter(waf_settings::Column::SiteId.eq(id))
+        .one(&state.db)
+        .await?;
+    let engine_on = settings.as_ref().map(|s| s.waf_enabled).unwrap_or(true);
+
+    let active_rules = rule::Entity::find()
+        .filter(rule::Column::SiteId.eq(id))
+        .filter(rule::Column::Enabled.eq(true))
+        .all(&state.db)
+        .await?;
+    let custom_mode =
+        if active_rules.iter().any(|rule| rule.mode == mode::BLOCK) {
+            "block".to_string()
+        } else if active_rules.iter().any(|rule| rule.mode == mode::MONITOR) {
+            "monitor".to_string()
+        } else {
+            "off".to_string()
+        };
+
+    let rate_limits = rate_limit_rules::Entity::find()
+        .filter(rate_limit_rules::Column::SiteId.eq(id))
+        .filter(rate_limit_rules::Column::Enabled.eq(true))
+        .all(&state.db)
+        .await?;
+    let cc = CC_ACTION_STRENGTH
+        .iter()
+        .find(|strongest| {
+            rate_limits.iter().any(|rule| &rule.action == *strongest)
+        })
+        .map(|strongest| strongest.to_string())
+        .unwrap_or_else(|| "off".to_string());
+
+    let bot = bot_protection::Entity::find()
+        .filter(bot_protection::Column::SiteId.eq(id))
+        .one(&state.db)
+        .await?
+        .filter(|row| row.enabled)
+        .map(|row| row.action)
+        .unwrap_or_else(|| "off".to_string());
+
+    let under_attack = challenge_settings::Entity::find()
+        .filter(challenge_settings::Column::SiteId.eq(id))
+        .one(&state.db)
+        .await?
+        .filter(|row| row.enabled)
+        .is_some_and(|row| row.under_attack_mode);
+
+    // A missing global row means observation mode was never switched on.
+    let observation_mode = defense_settings::Entity::find_by_id(1)
+        .one(&state.db)
+        .await?
+        .is_some_and(|row| row.observation_mode);
+
+    let managed: std::collections::BTreeMap<String, String> = CATEGORIES
+        .iter()
+        .map(|category| {
+            let action = if settings.as_ref().is_some_and(|s| {
+                s.monitor_categories.iter().any(|m| m == category)
+            }) {
+                "monitor"
+            } else {
+                "block"
+            };
+            (category.to_string(), action.to_string())
+        })
+        .collect();
+
+    Ok(Json(WafPosture {
+        engine: if engine_on { "on" } else { "off" },
+        detection: WafPostureDetection {
+            managed: true,
+            custom: !active_rules.is_empty(),
+            deep_inspection: settings
+                .as_ref()
+                .map(|s| s.advanced_mode)
+                .unwrap_or(false),
+            under_attack,
+        },
+        enforcement: WafPostureEnforcement {
+            managed,
+            custom_rules: custom_mode,
+            cc,
+            bot,
+            observation_mode,
+        },
+    }))
 }
 
 /// Trims, lowercases, de-duplicates and whitelist-checks a monitor list.
@@ -218,6 +371,7 @@ async fn find_or_create(
     let model = waf_settings::ActiveModel {
         id: Set(Uuid::new_v4()),
         site_id: Set(site_id),
+        waf_enabled: Set(true),
         advanced_mode: Set(false),
         monitor_categories: Set(Vec::new()),
         monitor_stacks: Set(Vec::new()),
