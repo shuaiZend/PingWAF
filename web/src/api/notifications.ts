@@ -50,6 +50,7 @@ export const NOTIFICATION_EVENT_TYPES = [
   'cert.expiring',
   'cert.expired',
   'config.sync_failed',
+  'site.failover_changed',
 ] as const
 
 /** The placeholder the server substitutes for stored secrets. */

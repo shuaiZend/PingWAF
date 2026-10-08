@@ -45,6 +45,10 @@ pub const SNAPSHOT_SCHEMA: i64 = 1;
 pub const MAX_VERSIONS_PER_SCOPE: u64 = 50;
 /// Versions older than this are pruned regardless of count.
 pub const VERSION_RETENTION_DAYS: i64 = 30;
+/// Expected snapshot size ceiling (2 MB). Only a warning threshold — large
+/// certificate chains are legitimate, but growth past this point signals a
+/// pathological payload worth investigating (see `record_version`).
+pub const MAX_SNAPSHOT_BYTES: usize = 2 * 1024 * 1024;
 
 /// Site tables whose rows carry private key material. Snapshots store these
 /// rows **without** the `key_pem` column — a version snapshot is API-readable
@@ -237,6 +241,24 @@ pub async fn record_version(
         },
         VersionScope::Global => capture_global_snapshot(db).await?,
     };
+    // Size guard: TLS certificate chains and full rule sets legitimately
+    // make snapshots large (private keys are stripped since the P0 fix —
+    // they are refilled from live rows on restore). PostgreSQL TOAST
+    // compresses the JSONB column automatically, so no explicit handling is
+    // needed; this only surfaces pathological growth before it turns into a
+    // slow INSERT on every mutation.
+    let snapshot_bytes = serde_json::to_vec(&snapshot)
+        .map(|bytes| bytes.len())
+        .unwrap_or_default();
+    if snapshot_bytes > MAX_SNAPSHOT_BYTES {
+        tracing::warn!(
+            scope = %scope.describe(),
+            bytes = snapshot_bytes,
+            threshold = MAX_SNAPSHOT_BYTES,
+            "configuration snapshot exceeds the expected size; \
+             investigate the site's rule or certificate payload"
+        );
+    }
     let summary = summarise(&snapshot);
 
     let row = config_version::ActiveModel {
@@ -282,6 +304,14 @@ pub async fn latest_version(
 
 /// Keeps the newest [`MAX_VERSIONS_PER_SCOPE`] versions of a scope within the
 /// retention window and drops the rest. Best-effort: failures are logged.
+/// Drops versions beyond the retention window and the per-scope cap.
+///
+/// PostgreSQL-only by design: `IS NOT DISTINCT FROM` matches the NULL
+/// `site_id` of global-scope rows (a plain `= $1` would silently prune
+/// nothing for the global scope), and the `NOT IN (… ORDER BY … LIMIT …)`
+/// subquery is the cheapest way to express "keep the newest N" in one
+/// statement. If a second database backend is ever supported, rewrite both
+/// constructs for it before touching anything else here.
 async fn prune_scope(db: &DatabaseConnection, scope: VersionScope) {
     let cutoff = Utc::now() - chrono::Duration::days(VERSION_RETENTION_DAYS);
     let sql = "\

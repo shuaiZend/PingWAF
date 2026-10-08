@@ -56,17 +56,26 @@ pub async fn notify_config_changed(
 
     // Record the version before the push: the database is already committed,
     // so the snapshot must land even if no agent is connected to receive it.
-    if let Err(err) = config_history::record_version(
-        &state.db,
-        VersionScope::Site(site_id),
-        config_version::source::API,
-        actor,
-        &site_config.config_hash,
-    )
-    .await
-    {
-        tracing::warn!(%site_id, error = %err, "could not record the configuration version");
-    }
+    // The ~19-table capture is best-effort and off the request path (same
+    // detached-task pattern as notification delivery): a slow capture must
+    // not stretch every API mutation. Hash-based dedup happens inside
+    // record_version, so repeat pushes stay cheap even when two spawns race.
+    let db = state.db.clone();
+    let config_hash = site_config.config_hash.clone();
+    let actor = actor.map(str::to_string);
+    tokio::spawn(async move {
+        if let Err(err) = config_history::record_version(
+            &db,
+            VersionScope::Site(site_id),
+            config_version::source::API,
+            actor.as_deref(),
+            &config_hash,
+        )
+        .await
+        {
+            tracing::warn!(%site_id, error = %err, "could not record the configuration version");
+        }
+    });
 
     // Find every agent whose site_id matches, then attempt delivery.
     let agents = match agent::Entity::find()
@@ -143,17 +152,24 @@ pub async fn notify_all_config_changed(state: &AppState, actor: Option<&str>) {
     // Global settings (defense mode, error pages) get their own version,
     // snapshotted from the tables that feed every site's bundle. Recorded
     // before the empty-registry bail-out: the change is committed either way.
-    if let Err(err) = config_history::record_version(
-        &state.db,
-        VersionScope::Global,
-        config_version::source::API,
-        actor,
-        &config.config_hash,
-    )
-    .await
-    {
-        tracing::warn!(error = %err, "could not record the global configuration version");
-    }
+    // Detached like the per-site path — the push must not wait on the
+    // snapshot capture.
+    let db = state.db.clone();
+    let config_hash = config.config_hash.clone();
+    let actor = actor.map(str::to_string);
+    tokio::spawn(async move {
+        if let Err(err) = config_history::record_version(
+            &db,
+            VersionScope::Global,
+            config_version::source::API,
+            actor.as_deref(),
+            &config_hash,
+        )
+        .await
+        {
+            tracing::warn!(error = %err, "could not record the global configuration version");
+        }
+    });
 
     if agents.is_empty() {
         tracing::debug!("no agents registered, skipping config push");

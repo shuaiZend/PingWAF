@@ -15,6 +15,7 @@
 //! into a notification storm.
 
 pub mod email;
+pub mod secretbox;
 pub mod self_monitor;
 pub mod webhook;
 
@@ -204,11 +205,17 @@ impl NotificationManager {
     /// after channel mutations and periodically, so edits made by another
     /// process (or instance) are picked up within a minute.
     pub async fn reload(&self) {
-        let channels = notification_channel::Entity::find()
+        let mut channels = notification_channel::Entity::find()
             .order_by_asc(notification_channel::Column::Name)
             .all(&self.db)
             .await
             .unwrap_or_default();
+        // Rows hold sealed secrets (see `secretbox`); delivery needs the
+        // real values, so open them here — the only place raw rows are
+        // turned into live channel configs.
+        for channel in &mut channels {
+            secretbox::open_config(&mut channel.config);
+        }
         self.channels.store(Arc::new(channels));
         self.settings.store(Arc::new(
             NotificationSettings::load(&self.db).await,
@@ -368,6 +375,9 @@ impl NotificationManager {
         }
         // Hard cap, in case a burst slipped under the retention window: keep
         // the newest `MAX_EVENT_ROWS` rows, drop the rest.
+        // PostgreSQL-only: `ORDER BY … OFFSET $1` inside the IN-subquery is
+        // the single-statement form of "delete everything but the newest N";
+        // a different backend would need its own formulation.
         let backend = self.db.get_database_backend();
         let stmt = sea_orm::Statement::from_sql_and_values(
             backend,
