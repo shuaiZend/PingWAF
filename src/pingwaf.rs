@@ -55,11 +55,11 @@ use tracing::{error, info, warn};
 /// The operating mode for PingWAF.
 pub enum RunMode {
     /// Control plane only: REST API + gRPC server + PostgreSQL
-    Server(ServerConfig),
+    Server(Box<ServerConfig>),
     /// Data plane only: connects to a remote control plane
-    Agent(AgentConfig),
+    Agent(Box<AgentConfig>),
     /// Both control plane and data plane in a single process
-    AllInOne(ServerConfig, AgentConfig),
+    AllInOne(Box<ServerConfig>, Box<AgentConfig>),
 }
 
 /// Convert CLI server options into a `ServerConfig`.
@@ -176,15 +176,15 @@ fn extract_port(addr: &str) -> &str {
 pub fn build_run_mode(cli: PingWafCli) -> RunMode {
     match cli.command {
         PingWafCommand::Server(ref opts) => {
-            RunMode::Server(server_config_from_opts(opts))
+            RunMode::Server(Box::new(server_config_from_opts(opts)))
         },
         PingWafCommand::Agent(ref opts) => {
-            RunMode::Agent(agent_config_from_opts(opts))
+            RunMode::Agent(Box::new(agent_config_from_opts(opts)))
         },
         PingWafCommand::AllInOne(ref opts) => {
             let server_config = server_config_from_all_in_one(opts);
             let agent_config = agent_config_from_all_in_one(opts);
-            RunMode::AllInOne(server_config, agent_config)
+            RunMode::AllInOne(Box::new(server_config), Box::new(agent_config))
         },
         PingWafCommand::User { .. }
         | PingWafCommand::Mode { .. }
@@ -1266,7 +1266,7 @@ pub async fn run(mode: RunMode) -> anyhow::Result<()> {
                 grpc_addr = %config.grpc_addr,
                 "starting PingWAF in Server mode (control plane only)"
             );
-            pingwaf_server::start_server(config).await
+            pingwaf_server::start_server(*config).await
         },
         RunMode::Agent(config) => {
             info!(
@@ -1274,7 +1274,7 @@ pub async fn run(mode: RunMode) -> anyhow::Result<()> {
                 cache_dir = %config.cache_dir,
                 "starting PingWAF in Agent mode (data plane only)"
             );
-            let agent = pingwaf_agent::start_agent(config).await?;
+            let agent = pingwaf_agent::start_agent(*config).await?;
             info!("PingWAF agent is running, starting data plane proxy");
 
             // Start the data plane proxy in the background
@@ -1313,7 +1313,7 @@ pub async fn run(mode: RunMode) -> anyhow::Result<()> {
 
             // Start the agent in the background first.
             // It will retry connecting to the server until it comes up.
-            let agent = match pingwaf_agent::start_agent(agent_config).await {
+            let agent = match pingwaf_agent::start_agent(*agent_config).await {
                 Ok(agent) => Some(agent),
                 Err(e) => {
                     error!(error = %e, "failed to start agent, continuing with server only");
@@ -1334,7 +1334,7 @@ pub async fn run(mode: RunMode) -> anyhow::Result<()> {
             };
 
             // Run the server (blocks until shutdown signal)
-            let result = pingwaf_server::start_server(server_config).await;
+            let result = pingwaf_server::start_server(*server_config).await;
 
             // Gracefully shut down the agent
             if let Some(agent) = agent {
