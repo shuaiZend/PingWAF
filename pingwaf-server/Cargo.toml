@@ -1,6 +1,6 @@
 [package]
 name = "pingwaf-server"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 description = "PingWAF control plane: REST API for the dashboard, gRPC control plane for agents"
 license = "Apache-2.0"

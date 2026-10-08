@@ -1,6 +1,6 @@
 [package]
 name = "pingwaf-pprof"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 license = "Apache-2.0"
 description = "Built-in pprof-style profiling for PingWAF: CPU sampling as go-tool-pprof compatible protobuf, SVG flamegraphs and a memory snapshot. Shared by the control plane REST API and the data plane admin plugin."

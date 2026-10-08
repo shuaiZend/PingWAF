@@ -5368,7 +5368,7 @@ dependencies = [
 
 [[package]]
 name = "pingwaf-agent"
-version = "0.1.0"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -5392,7 +5392,7 @@ dependencies = [
 
 [[package]]
 name = "pingwaf-challenge"
-version = "0.1.0"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -5408,7 +5408,7 @@ dependencies = [
 
 [[package]]
 name = "pingwaf-pprof"
-version = "0.1.0"
+version = "0.24.0"
 dependencies = [
  "bytesize",
  "flate2",
@@ -5421,7 +5421,7 @@ dependencies = [
 
 [[package]]
 name = "pingwaf-proto"
-version = "0.1.0"
+version = "0.24.0"
 dependencies = [
  "prost 0.14.4",
  "prost-types 0.14.4",
@@ -5432,7 +5432,7 @@ dependencies = [
 
 [[package]]
 name = "pingwaf-server"
-version = "0.1.0"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -5477,7 +5477,7 @@ dependencies = [
 
 [[package]]
 name = "pingwaf-waf"
-version = "0.1.0"
+version = "0.24.0"
 dependencies = [
  "ahash",
  "aho-corasick",
