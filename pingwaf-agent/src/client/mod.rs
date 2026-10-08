@@ -1090,9 +1090,16 @@ fn apply_client_tls(
     Ok(endpoint.tls_config(tls)?)
 }
 
-/// Doubles the current reconnect backoff, capped at the configured maximum.
+/// Doubles the current reconnect backoff, capped at the configured maximum,
+/// then shrinks it to a random point in the lower half of that value.
+///
+/// The jitter stops a fleet of agents that lost the control plane together —
+/// a deploy, a network blip — from reconnecting in a lockstep burst every
+/// `reconnect_max_delay_ms`.
 fn next_backoff(current_ms: u64, max_ms: u64) -> u64 {
-    current_ms.saturating_mul(2).min(max_ms)
+    let capped = current_ms.saturating_mul(2).min(max_ms);
+    let factor = 0.5 + rand::random::<f64>() * 0.5;
+    ((capped as f64 * factor) as u64).max(1)
 }
 
 /// The cadence the heartbeat sender ticks at.
@@ -1302,12 +1309,22 @@ mod tests {
     }
 
     #[test]
-    fn backoff_doubles_and_is_capped() {
-        assert_eq!(next_backoff(100, 60_000), 200);
-        assert_eq!(next_backoff(50_000, 60_000), 60_000);
-        assert_eq!(next_backoff(60_000, 60_000), 60_000);
-        // A pathological current value must not overflow.
-        assert_eq!(next_backoff(u64::MAX, 1_000), 1_000);
+    fn backoff_doubles_is_capped_and_jittered() {
+        // Each step lands in [50%, 100%] of the doubled-and-capped value —
+        // still exponential, but a fleet of agents never reconnects in
+        // lockstep.
+        for _ in 0..100 {
+            let next = next_backoff(100, 60_000);
+            assert!((100..=200).contains(&next), "{next}");
+
+            let capped = next_backoff(50_000, 60_000);
+            assert!((30_000..=60_000).contains(&capped), "{capped}");
+
+            // A pathological current value must neither overflow nor stall at
+            // zero.
+            let overflow = next_backoff(u64::MAX, 1_000);
+            assert!((500..=1_000).contains(&overflow), "{overflow}");
+        }
     }
 
     #[test]
@@ -1379,17 +1396,17 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(1_000)).await;
 
         let observed = client.retry_delay_ms.load(Ordering::Relaxed);
-        assert_eq!(
-            observed, 80,
-            "repeated failures must grow backoff up to the configured max"
+        assert!(
+            (40..=80).contains(&observed),
+            "repeated failures must grow backoff into the jittered top half, got {observed}"
         );
 
         client.shutdown_signal.store(true, Ordering::Relaxed);
         handle.await.unwrap();
-        assert_eq!(
-            client.retry_delay_ms.load(Ordering::Relaxed),
-            80,
-            "no registration happened, so backoff must stay at the max"
+        let observed = client.retry_delay_ms.load(Ordering::Relaxed);
+        assert!(
+            (40..=80).contains(&observed),
+            "no registration happened, so backoff must stay in the jittered top half, got {observed}"
         );
     }
 }
