@@ -48,6 +48,12 @@ pub struct SiteResponse {
     pub trusted_header: String,
     /// Trust the last XFF entry (nearest proxy) instead of the first.
     pub trust_last_hop: bool,
+    /// CIDR ranges of proxies allowed to influence the resolved client IP;
+    /// an empty list trusts nothing.
+    pub trusted_proxy_ranges: Vec<String>,
+    /// IP groups whose ranges are merged into `trusted_proxy_ranges` when
+    /// the agent configuration is built.
+    pub trusted_proxy_group_ids: Vec<Uuid>,
     pub user_id: Uuid,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -66,6 +72,8 @@ impl From<site::Model> for SiteResponse {
             trust_proxy_headers: model.trust_proxy_headers,
             trusted_header: model.trusted_header,
             trust_last_hop: model.trust_last_hop,
+            trusted_proxy_ranges: model.trusted_proxy_ranges,
+            trusted_proxy_group_ids: model.trusted_proxy_group_ids,
             user_id: model.user_id,
             created_at: model.created_at,
             updated_at: model.updated_at,
@@ -207,6 +215,15 @@ pub struct UpdateSiteRequest {
     /// Trust the last XFF entry (nearest proxy) instead of the first.
     #[serde(default)]
     pub trust_last_hop: Option<bool>,
+    /// CIDR ranges of proxies allowed to influence the resolved client IP;
+    /// an empty list trusts nothing. Entries are validated as CIDR (a bare
+    /// IP expands to a /32 or /128).
+    #[serde(default)]
+    pub trusted_proxy_ranges: Option<Vec<String>>,
+    /// IP groups whose ranges merge into the effective trusted-proxy scope.
+    /// Every id must reference an existing IP group.
+    #[serde(default)]
+    pub trusted_proxy_group_ids: Option<Vec<Uuid>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -757,6 +774,8 @@ async fn create(
         trusted_header: Set(crate::models::trusted_header::DEFAULT.to_string()),
         trust_last_hop: Set(true),
         failover_policy: Set("inherit".to_string()),
+        trusted_proxy_ranges: Set(Vec::new()),
+        trusted_proxy_group_ids: Set(Vec::new()),
         created_at: Set(timestamp),
         updated_at: Set(timestamp),
     }
@@ -930,6 +949,42 @@ async fn update(
     }
     if let Some(value) = payload.trust_last_hop {
         active.trust_last_hop = Set(value);
+    }
+    if let Some(ranges) = &payload.trusted_proxy_ranges {
+        let mut normalized = Vec::with_capacity(ranges.len());
+        for range in ranges {
+            match parse_proxy_range(range) {
+                Some(parsed) => {
+                    if !normalized.contains(&parsed) {
+                        normalized.push(parsed);
+                    }
+                },
+                None => {
+                    return Err(ApiError::BadRequest(format!(
+                        "'{range}' is not a valid IP or CIDR range"
+                    )));
+                },
+            }
+        }
+        active.trusted_proxy_ranges = Set(normalized);
+    }
+    if let Some(group_ids) = &payload.trusted_proxy_group_ids {
+        let mut normalized: Vec<Uuid> = Vec::with_capacity(group_ids.len());
+        for group_id in group_ids {
+            let exists = ip_groups::Entity::find_by_id(*group_id)
+                .one(&state.db)
+                .await?
+                .is_some();
+            if !exists {
+                return Err(ApiError::BadRequest(format!(
+                    "IP group {group_id} does not exist"
+                )));
+            }
+            if !normalized.contains(group_id) {
+                normalized.push(*group_id);
+            }
+        }
+        active.trusted_proxy_group_ids = Set(normalized);
     }
     active.updated_at = Set(Utc::now());
 
@@ -1892,6 +1947,27 @@ fn origin_host(address: &str) -> &str {
     host.trim_start_matches('[').trim_end_matches(']')
 }
 
+/// Normalizes a proxy-trust entry into its canonical CIDR form.
+///
+/// A bare IP becomes a host range (`/32` for IPv4, `/128` for IPv6), which is
+/// what "trust exactly this proxy" reads like; a CIDR has its host bits
+/// masked away (so `10.0.0.5/24` renders as `10.0.0.0/24`) and duplicates
+/// collapse at the caller. `None` marks invalid input.
+pub fn parse_proxy_range(raw: &str) -> Option<String> {
+    let value = raw.trim();
+    if value.contains('/') {
+        value
+            .parse::<ipnet::IpNet>()
+            .ok()
+            .map(|net| net.trunc().to_string())
+    } else {
+        value
+            .parse::<std::net::IpAddr>()
+            .ok()
+            .map(|ip| ipnet::IpNet::from(ip).to_string())
+    }
+}
+
 /// Updates `sites.updated_at` so agents see a fresh configuration fingerprint.
 pub async fn touch_site(
     state: &AppState,
@@ -1911,6 +1987,34 @@ pub async fn touch_site(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proxy_ranges_normalize_to_canonical_cidr() {
+        assert_eq!(
+            parse_proxy_range("10.0.0.1").as_deref(),
+            Some("10.0.0.1/32")
+        );
+        assert_eq!(
+            parse_proxy_range(" 10.0.0.0/24 ").as_deref(),
+            Some("10.0.0.0/24")
+        );
+        assert_eq!(
+            parse_proxy_range("2001:db8::1").as_deref(),
+            Some("2001:db8::1/128")
+        );
+        assert_eq!(
+            parse_proxy_range("2001:db8::/32").as_deref(),
+            Some("2001:db8::/32")
+        );
+        // A host bit set inside the prefix is masked away.
+        assert_eq!(
+            parse_proxy_range("10.0.0.5/24").as_deref(),
+            Some("10.0.0.0/24")
+        );
+        assert!(parse_proxy_range("not-an-ip").is_none());
+        assert!(parse_proxy_range("10.0.0.0/33").is_none());
+        assert!(parse_proxy_range("").is_none());
+    }
 
     #[test]
     fn origin_addresses_are_normalized_to_host_port() {

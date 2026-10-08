@@ -30,7 +30,7 @@ import { deriveWafConfig, ruleKeys, rulesApi } from '@/api/rules'
 import { siteKeys } from '@/api/sites'
 import { useCanWrite, useDebouncedValue } from '@/hooks'
 import { cn } from '@/lib/utils'
-import { RULE_MODES, type Rule, type RuleGroup, type RuleMode } from '@/api/types'
+import { type Rule, type RuleGroup } from '@/api/types'
 
 const ACTION_TONE: Record<string, 'danger' | 'warning' | 'info' | 'success' | 'neutral'> = {
   block: 'danger',
@@ -132,27 +132,6 @@ export function CustomRulesPanel() {
     },
   })
 
-  /**
-   * Applies an enforcement mode across the whole rule set. There is no
-   * site-level WAF record — the posture is the aggregate of the rules — so
-   * "block mode" means every rule enforces in block mode.
-   */
-  const applyMode = useMutation({
-    mutationFn: async (mode: RuleMode) => {
-      const targets = allRules.filter((r) => r.mode !== mode)
-      await Promise.all(targets.map((r) => rulesApi.setMode(siteId, r.id, mode)))
-      return targets.length
-    },
-    onSuccess: (changed, mode) => {
-      if (changed === 0) {
-        toast.info(t('pages.waf.modeAlready'), t(`pages.waf.mode_${mode}`))
-      } else {
-        toast.success(t('pages.waf.modeApplied'), `${t(`pages.waf.mode_${mode}`)} · ${changed}`)
-      }
-      invalidate()
-    },
-  })
-
   /** Re-adds the built-in rule pack for a site whose rules were deleted. */
   const restoreBuiltins = useMutation({
     mutationFn: () => rulesApi.restoreDefaults(siteId),
@@ -193,8 +172,6 @@ export function CustomRulesPanel() {
       invalidate()
     },
   })
-
-  const busy = applyMode.isPending || restoreBuiltins.isPending
 
   const openCreate = (tags?: string[]) => {
     setEditing(null)
@@ -498,58 +475,6 @@ export function CustomRulesPanel() {
               </div>
             </div>
           )}
-
-          {/* ── Mode ─────────────────────────────────────────────────── */}
-          <Card className="max-w-2xl">
-            <CardHeader
-              title={t('pages.waf.mode')}
-              description={t('pages.waf.modeCardHint')}
-            />
-            <CardBody className="flex flex-col gap-4">
-              <div className="flex flex-col gap-2">
-                {RULE_MODES.map((m) => {
-                  const active = waf.mode === m
-                  return (
-                    <button
-                      key={m}
-                      type="button"
-                      disabled={!canWrite || busy || loading}
-                      onClick={() => applyMode.mutate(m as RuleMode)}
-                      className={cn(
-                        'flex items-center justify-between gap-3 rounded-lg border px-3 py-2.5 text-left transition-all disabled:cursor-not-allowed disabled:opacity-60',
-                        active
-                          ? 'border-brand bg-brand-soft'
-                          : 'border-line hover:border-fill hover:bg-recessed',
-                      )}
-                    >
-                      <span className="min-w-0">
-                        <span
-                          className={cn(
-                            'block text-sm font-medium',
-                            active ? 'text-brand' : 'text-fg',
-                          )}
-                        >
-                          {t(`pages.waf.mode_${m}`)}
-                        </span>
-                        <span className="block text-xs text-fg-subtle">
-                          {t(`pages.waf.modeHint_${m}`)}
-                        </span>
-                      </span>
-                      {active && <ShieldCheck weight="fill" className="h-4 w-4 shrink-0 text-brand" />}
-                    </button>
-                  )
-                })}
-              </div>
-              {applyMode.isPending && (
-                <p className="text-xs text-fg-subtle">{t('pages.waf.applyingMode')}</p>
-              )}
-              <div className="rounded-md border border-line bg-recessed px-3 py-2">
-                <p className="text-xs leading-relaxed text-fg-subtle">
-                  {t('pages.waf.modeExplainer')}
-                </p>
-              </div>
-            </CardBody>
-          </Card>
 
           {/* ── Rule groups ──────────────────────────────────────────── */}
           <Card className="mt-4">

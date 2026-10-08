@@ -107,11 +107,14 @@ services:
   #   container_name: pingwaf-agent
   #   entrypoint: ["pingwaf", "agent"]
   #   command:
-  #     - "--server-url=http://pingwaf:9090"
-  #     # When the control plane serves gRPC over TLS (grpc_tls_cert/key on the
-  #     # server), switch to --server-url=https://pingwaf:9090 and point this at
-  #     # the CA that signed its certificate:
-  #     # - "--server-ca-cert=/etc/pingwaf/certs/grpc-ca.pem"
+  #     # The control plane serves gRPC over TLS by default (self-signed on
+  #     # first boot). Use https:// and pin its certificate as the CA:
+  #     - "--server-url=https://pingwaf:9090"
+  #     # Download the control plane certificate (Settings → Control plane HTTPS
+  #     # → download), mount it, and point this at it. Set grpc_tls_mode = "off"
+  #     # on the control plane to serve plaintext instead (then revert to
+  #     # --server-url=http://pingwaf:9090).
+  #     - "--server-ca-cert=/etc/pingwaf/certs/grpc-ca.pem"
   #     - "--api-key=${AGENT_API_KEY:-}"
   #     - "--cache-dir=/var/lib/pingwaf/cache"
   #     - "--heartbeat-interval-secs=30"

@@ -594,6 +594,8 @@ mod tests {
             trusted_header: crate::models::trusted_header::DEFAULT.to_string(),
             trust_last_hop: true,
             failover_policy: "inherit".to_string(),
+            trusted_proxy_ranges: Vec::new(),
+            trusted_proxy_group_ids: Vec::new(),
             created_at: timestamp,
             updated_at: timestamp,
         };

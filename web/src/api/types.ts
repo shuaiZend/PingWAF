@@ -126,6 +126,10 @@ export interface Site {
   trusted_header: string
   /** Trust only the most recent hop of `x-forwarded-for`. */
   trust_last_hop: boolean
+  /** CIDR ranges whose direct peers may set the forwarded header. */
+  trusted_proxy_ranges: string[]
+  /** IP groups whose ranges merge into the trusted-proxy scope. */
+  trusted_proxy_group_ids: string[]
   user_id: string
   created_at: string
   updated_at: string
@@ -230,6 +234,10 @@ export interface UpdateSiteRequest {
   trusted_header?: string
   /** Trust only the most recent hop of `x-forwarded-for`. */
   trust_last_hop?: boolean
+  /** CIDR ranges whose direct peers may set the forwarded header. */
+  trusted_proxy_ranges?: string[]
+  /** IP groups whose ranges merge into the trusted-proxy scope. */
+  trusted_proxy_group_ids?: string[]
 }
 
 export interface CreateUpstreamRequest {
@@ -448,6 +456,8 @@ export const WAF_STACKS: WafStack[] = ['java', 'php', 'python', 'node']
 export interface WafSettings {
   id: string
   site_id: string
+  /** Explicit engine switch; a missing server row means `true`. */
+  waf_enabled: boolean
   advanced_mode: boolean
   monitor_categories: WafCategory[] | string[]
   monitor_stacks: WafStack[] | string[]
@@ -458,10 +468,35 @@ export interface WafSettings {
 
 /** Patch semantics: omitted fields keep their current value. */
 export interface UpdateWafSettingsRequest {
+  waf_enabled?: boolean
   advanced_mode?: boolean
   monitor_categories?: string[]
   monitor_stacks?: string[]
   monitor_managed_rules?: string[]
+}
+
+/** `api::waf_settings::WafPosture` — what the data plane enforces right now. */
+export interface WafPosture {
+  /** `"on"` / `"off"` — the explicit engine switch. */
+  engine: 'on' | 'off' | string
+  detection: {
+    /** The managed ruleset is always loaded by the data plane. */
+    managed: boolean
+    custom: boolean
+    deep_inspection: boolean
+    under_attack: boolean
+  }
+  enforcement: {
+    /** Managed action per attack category (`sqli`, ...): block | monitor. */
+    managed: Record<string, string>
+    /** Aggregate custom-rule mode: block | monitor | off. */
+    custom_rules: string
+    /** Strongest rate-limit action, or `"off"`. */
+    cc: string
+    /** Bot protection action, or `"off"`. */
+    bot: string
+    observation_mode: boolean
+  }
 }
 
 /** `api::waf_settings::ManagedRuleEntry` — one built-in managed rule. */
@@ -826,8 +861,14 @@ export interface Agent {
   config_hash: string | null
   last_heartbeat: string | null
   registered_at: string
+  /** When the agent last applied a full site config; null = never. */
+  last_config_sync_at: string | null
+  /** When the agent last applied a per-site rule bundle; null = never. */
+  last_policy_sync_at: string | null
   connected: boolean
   pending_commands: number
+  /** Whether the gRPC control plane serves TLS; false = plaintext (degraded). */
+  grpc_tls: boolean
 }
 
 export interface AgentListQuery extends PaginationQuery {
@@ -1156,6 +1197,8 @@ export interface VersionResponse {
   version: string
   api: string
   registration_open: boolean
+  /** Whether the gRPC control plane serves TLS; false = plaintext (degraded). */
+  grpc_tls: boolean
 }
 
 /* ── SSL / TLS ────────────────────────────────────────────────────── */
@@ -1700,13 +1743,26 @@ export interface BotConfig {
   action: BotAction | string
   /** Case-insensitive User-Agent substrings of verified good bots. */
   known_bots_whitelist: string[]
+  /** Verify known crawler user agents by their IP: a client inside the
+   * referenced IP group's ranges always counts as a verified bot. */
+  ip_verification_enabled: boolean
+  /** IP group whose ranges are treated as verified crawler networks. */
+  verified_ip_group_id: string | null
+  /** Verify known crawler user agents by DNS reverse + forward lookups. */
+  dns_verification_enabled: boolean
   updated_at: string
 }
 
 export type UpdateBotRequest = Partial<
   Pick<
     BotConfig,
-    'enabled' | 'ua_analysis' | 'action' | 'known_bots_whitelist'
+    | 'enabled'
+    | 'ua_analysis'
+    | 'action'
+    | 'known_bots_whitelist'
+    | 'ip_verification_enabled'
+    | 'verified_ip_group_id'
+    | 'dns_verification_enabled'
   >
 >
 
@@ -1821,6 +1877,10 @@ export interface IpGroup {
   ip_ranges: string[]
   action: IpGroupAction | string
   is_global: boolean
+  /** `builtin` (compiled-in snapshot), `url` (operator source), null = manual. */
+  subscription_kind: 'builtin' | 'url' | null
+  /** Whether the sync scheduler refreshes this group's subscription. */
+  subscription_enabled: boolean
   source_url: string | null
   sync_interval_minutes: number | null
   last_synced_at: string | null
@@ -1845,6 +1905,7 @@ export interface CreateIpGroupRequest {
   source_url?: string | null
   sync_interval_minutes?: number | null
   enabled?: boolean
+  subscription_enabled?: boolean
 }
 
 export type UpdateIpGroupRequest = Partial<CreateIpGroupRequest>

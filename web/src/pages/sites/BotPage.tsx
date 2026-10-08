@@ -21,6 +21,7 @@ import { Badge } from '@/components/ui/Badge'
 import { useToast } from '@/components/ui/Toast'
 import { ErrorState } from '@/components/ErrorState'
 import { botApi, botKeys, defaultBotConfig, COMMON_KNOWN_BOTS } from '@/api/bot'
+import { ipGroupsApi, ipGroupKeys } from '@/api/ipGroups'
 import { useCanWrite } from '@/hooks'
 import { BOT_ACTIONS, type BotConfig } from '@/api/types'
 
@@ -40,6 +41,15 @@ export function BotPage() {
     queryFn: () => botApi.get(siteId),
     enabled: Boolean(siteId),
   })
+
+  // Enabled groups offered as verified-bot networks; the server validates
+  // global/linkage on save, the selector is only a convenience.
+  const groupsQuery = useQuery({
+    queryKey: ipGroupKeys.list({ enabled: true }),
+    queryFn: () => ipGroupsApi.list({ enabled: true, page_size: 100 }),
+    enabled: Boolean(siteId),
+  })
+  const ipGroups = groupsQuery.data?.items ?? []
 
   // Seed the form from the query (render-phase reset on new data / first
   // failure), so nothing flashes stale values on the first paint.
@@ -70,6 +80,9 @@ export function BotPage() {
         ua_analysis: payload.ua_analysis,
         action: payload.action,
         known_bots_whitelist: payload.known_bots_whitelist,
+        ip_verification_enabled: payload.ip_verification_enabled,
+        verified_ip_group_id: payload.verified_ip_group_id,
+        dns_verification_enabled: payload.dns_verification_enabled,
       }),
     onSuccess: (saved) => {
       setConfig(saved)
@@ -203,6 +216,57 @@ export function BotPage() {
                 hint={t('pages.bot.actionHint')}
                 options={BOT_ACTIONS.map((a) => ({ value: a, label: t(`actions.${a}`, a) }))}
                 onChange={(e) => patch({ action: e.target.value })}
+              />
+            </CardBody>
+          </Card>
+
+          <Card>
+            <CardHeader
+              title={t('pages.bot.verification.title')}
+              description={t('pages.bot.verification.hint')}
+            />
+            <CardBody className="flex flex-col gap-5">
+              <Switch
+                checked={config.ip_verification_enabled}
+                disabled={!canWrite || !config.enabled}
+                onCheckedChange={(ip_verification_enabled) =>
+                  patch({ ip_verification_enabled })
+                }
+                label={t('pages.bot.verification.ip')}
+                description={t('pages.bot.verification.ipHint')}
+              />
+              {config.ip_verification_enabled && (
+                <Select
+                  label={t('pages.bot.verification.group')}
+                  value={config.verified_ip_group_id ?? ''}
+                  disabled={!canWrite || !config.enabled}
+                  containerClassName="max-w-xs"
+                  hint={t('pages.bot.verification.groupHint')}
+                  options={[
+                    {
+                      value: '',
+                      label: t('pages.bot.verification.groupNone'),
+                    },
+                    ...ipGroups.map((group) => ({
+                      value: group.id,
+                      label: group.is_global
+                        ? `${group.name} · ${t('pages.bot.verification.globalGroup')}`
+                        : group.name,
+                    })),
+                  ]}
+                  onChange={(e) =>
+                    patch({ verified_ip_group_id: e.target.value || null })
+                  }
+                />
+              )}
+              <Switch
+                checked={config.dns_verification_enabled}
+                disabled={!canWrite || !config.enabled}
+                onCheckedChange={(dns_verification_enabled) =>
+                  patch({ dns_verification_enabled })
+                }
+                label={t('pages.bot.verification.dns')}
+                description={t('pages.bot.verification.dnsHint')}
               />
             </CardBody>
           </Card>

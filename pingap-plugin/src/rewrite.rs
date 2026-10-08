@@ -1879,6 +1879,7 @@ rules = '[{"id":"h","direction":"response","operations":[{"type":"set_header","n
                     trust_proxy_headers: false,
                     trusted_header: String::new(),
                     trust_last_hop: false,
+                    trusted_proxy_ranges: Vec::new(),
                 }],
                 config_hash: "hash-1".to_string(),
                 updated_at: None,

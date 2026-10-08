@@ -141,18 +141,17 @@ export function formatRelative(
   if (abs < 45_000) return rtf.format(0, 'minute')
   if (abs < 60_000) return rtf.format(Math.round(diff / 1000), 'second')
 
-  // Largest unit whose threshold the gap has not crossed yet.
-  const ladder: [number, Intl.RelativeTimeFormatUnit][] = [
-    [3600_000, 'minute'],
-    [86_400_000, 'hour'],
-    [604_800_000, 'day'],
-    [2_629_800_000, 'week'],
-    [31_557_600_000, 'month'],
+  // First row whose upper bound exceeds the gap wins; divide by that row's
+  // own unit length so the label and the divisor always agree.
+  const ladder: [number, Intl.RelativeTimeFormatUnit, number][] = [
+    [3_600_000, 'minute', 60_000],
+    [86_400_000, 'hour', 3_600_000],
+    [604_800_000, 'day', 86_400_000],
+    [2_629_800_000, 'week', 604_800_000],
+    [31_557_600_000, 'month', 2_629_800_000],
   ]
-  for (let i = 1; i < ladder.length; i += 1) {
-    if (abs < ladder[i][0]) {
-      return rtf.format(Math.round(diff / ladder[i - 1][0]), ladder[i - 1][1])
-    }
+  for (const [bound, unit, unitMs] of ladder) {
+    if (abs < bound) return rtf.format(Math.round(diff / unitMs), unit)
   }
   return rtf.format(Math.round(diff / 31_557_600_000), 'year')
 }

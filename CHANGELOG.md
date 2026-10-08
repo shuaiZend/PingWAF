@@ -8,6 +8,91 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.25.0] — 2026-10-09
+
+A security-update batch (control-plane hardening, stricter proxy trust,
+stronger bot verification) plus a round of dashboard UX consolidation.
+
+### ⚠️ Breaking Changes
+
+- *(plugin)* Proxy-trust resolution is now **strict**: a site with
+  `trust_proxy_headers: true` only believes the forwarded client-IP header
+  when the direct TCP peer falls inside `trusted_proxy_ranges` (CIDR list);
+  otherwise the connection's own address is used. An empty range list means
+  no proxy is trusted — sites that relied on forwarded headers without
+  declaring their proxy's ranges must add them (or reference an IP group via
+  the new `trusted_proxy_group_ids`) after upgrading. The server logs a
+  warning at startup for affected sites.
+
+### ⛰️ Features
+
+- *(server)* The MCP endpoint's authentication now runs the same account
+  checks as the REST API: disabled accounts, tokens superseded by a newer
+  sign-in and accounts that must change their password are all refused (MCP
+  offers no password-change flow). API keys are checked for revocation and
+  enabled state. JSON-RPC batches are capped at 16 calls and the request
+  body at 256 KiB.
+- *(server)* The gRPC control plane serves **TLS by default**. With no
+  certificate configured, the first boot generates a self-signed CA + server
+  certificate (persisted in `instance_settings` and written to the data
+  directory for agents to pin), so distributed deployments are encrypted out
+  of the box; explicit `grpc_tls_cert`/`grpc_tls_key` take priority and
+  `grpc_tls_mode = "off"` reverts to plaintext with a startup warning and a
+  `grpc_tls: false` flag on `GET /version`, surfaced as a console banner.
+  The all-in-one mode wires its embedded agent to the generated CA
+  automatically.
+- *(sites)* Reverse-proxy trust gains `trusted_proxy_ranges` (CIDR list) and
+  `trusted_proxy_group_ids` (reference an IP group — its ranges merge with
+  the hand-entered list). See the breaking change above for the enforcement
+  change.
+- *(plugin)* Bot protection verifies claimed bots beyond the spoofable user
+  agent: `ip_verification_enabled` with `verified_ip_group_id` treats client
+  IPs inside a referenced IP group as verified bots, and
+  `dns_verification_enabled` adds reverse-DNS confirmation against the
+  vendor domains (`*.googlebot.com`, `yandex.com`, `duckduckgo.com`, …) with
+  a cached result and a graceful fallback to the UA verdict. Signals compose
+  in the order IP match > confirmed DNS > UA whitelist > browser fingerprint.
+- *(server)* IP groups support subscriptions: four built-in snapshot groups
+  (Google, Yandex, DuckDuckGo and Cloudflare ranges) are seeded on first
+  start, `url` groups pull plain-text/CIDR lists over HTTP, and a daily job
+  refreshes both (`last_synced_at` / `last_sync_error` report the outcome).
+  Range changes immediately re-push configuration to the sites using the
+  group for access rules, route gating, bot verification or proxy trust.
+- *(server)* Per-site `waf_enabled` is an explicit engine switch — with it
+  off the data plane skips WAF evaluation for the site entirely, instead of
+  inferring "no rules configured". `GET /api/v1/sites/{id}/waf/posture`
+  aggregates the effective posture (engine, detection surfaces and per-
+  category enforcement) for the dashboard and automation.
+
+### 🎨 Miscellaneous
+
+- *(web)* The protection page opens with a "current effective posture" card
+  built from the new posture endpoint, and groups the settings into the
+  engine / detection / enforcement layers; the protection-mode selector
+  moved out of the custom-rules panel.
+- *(web)* The site's Basic page is split into focused sections (trust,
+  origin pools, routes) with the proxy-trust card gaining the new trust-
+  range and IP-group editors; the sidebar now lists global pages only, with
+  site-level navigation consolidated into the site tabs.
+- *(web)* The agents table replaces the pending-commands column with last
+  sync times — agents report when they last applied the site config and the
+  rule bundle (`last_config_sync_at` / `last_policy_sync_at` on the agent
+  response).
+
+### 🐛 Bug Fixes
+
+- *(web)* Relative times between one minute and one hour rendered as "just
+  now", and hour gaps as "N minutes ago" — the unit ladder divided by the
+  wrong interval. Heartbeat and sync columns show correct relative times.
+
+### 📚 Documentation
+
+- API reference: MCP authentication and limits, gRPC TLS defaults, WAF
+  settings/posture, agent sync fields, IP-group subscriptions, bot
+  verification fields and the strict proxy-trust semantics. Quick start and
+  deployment guides updated for the TLS-by-default control plane; the
+  security checklist gained gRPC-TLS and proxy-trust items.
+
 ## [PingWAF 0.24.1] — 2026-10-08
 
 A patch release with three fixes for regressions and gaps reported right

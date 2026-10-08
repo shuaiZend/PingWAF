@@ -1,10 +1,11 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use dashmap::DashMap;
 use pingap_cache::quota;
 use pingap_core::normalize_host;
@@ -101,7 +102,8 @@ pub struct SiteRules {
 }
 
 /// Site-level forwarded-header trust: which header carries the real client
-/// IP and whether only the nearest proxy's entry is believed.
+/// IP, whether only the nearest proxy's entry is believed, and which peers
+/// are allowed to influence the resolution at all.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProxyTrustConfig {
     /// Trust forwarded headers at all.
@@ -114,6 +116,10 @@ pub struct ProxyTrustConfig {
     /// first one, which the client can spoof.
     #[serde(default = "default_true")]
     pub last_hop_only: bool,
+    /// CIDR ranges of proxies allowed to influence the resolved client IP.
+    /// Empty = trust nothing (the TCP peer is always used).
+    #[serde(default)]
+    pub trusted_ranges: Vec<String>,
 }
 
 impl Default for ProxyTrustConfig {
@@ -122,6 +128,7 @@ impl Default for ProxyTrustConfig {
             enabled: false,
             header: String::new(),
             last_hop_only: true,
+            trusted_ranges: Vec::new(),
         }
     }
 }
@@ -477,6 +484,11 @@ pub struct BotProtectionConfig {
     pub enabled: bool,
     pub action: WafAction,
     pub known_bots_whitelist: Vec<String>,
+    /// Expanded CIDR ranges of the configured verified-bot IP group; a
+    /// client IP inside any of them counts as a verified bot.
+    pub verified_bot_ranges: Vec<String>,
+    /// Verify known crawler user agents by DNS reverse + forward lookups.
+    pub dns_verification_enabled: bool,
 }
 
 // ─── Basic Auth ─────────────────────────────────────────────
@@ -739,6 +751,11 @@ pub struct RuleCache {
     /// recorded here is what keeps a bundle naming no site at all - the first
     /// one, before the control plane has answered - from wiping those.
     quota_domains: Mutex<HashSet<String>>,
+    /// Unix seconds of the last successful full-config application; 0 = never.
+    last_config_sync_at: AtomicI64,
+    /// Unix seconds of the last successful single-site rule bundle
+    /// application; 0 = never.
+    last_policy_sync_at: AtomicI64,
 }
 
 impl RuleCache {
@@ -753,6 +770,8 @@ impl RuleCache {
             cache_dir: cache_dir.clone(),
             agent_id,
             quota_domains: Mutex::new(HashSet::new()),
+            last_config_sync_at: AtomicI64::new(0),
+            last_policy_sync_at: AtomicI64::new(0),
         });
 
         // Ensure cache directory exists
@@ -1009,6 +1028,9 @@ impl RuleCache {
             warn!(error = %e, "Failed to persist rule cache to disk");
         }
 
+        self.last_policy_sync_at
+            .store(Utc::now().timestamp(), Ordering::Relaxed);
+
         Ok(())
     }
 
@@ -1056,6 +1078,7 @@ impl RuleCache {
                         enabled: site.trust_proxy_headers,
                         header: site.trusted_header.clone(),
                         last_hop_only: site.trust_last_hop,
+                        trusted_ranges: site.trusted_proxy_ranges.clone(),
                     };
 
                     // Update domain index
@@ -1084,6 +1107,9 @@ impl RuleCache {
         if let Err(e) = self.persist_to_disk() {
             warn!(error = %e, "Failed to persist rule cache to disk");
         }
+
+        self.last_config_sync_at
+            .store(Utc::now().timestamp(), Ordering::Relaxed);
 
         Ok(())
     }
@@ -1132,6 +1158,26 @@ impl RuleCache {
     /// the string.
     pub fn config_hash(&self) -> Arc<str> {
         self.inner.load().config_hash.clone()
+    }
+
+    /// When a full site config was last applied successfully, for the
+    /// heartbeat's sync report.
+    pub fn config_synced_at(&self) -> Option<DateTime<Utc>> {
+        self.sync_marker(&self.last_config_sync_at)
+    }
+
+    /// When a single-site rule bundle was last applied successfully.
+    pub fn policy_synced_at(&self) -> Option<DateTime<Utc>> {
+        self.sync_marker(&self.last_policy_sync_at)
+    }
+
+    fn sync_marker(&self, cell: &AtomicI64) -> Option<DateTime<Utc>> {
+        let secs = cell.load(Ordering::Relaxed);
+        if secs <= 0 {
+            None
+        } else {
+            Utc.timestamp_opt(secs, 0).single()
+        }
     }
 
     // ─── IP Blocking ────────────────────────────────────────
@@ -1514,6 +1560,8 @@ impl RuleCache {
             enabled: b.enabled,
             action: WafAction::from(b.action),
             known_bots_whitelist: b.known_bots_whitelist.clone(),
+            verified_bot_ranges: b.verified_bot_ranges.clone(),
+            dns_verification_enabled: b.dns_verification_enabled,
         }
     }
 
@@ -1899,6 +1947,7 @@ mod tests {
             trust_proxy_headers: false,
             trusted_header: String::new(),
             trust_last_hop: false,
+            trusted_proxy_ranges: Vec::new(),
         };
         assert_eq!(site_status_str(site.status), site_status::PAUSED);
         let rules =
@@ -1933,6 +1982,7 @@ mod tests {
             trust_proxy_headers: false,
             trusted_header: String::new(),
             trust_last_hop: false,
+            trusted_proxy_ranges: Vec::new(),
         };
         let rules =
             RuleCache::convert_bundle(site.rules.as_ref().expect("bundle"));
