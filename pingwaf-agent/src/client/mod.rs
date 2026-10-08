@@ -6,7 +6,7 @@ use std::time::Duration;
 use arc_swap::ArcSwapOption;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tonic::transport::{Channel, Endpoint};
+use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
 use tracing::{debug, error, info, warn};
 
 use pingwaf_proto::control_plane::{
@@ -213,6 +213,11 @@ impl ControlPlaneClient {
             .keep_alive_while_idle(true)
             .http2_keep_alive_interval(Duration::from_secs(30))
             .tcp_nodelay(true);
+        let endpoint = apply_client_tls(
+            endpoint,
+            &self.config.server_url,
+            &self.config.server_ca_cert,
+        )?;
 
         let channel = endpoint.connect().await?;
         Ok(channel)
@@ -1023,6 +1028,34 @@ impl ControlPlaneClient {
 // Helper functions for system information
 // ─────────────────────────────────────────────────────────────
 
+/// Enables TLS for `https://` server URLs.
+///
+/// `Endpoint::from_shared` does not do this on its own — without the explicit
+/// config the agent would speak cleartext h2 into a TLS port. With a
+/// configured CA file that file is the only trust anchor; otherwise the
+/// bundled webpki roots apply.
+fn apply_client_tls(
+    endpoint: Endpoint,
+    server_url: &str,
+    ca_cert_path: &Option<String>,
+) -> anyhow::Result<Endpoint> {
+    if !server_url.starts_with("https://") {
+        return Ok(endpoint);
+    }
+    let mut tls = ClientTlsConfig::new();
+    if let Some(path) = ca_cert_path {
+        let pem = std::fs::read_to_string(path).map_err(|err| {
+            anyhow::anyhow!(
+                "failed to read server CA certificate {path}: {err}"
+            )
+        })?;
+        tls = tls.ca_certificate(Certificate::from_pem(pem));
+    } else {
+        tls = tls.with_enabled_roots();
+    }
+    Ok(endpoint.tls_config(tls)?)
+}
+
 /// Doubles the current reconnect backoff, capped at the configured maximum.
 fn next_backoff(current_ms: u64, max_ms: u64) -> u64 {
     current_ms.saturating_mul(2).min(max_ms)
@@ -1158,6 +1191,39 @@ fn get_total_memory() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plaintext_urls_skip_tls_config() {
+        let endpoint = Endpoint::from_shared("http://localhost:9090").unwrap();
+        assert!(
+            apply_client_tls(endpoint, "http://localhost:9090", &None).is_ok()
+        );
+    }
+
+    #[test]
+    fn https_without_ca_uses_bundled_roots() {
+        let endpoint =
+            Endpoint::from_shared("https://waf.example.com:9090").unwrap();
+        assert!(apply_client_tls(
+            endpoint,
+            "https://waf.example.com:9090",
+            &None
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn https_with_missing_ca_file_fails_early() {
+        let endpoint =
+            Endpoint::from_shared("https://waf.example.com:9090").unwrap();
+        let err = apply_client_tls(
+            endpoint,
+            "https://waf.example.com:9090",
+            &Some("/nonexistent/ca.pem".to_string()),
+        )
+        .expect_err("a missing CA file must fail before connecting");
+        assert!(err.to_string().contains("/nonexistent/ca.pem"));
+    }
 
     fn test_client(initial_ms: u64, max_ms: u64) -> Arc<ControlPlaneClient> {
         test_client_at("http://127.0.0.1:1", initial_ms, max_ms)

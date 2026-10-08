@@ -69,6 +69,8 @@ fn server_config_from_opts(opts: &ServerOpts) -> ServerConfig {
     config.db_url = opts.common.db_url.clone();
     config.http_addr = opts.common.admin_addr.clone();
     config.grpc_addr = opts.common.grpc_addr.clone();
+    config.grpc_tls_cert = opts.common.grpc_tls_cert.clone();
+    config.grpc_tls_key = opts.common.grpc_tls_key.clone();
     config.jwt_secret = opts.jwt_secret.clone();
     config.default_admin_email = opts.admin_email.clone();
     config.default_admin_password = opts.admin_password.clone();
@@ -83,6 +85,8 @@ fn server_config_from_all_in_one(opts: &AllInOneOpts) -> ServerConfig {
     config.db_url = opts.common.db_url.clone();
     config.http_addr = opts.common.admin_addr.clone();
     config.grpc_addr = opts.common.grpc_addr.clone();
+    config.grpc_tls_cert = opts.common.grpc_tls_cert.clone();
+    config.grpc_tls_key = opts.common.grpc_tls_key.clone();
     config.jwt_secret = opts.jwt_secret.clone();
     config.default_admin_email = opts.admin_email.clone();
     config.default_admin_password = opts.admin_password.clone();
@@ -108,6 +112,7 @@ fn agent_config_from_opts(opts: &AgentOpts) -> AgentConfig {
         server_url: opts.server_url.clone(),
         api_key: opts.api_key.clone(),
         agent_id: String::new(),
+        server_ca_cert: opts.server_ca_cert.clone(),
         heartbeat_interval_secs: opts.heartbeat_interval_secs,
         cache_dir: opts.cache_dir.clone(),
         log_batch_size: opts.log_batch_size,
@@ -124,15 +129,25 @@ fn agent_config_from_opts(opts: &AgentOpts) -> AgentConfig {
 
 /// Convert CLI all-in-one options into an `AgentConfig`.
 ///
-/// In all-in-one mode the agent connects to the local server via loopback.
+/// In all-in-one mode the agent connects to the local server via loopback;
+/// when the gRPC listener runs TLS, it switches to `https://` and trusts the
+/// server certificate through its own file (the certificate must carry an IP
+/// SAN for 127.0.0.1).
 fn agent_config_from_all_in_one(opts: &AllInOneOpts) -> AgentConfig {
     // Derive the loopback gRPC URL from the configured gRPC address
     let port = extract_port(&opts.common.grpc_addr);
-    let server_url = format!("http://127.0.0.1:{port}");
+    let (server_url, server_ca_cert) =
+        match (&opts.common.grpc_tls_cert, &opts.common.grpc_tls_key) {
+            (Some(cert), Some(_)) => {
+                (format!("https://127.0.0.1:{port}"), Some(cert.clone()))
+            },
+            _ => (format!("http://127.0.0.1:{port}"), None),
+        };
     AgentConfig {
         server_url,
         api_key: opts.api_key.clone(),
         agent_id: String::new(),
+        server_ca_cert,
         heartbeat_interval_secs: opts.heartbeat_interval_secs,
         cache_dir: opts.cache_dir.clone(),
         log_batch_size: opts.log_batch_size,

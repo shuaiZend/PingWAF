@@ -6,8 +6,13 @@ use serde::{Deserialize, Serialize};
 /// locally, and ships logs/metrics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
-    /// gRPC server URL (e.g., "http://localhost:9090")
+    /// gRPC server URL (e.g., "http://localhost:9090"; use "https://" when
+    /// the control plane serves gRPC over TLS)
     pub server_url: String,
+    /// Optional PEM file with the CA (or chain) that signed the control
+    /// plane's certificate; defaults to the bundled webpki roots.
+    #[serde(default)]
+    pub server_ca_cert: Option<String>,
     /// API key for authentication with control plane
     pub api_key: String,
     /// Unique identifier for this agent (auto-generated if empty)
@@ -86,6 +91,7 @@ impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             server_url: "http://localhost:9090".to_string(),
+            server_ca_cert: None,
             api_key: String::new(),
             agent_id: String::new(),
             heartbeat_interval_secs: default_heartbeat_interval(),

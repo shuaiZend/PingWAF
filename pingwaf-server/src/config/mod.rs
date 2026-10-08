@@ -130,6 +130,14 @@ pub struct ServerConfig {
     /// Socket address the gRPC control plane listens on.
     #[serde(default = "default_grpc_addr")]
     pub grpc_addr: String,
+    /// Optional PEM certificate enabling TLS on the gRPC listener. Both this
+    /// and `grpc_tls_key` must be set; agents then connect with `https://`
+    /// URLs. Cross-network deployments should always enable it.
+    #[serde(default)]
+    pub grpc_tls_cert: Option<String>,
+    /// Optional PEM private key for `grpc_tls_cert`.
+    #[serde(default)]
+    pub grpc_tls_key: Option<String>,
     /// HMAC secret used to sign access, refresh and agent tokens.
     #[serde(default = "default_jwt_secret")]
     pub jwt_secret: String,
@@ -217,6 +225,8 @@ impl Default for ServerConfig {
             db_url: DEFAULT_DB_URL.to_string(),
             http_addr: DEFAULT_HTTP_ADDR.to_string(),
             grpc_addr: DEFAULT_GRPC_ADDR.to_string(),
+            grpc_tls_cert: None,
+            grpc_tls_key: None,
             jwt_secret: DEFAULT_JWT_SECRET.to_string(),
             jwt_expiration_hours: DEFAULT_JWT_EXPIRATION_HOURS,
             refresh_token_expiration_hours: DEFAULT_REFRESH_EXPIRATION_HOURS,
@@ -266,6 +276,12 @@ impl ServerConfig {
         }
         if let Ok(value) = std::env::var("PINGWAF_GRPC_ADDR") {
             config.grpc_addr = value;
+        }
+        if let Ok(value) = std::env::var("PINGWAF_GRPC_TLS_CERT") {
+            config.grpc_tls_cert = non_empty_env(&value);
+        }
+        if let Ok(value) = std::env::var("PINGWAF_GRPC_TLS_KEY") {
+            config.grpc_tls_key = non_empty_env(&value);
         }
         if let Ok(value) = std::env::var("PINGWAF_JWT_SECRET") {
             config.jwt_secret = value;
