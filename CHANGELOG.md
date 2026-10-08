@@ -8,6 +8,79 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.24.0] — 2026-10-08
+
+A security-hardening batch: fixes for the risks surfaced by a full control
+plane / agent / deployment audit.
+
+### ⚠️ Breaking Changes
+
+- *(compose)* The PostgreSQL port is now published on loopback only
+  (`127.0.0.1:5432` by default). Deployments that reach the database from
+  another host must set `POSTGRES_BIND=0.0.0.0` explicitly — together with a
+  strong password.
+- *(agent)* The log, certificate-event and metric shipping streams now
+  authenticate with the agent's API key (gRPC metadata). **Upgrade agents
+  before the control plane**: a new agent against an old server is ignored
+  harmlessly, while an old agent against the new server is refused.
+- *(agent)* `fail_open = false` now means what it always claimed: while the
+  agent is disconnected from the control plane, hosts without synced rules
+  answer `503` instead of silently falling back to the built-in rules in
+  block mode. Deployments that set `false` while it was inert will see real
+  fail-closed behaviour after upgrading — including a `503` window between
+  agent start and the first successful sync.
+- *(ci)* Main-branch docker builds publish a `:main` amd64 snapshot instead
+  of overwriting the multi-arch `:latest` manifest on every commit;
+  `:latest` now tracks releases only.
+
+### ⛰️ Features
+
+- *(server)* Optional TLS on the gRPC control plane: `grpc_tls_cert` +
+  `grpc_tls_key` switch the listener to TLS, agents connect with `https://`
+  URLs and can pin a private CA via `server_ca_cert`, and the all-in-one
+  mode wires both sides up automatically.
+- *(server)* The authentication endpoints are rate limited per source
+  address — 10 logins/min, 5 registrations/hour, 30 refreshes/min, 10
+  password changes/min (passkey logins share the login bucket) — answering
+  `429` with `Retry-After` when exceeded.
+- *(server)* Startup warns while the default administrator password
+  (`pingwaf123`) is still active, next to the forced first-login password
+  change.
+- *(server)* `PINGWAF_PUBLIC_HOST` (or `--public-host`, or the `public_host`
+  file key) pins the cleartext-to-HTTPS redirect target instead of building
+  it from the client's `Host` header.
+
+### 🐛 Bug Fixes
+
+- *(server)* Placeholder JWT secrets — the built-in default, the CLI default
+  and the compose value — are now all detected as unconfigured and replaced
+  by a generated secret persisted on first boot, instead of being used
+  verbatim by the single-value check.
+- *(server)* Dashboard tokens carry a token version: changing a password,
+  disabling an account or changing its role bumps the version and
+  immediately invalidates that account's access and refresh tokens. Tokens
+  issued before this mechanism existed stay valid until expiry.
+- *(server)* The first-admin registration race is closed: sign-up runs in a
+  transaction guarded by a Postgres advisory lock, so concurrent requests
+  can no longer create a second administrator.
+- *(server)* `/healthz` and `/api/v1/health` reuse their database answer for
+  5 seconds, so a database that has slowed down stops collecting one extra
+  query per container or load-balancer probe.
+- *(agent)* `Set-Cookie` pairs shipped in access logs are joined with a
+  newline instead of a comma — cookie values routinely contain commas of
+  their own inside `Expires` attributes, which made shipped pairs
+  indistinguishable.
+- *(agent)* The reconnect backoff is jittered (each step lands between 50%
+  and 100% of the doubled, capped delay) so a fleet that lost the control
+  plane together never retries in lockstep.
+
+### 🔧 Internal
+
+- An outbound-TLS audit confirmed the control plane's HTTP client needs no
+  change: reqwest 0.13's `default-tls` already maps to rustls and no
+  OpenSSL build slips into the tree (pingora's openssl feature is the data
+  plane's outbound backend, unrelated to the API client).
+
 ## [PingWAF 0.23.0] — 2026-10-08
 
 ### ⛰️ Features
