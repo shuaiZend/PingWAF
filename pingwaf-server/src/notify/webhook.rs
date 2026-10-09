@@ -397,7 +397,7 @@ mod tests {
             let err = ensure_public_webhook(url).await.unwrap_err();
             assert!(err.contains("private"), "{url}: {err}");
         }
-        // Bad scheme / unparseable: rejected before any I/O.
+        // Bad scheme / unparsable: rejected before any I/O.
         for url in ["file:///etc/passwd", "ftp://example.com/hook", "not a url"]
         {
             assert!(ensure_public_webhook(url).await.is_err(), "{url}");
