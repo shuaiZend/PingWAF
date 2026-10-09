@@ -1396,8 +1396,7 @@ async fn update_pool(
     active.health_check_timeout_ms = Set(health_check.timeout_ms);
     active.health_check_unhealthy_threshold =
         Set(health_check.unhealthy_threshold);
-    active.health_check_healthy_threshold =
-        Set(health_check.healthy_threshold);
+    active.health_check_healthy_threshold = Set(health_check.healthy_threshold);
 
     let updated = active.update(&state.db).await?;
     validate_pool(
