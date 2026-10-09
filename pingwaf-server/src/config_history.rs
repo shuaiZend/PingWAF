@@ -24,18 +24,17 @@ use std::collections::BTreeMap;
 
 use chrono::Utc;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection,
-    DbErr, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
-    TransactionTrait,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DbErr,
+    EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait,
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::models::{
-    bot_protection, challenge_settings, config_version, defense_settings,
-    error_pages, geo_rules, ip_access_rules, ip_group_sites, mtls_ca,
-    mtls_client_certificate, rate_limit_rules, rewrite_rules, rule, rule_groups,
-    cache_rules, site, site_basic_auth, site_certificates, site_routes,
+    bot_protection, cache_rules, challenge_settings, config_version,
+    defense_settings, error_pages, geo_rules, ip_access_rules, ip_group_sites,
+    mtls_ca, mtls_client_certificate, rate_limit_rules, rewrite_rules, rule,
+    rule_groups, site, site_basic_auth, site_certificates, site_routes,
     site_ssl, site_upstream_pools, site_upstreams, waf_settings,
 };
 
@@ -61,8 +60,7 @@ pub const PRIVATE_KEY_TABLES: [&str; 3] =
 /// captured snapshot document.
 fn strip_private_keys(tables: &mut BTreeMap<String, Value>) {
     for name in PRIVATE_KEY_TABLES {
-        if let Some(rows) = tables.get_mut(name).and_then(Value::as_array_mut)
-        {
+        if let Some(rows) = tables.get_mut(name).and_then(Value::as_array_mut) {
             for row in rows.iter_mut() {
                 if let Some(object) = row.as_object_mut() {
                     object.remove("key_pem");
@@ -140,23 +138,79 @@ pub async fn capture_site_snapshot(
     let mut tables = BTreeMap::new();
     snapshot_table!(db, tables, rule_groups, Id, "rule_groups", site_id);
     snapshot_table!(db, tables, rule, Id, "rules", site_id);
-    snapshot_table!(db, tables, rate_limit_rules, Id, "rate_limit_rules", site_id);
+    snapshot_table!(
+        db,
+        tables,
+        rate_limit_rules,
+        Id,
+        "rate_limit_rules",
+        site_id
+    );
     snapshot_table!(db, tables, cache_rules, Id, "cache_rules", site_id);
-    snapshot_table!(db, tables, site_upstream_pools, Id, "site_upstream_pools", site_id);
+    snapshot_table!(
+        db,
+        tables,
+        site_upstream_pools,
+        Id,
+        "site_upstream_pools",
+        site_id
+    );
     snapshot_table!(db, tables, site_upstreams, Id, "site_upstreams", site_id);
     snapshot_table!(db, tables, site_routes, Id, "site_routes", site_id);
     snapshot_table!(db, tables, site_ssl, Id, "site_ssl", site_id);
-    snapshot_table!(db, tables, site_certificates, Id, "site_certificates", site_id);
-    snapshot_table!(db, tables, ip_access_rules, Id, "ip_access_rules", site_id);
-    snapshot_table!(db, tables, ip_group_sites, IpGroupId, "ip_group_sites", site_id);
+    snapshot_table!(
+        db,
+        tables,
+        site_certificates,
+        Id,
+        "site_certificates",
+        site_id
+    );
+    snapshot_table!(
+        db,
+        tables,
+        ip_access_rules,
+        Id,
+        "ip_access_rules",
+        site_id
+    );
+    snapshot_table!(
+        db,
+        tables,
+        ip_group_sites,
+        IpGroupId,
+        "ip_group_sites",
+        site_id
+    );
     snapshot_table!(db, tables, waf_settings, Id, "waf_settings", site_id);
-    snapshot_table!(db, tables, challenge_settings, Id, "challenge_settings", site_id);
+    snapshot_table!(
+        db,
+        tables,
+        challenge_settings,
+        Id,
+        "challenge_settings",
+        site_id
+    );
     snapshot_table!(db, tables, bot_protection, Id, "bot_protection", site_id);
     snapshot_table!(db, tables, geo_rules, Id, "geo_rules", site_id);
-    snapshot_table!(db, tables, site_basic_auth, Id, "site_basic_auth", site_id);
+    snapshot_table!(
+        db,
+        tables,
+        site_basic_auth,
+        Id,
+        "site_basic_auth",
+        site_id
+    );
     snapshot_table!(db, tables, rewrite_rules, Id, "rewrite_rules", site_id);
     snapshot_table!(db, tables, mtls_ca, Id, "mtls_cas", site_id);
-    snapshot_table!(db, tables, mtls_client_certificate, Id, "mtls_client_certificates", site_id);
+    snapshot_table!(
+        db,
+        tables,
+        mtls_client_certificate,
+        Id,
+        "mtls_client_certificates",
+        site_id
+    );
     // Private keys never enter a snapshot: the column is dropped here and
     // re-filled from the live rows on restore.
     strip_private_keys(&mut tables);
@@ -203,10 +257,8 @@ pub fn summarise(snapshot: &Value) -> Value {
     let mut summary = serde_json::Map::new();
     if let Some(tables) = snapshot.get("tables").and_then(Value::as_object) {
         for (name, rows) in tables {
-            let count = rows
-                .as_array()
-                .map(|rows| rows.len())
-                .unwrap_or_default();
+            let count =
+                rows.as_array().map(|rows| rows.len()).unwrap_or_default();
             if count > 0 {
                 summary.insert(name.clone(), json!(count));
             }
@@ -293,8 +345,9 @@ pub async fn latest_version(
         .order_by_desc(config_version::Column::Id)
         .limit(1);
     query = match scope {
-        VersionScope::Site(site_id) => query
-            .filter(config_version::Column::SiteId.eq(site_id)),
+        VersionScope::Site(site_id) => {
+            query.filter(config_version::Column::SiteId.eq(site_id))
+        },
         VersionScope::Global => {
             query.filter(config_version::Column::SiteId.is_null())
         },
@@ -387,16 +440,14 @@ macro_rules! restore_site_table {
                     },
                     None => row.clone(),
                 };
-                let model: $module::Model =
-                    serde_json::from_value(merged).map_err(|err| {
+                let model: $module::Model = serde_json::from_value(merged)
+                    .map_err(|err| {
                         DbErr::Custom(format!(
                             "cannot decode {} row: {err}",
                             $name
                         ))
                     })?;
-                <$module::ActiveModel>::from(model)
-                    .insert($txn)
-                    .await?;
+                <$module::ActiveModel>::from(model).insert($txn).await?;
             }
         }
     }};
@@ -423,23 +474,53 @@ async fn restore_site_rows(
     > = std::collections::HashMap::new();
     collect_live_rows!(txn, live, rule_groups, "rule_groups", site_id);
     collect_live_rows!(txn, live, rule, "rules", site_id);
-    collect_live_rows!(txn, live, rate_limit_rules, "rate_limit_rules", site_id);
+    collect_live_rows!(
+        txn,
+        live,
+        rate_limit_rules,
+        "rate_limit_rules",
+        site_id
+    );
     collect_live_rows!(txn, live, cache_rules, "cache_rules", site_id);
     collect_live_rows!(txn, live, site_routes, "site_routes", site_id);
     collect_live_rows!(txn, live, site_upstreams, "site_upstreams", site_id);
-    collect_live_rows!(txn, live, site_upstream_pools, "site_upstream_pools", site_id);
+    collect_live_rows!(
+        txn,
+        live,
+        site_upstream_pools,
+        "site_upstream_pools",
+        site_id
+    );
     collect_live_rows!(txn, live, site_ssl, "site_ssl", site_id);
-    collect_live_rows!(txn, live, site_certificates, "site_certificates", site_id);
+    collect_live_rows!(
+        txn,
+        live,
+        site_certificates,
+        "site_certificates",
+        site_id
+    );
     collect_live_rows!(txn, live, ip_access_rules, "ip_access_rules", site_id);
     collect_live_rows!(txn, live, ip_group_sites, "ip_group_sites", site_id);
     collect_live_rows!(txn, live, waf_settings, "waf_settings", site_id);
-    collect_live_rows!(txn, live, challenge_settings, "challenge_settings", site_id);
+    collect_live_rows!(
+        txn,
+        live,
+        challenge_settings,
+        "challenge_settings",
+        site_id
+    );
     collect_live_rows!(txn, live, bot_protection, "bot_protection", site_id);
     collect_live_rows!(txn, live, geo_rules, "geo_rules", site_id);
     collect_live_rows!(txn, live, site_basic_auth, "site_basic_auth", site_id);
     collect_live_rows!(txn, live, rewrite_rules, "rewrite_rules", site_id);
     collect_live_rows!(txn, live, mtls_ca, "mtls_cas", site_id);
-    collect_live_rows!(txn, live, mtls_client_certificate, "mtls_client_certificates", site_id);
+    collect_live_rows!(
+        txn,
+        live,
+        mtls_client_certificate,
+        "mtls_client_certificates",
+        site_id
+    );
 
     // Down (children first).
     delete_site_table!(txn, rule, site_id);
@@ -464,24 +545,54 @@ async fn restore_site_rows(
 
     // Up (parents first).
     restore_site_table!(txn, tables, live, rule_groups, "rule_groups");
-    restore_site_table!(txn, tables, live,rule, "rules");
-    restore_site_table!(txn, tables, live,rate_limit_rules, "rate_limit_rules");
-    restore_site_table!(txn, tables, live,cache_rules, "cache_rules");
-    restore_site_table!(txn, tables, live,site_upstream_pools, "site_upstream_pools");
-    restore_site_table!(txn, tables, live,site_upstreams, "site_upstreams");
-    restore_site_table!(txn, tables, live,site_routes, "site_routes");
-    restore_site_table!(txn, tables, live,site_ssl, "site_ssl");
-    restore_site_table!(txn, tables, live,site_certificates, "site_certificates");
-    restore_site_table!(txn, tables, live,ip_access_rules, "ip_access_rules");
-    restore_site_table!(txn, tables, live,ip_group_sites, "ip_group_sites");
-    restore_site_table!(txn, tables, live,waf_settings, "waf_settings");
-    restore_site_table!(txn, tables, live,challenge_settings, "challenge_settings");
-    restore_site_table!(txn, tables, live,bot_protection, "bot_protection");
-    restore_site_table!(txn, tables, live,geo_rules, "geo_rules");
-    restore_site_table!(txn, tables, live,site_basic_auth, "site_basic_auth");
-    restore_site_table!(txn, tables, live,rewrite_rules, "rewrite_rules");
-    restore_site_table!(txn, tables, live,mtls_ca, "mtls_cas");
-    restore_site_table!(txn, tables, live,mtls_client_certificate, "mtls_client_certificates");
+    restore_site_table!(txn, tables, live, rule, "rules");
+    restore_site_table!(
+        txn,
+        tables,
+        live,
+        rate_limit_rules,
+        "rate_limit_rules"
+    );
+    restore_site_table!(txn, tables, live, cache_rules, "cache_rules");
+    restore_site_table!(
+        txn,
+        tables,
+        live,
+        site_upstream_pools,
+        "site_upstream_pools"
+    );
+    restore_site_table!(txn, tables, live, site_upstreams, "site_upstreams");
+    restore_site_table!(txn, tables, live, site_routes, "site_routes");
+    restore_site_table!(txn, tables, live, site_ssl, "site_ssl");
+    restore_site_table!(
+        txn,
+        tables,
+        live,
+        site_certificates,
+        "site_certificates"
+    );
+    restore_site_table!(txn, tables, live, ip_access_rules, "ip_access_rules");
+    restore_site_table!(txn, tables, live, ip_group_sites, "ip_group_sites");
+    restore_site_table!(txn, tables, live, waf_settings, "waf_settings");
+    restore_site_table!(
+        txn,
+        tables,
+        live,
+        challenge_settings,
+        "challenge_settings"
+    );
+    restore_site_table!(txn, tables, live, bot_protection, "bot_protection");
+    restore_site_table!(txn, tables, live, geo_rules, "geo_rules");
+    restore_site_table!(txn, tables, live, site_basic_auth, "site_basic_auth");
+    restore_site_table!(txn, tables, live, rewrite_rules, "rewrite_rules");
+    restore_site_table!(txn, tables, live, mtls_ca, "mtls_cas");
+    restore_site_table!(
+        txn,
+        tables,
+        live,
+        mtls_client_certificate,
+        "mtls_client_certificates"
+    );
 
     // The site row itself: overlay the snapshot onto the live row so columns
     // added after the snapshot keep their current values.
@@ -492,11 +603,11 @@ async fn restore_site_rows(
             .ok_or_else(|| {
                 DbErr::RecordNotFound("site vanished during rollback".into())
             })?;
-        let mut merged =
-            serde_json::to_value(&live).map_err(|err| DbErr::Custom(err.to_string()))?;
+        let mut merged = serde_json::to_value(&live)
+            .map_err(|err| DbErr::Custom(err.to_string()))?;
         merge_objects(&mut merged, saved);
-        let mut model: site::Model = serde_json::from_value(merged)
-            .map_err(|err| {
+        let mut model: site::Model =
+            serde_json::from_value(merged).map_err(|err| {
                 DbErr::Custom(format!("cannot decode the site snapshot: {err}"))
             })?;
         model.updated_at = Utc::now();
@@ -550,7 +661,10 @@ async fn restore_global_rows(
             // The settings always live in row 1, whatever the snapshot says.
             active.id = Set(1);
             active.updated_at = Set(Utc::now());
-            if defense_settings::Entity::find_by_id(1).one(txn).await?.is_some()
+            if defense_settings::Entity::find_by_id(1)
+                .one(txn)
+                .await?
+                .is_some()
             {
                 active.update(txn).await?;
             } else {
@@ -616,9 +730,14 @@ pub async fn rollback(
     // the rollback as a first-class change and the dedup window does not
     // hide it.
     let hash = config_hash_after(db, scope).await.unwrap_or_default();
-    let new_version =
-        record_version(db, scope, config_version::source::ROLLBACK, actor, &hash)
-            .await?;
+    let new_version = record_version(
+        db,
+        scope,
+        config_version::source::ROLLBACK,
+        actor,
+        &hash,
+    )
+    .await?;
 
     Ok(RollbackOutcome {
         restored_version: version.id,
@@ -642,10 +761,9 @@ async fn config_hash_after(
                 .await
                 .ok()
                 .flatten()?;
-            let bundle =
-                crate::grpc::config::build_rule_bundle(db, &site_row)
-                    .await
-                    .ok()?;
+            let bundle = crate::grpc::config::build_rule_bundle(db, &site_row)
+                .await
+                .ok()?;
             Some(bundle.config_hash)
         },
     }
@@ -683,10 +801,7 @@ mod tests {
     #[test]
     fn merge_replaces_arrays_and_scalars() {
         let mut base = json!({ "domains": ["a"], "n": 1 });
-        merge_objects(
-            &mut base,
-            &json!({ "domains": ["b", "c"], "n": 2 }),
-        );
+        merge_objects(&mut base, &json!({ "domains": ["b", "c"], "n": 2 }));
         assert_eq!(base["domains"], json!(["b", "c"]));
         assert_eq!(base["n"], json!(2));
     }
@@ -742,8 +857,12 @@ mod tests {
         assert!(tables["site_ssl"][0].get("key_pem").is_none());
         assert_eq!(tables["site_ssl"][0]["cert_pem"], json!("CERT"));
         assert!(tables["mtls_cas"][0].get("key_pem").is_none());
-        assert!(tables["mtls_client_certificates"][0].get("key_pem").is_none());
-        assert!(tables["mtls_client_certificates"][1].get("key_pem").is_none());
+        assert!(tables["mtls_client_certificates"][0]
+            .get("key_pem")
+            .is_none());
+        assert!(tables["mtls_client_certificates"][1]
+            .get("key_pem")
+            .is_none());
         // Only the three private tables are stripped.
         assert_eq!(tables["site_routes"][0]["key_pem"], json!("NOT-A-KEY"));
     }
@@ -766,7 +885,10 @@ mod tests {
         // deleted since the snapshot has no live underlay and must decode
         // exactly as stored.
         let mut by_id = std::collections::HashMap::new();
-        by_id.insert(Some(json!("kept")), json!({ "id": "kept", "key_pem": "LIVE" }));
+        by_id.insert(
+            Some(json!("kept")),
+            json!({ "id": "kept", "key_pem": "LIVE" }),
+        );
         let live: BTreeMap<&str, std::collections::HashMap<_, _>> =
             BTreeMap::from([("site_ssl", by_id)]);
 

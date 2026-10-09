@@ -26,9 +26,8 @@ const SCAN_INTERVAL: Duration = Duration::from_secs(3600);
 /// 600s) is far shorter than the scan interval, so without this set every
 /// sweep would re-notify. Process restarts replay one alert per pending
 /// certificate — acceptable for a daily-scale signal.
-static ALERTED: std::sync::LazyLock<
-    std::sync::Mutex<HashSet<String>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashSet::new()));
+static ALERTED: std::sync::LazyLock<std::sync::Mutex<HashSet<String>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashSet::new()));
 
 /// Spawns the hourly scanner; the handle is detached by the caller.
 pub fn start(db: DatabaseConnection) -> JoinHandle<()> {
@@ -76,48 +75,55 @@ async fn scan(db: &DatabaseConnection) {
             continue;
         }
         match kind {
-            "expired" => notify::emit(AlertEvent {
-                event_type: event_type::CERT_EXPIRED.to_string(),
-                severity: severity::CRITICAL,
-                title: format!("Certificate for '{}' has expired", row.domain),
-                message: format!(
-                    "The certificate for '{}' (site {}) expired at {}. \
+            "expired" => {
+                notify::emit(AlertEvent {
+                    event_type: event_type::CERT_EXPIRED.to_string(),
+                    severity: severity::CRITICAL,
+                    title: format!(
+                        "Certificate for '{}' has expired",
+                        row.domain
+                    ),
+                    message: format!(
+                        "The certificate for '{}' (site {}) expired at {}. \
                      Renew it or replace it to keep TLS working.",
-                    row.domain,
-                    row.site_id,
-                    expires_at.format("%Y-%m-%d %H:%M UTC"),
-                ),
-                details: Some(serde_json::json!({
-                    "site_id": row.site_id.to_string(),
-                    "domain": row.domain,
-                    "expires_at": expires_at.to_rfc3339(),
-                })),
-                dedup_key: Some(alert_key(row.site_id, expires_at)),
-            })
-            .await,
-            _ => notify::emit(AlertEvent {
-                event_type: event_type::CERT_EXPIRING.to_string(),
-                severity: severity::WARNING,
-                title: format!(
-                    "Certificate for '{}' expires within {warn_days} days",
-                    row.domain
-                ),
-                message: format!(
-                    "The certificate for '{}' (site {}) expires at {}. \
+                        row.domain,
+                        row.site_id,
+                        expires_at.format("%Y-%m-%d %H:%M UTC"),
+                    ),
+                    details: Some(serde_json::json!({
+                        "site_id": row.site_id.to_string(),
+                        "domain": row.domain,
+                        "expires_at": expires_at.to_rfc3339(),
+                    })),
+                    dedup_key: Some(alert_key(row.site_id, expires_at)),
+                })
+                .await
+            },
+            _ => {
+                notify::emit(AlertEvent {
+                    event_type: event_type::CERT_EXPIRING.to_string(),
+                    severity: severity::WARNING,
+                    title: format!(
+                        "Certificate for '{}' expires within {warn_days} days",
+                        row.domain
+                    ),
+                    message: format!(
+                        "The certificate for '{}' (site {}) expires at {}. \
                      Renewal should happen automatically; verify it works.",
-                    row.domain,
-                    row.site_id,
-                    expires_at.format("%Y-%m-%d %H:%M UTC"),
-                ),
-                details: Some(serde_json::json!({
-                    "site_id": row.site_id.to_string(),
-                    "domain": row.domain,
-                    "expires_at": expires_at.to_rfc3339(),
-                    "warn_days": warn_days,
-                })),
-                dedup_key: Some(alert_key(row.site_id, expires_at)),
-            })
-            .await,
+                        row.domain,
+                        row.site_id,
+                        expires_at.format("%Y-%m-%d %H:%M UTC"),
+                    ),
+                    details: Some(serde_json::json!({
+                        "site_id": row.site_id.to_string(),
+                        "domain": row.domain,
+                        "expires_at": expires_at.to_rfc3339(),
+                        "warn_days": warn_days,
+                    })),
+                    dedup_key: Some(alert_key(row.site_id, expires_at)),
+                })
+                .await
+            },
         }
     }
 }
@@ -132,16 +138,12 @@ fn classify(
     if expires_at <= now {
         return Some("expired");
     }
-    let warn_from =
-        now + chrono::Duration::days(i64::from(warn_days));
+    let warn_from = now + chrono::Duration::days(i64::from(warn_days));
     (expires_at <= warn_from).then_some("expiring")
 }
 
 /// The dedup/suppression key for one certificate expiry state.
-fn alert_key(
-    site_id: uuid::Uuid,
-    expires_at: chrono::DateTime<Utc>,
-) -> String {
+fn alert_key(site_id: uuid::Uuid, expires_at: chrono::DateTime<Utc>) -> String {
     format!("{}:{}", site_id, expires_at.date_naive())
 }
 
@@ -149,12 +151,10 @@ fn alert_key(
 /// so no extra task is needed.
 async fn prune_login_history(db: &DatabaseConnection) {
     const LOGIN_HISTORY_RETENTION_DAYS: i64 = 90;
-    let cutoff = Utc::now()
-        - chrono::Duration::days(LOGIN_HISTORY_RETENTION_DAYS);
+    let cutoff =
+        Utc::now() - chrono::Duration::days(LOGIN_HISTORY_RETENTION_DAYS);
     if let Err(err) = crate::models::login_history::Entity::delete_many()
-        .filter(
-            crate::models::login_history::Column::CreatedAt.lt(cutoff),
-        )
+        .filter(crate::models::login_history::Column::CreatedAt.lt(cutoff))
         .exec(db)
         .await
     {

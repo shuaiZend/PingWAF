@@ -1298,11 +1298,7 @@ mod tests {
         ] {
             let mut req = RequestHeader::build("GET", b"/path", None).unwrap();
             req.insert_header("Host", host).unwrap();
-            assert_eq!(
-                get_host(&req),
-                Some(expected.to_string()),
-                "{host}"
-            );
+            assert_eq!(get_host(&req), Some(expected.to_string()), "{host}");
         }
     }
 

@@ -744,8 +744,7 @@ impl Server {
             .find_map(|idx| {
                 let name = route.ordered.get(idx)?;
                 let location = self.location_provider.get(name)?;
-                let (matched, captures) =
-                    location.match_host_path(&host, path);
+                let (matched, captures) = location.match_host_path(&host, path);
                 if matched && location.match_conditions(header, client_ip) {
                     Some((location, captures))
                 } else {

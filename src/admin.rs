@@ -40,15 +40,14 @@ use pingwaf_server::auth::password::{
 };
 use pingwaf_server::config_history::{self, VersionScope};
 use pingwaf_server::models::{
-    api_protection_setting, config_version, defense_settings, ip_groups,
-    role, site, user,
+    api_protection_setting, config_version, defense_settings, ip_groups, role,
+    site, user,
 };
 
 use crate::cli::{
     AddAdminOpts, AllowlistOpts, ConfigCommand, ConfigHistoryOpts,
-    ConfigRollbackOpts, ConfigShowOpts, DbOpts, ModeCommand, OnOff,
-    PingWafCli, PingWafCommand, ResetPasswordOpts, SecurityCommand,
-    UserSubcommand,
+    ConfigRollbackOpts, ConfigShowOpts, DbOpts, ModeCommand, OnOff, PingWafCli,
+    PingWafCommand, ResetPasswordOpts, SecurityCommand, UserSubcommand,
 };
 
 /// Runs a maintenance subcommand.
@@ -478,25 +477,23 @@ async fn config_history_cmd(opts: ConfigHistoryOpts) -> anyhow::Result<()> {
 
     let referenced: Vec<Uuid> =
         rows.iter().filter_map(|row| row.site_id).collect();
-    let domains: std::collections::HashMap<Uuid, String> =
-        site::Entity::find()
-            .filter(site::Column::Id.is_in(referenced))
-            .all(&db)
-            .await?
-            .into_iter()
-            .map(|row| (row.id, row.domain))
-            .collect();
+    let domains: std::collections::HashMap<Uuid, String> = site::Entity::find()
+        .filter(site::Column::Id.is_in(referenced))
+        .all(&db)
+        .await?
+        .into_iter()
+        .map(|row| (row.id, row.domain))
+        .collect();
 
     println!(
-        "{:<6} {:<36} {:<18} {:<10} {:<24} {}",
-        "VERSION", "SCOPE", "CONFIG HASH", "SOURCE", "CREATED (UTC)", "CHANGES"
+        "{:<6} {:<36} {:<18} {:<10} {:<24} CHANGES",
+        "VERSION", "SCOPE", "CONFIG HASH", "SOURCE", "CREATED (UTC)"
     );
     for row in &rows {
         let scope_label = match row.site_id {
-            Some(id) => domains
-                .get(&id)
-                .cloned()
-                .unwrap_or_else(|| id.to_string()),
+            Some(id) => {
+                domains.get(&id).cloned().unwrap_or_else(|| id.to_string())
+            },
             None => "global".to_string(),
         };
         let changes = row
@@ -507,10 +504,7 @@ async fn config_history_cmd(opts: ConfigHistoryOpts) -> anyhow::Result<()> {
                 let mut parts: Vec<String> = entries
                     .iter()
                     .map(|(table, count)| {
-                        format!(
-                            "{table}={}",
-                            count.as_u64().unwrap_or(0)
-                        )
+                        format!("{table}={}", count.as_u64().unwrap_or(0))
                     })
                     .collect();
                 parts.sort();
@@ -528,7 +522,10 @@ async fn config_history_cmd(opts: ConfigHistoryOpts) -> anyhow::Result<()> {
         );
     }
     println!();
-    println!("{} version(s); details: pingwaf config show <version>", rows.len());
+    println!(
+        "{} version(s); details: pingwaf config show <version>",
+        rows.len()
+    );
     Ok(())
 }
 
@@ -538,14 +535,15 @@ async fn config_show(opts: ConfigShowOpts) -> anyhow::Result<()> {
         .one(&db)
         .await
         .context("cannot read the config_versions table")?
-        .with_context(|| format!("no configuration version {}", opts.version))?;
+        .with_context(|| {
+            format!("no configuration version {}", opts.version)
+        })?;
 
     if opts.json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&row.snapshot).context(
-                "cannot serialise the snapshot"
-            )?
+            serde_json::to_string_pretty(&row.snapshot)
+                .context("cannot serialise the snapshot")?
         );
         return Ok(());
     }
@@ -568,17 +566,11 @@ async fn config_show(opts: ConfigShowOpts) -> anyhow::Result<()> {
     {
         println!("snapshot summary:");
         for (table, count) in entries {
-            println!(
-                "  {table:<32} {} row(s)",
-                count.as_u64().unwrap_or(0)
-            );
+            println!("  {table:<32} {} row(s)", count.as_u64().unwrap_or(0));
         }
     }
     println!();
-    println!(
-        "full snapshot: pingwaf config show {} --json",
-        row.id
-    );
+    println!("full snapshot: pingwaf config show {} --json", row.id);
     Ok(())
 }
 
@@ -588,7 +580,9 @@ async fn config_rollback(opts: ConfigRollbackOpts) -> anyhow::Result<()> {
         .one(&db)
         .await
         .context("cannot read the config_versions table")?
-        .with_context(|| format!("no configuration version {}", opts.version))?;
+        .with_context(|| {
+            format!("no configuration version {}", opts.version)
+        })?;
 
     let scope_label = match row.site_id {
         Some(id) => format!("site {id}"),
@@ -608,25 +602,22 @@ async fn config_rollback(opts: ConfigRollbackOpts) -> anyhow::Result<()> {
         let mut answer = String::new();
         std::io::stdin().read_line(&mut answer)?;
         let answer = answer.trim();
-        if !(answer.eq_ignore_ascii_case("yes") || answer.eq_ignore_ascii_case("y"))
+        if !(answer.eq_ignore_ascii_case("yes")
+            || answer.eq_ignore_ascii_case("y"))
         {
             bail!("aborted");
         }
     }
 
-    let outcome =
-        config_history::rollback(&db, opts.version, Some("cli"))
-            .await
-            .map_err(|err| {
-                if matches!(
-                    err,
-                    sea_orm::DbErr::RecordNotFound(_)
-                ) {
-                    anyhow::anyhow!("no configuration version {}", opts.version)
-                } else {
-                    anyhow::anyhow!("rollback failed: {err}")
-                }
-            })?;
+    let outcome = config_history::rollback(&db, opts.version, Some("cli"))
+        .await
+        .map_err(|err| {
+            if matches!(err, sea_orm::DbErr::RecordNotFound(_)) {
+                anyhow::anyhow!("no configuration version {}", opts.version)
+            } else {
+                anyhow::anyhow!("rollback failed: {err}")
+            }
+        })?;
 
     println!(
         "restored configuration version {} ({})",

@@ -38,9 +38,17 @@ impl MigrationTrait for Migration {
                             .string_len(30)
                             .not_null(),
                     )
-                    .col(ColumnDef::new(ConfigVersions::Actor).string_len(255).null())
+                    .col(
+                        ColumnDef::new(ConfigVersions::Actor)
+                            .string_len(255)
+                            .null(),
+                    )
                     .col(ColumnDef::new(ConfigVersions::Summary).json().null())
-                    .col(ColumnDef::new(ConfigVersions::Snapshot).json().not_null())
+                    .col(
+                        ColumnDef::new(ConfigVersions::Snapshot)
+                            .json()
+                            .not_null(),
+                    )
                     .col(
                         ColumnDef::new(ConfigVersions::CreatedAt)
                             .timestamp_with_time_zone()

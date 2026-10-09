@@ -19,7 +19,7 @@ use base64::Engine as _;
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
 use ring::digest::{digest, SHA256};
 use ring::rand::{SecureRandom, SystemRandom};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 /// Config keys that must never be stored or returned in plain text.
 /// Shared with the API layer, which redacts them in responses.
@@ -154,9 +154,7 @@ pub fn seal_config(config: &mut Value) {
     let key = LessSafeKey::new(key);
     for name in SECRET_KEYS {
         let sealed = match object.get(name).and_then(Value::as_str) {
-            Some(value)
-                if !value.is_empty() && !value.starts_with(PREFIX) =>
-            {
+            Some(value) if !value.is_empty() && !value.starts_with(PREFIX) => {
                 seal_with(&key, &rng, value)
             },
             _ => continue,

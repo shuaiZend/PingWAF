@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -39,17 +39,16 @@ export function FailoverPanel() {
     queryFn: () => failoverApi.get(siteId),
     enabled: Boolean(siteId),
   })
-  const [policy, setPolicy] = useState<FailoverPolicy | null>(null)
-
-  useEffect(() => {
-    if (query.data) setPolicy(query.data.failover_policy)
-  }, [query.data])
+  // Local override for optimistic UI; falls back to the server value so the
+  // form stays editable without mirroring query state into an effect.
+  const [override, setOverride] = useState<FailoverPolicy | null>(null)
+  const policy = override ?? query.data?.failover_policy ?? null
 
   const save = useMutation({
     mutationFn: (next: FailoverPolicy) => failoverApi.update(siteId, next),
     onSuccess: (updated) => {
       toast.success(t('sites.failover.saved'))
-      setPolicy(updated.failover_policy)
+      setOverride(updated.failover_policy)
       void queryClient.invalidateQueries({
         queryKey: failoverKeys.all(siteId),
       })
@@ -86,7 +85,7 @@ export function FailoverPanel() {
           disabled={!canWrite || save.isPending}
           onChange={(e) => {
             const next = e.target.value as FailoverPolicy
-            setPolicy(next)
+            setOverride(next)
             if (next !== query.data.failover_policy) save.mutate(next)
           }}
         />

@@ -82,9 +82,7 @@ impl Default for LoginSecuritySettings {
 impl LoginSecuritySettings {
     /// Loads the settings from `instance_settings`, falling back to the
     /// defaults when the row is missing or unparsable.
-    pub async fn load(
-        db: &DatabaseConnection,
-    ) -> Self {
+    pub async fn load(db: &DatabaseConnection) -> Self {
         use crate::models::instance_setting;
 
         let stored = instance_setting::Entity::find_by_id(SETTINGS_KEY)
@@ -93,8 +91,7 @@ impl LoginSecuritySettings {
             .ok()
             .flatten();
         match stored {
-            Some(row) => serde_json::from_str(&row.value)
-                .unwrap_or_default(),
+            Some(row) => serde_json::from_str(&row.value).unwrap_or_default(),
             None => Self::default(),
         }
     }
@@ -135,23 +132,21 @@ impl LoginSecuritySettings {
     pub fn validate(&self) -> Result<(), String> {
         if !self.online_geo_url.contains("{ip}") {
             return Err(
-                "online_geo_url must contain the {ip} placeholder"
-                    .to_string(),
+                "online_geo_url must contain the {ip} placeholder".to_string()
             );
         }
         if !(self.online_geo_url.starts_with("http://")
             || self.online_geo_url.starts_with("https://"))
         {
-            return Err(
-                "online_geo_url must start with http:// or https://"
-                    .to_string(),
-            );
+            return Err("online_geo_url must start with http:// or https://"
+                .to_string());
         }
         if let Some(header) = &self.trusted_header {
             let name = header.trim().to_ascii_lowercase();
             if name.is_empty() {
-                return Err("trusted_header must not be empty when set"
-                    .to_string());
+                return Err(
+                    "trusted_header must not be empty when set".to_string()
+                );
             }
         }
         if self.baseline_count == 0 || self.baseline_count > 100 {
@@ -216,8 +211,7 @@ pub fn is_private(ip: IpAddr) -> bool {
                 return is_private(IpAddr::V4(v4));
             }
             let segments = v6.segments();
-            (segments[0] & 0xfe00) == 0xfc00
-                || (segments[0] & 0xffc0) == 0xfe80
+            (segments[0] & 0xfe00) == 0xfc00 || (segments[0] & 0xffc0) == 0xfe80
         },
     }
 }
@@ -236,18 +230,17 @@ pub fn resolve_client_ip(
             .get(name.trim().to_ascii_lowercase())
             .and_then(|value| value.to_str().ok())
         {
-            let mut hops =
-                value.split(',').map(str::trim).filter(|hop| {
-                    !hop.is_empty()
-                        && hop.parse::<IpAddr>().is_ok()
-                });
+            let mut hops = value
+                .split(',')
+                .map(str::trim)
+                .filter(|hop| !hop.is_empty() && hop.parse::<IpAddr>().is_ok());
             if settings.trust_last_hop {
-                if let Some(last) = hops.last().and_then(|h| h.parse().ok())
+                if let Some(last) =
+                    hops.next_back().and_then(|h| h.parse().ok())
                 {
                     return Some(last);
                 }
-            } else if let Some(first) =
-                hops.next().and_then(|h| h.parse().ok())
+            } else if let Some(first) = hops.next().and_then(|h| h.parse().ok())
             {
                 return Some(first);
             }
@@ -281,25 +274,25 @@ pub async fn lookup_geo(
 /// makes this cheap and an uploaded file is picked up without restarts.
 async fn lookup_mmdb(ip: IpAddr) -> Option<GeoInfo> {
     let path = geoip_mmdb_path();
-    let result =
-        tokio::task::spawn_blocking(move || -> Option<GeoInfo> {
-            let reader = maxminddb::Reader::open_readfile(&path).ok()?;
-            let found: Option<maxminddb::geoip2::Country> =
-                reader.lookup(ip).ok().flatten()?;
-            let country = found?;
-            Some(GeoInfo {
-                country_code: country
-                    .country
-                    .and_then(|c| c.iso_code)
-                    .map(|code| code.to_string()),
-                region: None,
-                city: None,
-                source: crate::models::geo_source::LOCAL,
-            })
+    let result = tokio::task::spawn_blocking(move || -> Option<GeoInfo> {
+        let reader = maxminddb::Reader::open_readfile(&path).ok()?;
+        // maxminddb 0.27: `lookup` returns a lazy `LookupResult` and
+        // decoding happens separately through `decode`.
+        let found: Option<maxminddb::geoip2::Country> =
+            reader.lookup(ip).ok()?.decode().ok()?;
+        let country = found?;
+        Some(GeoInfo {
+            // 0.27: `country` is a plain struct; `iso_code` is the
+            // `Option<&str>`.
+            country_code: country.country.iso_code.map(|code| code.to_string()),
+            region: None,
+            city: None,
+            source: crate::models::geo_source::LOCAL,
         })
-        .await
-        .ok()
-        .flatten();
+    })
+    .await
+    .ok()
+    .flatten();
     result
 }
 
@@ -407,12 +400,8 @@ pub async fn record_login(
     // would bleach the new country into the baseline.
     let mut baseline_countries = Vec::new();
     if judge && settings.anomaly_enabled {
-        baseline_countries = recent_countries(
-            db,
-            user_id,
-            settings.baseline_count,
-        )
-        .await;
+        baseline_countries =
+            recent_countries(db, user_id, settings.baseline_count).await;
     }
 
     let geo = lookup_geo(ip, &settings).await;
@@ -439,8 +428,7 @@ pub async fn record_login(
     let Some(country) = geo.country_code else {
         return;
     };
-    if !is_anomalous(&baseline_countries, &country, settings.baseline_count)
-    {
+    if !is_anomalous(&baseline_countries, &country, settings.baseline_count) {
         return;
     }
     notify::emit(AlertEvent {
@@ -540,14 +528,8 @@ mod tests {
         let settings = LoginSecuritySettings::default();
         let headers = headers_with("x-forwarded-for", "1.2.3.4");
         let peer = Some(ip("203.0.113.9"));
-        assert_eq!(
-            resolve_client_ip(&headers, peer, &settings),
-            peer
-        );
-        assert_eq!(
-            resolve_client_ip(&headers, None, &settings),
-            None
-        );
+        assert_eq!(resolve_client_ip(&headers, peer, &settings), peer);
+        assert_eq!(resolve_client_ip(&headers, None, &settings), None);
     }
 
     #[test]
@@ -556,8 +538,7 @@ mod tests {
             trusted_header: Some("x-forwarded-for".to_string()),
             ..LoginSecuritySettings::default()
         };
-        let headers =
-            headers_with("x-forwarded-for", "198.51.100.7, 10.0.0.1");
+        let headers = headers_with("x-forwarded-for", "198.51.100.7, 10.0.0.1");
         assert_eq!(
             resolve_client_ip(&headers, Some(ip("203.0.113.9")), &settings),
             Some(ip("198.51.100.7"))
@@ -595,11 +576,8 @@ mod tests {
 
     #[test]
     fn a_new_country_is_anomalous_once_the_baseline_is_full() {
-        let baseline = vec![
-            "CN".to_string(),
-            "CN".to_string(),
-            "JP".to_string(),
-        ];
+        let baseline =
+            vec!["CN".to_string(), "CN".to_string(), "JP".to_string()];
         assert!(is_anomalous(&baseline, "US", 3));
         assert!(!is_anomalous(&baseline, "JP", 3));
         assert!(!is_anomalous(&baseline, "CN", 3));
@@ -643,8 +621,7 @@ mod tests {
     #[test]
     fn private_v4_mapped_v6_is_caught() {
         use std::net::Ipv6Addr;
-        let mapped =
-            IpAddr::V6(Ipv4Addr::new(192, 168, 0, 1).to_ipv6_mapped());
+        let mapped = IpAddr::V6(Ipv4Addr::new(192, 168, 0, 1).to_ipv6_mapped());
         assert!(is_private(mapped));
         let _ = Ipv6Addr::LOCALHOST;
     }

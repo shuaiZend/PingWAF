@@ -98,3 +98,6 @@ Thumbs.db
 
 # Python bytecode from tools/waf-bench scripts
 __pycache__/
+
+# Internal review notes — never publish
+docs-internal/

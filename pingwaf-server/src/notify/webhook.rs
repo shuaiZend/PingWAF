@@ -9,7 +9,7 @@
 use base64::Engine as _;
 use hmac::digest::KeyInit as _;
 use hmac::Mac;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use super::AlertEvent;
 
@@ -100,8 +100,7 @@ pub async fn ensure_public_webhook(url: &str) -> Result<(), String> {
         return Err("webhook URL has no host".to_string());
     };
     // A literal IP skips DNS entirely.
-    if let Ok(ip) = host.trim_matches(['[', ']']).parse::<std::net::IpAddr>()
-    {
+    if let Ok(ip) = host.trim_matches(['[', ']']).parse::<std::net::IpAddr>() {
         if is_blocked_ip(ip) {
             return Err(
                 "webhook host is a private, loopback or link-local address"
@@ -110,9 +109,12 @@ pub async fn ensure_public_webhook(url: &str) -> Result<(), String> {
         }
         return Ok(());
     }
-    let addrs = tokio::net::lookup_host((host, 443u16))
-        .await
-        .map_err(|err| format!("cannot resolve webhook host '{host}': {err}"))?;
+    let addrs =
+        tokio::net::lookup_host((host, 443u16))
+            .await
+            .map_err(|err| {
+                format!("cannot resolve webhook host '{host}': {err}")
+            })?;
     for addr in addrs {
         if is_blocked_ip(addr.ip()) {
             return Err(
@@ -219,8 +221,7 @@ pub fn sign_url(url: &str, secret: &str) -> Result<String, String> {
         .map_err(|err| err.to_string())?;
     hmac::digest::Update::update(&mut mac, string_to_sign.as_bytes());
     let signature = mac.finalize().into_bytes();
-    let encoded =
-        base64::engine::general_purpose::STANDARD.encode(signature);
+    let encoded = base64::engine::general_purpose::STANDARD.encode(signature);
 
     let separator = if url.contains('?') { '&' } else { '?' };
     Ok(format!(
@@ -313,7 +314,11 @@ mod tests {
 
     #[test]
     fn signing_appends_timestamp_and_sign() {
-        let signed = sign_url("https://oapi.dingtalk.com/robot/send?access_token=x", "SEC123").unwrap();
+        let signed = sign_url(
+            "https://oapi.dingtalk.com/robot/send?access_token=x",
+            "SEC123",
+        )
+        .unwrap();
         assert!(signed.starts_with(
             "https://oapi.dingtalk.com/robot/send?access_token=x&timestamp="
         ));
@@ -333,10 +338,22 @@ mod tests {
     fn private_addresses_are_blocked() {
         use std::net::IpAddr;
         let blocked = [
-            "127.0.0.1", "10.1.2.3", "172.16.0.9", "172.31.255.1",
-            "192.168.1.1", "169.254.169.254", "0.0.0.0", "100.64.0.1",
-            "255.255.255.255", "::1", "::", "fe80::1", "fc00::1", "fd12::1",
-            "::ffff:10.0.0.5", "::ffff:169.254.169.254",
+            "127.0.0.1",
+            "10.1.2.3",
+            "172.16.0.9",
+            "172.31.255.1",
+            "192.168.1.1",
+            "169.254.169.254",
+            "0.0.0.0",
+            "100.64.0.1",
+            "255.255.255.255",
+            "::1",
+            "::",
+            "fe80::1",
+            "fc00::1",
+            "fd12::1",
+            "::ffff:10.0.0.5",
+            "::ffff:169.254.169.254",
         ];
         for ip in blocked {
             assert!(
@@ -345,7 +362,10 @@ mod tests {
             );
         }
         let allowed = [
-            "8.8.8.8", "172.32.0.1", "100.128.0.1", "2606:4700::1111",
+            "8.8.8.8",
+            "172.32.0.1",
+            "100.128.0.1",
+            "2606:4700::1111",
             "2001:4860:4860::8888",
         ];
         for ip in allowed {

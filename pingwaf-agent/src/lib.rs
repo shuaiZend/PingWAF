@@ -463,13 +463,12 @@ mod tests {
 
     #[test]
     fn failover_resolution_prefers_site_then_global_then_local() {
-        let policy = |domain: &str, mode: proto::FailoverMode| {
-            proto::SitePolicy {
+        let policy =
+            |domain: &str, mode: proto::FailoverMode| proto::SitePolicy {
                 domain: domain.to_string(),
                 alternate_domains: Vec::new(),
                 mode: mode as i32,
-            }
-        };
+            };
 
         // Site policy wins over everything, in both directions. Every case
         // gets its own cache dir: the cache persists to disk, so sharing a
@@ -479,7 +478,10 @@ mod tests {
             dir.path(),
             true,
             vec![
-                policy("closed.example.com", proto::FailoverMode::FailoverClosed),
+                policy(
+                    "closed.example.com",
+                    proto::FailoverMode::FailoverClosed,
+                ),
                 policy("open.example.com", proto::FailoverMode::FailoverOpen),
             ],
             Some(true),

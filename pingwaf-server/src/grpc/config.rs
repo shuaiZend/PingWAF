@@ -1039,12 +1039,9 @@ pub async fn build_rule_bundle(
     // A missing settings row means observation mode was never switched on, so
     // the data plane keeps enforcing; the failover default likewise falls
     // back to fail-open.
-    let defense_row = defense_settings::Entity::find_by_id(1)
-        .one(db)
-        .await?;
-    let observation_mode = defense_row
-        .as_ref()
-        .is_some_and(|row| row.observation_mode);
+    let defense_row = defense_settings::Entity::find_by_id(1).one(db).await?;
+    let observation_mode =
+        defense_row.as_ref().is_some_and(|row| row.observation_mode);
     let default_fail_open =
         defense_row.as_ref().is_none_or(|row| row.default_fail_open);
     // Every bundle carries the complete domain → failover policy registry so
@@ -1296,19 +1293,10 @@ mod tests {
 
     #[test]
     fn unknown_failover_policies_degrade_to_inherit() {
-        assert_eq!(
-            failover_mode_of("open"),
-            FailoverMode::FailoverOpen
-        );
-        assert_eq!(
-            failover_mode_of("closed"),
-            FailoverMode::FailoverClosed
-        );
+        assert_eq!(failover_mode_of("open"), FailoverMode::FailoverOpen);
+        assert_eq!(failover_mode_of("closed"), FailoverMode::FailoverClosed);
         for policy in ["inherit", "", "bogus"] {
-            assert_eq!(
-                failover_mode_of(policy),
-                FailoverMode::FailoverInherit
-            );
+            assert_eq!(failover_mode_of(policy), FailoverMode::FailoverInherit);
         }
     }
 

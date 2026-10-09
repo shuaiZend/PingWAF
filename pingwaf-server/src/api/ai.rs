@@ -304,8 +304,8 @@ async fn test_settings(
     candidate.enabled = true;
     // The stored key may be sealed (`enc:v1:`); the provider needs plain
     // text. Clear-text legacy rows pass through untouched.
-    candidate.api_key = secretbox::open_string(&candidate.api_key)
-        .unwrap_or_default();
+    candidate.api_key =
+        secretbox::open_string(&candidate.api_key).unwrap_or_default();
 
     let provider = Provider::new(&candidate)
         .map_err(|err| ApiError::BadRequest(err.to_string()))?;
@@ -583,10 +583,10 @@ async fn send_message(
     let can_write = settings.allow_write_tools && current.is_admin();
     // The stored key may be sealed; the provider needs plain text.
     let mut provider_settings = settings.clone();
-    provider_settings.api_key = secretbox::open_string(&settings.api_key)
-        .unwrap_or_default();
-    let provider = Provider::new(&provider_settings)
-        .map_err(|err| match err {
+    provider_settings.api_key =
+        secretbox::open_string(&settings.api_key).unwrap_or_default();
+    let provider =
+        Provider::new(&provider_settings).map_err(|err| match err {
             ai::ProviderError::Config(message) => ApiError::Conflict(message),
             other => ApiError::Internal(other.to_string()),
         })?;

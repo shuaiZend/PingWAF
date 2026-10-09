@@ -55,8 +55,9 @@ async fn get_failover(
 ) -> Result<Json<FailoverSettings>, ApiError> {
     let id = parse_uuid(&site_id, "site id")?;
     let site_row = load_site_read(&state.db, id, &current).await?;
-    let default_fail_open =
-        crate::api::defense::load(&state.db).await?.default_fail_open;
+    let default_fail_open = crate::api::defense::load(&state.db)
+        .await?
+        .default_fail_open;
     Ok(Json(FailoverSettings {
         failover_policy: site_row.failover_policy,
         default_fail_open,

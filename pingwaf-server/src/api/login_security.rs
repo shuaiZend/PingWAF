@@ -8,11 +8,9 @@
 use axum::extract::{DefaultBodyLimit, Multipart, Query, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use sea_orm::{
-    ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect,
-};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::api::error::ApiError;
 use crate::api::state::AppState;
@@ -30,8 +28,7 @@ pub fn routes() -> Router<AppState> {
         .route("/login-security", get(show).put(update))
         .route(
             "/login-security/geoip",
-            post(upload_geoip)
-                .layer(DefaultBodyLimit::max(MAX_MMDB_BYTES)),
+            post(upload_geoip).layer(DefaultBodyLimit::max(MAX_MMDB_BYTES)),
         )
         .route("/login-history", get(list_history))
 }
@@ -83,9 +80,7 @@ async fn update(
     if let Some(value) = payload.geoip_local_enabled {
         settings.geoip_local_enabled = value;
     }
-    settings
-        .validate()
-        .map_err(ApiError::BadRequest)?;
+    settings.validate().map_err(ApiError::BadRequest)?;
     settings.store(&state.db).await?;
     tracing::info!(
         actor = %current.email,

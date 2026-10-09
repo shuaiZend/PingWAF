@@ -1,8 +1,8 @@
 //! SMTP e-mail sender for the notification system, on top of `lettre`.
 
 use lettre::{
-    AsyncSmtpTransport, AsyncTransport, Tokio1Executor, message::Mailbox,
-    transport::smtp::authentication::Credentials,
+    message::Mailbox, transport::smtp::authentication::Credentials,
+    AsyncSmtpTransport, AsyncTransport, Tokio1Executor,
 };
 use serde_json::Value;
 
@@ -34,15 +34,15 @@ impl EmailConfig {
                 .map(str::to_string)
         };
         let smtp_host = get_str("smtp_host")
-            .ok_or_else(|| "missing 'smtp_host' in the channel config")?;
+            .ok_or("missing 'smtp_host' in the channel config")?;
         let smtp_port = config
             .get("smtp_port")
             .and_then(Value::as_u64)
             .unwrap_or(465);
         let smtp_port =
             u16::try_from(smtp_port).map_err(|_| "invalid 'smtp_port'")?;
-        let from = get_str("from")
-            .ok_or_else(|| "missing 'from' in the channel config")?;
+        let from =
+            get_str("from").ok_or("missing 'from' in the channel config")?;
         let to: Vec<String> = config
             .get("to")
             .and_then(Value::as_array)
@@ -57,8 +57,9 @@ impl EmailConfig {
             })
             .unwrap_or_default();
         if to.is_empty() {
-            return Err("missing 'to' recipients in the channel config"
-                .to_string());
+            return Err(
+                "missing 'to' recipients in the channel config".to_string()
+            );
         }
         Ok(Self {
             smtp_host,

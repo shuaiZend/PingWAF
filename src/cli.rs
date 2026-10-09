@@ -712,13 +712,9 @@ mod tests {
         assert_eq!(opts.limit, 5);
         assert_eq!(opts.db.db_url, "postgres://other/db");
 
-        let PingWafCommand::Config { command } = parse(&[
-            "pingwaf",
-            "config",
-            "show",
-            "42",
-            "--json",
-        ]) else {
+        let PingWafCommand::Config { command } =
+            parse(&["pingwaf", "config", "show", "42", "--json"])
+        else {
             panic!("expected the config command");
         };
         let ConfigCommand::Show(opts) = command else {
@@ -727,13 +723,9 @@ mod tests {
         assert_eq!(opts.version, 42);
         assert!(opts.json);
 
-        let PingWafCommand::Config { command } = parse(&[
-            "pingwaf",
-            "config",
-            "rollback",
-            "7",
-            "--yes",
-        ]) else {
+        let PingWafCommand::Config { command } =
+            parse(&["pingwaf", "config", "rollback", "7", "--yes"])
+        else {
             panic!("expected the config command");
         };
         let ConfigCommand::Rollback(opts) = command else {

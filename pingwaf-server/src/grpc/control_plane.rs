@@ -446,7 +446,9 @@ impl ControlPlaneTrait for ControlPlaneService {
                 Err(err) => {
                     tracing::error!(site_id = %site_row.id, error = %err, "could not build rule bundle");
                     crate::notify::emit(crate::notify::AlertEvent {
-                        event_type: crate::models::event_type::CONFIG_SYNC_FAILED.to_string(),
+                        event_type:
+                            crate::models::event_type::CONFIG_SYNC_FAILED
+                                .to_string(),
                         severity: crate::models::severity::CRITICAL,
                         title: format!(
                             "Configuration sync failed for site {}",
@@ -636,7 +638,8 @@ impl ControlPlaneTrait for ControlPlaneService {
             // through an expired certificate.
             if message.level.eq_ignore_ascii_case("error") {
                 crate::notify::emit(crate::notify::AlertEvent {
-                    event_type: crate::models::event_type::CERT_RENEWAL_FAILED.to_string(),
+                    event_type: crate::models::event_type::CERT_RENEWAL_FAILED
+                        .to_string(),
                     severity: crate::models::severity::CRITICAL,
                     title: "Certificate renewal failed".to_string(),
                     message: if message.message.is_empty() {
@@ -929,9 +932,7 @@ async fn persist_site_certificates(
                     expires_at,
                     now,
                     crate::notify::global()
-                        .map(|manager| {
-                            manager.settings().cert_expiry_warn_days
-                        })
+                        .map(|manager| manager.settings().cert_expiry_warn_days)
                         .unwrap_or(30),
                 )
                 .await;
@@ -979,8 +980,7 @@ async fn notify_certificate_state(
         return;
     }
 
-    let warn_from =
-        now + chrono::Duration::days(i64::from(warn_days));
+    let warn_from = now + chrono::Duration::days(i64::from(warn_days));
     if status == cert_status::ACTIVE && expires_at <= warn_from {
         let days_left = (expires_at - now).num_days().max(0);
         crate::notify::emit(crate::notify::AlertEvent {
@@ -1100,24 +1100,18 @@ async fn check_agent_resources(agent_id: Uuid, sample: &HostSample) {
     let settings = manager.settings();
 
     let memory_percent = if sample.memory_total_bytes > 0 {
-        (sample.memory_used_bytes as f32
-            / sample.memory_total_bytes as f32)
+        (sample.memory_used_bytes as f32 / sample.memory_total_bytes as f32)
             * 100.0
     } else {
         0.0
     };
     let disk_percent = if sample.disk_total_bytes > 0 {
-        (sample.disk_used_bytes as f32 / sample.disk_total_bytes as f32)
-            * 100.0
+        (sample.disk_used_bytes as f32 / sample.disk_total_bytes as f32) * 100.0
     } else {
         0.0
     };
     let metrics: [(&'static str, f32, u8); 3] = [
-        (
-            "cpu",
-            sample.cpu_usage_percent as f32,
-            settings.cpu_percent,
-        ),
+        ("cpu", sample.cpu_usage_percent as f32, settings.cpu_percent),
         ("memory", memory_percent, settings.memory_percent),
         ("disk", disk_percent, settings.disk_percent),
     ];
@@ -1126,9 +1120,8 @@ async fn check_agent_resources(agent_id: Uuid, sample: &HostSample) {
         let key = (agent_id, metric);
         let over = value >= f32::from(threshold);
         let strikes = {
-            let mut map = RESOURCE_STRIKES
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let mut map =
+                RESOURCE_STRIKES.lock().unwrap_or_else(|e| e.into_inner());
             let entry = map.entry(key).or_insert(0);
             if over {
                 *entry = entry.saturating_add(1);
@@ -1148,9 +1141,7 @@ async fn check_agent_resources(agent_id: Uuid, sample: &HostSample) {
                     event_type: crate::models::event_type::AGENT_RESOURCE
                         .to_string(),
                     severity,
-                    title: format!(
-                        "Agent {agent_id}: {metric} usage high"
-                    ),
+                    title: format!("Agent {agent_id}: {metric} usage high"),
                     message: format!(
                         "Agent {agent_id} reports {metric} usage at \
                          {value:.1}% (threshold {threshold}%)."

@@ -13,8 +13,7 @@ use crate::api::state::AppState;
 use crate::models::{event_type, severity};
 
 /// How often the control plane samples itself.
-const SAMPLE_INTERVAL: std::time::Duration =
-    std::time::Duration::from_secs(60);
+const SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 /// Consecutive over-threshold samples before an alert is raised.
 const SUSTAINED_SAMPLES: u8 = 2;
 
@@ -115,7 +114,10 @@ impl Breach {
 }
 
 /// Metrics over their thresholds in one sample.
-fn breaches(sample: Sample, settings: &super::NotificationSettings) -> Vec<Breach> {
+fn breaches(
+    sample: Sample,
+    settings: &super::NotificationSettings,
+) -> Vec<Breach> {
     let mut found = Vec::new();
     if sample.cpu_percent >= f32::from(settings.cpu_percent) {
         found.push(Breach {
@@ -158,10 +160,8 @@ pub fn start(_state: AppState) -> tokio::task::JoinHandle<()> {
             let found = breaches(current, &manager.settings());
 
             for breach in &found {
-                let count = strikes
-                    .entry(breach.label)
-                    .or_insert(0)
-                    .saturating_add(1);
+                let count =
+                    strikes.entry(breach.label).or_insert(0).saturating_add(1);
                 strikes.insert(breach.label, count);
                 // Fires once per sustained breach; repeats inside the window
                 // are suppressed by the channel dedup.

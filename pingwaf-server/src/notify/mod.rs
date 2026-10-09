@@ -67,7 +67,11 @@ pub struct AlertEvent {
 impl AlertEvent {
     /// The key repeated alerts collapse onto within the dedup window.
     fn suppression_key(&self) -> String {
-        format!("{}:{}", self.event_type, self.dedup_key.as_deref().unwrap_or(""))
+        format!(
+            "{}:{}",
+            self.event_type,
+            self.dedup_key.as_deref().unwrap_or("")
+        )
     }
 }
 
@@ -212,8 +216,7 @@ impl NotificationSettings {
             .ok()
             .flatten();
         match stored {
-            Some(row) => serde_json::from_str(&row.value)
-                .unwrap_or_default(),
+            Some(row) => serde_json::from_str(&row.value).unwrap_or_default(),
             None => Self::default(),
         }
     }
@@ -321,9 +324,8 @@ impl NotificationManager {
             secretbox::open_config(&mut channel.config);
         }
         self.channels.store(Arc::new(channels));
-        self.settings.store(Arc::new(
-            NotificationSettings::load(&self.db).await,
-        ));
+        self.settings
+            .store(Arc::new(NotificationSettings::load(&self.db).await));
     }
 
     /// Currently loaded settings (thresholds, dedup window).
@@ -386,16 +388,12 @@ impl NotificationManager {
     }
 
     /// Sends a test alert through one channel and reports the outcome.
-    pub async fn test_channel(
-        &self,
-        channel_id: Uuid,
-    ) -> Result<(), String> {
-        let Some(channel) = notification_channel::Entity::find_by_id(
-            channel_id,
-        )
-        .one(&self.db)
-        .await
-        .map_err(|err| err.to_string())?
+    pub async fn test_channel(&self, channel_id: Uuid) -> Result<(), String> {
+        let Some(channel) =
+            notification_channel::Entity::find_by_id(channel_id)
+                .one(&self.db)
+                .await
+                .map_err(|err| err.to_string())?
         else {
             return Err("channel not found".to_string());
         };
@@ -416,11 +414,7 @@ impl NotificationManager {
 
     /// True when an identical alert was delivered to this channel within the
     /// dedup window. Records the attempt when it returns `false`.
-    fn suppressed(
-        &self,
-        channel_id: Uuid,
-        event: &AlertEvent,
-    ) -> bool {
+    fn suppressed(&self, channel_id: Uuid, event: &AlertEvent) -> bool {
         let window = self.settings().dedup_window_secs;
         if window == 0 {
             return false;
@@ -436,7 +430,9 @@ impl NotificationManager {
         dedup.insert(key, now);
         // Keep the map from growing without bound across agent churn.
         if dedup.len() > 10_000 {
-            dedup.retain(|_, at| now.duration_since(*at) < Duration::from_secs(window));
+            dedup.retain(|_, at| {
+                now.duration_since(*at) < Duration::from_secs(window)
+            });
         }
         false
     }
@@ -446,7 +442,8 @@ impl NotificationManager {
         // Message originates from attacker-influenced traffic details (rule
         // ids, sample snippets); cap it so one noisy rule cannot inflate the
         // history table. Characters (not bytes) keeps multi-byte text intact.
-        let message: String = event.message.chars().take(MAX_MESSAGE_CHARS).collect();
+        let message: String =
+            event.message.chars().take(MAX_MESSAGE_CHARS).collect();
         let row = notification_event::ActiveModel {
             id: Set(Uuid::new_v4()),
             event_type: Set(event.event_type.clone()),
@@ -475,8 +472,8 @@ impl NotificationManager {
             return;
         }
 
-        let cutoff = chrono::Utc::now()
-            - chrono::Duration::days(EVENT_RETENTION_DAYS);
+        let cutoff =
+            chrono::Utc::now() - chrono::Duration::days(EVENT_RETENTION_DAYS);
         if let Err(err) = notification_event::Entity::delete_many()
             .filter(notification_event::Column::CreatedAt.lt(cutoff))
             .exec(&self.db)

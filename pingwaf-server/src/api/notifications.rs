@@ -14,7 +14,7 @@ use sea_orm::{
     QuerySelect, Set,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::api::error::ApiError;
@@ -70,7 +70,7 @@ fn validate_config(kind: &str, config: &Value) -> Result<(), ApiError> {
     match kind {
         channel_kind::EMAIL => {
             crate::notify::email::EmailConfig::from_json(config)
-                .map_err(|err| ApiError::BadRequest(err))?;
+                .map_err(ApiError::BadRequest)?;
         },
         channel_kind::WECOM | channel_kind::DINGTALK => {
             get_url()?;
@@ -310,10 +310,9 @@ async fn delete_channel(
     Path(channel_id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     current.require_admin().map_err(ApiError::from)?;
-    let result =
-        notification_channel::Entity::delete_by_id(channel_id)
-            .exec(&state.db)
-            .await?;
+    let result = notification_channel::Entity::delete_by_id(channel_id)
+        .exec(&state.db)
+        .await?;
     if result.rows_affected == 0 {
         return Err(ApiError::NotFound("channel not found".to_string()));
     }
@@ -462,8 +461,8 @@ async fn list_events(
         .map(str::trim)
         .filter(|kind| !kind.is_empty())
     {
-        db_query = db_query
-            .filter(notification_event::Column::EventType.eq(kind));
+        db_query =
+            db_query.filter(notification_event::Column::EventType.eq(kind));
     }
     Ok(Json(db_query.all(&state.db).await?))
 }

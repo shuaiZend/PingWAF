@@ -194,8 +194,7 @@ async fn check_stale_agents(
         );
 
         crate::notify::emit(crate::notify::AlertEvent {
-            event_type: crate::models::event_type::AGENT_OFFLINE
-                .to_string(),
+            event_type: crate::models::event_type::AGENT_OFFLINE.to_string(),
             severity: crate::models::severity::CRITICAL,
             title: format!("Agent {} went offline", row.hostname),
             message: format!(
@@ -254,8 +253,7 @@ async fn check_stale_agents(
             );
 
             crate::notify::emit(crate::notify::AlertEvent {
-                event_type: crate::models::event_type::AGENT_ONLINE
-                    .to_string(),
+                event_type: crate::models::event_type::AGENT_ONLINE.to_string(),
                 severity: crate::models::severity::INFO,
                 title: format!("Agent {} is back online", row.hostname),
                 message: format!(

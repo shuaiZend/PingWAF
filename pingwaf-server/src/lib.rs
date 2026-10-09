@@ -393,9 +393,7 @@ pub async fn start_server(mut config: ServerConfig) -> anyhow::Result<()> {
 
 /// Reloads the notification channels and settings every minute, so edits made
 /// outside this process (the CLI, another instance) are picked up.
-fn start_notify_reload_loop(
-    state: AppState,
-) -> tokio::task::JoinHandle<()> {
+fn start_notify_reload_loop(state: AppState) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;

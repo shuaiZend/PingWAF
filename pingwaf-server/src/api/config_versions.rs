@@ -8,9 +8,7 @@ use axum::extract::{Path, Query, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
-use sea_orm::{
-    ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect,
-};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -26,10 +24,7 @@ use crate::models::{config_version, site};
 /// Routes contributed to `/api/v1`.
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route(
-            "/config-versions",
-            get(list_versions),
-        )
+        .route("/config-versions", get(list_versions))
         .route("/config-versions/{version_id}", get(show_version))
         .route(
             "/config-versions/{version_id}/rollback",
@@ -81,10 +76,15 @@ async fn list_versions(
         .offset(offset);
     query = match site_id.as_deref() {
         None => query,
-        Some("global") => query.filter(config_version::Column::SiteId.is_null()),
+        Some("global") => {
+            query.filter(config_version::Column::SiteId.is_null())
+        },
         Some(raw) => {
-            let site_id = Uuid::parse_str(raw.trim())
-                .map_err(|_| ApiError::BadRequest("site_id must be a UUID or 'global'".to_string()))?;
+            let site_id = Uuid::parse_str(raw.trim()).map_err(|_| {
+                ApiError::BadRequest(
+                    "site_id must be a UUID or 'global'".to_string(),
+                )
+            })?;
             query.filter(config_version::Column::SiteId.eq(site_id))
         },
     };
@@ -158,14 +158,15 @@ async fn rollback_version(
 ) -> Result<Json<Value>, ApiError> {
     current.require_admin().map_err(ApiError::from)?;
 
-    let outcome = config_history::rollback(&state.db, version_id, Some(&current.email))
-        .await
-        .map_err(|err| match err {
-            sea_orm::DbErr::RecordNotFound(message) => {
-                ApiError::NotFound(message)
-            },
-            other => ApiError::from(other),
-        })?;
+    let outcome =
+        config_history::rollback(&state.db, version_id, Some(&current.email))
+            .await
+            .map_err(|err| match err {
+                sea_orm::DbErr::RecordNotFound(message) => {
+                    ApiError::NotFound(message)
+                },
+                other => ApiError::from(other),
+            })?;
 
     match outcome.scope {
         VersionScope::Site(site_id) => {

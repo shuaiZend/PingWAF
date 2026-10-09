@@ -95,7 +95,11 @@ impl MigrationTrait for Migration {
                             .text()
                             .not_null(),
                     )
-                    .col(ColumnDef::new(NotificationEvents::Details).json().null())
+                    .col(
+                        ColumnDef::new(NotificationEvents::Details)
+                            .json()
+                            .null(),
+                    )
                     .col(
                         ColumnDef::new(NotificationEvents::CreatedAt)
                             .timestamp_with_time_zone()
@@ -119,16 +123,12 @@ impl MigrationTrait for Migration {
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
             .drop_table(
-                Table::drop()
-                    .table(NotificationEvents::Table)
-                    .to_owned(),
+                Table::drop().table(NotificationEvents::Table).to_owned(),
             )
             .await?;
         manager
             .drop_table(
-                Table::drop()
-                    .table(NotificationChannels::Table)
-                    .to_owned(),
+                Table::drop().table(NotificationChannels::Table).to_owned(),
             )
             .await
     }

@@ -67,12 +67,10 @@ fn consume(
     user: Uuid,
     now: Instant,
 ) -> Result<(), u64> {
-    let entry = counters
-        .entry((bucket, user))
-        .or_insert(Entry {
-            window_start: now,
-            count: 0,
-        });
+    let entry = counters.entry((bucket, user)).or_insert(Entry {
+        window_start: now,
+        count: 0,
+    });
     if now.duration_since(entry.window_start) >= rate.window {
         entry.window_start = now;
         entry.count = 0;
@@ -129,16 +127,15 @@ mod tests {
         let mut counters = Counters::new();
         let start = Instant::now();
         for _ in 0..CHAT.limit {
-            assert!(consume(&mut counters, "ai_chat", CHAT, user(1), start)
-                .is_ok());
+            assert!(
+                consume(&mut counters, "ai_chat", CHAT, user(1), start).is_ok()
+            );
         }
         assert!(
             consume(&mut counters, "ai_chat", CHAT, user(1), start).is_err()
         );
         let later = start + CHAT.window;
-        assert!(
-            consume(&mut counters, "ai_chat", CHAT, user(1), later).is_ok()
-        );
+        assert!(consume(&mut counters, "ai_chat", CHAT, user(1), later).is_ok());
     }
 
     #[test]
@@ -146,19 +143,15 @@ mod tests {
         let mut counters = Counters::new();
         let now = Instant::now();
         for _ in 0..CHAT.limit {
-            assert!(consume(&mut counters, "ai_chat", CHAT, user(2), now)
-                .is_ok());
+            assert!(
+                consume(&mut counters, "ai_chat", CHAT, user(2), now).is_ok()
+            );
         }
-        assert!(
-            consume(&mut counters, "ai_chat", CHAT, user(2), now).is_err()
-        );
+        assert!(consume(&mut counters, "ai_chat", CHAT, user(2), now).is_err());
         // A different user and a different bucket each start fresh.
+        assert!(consume(&mut counters, "ai_chat", CHAT, user(3), now).is_ok());
         assert!(
-            consume(&mut counters, "ai_chat", CHAT, user(3), now).is_ok()
-        );
-        assert!(
-            consume(&mut counters, "ai_create", CREATE, user(2), now)
-                .is_ok()
+            consume(&mut counters, "ai_create", CREATE, user(2), now).is_ok()
         );
     }
 

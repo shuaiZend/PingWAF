@@ -1904,13 +1904,12 @@ impl WafPlugin {
             // default from the last sync, else the agent's local
             // `--fail-open` setting. A connected agent always keeps
             // serving, whatever the policies say.
-            let choice = if agent.is_connected()
-                || agent.effective_fail_open(&host)
-            {
-                EngineChoice::Base
-            } else {
-                EngineChoice::FailClosed
-            };
+            let choice =
+                if agent.is_connected() || agent.effective_fail_open(&host) {
+                    EngineChoice::Base
+                } else {
+                    EngineChoice::FailClosed
+                };
             ResolvedSite {
                 choice,
                 site_id: host,
@@ -3690,8 +3689,7 @@ advanced_mode = true
             fail_open: true,
             ..Default::default()
         };
-        let (_guard, _agent, _dir) =
-            install_test_agent_with(config, dir).await;
+        let (_guard, _agent, _dir) = install_test_agent_with(config, dir).await;
         let agent = PingWafAgent::instance().unwrap();
         agent
             .rule_cache

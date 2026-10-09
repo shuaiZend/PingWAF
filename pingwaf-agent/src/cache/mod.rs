@@ -1082,9 +1082,10 @@ impl RuleCache {
                     };
 
                     // Update domain index
-                    updated
-                        .domain_index
-                        .insert(normalize_host(&site_rules.domain), site.id.clone());
+                    updated.domain_index.insert(
+                        normalize_host(&site_rules.domain),
+                        site.id.clone(),
+                    );
                     for alt in &site_rules.alternate_domains {
                         updated
                             .domain_index
@@ -1127,11 +1128,7 @@ impl RuleCache {
     /// The site's disconnected policy for `domain`, when the control plane
     /// has one registered (primary or alternate domain match).
     pub fn failover_for_domain(&self, domain: &str) -> Option<FailoverMode> {
-        self.inner
-            .load()
-            .failover_registry
-            .get(domain)
-            .copied()
+        self.inner.load().failover_registry.get(domain).copied()
     }
 
     /// The control-plane-wide fail-open default, when it has ever been
@@ -1764,14 +1761,8 @@ mod tests {
             mode: proto::FailoverMode::FailoverClosed as i32,
         }];
         let registry = failover_registry_from(&policies);
-        assert_eq!(
-            registry.get("example.com"),
-            Some(&FailoverMode::Closed)
-        );
-        assert_eq!(
-            registry.get("m.example.com"),
-            Some(&FailoverMode::Closed)
-        );
+        assert_eq!(registry.get("example.com"), Some(&FailoverMode::Closed));
+        assert_eq!(registry.get("m.example.com"), Some(&FailoverMode::Closed));
         assert_eq!(registry.get("other.example.com"), None);
     }
 

@@ -29,7 +29,11 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(LoginHistory::Email).text().not_null())
                     .col(ColumnDef::new(LoginHistory::Ip).text().not_null())
                     .col(ColumnDef::new(LoginHistory::UserAgent).text().null())
-                    .col(ColumnDef::new(LoginHistory::CountryCode).string_len(8).null())
+                    .col(
+                        ColumnDef::new(LoginHistory::CountryCode)
+                            .string_len(8)
+                            .null(),
+                    )
                     .col(ColumnDef::new(LoginHistory::Region).text().null())
                     .col(ColumnDef::new(LoginHistory::City).text().null())
                     .col(

@@ -143,9 +143,7 @@ async fn status(
 /// `POST /api/v1/auth/login`
 async fn login(
     State(state): State<AppState>,
-    connect_info: Option<
-        axum::Extension<crate::tls::ConnInfo>,
-    >,
+    connect_info: Option<axum::Extension<crate::tls::ConnInfo>>,
     headers: axum::http::HeaderMap,
     Json(payload): Json<LoginRequest>,
 ) -> Result<Response, ApiError> {
@@ -192,7 +190,8 @@ async fn login(
             user_id,
             &login_email,
             &headers,
-            connect_info.map(|info| info.0.peer_addr.ip()),            true,
+            connect_info.map(|info| info.0.peer_addr.ip()),
+            true,
         )
         .await;
     });

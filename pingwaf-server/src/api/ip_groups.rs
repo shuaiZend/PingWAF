@@ -636,10 +636,9 @@ async fn sync_now(
     let target = parse_uuid(&group_id, "IP group id")?;
     let group = find_group(&state, target).await?;
 
-    let updated =
-        sync_subscription(&state, group, Some(&_current.email))
-            .await
-            .map_err(|message| {
+    let updated = sync_subscription(&state, group, Some(&_current.email))
+        .await
+        .map_err(|message| {
             tracing::warn!(
                 group_id = %target,
                 error = %message,
