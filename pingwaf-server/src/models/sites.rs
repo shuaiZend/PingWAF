@@ -134,6 +134,20 @@ pub mod site_upstream_pools {
         pub sni: Option<String>,
         /// `None` keeps the proxy default (verification on).
         pub verify_cert: Option<bool>,
+        /// Active HTTP health check for this pool's nodes; `false` leaves the
+        /// agent's data plane on its default bare TCP probe.
+        pub health_check_enabled: bool,
+        /// Probe path; always starts with `/`.
+        pub health_check_path: String,
+        /// Seconds between probe rounds. The data plane's scheduler aligns
+        /// this to 10s grid steps, so values are effectively rounded up.
+        pub health_check_interval_seconds: i32,
+        /// Probe connect/read timeout in milliseconds.
+        pub health_check_timeout_ms: i32,
+        /// Consecutive failed probes before a node is marked unhealthy.
+        pub health_check_unhealthy_threshold: i32,
+        /// Consecutive successful probes before a node is marked healthy.
+        pub health_check_healthy_threshold: i32,
         pub is_default: bool,
         pub created_at: DateTimeUtc,
     }

@@ -94,6 +94,12 @@ pub struct WafEngineConfig {
     /// Monitor while the hit still feeds the total score). Empty = enforce
     /// everything.
     pub monitor_managed_rules: std::collections::HashSet<String>,
+    /// Custom rule ids downgraded to monitor-only: a hit feeds the anomaly
+    /// score and the event log but the rule's own action never enforces.
+    /// This carries the per-rule monitor switch from the control plane —
+    /// unlike managed rules, a custom rule's id never starts with
+    /// `PINGWAF-`, so membership here is the only downgrade source.
+    pub monitor_custom_rules: std::collections::HashSet<String>,
 }
 
 impl Default for WafEngineConfig {
@@ -111,6 +117,7 @@ impl Default for WafEngineConfig {
             monitor_categories: CategorySet::EMPTY,
             monitor_stacks: StackSet::EMPTY,
             monitor_managed_rules: std::collections::HashSet::new(),
+            monitor_custom_rules: std::collections::HashSet::new(),
         }
     }
 }
@@ -214,6 +221,7 @@ pub struct WafEngine {
     monitor_categories: CategorySet,
     monitor_stacks: StackSet,
     monitor_managed_rules: std::collections::HashSet<String>,
+    monitor_custom_rules: std::collections::HashSet<String>,
 }
 
 impl std::fmt::Debug for WafEngine {
@@ -258,6 +266,7 @@ impl WafEngine {
             monitor_categories: config.monitor_categories,
             monitor_stacks: config.monitor_stacks,
             monitor_managed_rules: config.monitor_managed_rules.clone(),
+            monitor_custom_rules: config.monitor_custom_rules.clone(),
         }
     }
 
@@ -273,14 +282,13 @@ impl WafEngine {
         !scoped.is_empty() && self.monitor_stacks.intersects(scoped)
     }
 
-    /// `true` when a Stage-2 managed rule is downgraded to monitor-only.
-    /// Only managed rules participate: custom rules are explicit operator
-    /// configuration and are never silently downgraded. Three downgrade
-    /// sources compose: attack-category sets, backend-stack sets and the
-    /// per-rule set (which also covers score-gate rules).
+    /// `true` when a Stage-2 rule is downgraded to monitor-only. Managed
+    /// rules downgrade through the category/stack/per-rule sets; custom
+    /// rules only through the explicit per-rule monitor set (the control
+    /// plane's per-rule monitor switch), never implicitly.
     fn rule_monitored(&self, rule: &CompiledRule) -> bool {
         if !rule.id.starts_with("PINGWAF-") {
-            return false;
+            return self.monitor_custom_rules.contains(rule.id.as_str());
         }
         if self.monitor_managed_rules.contains(rule.id.as_str()) {
             return true;
@@ -1090,6 +1098,14 @@ impl WafEngine {
                     unreachable!("allow rules handled in pre-pass")
                 },
                 RuleAction::Log => {
+                    // OWASP CRS anomaly-scoring semantics, kept deliberately:
+                    // a log-action hit feeds the same aggregate (including
+                    // the blocking subset), so several low-severity log hits
+                    // — or log hits stacked on signature hits — can cross
+                    // the threshold and block. Operators who want a rule to
+                    // never contribute to blocking use the per-rule monitor
+                    // switch instead, which routes through
+                    // `add_severity_hit_ex(monitored=true)`.
                     self.scorer.add_severity_hit(&mut breakdown, rule.severity);
                 },
                 RuleAction::Block => {
@@ -1533,6 +1549,42 @@ mod tests {
         let v = e.inspect(&req("GET", "/secret/data", ""));
         assert!(matches!(v.action, WafAction::Block | WafAction::Monitor));
         assert!(v.matched_rules.contains(&"BLOCK-SECRET".to_string()));
+    }
+
+    #[test]
+    fn custom_rule_monitor_mode_downgrades_block() {
+        let custom = CompiledRule::compile(
+            "BLOCK-SECRET",
+            "block /secret",
+            r#"http.request.uri.path starts_with "/secret""#,
+            RuleAction::Block,
+            5,
+            vec!["custom".into()],
+        )
+        .unwrap();
+
+        // Without the per-rule monitor switch the custom rule enforces.
+        let cfg = WafEngineConfig {
+            rules: vec![custom.clone()],
+            ..Default::default()
+        };
+        let v = WafEngine::new(&cfg).inspect(&req("GET", "/secret/data", ""));
+        assert_eq!(v.action, WafAction::Block);
+
+        // With the monitor switch the hit is still detected and scored, but
+        // the rule's own action never enforces.
+        let cfg = WafEngineConfig {
+            rules: vec![custom],
+            monitor_custom_rules: ["BLOCK-SECRET".to_string()]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let v = WafEngine::new(&cfg).inspect(&req("GET", "/secret/data", ""));
+        assert_eq!(v.action, WafAction::Monitor);
+        assert!(v.matched_rules.contains(&"BLOCK-SECRET".to_string()));
+        assert!(v.details.contains("[monitored]"));
+        assert!(v.breakdown.total > 0);
     }
 
     #[test]

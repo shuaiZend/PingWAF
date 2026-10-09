@@ -215,6 +215,27 @@ fn failover_registry_from(
     registry
 }
 
+/// The site's effective WAF enforcement state: `(engine mode, observation)`.
+/// A missing WAF config means the engine is off.
+fn site_enforcement(site: Option<&SiteRules>) -> (WafMode, bool) {
+    match site {
+        Some(s) => (
+            s.waf_config
+                .as_ref()
+                .map(|c| c.mode)
+                .unwrap_or(WafMode::Off),
+            s.observation_mode,
+        ),
+        None => (WafMode::Off, false),
+    }
+}
+
+/// True when the state enforces WAF block verdicts (block mode without
+/// observation), i.e. WAF auto-blocks may be produced.
+fn waf_enforcing(state: (WafMode, bool)) -> bool {
+    state.0 == WafMode::Block && !state.1
+}
+
 /// Persisted site status values, matching `models::sites::site_status` on the
 /// control plane.
 pub mod site_status {
@@ -283,7 +304,15 @@ impl From<i32> for WafMode {
         match v {
             1 => Self::Monitor,
             2 => Self::Block,
-            _ => Self::Off,
+            0 => Self::Off,
+            // A newer control plane may know modes this agent does not.
+            // Silently treating the site as off would disable its WAF for
+            // the whole upgrade window; enforcing (block) matches the
+            // fail-close convention used by `WafAction`.
+            unknown => {
+                warn!(value = unknown, "unknown waf mode; enforcing as block");
+                Self::Block
+            },
         }
     }
 }
@@ -472,7 +501,17 @@ impl From<i32> for ChallengeLevel {
             1 => Self::NonInteractive,
             2 => Self::Managed,
             3 => Self::Interactive,
-            _ => Self::None,
+            0 => Self::None,
+            // A newer control plane may know levels this agent does not.
+            // Degrading to `None` would silently stop challenging; the
+            // strongest level keeps the protection fail-close.
+            unknown => {
+                warn!(
+                    value = unknown,
+                    "unknown challenge level; enforcing as interactive"
+                );
+                Self::Interactive
+            },
         }
     }
 }
@@ -978,6 +1017,15 @@ impl RuleCache {
         let domain = site_rules.domain.clone();
         let alternate_domains = site_rules.alternate_domains.clone();
 
+        // Capture the pre-sync enforcement state: leaving it (block mode,
+        // observation off) invalidates the site's WAF auto-blocks.
+        let previous = self
+            .inner
+            .load()
+            .sites
+            .get(&site_id)
+            .map(|s| site_enforcement(Some(s)));
+
         // Swap in updated rules
         self.inner.rcu(|current| {
             let mut updated = (**current).clone();
@@ -1023,6 +1071,21 @@ impl RuleCache {
         // ceilings have to follow before the next write is accounted.
         self.apply_cache_quotas();
 
+        // The site left enforcing mode: drop its stale WAF auto-blocks so
+        // monitor/observation mode is not silently overridden by blocks the
+        // engine issued under the previous configuration.
+        let current = self
+            .inner
+            .load()
+            .sites
+            .get(&site_id)
+            .map(|s| site_enforcement(Some(s)));
+        if previous.is_some_and(waf_enforcing)
+            && !current.is_some_and(waf_enforcing)
+        {
+            self.clear_waf_auto_blocks(&site_id);
+        }
+
         // Persist asynchronously (best effort)
         if let Err(e) = self.persist_to_disk() {
             warn!(error = %e, "Failed to persist rule cache to disk");
@@ -1039,6 +1102,17 @@ impl RuleCache {
         &self,
         config: &proto::SiteConfig,
     ) -> anyhow::Result<()> {
+        // Pre-sync enforcement state per site, so leaving enforcing mode
+        // (block → monitor/off, observation on) drops the site's stale
+        // WAF auto-blocks after the swap.
+        let previous: HashMap<String, (WafMode, bool)> = self
+            .inner
+            .load()
+            .sites
+            .iter()
+            .map(|(id, s)| (id.clone(), site_enforcement(Some(s))))
+            .collect();
+
         self.inner.rcu(|current| {
             let mut updated = (**current).clone();
             updated.config_hash = config.config_hash.as_str().into();
@@ -1095,6 +1169,28 @@ impl RuleCache {
                 }
             }
 
+            // A full site config is authoritative: sites the control plane
+            // no longer lists are dropped here together with their domain
+            // index entries, so a deleted site stops being served from
+            // stale cached rules (they would otherwise survive every sync
+            // and even a restart via the disk cache).
+            let known: std::collections::HashSet<&String> =
+                config.sites.iter().map(|s| &s.id).collect();
+            let ghost_ids: Vec<String> = updated
+                .sites
+                .keys()
+                .filter(|id| !known.contains(*id))
+                .cloned()
+                .collect();
+            for id in &ghost_ids {
+                if let Some(old) = updated.sites.remove(id) {
+                    updated.domain_index.remove(&normalize_host(&old.domain));
+                    for alt in &old.alternate_domains {
+                        updated.domain_index.remove(&normalize_host(alt));
+                    }
+                }
+            }
+
             Arc::new(updated)
         });
 
@@ -1104,6 +1200,32 @@ impl RuleCache {
         );
 
         self.apply_cache_quotas();
+
+        // Sites the control plane deleted lose every dynamic block — the
+        // entries would otherwise linger until expiry and reload from disk.
+        let current = self.inner.load();
+        for id in previous.keys() {
+            if !current.sites.contains_key(id) {
+                self.clear_site_blocks(id);
+            }
+        }
+        drop(current);
+
+        // Sites that left enforcing mode lose their WAF auto-blocks, the
+        // same way as on a single-bundle update.
+        for site in config.sites.iter().filter(|s| !s.id.is_empty()) {
+            let current = self
+                .inner
+                .load()
+                .sites
+                .get(&site.id)
+                .map(|s| site_enforcement(Some(s)));
+            if previous.get(&site.id).copied().is_some_and(waf_enforcing)
+                && !current.is_some_and(waf_enforcing)
+            {
+                self.clear_waf_auto_blocks(&site.id);
+            }
+        }
 
         if let Err(e) = self.persist_to_disk() {
             warn!(error = %e, "Failed to persist rule cache to disk");
@@ -1196,6 +1318,26 @@ impl RuleCache {
         }
     }
 
+    /// The reason an IP is dynamically blocked for a site, or `None`. The
+    /// reason prefix (`"waf: "` / `"rate limit: "`) identifies which policy
+    /// produced the block so callers can downgrade WAF-originated blocks
+    /// without touching rate-limit or control-plane-issued ones.
+    pub fn blocked_reason(&self, site_id: &str, ip: &str) -> Option<String> {
+        let key = format!("{}:{}", site_id, ip);
+        match self.blocked_ips.get(&key) {
+            Some(entry) => {
+                if entry.is_expired() {
+                    drop(entry);
+                    self.blocked_ips.remove(&key);
+                    None
+                } else {
+                    Some(entry.reason.clone())
+                }
+            },
+            None => None,
+        }
+    }
+
     /// Block an IP for a site, optionally with a duration.
     pub fn block_ip(
         &self,
@@ -1237,6 +1379,69 @@ impl RuleCache {
                 warn!(error = %e, "Failed to persist blocked IPs");
             }
         }
+    }
+
+    /// Drop every WAF auto-block (`"waf: "` reason) for a site, keeping
+    /// rate-limit and control-plane-issued blocks. Returns the number of
+    /// entries removed. Used when a site leaves enforcing mode (block →
+    /// monitor/off, or observation mode switched on): the stale auto-blocks
+    /// would otherwise keep refusing clients for up to the full window even
+    /// though the engine no longer produces block verdicts.
+    pub fn clear_waf_auto_blocks(&self, site_id: &str) -> usize {
+        let prefix = format!("{site_id}:");
+        let stale: Vec<String> = self
+            .blocked_ips
+            .iter()
+            .filter(|e| {
+                e.key().starts_with(&prefix)
+                    && !e.value().is_expired()
+                    && e.value().reason.starts_with("waf: ")
+            })
+            .map(|e| e.key().clone())
+            .collect();
+        let removed = stale.len();
+        for key in &stale {
+            self.blocked_ips.remove(key);
+        }
+        if removed > 0 {
+            info!(
+                site_id = %site_id,
+                removed,
+                "cleared WAF auto-blocks after leaving enforcing mode"
+            );
+            if let Err(e) = self.persist_blocked_ips() {
+                warn!(error = %e, "Failed to persist blocked IPs");
+            }
+        }
+        removed
+    }
+
+    /// Drop every dynamic block for a site, regardless of origin. Used when
+    /// the site itself is deleted: its entries would otherwise linger until
+    /// their expiry (and be re-loaded from disk on restart).
+    pub fn clear_site_blocks(&self, site_id: &str) -> usize {
+        let prefix = format!("{site_id}:");
+        let stale: Vec<String> = self
+            .blocked_ips
+            .iter()
+            .filter(|e| e.key().starts_with(&prefix))
+            .map(|e| e.key().clone())
+            .collect();
+        let removed = stale.len();
+        for key in &stale {
+            self.blocked_ips.remove(key);
+        }
+        if removed > 0 {
+            debug!(
+                site_id = %site_id,
+                removed,
+                "cleared blocks for removed site"
+            );
+            if let Err(e) = self.persist_blocked_ips() {
+                warn!(error = %e, "Failed to persist blocked IPs");
+            }
+        }
+        removed
     }
 
     /// Clean up expired IP blocks.
@@ -1772,6 +1977,109 @@ mod tests {
         assert_eq!(FailoverMode::from(1), FailoverMode::Open);
         assert_eq!(FailoverMode::from(2), FailoverMode::Closed);
         assert_eq!(FailoverMode::from(99), FailoverMode::Inherit);
+    }
+
+    #[test]
+    fn clear_waf_auto_blocks_removes_only_waf_reasons() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache =
+            RuleCache::new(dir.path().to_path_buf(), "test".to_string())
+                .unwrap();
+
+        cache.block_ip("site-1", "203.0.113.1", None, "waf: sqli probe");
+        cache.block_ip("site-1", "203.0.113.2", None, "rate limit: login");
+        cache.block_ip("site-1", "203.0.113.3", None, "manual abuse");
+        cache.block_ip("site-2", "203.0.113.1", None, "waf: other site");
+
+        let removed = cache.clear_waf_auto_blocks("site-1");
+        assert_eq!(removed, 1);
+        assert_eq!(cache.blocked_reason("site-1", "203.0.113.1"), None);
+        assert_eq!(
+            cache.blocked_reason("site-1", "203.0.113.2").as_deref(),
+            Some("rate limit: login")
+        );
+        assert_eq!(
+            cache.blocked_reason("site-1", "203.0.113.3").as_deref(),
+            Some("manual abuse")
+        );
+        // Another site's WAF auto-blocks are untouched.
+        assert_eq!(
+            cache.blocked_reason("site-2", "203.0.113.1").as_deref(),
+            Some("waf: other site")
+        );
+
+        // Clearing again is a no-op.
+        assert_eq!(cache.clear_waf_auto_blocks("site-1"), 0);
+    }
+
+    #[test]
+    fn update_from_site_config_removes_deleted_sites() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache =
+            RuleCache::new(dir.path().to_path_buf(), "test".to_string())
+                .unwrap();
+
+        let site = |id: &str, domain: &str| proto::Site {
+            id: id.to_string(),
+            name: id.to_string(),
+            domain: domain.to_string(),
+            alternate_domains: Vec::new(),
+            status: 0,
+            rules: Some(proto::RuleBundle {
+                site_id: id.to_string(),
+                config_hash: "hash".to_string(),
+                ..Default::default()
+            }),
+            trust_proxy_headers: false,
+            trusted_header: String::new(),
+            trust_last_hop: false,
+            trusted_proxy_ranges: Vec::new(),
+        };
+        cache
+            .update_from_site_config(&proto::SiteConfig {
+                sites: vec![
+                    site("site-1", "a.example.com"),
+                    site("site-2", "b.example.com"),
+                ],
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(cache.get_site_rules_by_id("site-2").is_some());
+        cache.block_ip("site-2", "203.0.113.1", None, "waf: stale");
+
+        // A sync without site-2 drops the site, its domain index entries
+        // and its dynamic blocks — it must not keep serving from stale
+        // cached rules.
+        cache
+            .update_from_site_config(&proto::SiteConfig {
+                sites: vec![site("site-1", "a.example.com")],
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(cache.get_site_rules_by_id("site-2").is_none());
+        assert!(cache.get_site_rules("b.example.com").is_none());
+        assert_eq!(cache.blocked_reason("site-2", "203.0.113.1"), None);
+        // The surviving site is untouched.
+        assert!(cache.get_site_rules_by_id("site-1").is_some());
+    }
+
+    #[test]
+    fn unknown_waf_mode_enforces_fail_close() {
+        assert_eq!(WafMode::from(0), WafMode::Off);
+        assert_eq!(WafMode::from(1), WafMode::Monitor);
+        assert_eq!(WafMode::from(2), WafMode::Block);
+        // An unknown enum value from a newer control plane must not switch
+        // the site's WAF off for the upgrade window.
+        assert_eq!(WafMode::from(7), WafMode::Block);
+    }
+
+    #[test]
+    fn unknown_challenge_level_enforces_fail_close() {
+        assert_eq!(ChallengeLevel::from(0), ChallengeLevel::None);
+        assert_eq!(ChallengeLevel::from(3), ChallengeLevel::Interactive);
+        // Degrading to None would silently stop challenging; the strongest
+        // level keeps the protection.
+        assert_eq!(ChallengeLevel::from(9), ChallengeLevel::Interactive);
     }
 
     #[test]

@@ -44,6 +44,13 @@ export interface PoolFormState {
   httpsOrigin: boolean
   sni: string
   verifyCert: boolean
+  healthCheckEnabled: boolean
+  /** Kept as strings: raw input, validated on submit. */
+  healthCheckPath: string
+  healthCheckInterval: string
+  healthCheckTimeout: string
+  healthCheckUnhealthy: string
+  healthCheckHealthy: string
 }
 
 export const emptyPoolForm = (): PoolFormState => ({
@@ -53,6 +60,12 @@ export const emptyPoolForm = (): PoolFormState => ({
   httpsOrigin: false,
   sni: '',
   verifyCert: true,
+  healthCheckEnabled: false,
+  healthCheckPath: '/healthz',
+  healthCheckInterval: '10',
+  healthCheckTimeout: '3000',
+  healthCheckUnhealthy: '2',
+  healthCheckHealthy: '1',
 })
 
 export function poolFormFromPool(pool: UpstreamPool): PoolFormState {
@@ -64,7 +77,40 @@ export function poolFormFromPool(pool: UpstreamPool): PoolFormState {
     httpsOrigin: Boolean(pool.sni),
     sni: pool.sni ?? '',
     verifyCert: pool.verify_cert ?? true,
+    healthCheckEnabled: pool.health_check_enabled,
+    healthCheckPath: pool.health_check_path || '/healthz',
+    healthCheckInterval: String(pool.health_check_interval_seconds),
+    healthCheckTimeout: String(pool.health_check_timeout_ms),
+    healthCheckUnhealthy: String(pool.health_check_unhealthy_threshold),
+    healthCheckHealthy: String(pool.health_check_healthy_threshold),
   }
+}
+
+/**
+ * Mirrors the server's `PoolHealthCheck` validation so a bad posture fails
+ * inline instead of as a generic 400. Runs unconditionally — the server
+ * validates the stored values even while the check is disabled. Returns the
+ * `pages.basic.errors.*` i18n key suffix, or null when the fields are valid.
+ */
+export function validatePoolHealthCheck(form: PoolFormState): string | null {
+  const path = form.healthCheckPath.trim()
+  if (
+    !path.startsWith('/') ||
+    /[ ?#]/.test(path) ||
+    path.length > 255
+  ) {
+    return 'healthPathInvalid'
+  }
+  const int = (raw: string) => (/^\d+$/.test(raw.trim()) ? Number(raw.trim()) : NaN)
+  const interval = int(form.healthCheckInterval)
+  if (!(interval >= 5 && interval <= 3600)) return 'healthIntervalInvalid'
+  const timeout = int(form.healthCheckTimeout)
+  if (!(timeout >= 100 && timeout <= 30000)) return 'healthTimeoutInvalid'
+  const unhealthy = int(form.healthCheckUnhealthy)
+  if (!(unhealthy >= 1 && unhealthy <= 10)) return 'healthThresholdInvalid'
+  const healthy = int(form.healthCheckHealthy)
+  if (!(healthy >= 1 && healthy <= 10)) return 'healthThresholdInvalid'
+  return null
 }
 
 export interface NodeFormState {

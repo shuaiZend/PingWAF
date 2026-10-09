@@ -57,6 +57,44 @@ addrs = ["127.0.0.1:5000", "127.0.0.1:5001 10"]
 # - tls: false
 # health_check = "http://charts/ping?connection_timeout=3s&read_timeout=3s"
 
+# Circuit breaker & backend stats: the breaker reads its window failure
+# rates and consecutive counters from backend stats, so enabling breaker
+# thresholds implicitly turns stats on.
+#
+# Consecutive failures required to open the breaker for a backend.
+# Default `0` (breaker disabled)
+# circuit_break_max_consecutive_failures = 5
+#
+# Window failure rate (percent, 0-100) required to open the breaker; the
+# window must hold at least `circuit_break_min_requests_threshold` requests.
+# Default `0` (disabled)
+# circuit_break_max_failure_percent = 50
+#
+# Minimal requests within the stats window before the failure rate counts.
+# Default `10`
+# circuit_break_min_requests_threshold = 10
+#
+# Seconds the breaker stays open before letting probe requests through.
+# Default `10s`
+# circuit_break_open_duration = "10s"
+#
+# Interval of the stats window. Default `60s`
+# backend_stats_interval = "60s"
+
+# Maximum number of candidate backends the load balancer tries per request:
+# each candidate is checked against the health check and the circuit breaker,
+# and the first accepted one serves the request. A too-small bound turns
+# "several backends down" into an early 503 even when healthy backends remain.
+# Default `8`
+# lb_max_iterations = 8
+
+# Forward the request even when every backend is rejected by the health check
+# or the circuit breaker: the selection filter is dropped for that request
+# instead of failing with 503. Recommended for multi-node pools where a
+# misjudged health check should degrade instead of fail.
+# Default `false`
+# enable_unhealthy_fallback = false
+
 # When set to true, forces upstream connections to only use IPv4 addresses,
 # ignoring any IPv6 addresses even if available. Useful for environments
 # where IPv6 connectivity is problematic or not supported. 

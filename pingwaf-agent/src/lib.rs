@@ -210,6 +210,12 @@ impl PingWafAgent {
         self.rule_cache.is_ip_blocked(site_id, ip)
     }
 
+    /// The reason an IP is dynamically blocked for a site, or `None`.
+    #[inline]
+    pub fn blocked_reason(&self, site_id: &str, ip: &str) -> Option<String> {
+        self.rule_cache.blocked_reason(site_id, ip)
+    }
+
     /// Dynamically block an IP for a site. Called by the WAF plugin when a
     /// block verdict fires so the edge keeps refusing the client before the
     /// engine even runs; the block is reported to the control plane on the

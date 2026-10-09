@@ -12,10 +12,10 @@ use base64::Engine;
 use chrono::{DateTime, TimeZone, Utc};
 use pingwaf_proto::control_plane::{
     BasicAuthConfig, BasicAuthCredential, BotProtectionConfig, CacheRule,
-    ChallengeConfig, CustomErrorPage, FailoverMode, GeoConfig, IpAccessRule,
-    RateLimitRule, RewriteOperation, RewriteRule, RouteConfig, RuleBundle,
-    Site, SiteConfig, SitePolicy, SslConfig, UpstreamConfig, UpstreamPeer,
-    WafConfig, WafRule,
+    ChallengeConfig, CustomErrorPage, FailoverMode, GeoConfig,
+    HealthCheckConfig, IpAccessRule, RateLimitRule, RewriteOperation,
+    RewriteRule, RouteConfig, RuleBundle, Site, SiteConfig, SitePolicy,
+    SslConfig, UpstreamConfig, UpstreamPeer, WafConfig, WafRule,
 };
 use prost::Message;
 use prost_types::Timestamp;
@@ -581,12 +581,35 @@ fn pools_to_proto(
         if peers.is_empty() {
             continue;
         }
+        // The agent synthesizes the data-plane probe URL from this message;
+        // stored values are clamped so a bad row can never produce a
+        // zero-frequency or zero-timeout probe.
+        let health_check = if pool.health_check_enabled {
+            Some(HealthCheckConfig {
+                enabled: true,
+                path: if pool.health_check_path.starts_with('/') {
+                    pool.health_check_path.clone()
+                } else {
+                    "/".to_string()
+                },
+                interval_seconds: pool.health_check_interval_seconds.max(1)
+                    as u32,
+                timeout_ms: pool.health_check_timeout_ms.max(1) as u32,
+                unhealthy_threshold: pool
+                    .health_check_unhealthy_threshold
+                    .max(1) as u32,
+                healthy_threshold: pool.health_check_healthy_threshold.max(1)
+                    as u32,
+            })
+        } else {
+            None
+        };
         configs.push(UpstreamConfig {
             name: pool.name.clone(),
             peers,
             // LB_ROUND_ROBIN — the legacy enum, superseded by `algo`.
             algorithm: 0,
-            health_check: None,
+            health_check,
             connection_timeout_ms: 0,
             read_timeout_ms: 0,
             write_timeout_ms: 0,
@@ -653,11 +676,13 @@ fn routes_to_proto(
 
 /// Builds the site's WAF configuration from the enabled rules, merged with
 /// the site's `waf_settings` posture row when present. A missing row keeps
-/// the historical behavior: everything enforced at the normal level.
+/// the historical behavior: the mode is derived from the rules and the
+/// paranoia level stays at the default.
 ///
 /// The engine switch is explicit (`waf_settings.waf_enabled`, default on);
-/// the evaluation mode stays derived from the rules as a fallback for sites
-/// that never touched the mode selector.
+/// the evaluation mode and paranoia level come from the posture row's
+/// explicit columns. The rule-derived mode is only the legacy fallback for
+/// sites whose posture row has not been created yet.
 fn waf_config_to_proto(
     rules: &[WafRule],
     groups: &[rule_groups::Model],
@@ -666,13 +691,16 @@ fn waf_config_to_proto(
     let active: Vec<&WafRule> = rules.iter().filter(|r| r.enabled).collect();
 
     // Blocking wins over monitoring, monitoring wins over off.
-    let mode = if active.iter().any(|r| r.mode == WAF_MODE_BLOCK) {
+    let derived_mode = if active.iter().any(|r| r.mode == WAF_MODE_BLOCK) {
         WAF_MODE_BLOCK
     } else if active.iter().any(|r| r.mode == WAF_MODE_MONITOR) {
         WAF_MODE_MONITOR
     } else {
         WAF_MODE_OFF
     };
+    let mode = settings
+        .map(|s| mode::to_proto(&s.mode))
+        .unwrap_or(derived_mode);
 
     let has_tag = |needle: &str| {
         active.iter().any(|rule| {
@@ -688,6 +716,7 @@ fn waf_config_to_proto(
     let (
         waf_enabled,
         advanced_mode,
+        paranoia_level,
         monitor_categories,
         monitor_stacks,
         monitor_managed_rules,
@@ -696,12 +725,15 @@ fn waf_config_to_proto(
             (
                 s.waf_enabled,
                 s.advanced_mode,
+                s.paranoia_level,
                 s.monitor_categories.clone(),
                 s.monitor_stacks.clone(),
                 s.monitor_managed_rules.clone(),
             )
         })
-        .unwrap_or_else(|| (true, false, Vec::new(), Vec::new(), Vec::new()));
+        .unwrap_or_else(|| {
+            (true, false, 2, Vec::new(), Vec::new(), Vec::new())
+        });
 
     // The engine switch is explicit; rules only feed the mode fallback and
     // the per-category switches below.
@@ -710,14 +742,9 @@ fn waf_config_to_proto(
     WafConfig {
         enabled,
         mode,
-        // Paranoia level is derived from the highest severity in use (1-5 maps
-        // onto the 1-4 range the protocol allows).
-        paranoia_level: active
-            .iter()
-            .map(|rule| rule.severity)
-            .max()
-            .map(|severity| severity.clamp(1, 4))
-            .unwrap_or(1),
+        // Detection sensitivity is a site-level setting; it is deliberately
+        // decoupled from rule severity.
+        paranoia_level: paranoia_level.clamp(1, 4) as u32,
         sqli_detection: has_tag("sqli") || has_tag("sql-injection"),
         xss_detection: has_tag("xss"),
         rce_detection: has_tag("rce") || has_tag("command-injection"),
@@ -1392,7 +1419,9 @@ mod tests {
         assert!(config.enabled);
         assert_eq!(config.mode, WAF_MODE_MONITOR);
         assert!(config.sqli_detection);
-        assert_eq!(config.paranoia_level, 3);
+        // Without a posture row the paranoia level stays at the default
+        // instead of riding on rule severity.
+        assert_eq!(config.paranoia_level, 2);
         assert!(!config.advanced_mode);
         assert!(config.monitor_categories.is_empty());
         assert!(config.monitor_stacks.is_empty());
@@ -1446,6 +1475,8 @@ mod tests {
             id: Uuid::new_v4(),
             site_id,
             waf_enabled: true,
+            mode: mode::OFF.into(),
+            paranoia_level: 2,
             advanced_mode,
             monitor_categories: categories,
             monitor_stacks: stacks,
@@ -1517,6 +1548,59 @@ mod tests {
         assert_eq!(config.mode, WAF_MODE_OFF);
     }
 
+    #[test]
+    fn site_mode_and_paranoia_come_from_the_settings_row() {
+        let blocking = rule::Model {
+            id: Uuid::new_v4(),
+            group_id: None,
+            site_id: Uuid::nil(),
+            name: "r".into(),
+            description: None,
+            expression: "true".into(),
+            action: action::BLOCK.into(),
+            severity: 5,
+            tags: vec!["sqli".into()],
+            enabled: true,
+            mode: mode::BLOCK.into(),
+            priority: 0,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let rules = vec![rule_to_proto(&blocking)];
+
+        // A settings row wins over the rule derivation: an explicit monitor
+        // mode stays monitor even when every rule enforces block.
+        let mut row =
+            waf_settings_row(Uuid::nil(), false, Vec::new(), Vec::new());
+        row.mode = mode::MONITOR.into();
+        let config = waf_config_to_proto(&rules, &[], Some(&row));
+        assert_eq!(config.mode, WAF_MODE_MONITOR);
+
+        // A site without custom rules but with an explicit block mode runs
+        // the engine in block — the mode no longer silently rides on the
+        // rules (the legacy "no rules means off" trap).
+        let mut row =
+            waf_settings_row(Uuid::nil(), false, Vec::new(), Vec::new());
+        row.mode = mode::BLOCK.into();
+        let config = waf_config_to_proto(&[], &[], Some(&row));
+        assert!(config.enabled);
+        assert_eq!(config.mode, WAF_MODE_BLOCK);
+
+        // Paranoia level is site-configured, not severity-derived: a
+        // severity-5 rule no longer raises the sensitivity.
+        let mut row =
+            waf_settings_row(Uuid::nil(), false, Vec::new(), Vec::new());
+        row.mode = mode::BLOCK.into();
+        row.paranoia_level = 1;
+        let config = waf_config_to_proto(&rules, &[], Some(&row));
+        assert_eq!(config.paranoia_level, 1);
+
+        // Out-of-range stored values are clamped to the protocol range.
+        row.paranoia_level = 9;
+        let config = waf_config_to_proto(&rules, &[], Some(&row));
+        assert_eq!(config.paranoia_level, 4);
+    }
+
     fn pool_model(
         name: &str,
         lb_algorithm: &str,
@@ -1530,6 +1614,12 @@ mod tests {
             lb_algorithm: lb_algorithm.into(),
             sni: sni.map(Into::into),
             verify_cert: None,
+            health_check_enabled: false,
+            health_check_path: "/".into(),
+            health_check_interval_seconds: 10,
+            health_check_timeout_ms: 3000,
+            health_check_unhealthy_threshold: 2,
+            health_check_healthy_threshold: 1,
             is_default,
             created_at: Utc::now(),
         }
@@ -1597,6 +1687,53 @@ mod tests {
         let nodes = vec![node_model(pool.id, "10.0.0.1:8080", 1)];
         let configs = pools_to_proto(&[pool], &nodes);
         assert_eq!(configs[0].verify_cert, Some(false));
+    }
+
+    #[test]
+    fn pools_carry_health_check_only_when_enabled() {
+        let nodes_of =
+            |pool_id: Uuid| vec![node_model(pool_id, "10.0.0.1:8080", 1)];
+
+        // Disabled: no health check message at all — the agent stays on its
+        // default TCP probe.
+        let pool = pool_model("plain", "round_robin", None, false);
+        let nodes = nodes_of(pool.id);
+        let configs = pools_to_proto(&[pool], &nodes);
+        assert_eq!(configs[0].health_check, None);
+
+        // Enabled: every knob rides through, normalized path included.
+        let mut pool = pool_model("plain", "round_robin", None, false);
+        let nodes = nodes_of(pool.id);
+        pool.health_check_enabled = true;
+        pool.health_check_path = "/healthz".into();
+        pool.health_check_interval_seconds = 15;
+        pool.health_check_timeout_ms = 2000;
+        pool.health_check_unhealthy_threshold = 3;
+        pool.health_check_healthy_threshold = 2;
+        let configs = pools_to_proto(&[pool], &nodes);
+        let hc = configs[0].health_check.as_ref().expect("health check");
+        assert!(hc.enabled);
+        assert_eq!(hc.path, "/healthz");
+        assert_eq!(hc.interval_seconds, 15);
+        assert_eq!(hc.timeout_ms, 2000);
+        assert_eq!(hc.unhealthy_threshold, 3);
+        assert_eq!(hc.healthy_threshold, 2);
+
+        // A corrupt row (zeroes) is clamped instead of producing a
+        // zero-timeout probe downstream.
+        let mut pool = pool_model("corrupt", "round_robin", None, false);
+        let nodes = nodes_of(pool.id);
+        pool.health_check_enabled = true;
+        pool.health_check_interval_seconds = 0;
+        pool.health_check_timeout_ms = 0;
+        pool.health_check_unhealthy_threshold = 0;
+        pool.health_check_healthy_threshold = 0;
+        let configs = pools_to_proto(&[pool], &nodes);
+        let hc = configs[0].health_check.as_ref().expect("health check");
+        assert_eq!(hc.interval_seconds, 1);
+        assert_eq!(hc.timeout_ms, 1);
+        assert_eq!(hc.unhealthy_threshold, 1);
+        assert_eq!(hc.healthy_threshold, 1);
     }
 
     fn route_model(

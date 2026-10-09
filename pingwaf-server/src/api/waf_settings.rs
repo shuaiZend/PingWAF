@@ -37,6 +37,10 @@ pub struct UpdateWafSettingsRequest {
     #[serde(default)]
     pub waf_enabled: Option<bool>,
     #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub paranoia_level: Option<i32>,
+    #[serde(default)]
     pub advanced_mode: Option<bool>,
     #[serde(default)]
     pub monitor_categories: Option<Vec<String>>,
@@ -126,6 +130,18 @@ async fn update_waf_settings(
     if let Some(waf_enabled) = payload.waf_enabled {
         active.waf_enabled = Set(waf_enabled);
     }
+    if let Some(mode) = payload.mode {
+        let mode = normalise_mode(&mode)?;
+        active.mode = Set(mode);
+    }
+    if let Some(paranoia_level) = payload.paranoia_level {
+        if !(1..=4).contains(&paranoia_level) {
+            return Err(ApiError::BadRequest(
+                "paranoia_level must be between 1 and 4".to_string(),
+            ));
+        }
+        active.paranoia_level = Set(paranoia_level);
+    }
     if let Some(advanced) = payload.advanced_mode {
         active.advanced_mode = Set(advanced);
     }
@@ -182,6 +198,9 @@ pub struct WafPostureDetection {
 
 #[derive(Debug, serde::Serialize)]
 pub struct WafPostureEnforcement {
+    /// Explicit site-level enforcement mode (`off`/`monitor`/`block`).
+    /// Falls back to the legacy rule derivation when no posture row exists.
+    pub mode: String,
     /// Managed ruleset action per attack category (`sqli`, `xss`, ...):
     /// `"monitor"` when the category is downgraded, `"block"` otherwise.
     pub managed: std::collections::BTreeMap<String, String>,
@@ -233,6 +252,12 @@ async fn get_waf_posture(
         } else {
             "off".to_string()
         };
+    // The explicit site mode wins; the rule derivation is only the fallback
+    // for a site that never got a posture row.
+    let site_mode = settings
+        .as_ref()
+        .map(|s| s.mode.clone())
+        .unwrap_or_else(|| custom_mode.clone());
 
     let rate_limits = rate_limit_rules::Entity::find()
         .filter(rate_limit_rules::Column::SiteId.eq(id))
@@ -294,6 +319,7 @@ async fn get_waf_posture(
             under_attack,
         },
         enforcement: WafPostureEnforcement {
+            mode: site_mode,
             managed,
             custom_rules: custom_mode,
             cc,
@@ -301,6 +327,21 @@ async fn get_waf_posture(
             observation_mode,
         },
     }))
+}
+
+/// Trims and lowercase-validates the site enforcement mode.
+fn normalise_mode(raw: &str) -> Result<String, ApiError> {
+    use crate::models::mode;
+    let value = raw.trim().to_ascii_lowercase();
+    if !mode::is_valid(&value) {
+        return Err(ApiError::BadRequest(format!(
+            "unknown mode value '{value}'; allowed: {}, {}, {}",
+            mode::OFF,
+            mode::MONITOR,
+            mode::BLOCK
+        )));
+    }
+    Ok(value)
 }
 
 /// Trims, lowercases, de-duplicates and whitelist-checks a monitor list.
@@ -353,8 +394,34 @@ fn normalise_rule_ids(
     Ok(out)
 }
 
+/// Derives the legacy site mode from the site's enabled custom rules
+/// (block > monitor > off). Used exactly once when the posture row is first
+/// created so a lazy-created row matches the historical behavior; afterwards
+/// the stored explicit value wins.
+async fn derive_site_mode(
+    db: &sea_orm::DatabaseConnection,
+    site_id: Uuid,
+) -> Result<String, ApiError> {
+    use crate::models::{mode, rule};
+    let active = rule::Entity::find()
+        .filter(rule::Column::SiteId.eq(site_id))
+        .filter(rule::Column::Enabled.eq(true))
+        .all(db)
+        .await?;
+    let derived = if active.iter().any(|rule| rule.mode == mode::BLOCK) {
+        mode::BLOCK
+    } else if active.iter().any(|rule| rule.mode == mode::MONITOR) {
+        mode::MONITOR
+    } else {
+        mode::OFF
+    };
+    Ok(derived.to_string())
+}
+
 /// Finds the waf_settings row for a site, creating a default (enforce
-/// everything, no advanced mode) one if absent.
+/// everything, no advanced mode) one if absent. The freshly created row
+/// seeds `mode` from the site's enabled rules once, matching the legacy
+/// derivation the data plane used before the explicit column existed.
 async fn find_or_create(
     state: &AppState,
     site_id: Uuid,
@@ -372,6 +439,8 @@ async fn find_or_create(
         id: Set(Uuid::new_v4()),
         site_id: Set(site_id),
         waf_enabled: Set(true),
+        mode: Set(derive_site_mode(&state.db, site_id).await?),
+        paranoia_level: Set(2),
         advanced_mode: Set(false),
         monitor_categories: Set(Vec::new()),
         monitor_stacks: Set(Vec::new()),
@@ -427,6 +496,16 @@ mod tests {
             "monitor_categories",
         )
         .unwrap_err();
+        assert!(matches!(err, ApiError::BadRequest(_)));
+        assert!(err.to_string().contains("bogus"));
+    }
+
+    #[test]
+    fn normalise_mode_trims_and_validates() {
+        assert_eq!(normalise_mode(" Block ").unwrap(), "block");
+        assert_eq!(normalise_mode("MONITOR").unwrap(), "monitor");
+
+        let err = normalise_mode("bogus").unwrap_err();
         assert!(matches!(err, ApiError::BadRequest(_)));
         assert!(err.to_string().contains("bogus"));
     }

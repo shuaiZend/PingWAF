@@ -101,3 +101,6 @@ __pycache__/
 
 # Internal review notes — never publish
 docs-internal/
+
+# WorkBuddy local session memory & workspace data
+.workbuddy/

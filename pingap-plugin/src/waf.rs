@@ -285,6 +285,10 @@ struct SiteContext {
     /// WAF, IP/geo rules, bot protection and rate limiting stop enforcing.
     /// Access control (mTLS, basic auth, a paused site) is never downgraded.
     observation_mode: bool,
+    /// The site's engine mode. WAF auto-blocks produced while the site was
+    /// in block mode are skipped once the site leaves it (monitor/off) so a
+    /// mode switch is never overridden by stale edge refusals.
+    waf_mode: Option<CacheWafMode>,
     /// Site-level deep body inspection (advanced mode): inspect request
     /// bodies even when the plugin-level `inspect_body` switch is off.
     inspect_body: bool,
@@ -331,6 +335,7 @@ impl SiteContext {
                 .unwrap_or_default(),
             paused: site_rules.is_paused(),
             observation_mode: site_rules.observation_mode,
+            waf_mode: waf_cfg.map(|cfg| cfg.mode),
             inspect_body: waf_cfg
                 .filter(|cfg| cfg.enabled)
                 .is_some_and(|cfg| cfg.advanced_mode),
@@ -1284,9 +1289,13 @@ fn clearance_cookie(headers: &[(String, String)]) -> Option<String> {
 static CLEARANCE_MANAGER: RwLock<Option<(PathBuf, CookieManager)>> =
     RwLock::new(None);
 
-/// Whether `value` (when present) is a valid clearance cookie. A client that
-/// solved a challenge once is exempt from challenge-type rate limit rules.
-fn clearance_valid(value: Option<String>) -> bool {
+/// Whether `value` (when present) is a valid clearance cookie issued for
+/// `site_id`. A client that solved a site's challenge once is exempt from
+/// that site's challenge-type actions; the cookie's embedded site id must
+/// match so a clearance earned on one site cannot be replayed against
+/// another. Standalone (no agent) has no shared secret to verify against
+/// and stays exempt-free.
+fn clearance_valid(value: Option<String>, site_id: &str) -> bool {
     let Some(value) = value else {
         return false;
     };
@@ -1301,12 +1310,16 @@ fn clearance_valid(value: Option<String>) -> bool {
         if let Some((path, manager)) = cached.as_ref()
             && *path == secret_path
         {
-            return manager.validate_clearance(&value).is_ok();
+            return manager
+                .validate_clearance(&value)
+                .is_ok_and(|payload| payload.site_id == site_id);
         }
     }
     let secret = resolve_cookie_secret("");
     let manager = CookieManager::new(secret.as_bytes(), 3600);
-    let valid = manager.validate_clearance(&value).is_ok();
+    let valid = manager
+        .validate_clearance(&value)
+        .is_ok_and(|payload| payload.site_id == site_id);
     *CLEARANCE_MANAGER.write().unwrap_or_else(|e| e.into_inner()) =
         Some((secret_path, manager));
     valid
@@ -1743,7 +1756,15 @@ fn parse_mode(value: &str) -> WafMode {
         "off" => WafMode::Off,
         "monitor" => WafMode::Monitor,
         "block" => WafMode::Block,
-        _ => WafMode::Block,
+        // Fail close on a typo, but say so: a silently-blocking unknown
+        // value looks like the site enforcing rules nobody configured.
+        _ => {
+            warn!(
+                value = %value,
+                "unknown waf plugin mode; enforcing as block"
+            );
+            WafMode::Block
+        },
     }
 }
 
@@ -1812,6 +1833,16 @@ fn build_site_engine(cfg: &CacheWafConfig) -> WafEngine {
         CacheWafMode::Monitor => WafMode::Monitor,
         CacheWafMode::Block => WafMode::Block,
     };
+    // Per-rule monitor downgrade: a custom rule whose mode is monitor (or
+    // off, which is treated the same — detected and logged, never enforced)
+    // feeds the score and the event log but never carries its action. The
+    // site-level engine mode stays the master switch on top of this.
+    let monitor_custom_rules: std::collections::HashSet<String> = cfg
+        .custom_rules
+        .iter()
+        .filter(|r| r.enabled && r.mode != CacheWafMode::Block)
+        .map(|r| r.id.clone())
+        .collect();
     let rules: Vec<CompiledRule> = cfg
         .custom_rules
         .iter()
@@ -1860,6 +1891,7 @@ fn build_site_engine(cfg: &CacheWafConfig) -> WafEngine {
         monitor_managed_rules: parse_monitor_managed_rules(
             &cfg.monitor_managed_rules,
         ),
+        monitor_custom_rules,
         threshold: if cfg.anomaly_threshold > 0 {
             cfg.anomaly_threshold
         } else {
@@ -1910,6 +1942,10 @@ impl WafPlugin {
                 } else {
                     EngineChoice::FailClosed
                 };
+            // The host no longer resolves in the cache (deleted or renamed
+            // site): drop any compiled context so the per-domain cache
+            // cannot grow without bound across config churn.
+            self.site_contexts.remove(&host);
             ResolvedSite {
                 choice,
                 site_id: host,
@@ -2134,6 +2170,13 @@ impl WafPlugin {
             event_type,
         );
         let response = if denial.challenge {
+            // A client holding a valid clearance for this site already
+            // solved its challenge: re-issuing it would loop forever, so
+            // let it pass.
+            if clearance_valid(clearance_cookie(&request_data.headers), site_id)
+            {
+                return RequestPluginResult::Continue;
+            }
             build_challenge_response(
                 request_id,
                 original_url,
@@ -2218,6 +2261,8 @@ impl TryFrom<&PluginConf> for WafPlugin {
             monitor_categories,
             monitor_stacks,
             monitor_managed_rules,
+            // Standalone mode has no custom rules to downgrade.
+            monitor_custom_rules: Default::default(),
             threshold: anomaly_threshold,
             paranoia_level,
             max_decode_layers: 3,
@@ -2481,19 +2526,32 @@ impl Plugin for WafPlugin {
         // from an earlier WAF/rate-limit verdict or a server-issued block
         // command) is rejected before any rule runs. Like the paused-site
         // and mTLS denials this enforces an existing decision, so observation
-        // mode never downgrades it. Unknown hosts carry no synced site id and
-        // therefore can never match a block. ──
+        // mode never downgrades it — with one exception: a WAF auto-block is
+        // an artifact of the engine's previous configuration. A site that has
+        // since left block mode (monitor/off) or entered observation must not
+        // keep refusing clients the engine would no longer block, so those
+        // entries are skipped here and cleared on the next config sync.
+        // Rate-limit and control-plane blocks keep enforcing regardless.
+        // Unknown hosts carry no synced site id and therefore can never match
+        // a block. ──
         if !site_id.is_empty()
-            && agent.as_ref().is_some_and(|agent| {
-                agent.is_ip_blocked(&site_id, &request_data.client_ip)
-            })
+            && let Some(agent) = &agent
         {
-            let response = block_page(
-                &request_id,
-                "IP temporarily blocked by WAF defense",
-            );
-            emit_generated_access(agent.as_ref(), &request_id, &response);
-            return Ok(RequestPluginResult::Respond(response));
+            let waf_blocks_suppressed = observe
+                || context.as_ref().is_some_and(|site| {
+                    site.waf_mode != Some(CacheWafMode::Block)
+                });
+            if let Some(reason) =
+                agent.blocked_reason(&site_id, &request_data.client_ip)
+                && !(waf_blocks_suppressed && reason.starts_with("waf: "))
+            {
+                let response = block_page(
+                    &request_id,
+                    "IP temporarily blocked by WAF defense",
+                );
+                emit_generated_access(Some(agent), &request_id, &response);
+                return Ok(RequestPluginResult::Respond(response));
+            }
         }
 
         // ── mTLS: a site that requires a client certificate refuses the
@@ -2673,7 +2731,10 @@ impl Plugin for WafPlugin {
         {
             let cleared =
                 rate.rules.iter().any(|r| r.action == RateAction::Challenge)
-                    && clearance_valid(clearance_cookie(&request_data.headers));
+                    && clearance_valid(
+                        clearance_cookie(&request_data.headers),
+                        &site_id,
+                    );
             let outcome = rate.evaluate(
                 &self.rate_counters,
                 &request_data,
@@ -2903,6 +2964,19 @@ impl Plugin for WafPlugin {
             }
             block_page(&request_id, &verdict.details)
         } else {
+            // Challenge verdict. A client that already holds a valid
+            // clearance for this site solved its challenge before: issuing
+            // the same challenge again would loop forever, so let it
+            // through.
+            if clearance_valid(
+                clearance_cookie(&request_data.headers),
+                &site_id,
+            ) {
+                if let Some(agent) = &agent {
+                    agent.record_request(false);
+                }
+                return Ok(RequestPluginResult::Continue);
+            }
             // Challenge verdict — delegate to the challenge subsystem.
             let original_url = if query.is_empty() {
                 path
@@ -3360,6 +3434,267 @@ advanced_mode = true
             .await
             .unwrap();
         assert!(result == RequestPluginResult::Skipped);
+    }
+
+    /// Pushes a single-site config whose WAF engine runs in the given proto
+    /// mode (0=off, 1=monitor, 2=block).
+    async fn install_agent_with_site_mode(
+        waf_mode: i32,
+    ) -> (
+        tokio::sync::MutexGuard<'static, ()>,
+        Arc<PingWafAgent>,
+        tempfile::TempDir,
+    ) {
+        let installed = install_test_agent().await;
+        installed
+            .1
+            .rule_cache
+            .update_from_site_config(&proto::SiteConfig {
+                sites: vec![proto::Site {
+                    id: "site-1".to_string(),
+                    name: "example".to_string(),
+                    domain: "example.com".to_string(),
+                    alternate_domains: Vec::new(),
+                    status: 0,
+                    rules: Some(proto::RuleBundle {
+                        site_id: "site-1".to_string(),
+                        config_hash: "hash-1".to_string(),
+                        waf: Some(proto::WafConfig {
+                            enabled: true,
+                            mode: waf_mode,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
+                    trust_proxy_headers: false,
+                    trusted_header: String::new(),
+                    trust_last_hop: false,
+                    trusted_proxy_ranges: Vec::new(),
+                }],
+                ..Default::default()
+            })
+            .unwrap();
+        installed
+    }
+
+    /// A WAF auto-block is an artifact of the engine's block-mode
+    /// configuration: once the site switches to monitor, the stale entry must
+    /// not keep refusing clients. Rate-limit blocks keep enforcing.
+    #[tokio::test]
+    async fn test_waf_auto_block_skipped_in_site_monitor_mode() {
+        let (_guard, agent, _dir) = install_agent_with_site_mode(1).await; // monitor
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        // Left over from the site's block-mode era: skipped now.
+        agent.block_ip("site-1", "203.0.113.7", None, "waf: stale rule");
+        assert!(
+            run_request(&plugin, "203.0.113.7").await
+                == RequestPluginResult::Continue
+        );
+
+        // A rate-limit block is its own policy: still enforced.
+        agent.block_ip(
+            "site-1",
+            "203.0.113.8",
+            None,
+            "rate limit: login brute force",
+        );
+        let RequestPluginResult::Respond(resp) =
+            run_request(&plugin, "203.0.113.8").await
+        else {
+            panic!("expected the rate-limit block to answer");
+        };
+        assert_eq!(http::StatusCode::FORBIDDEN, resp.status);
+    }
+
+    /// Under observation mode the engine produces no new blocks, so WAF
+    /// auto-blocks must not silently keep refusing clients either.
+    #[tokio::test]
+    async fn test_waf_auto_block_skipped_under_observation() {
+        let (_guard, agent, _dir) = install_test_agent().await;
+        agent
+            .rule_cache
+            .update_from_site_config(&proto::SiteConfig {
+                sites: vec![proto::Site {
+                    id: "site-1".to_string(),
+                    name: "example".to_string(),
+                    domain: "example.com".to_string(),
+                    alternate_domains: Vec::new(),
+                    status: 0,
+                    rules: Some(proto::RuleBundle {
+                        site_id: "site-1".to_string(),
+                        config_hash: "hash-1".to_string(),
+                        waf: Some(proto::WafConfig {
+                            enabled: true,
+                            mode: 2, // block
+                            ..Default::default()
+                        }),
+                        observation_mode: true,
+                        ..Default::default()
+                    }),
+                    trust_proxy_headers: false,
+                    trusted_header: String::new(),
+                    trust_last_hop: false,
+                    trusted_proxy_ranges: Vec::new(),
+                }],
+                ..Default::default()
+            })
+            .unwrap();
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        agent.block_ip("site-1", "203.0.113.7", None, "waf: stale rule");
+        assert!(
+            run_request(&plugin, "203.0.113.7").await
+                == RequestPluginResult::Continue
+        );
+    }
+
+    /// In enforcing block mode a WAF auto-block keeps refusing the client at
+    /// the edge — the behavior the previous two tests guard the downgrade
+    /// against.
+    #[tokio::test]
+    async fn test_waf_auto_block_enforced_in_block_mode() {
+        let (_guard, agent, _dir) = install_agent_with_site_mode(2).await; // block
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        agent.block_ip("site-1", "203.0.113.7", None, "waf: fresh rule");
+        let RequestPluginResult::Respond(resp) =
+            run_request(&plugin, "203.0.113.7").await
+        else {
+            panic!("expected the auto-block to answer");
+        };
+        assert_eq!(http::StatusCode::FORBIDDEN, resp.status);
+    }
+
+    /// Builds one request with an explicit path and optional cookie header.
+    async fn run_path_request(
+        plugin: &WafPlugin,
+        path: &str,
+        cookie: Option<&str>,
+    ) -> RequestPluginResult {
+        let cookie_line = cookie
+            .map(|value| format!("Cookie: {value}\r\n"))
+            .unwrap_or_default();
+        let input_header = format!(
+            "GET {path} HTTP/1.1\r\nHost: example.com\r\n{cookie_line}\r\n"
+        );
+        let mock_io = Builder::new().read(input_header.as_bytes()).build();
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+        plugin
+            .handle_request(
+                PluginStep::EarlyRequest,
+                &mut session,
+                &mut Ctx::default(),
+            )
+            .await
+            .unwrap()
+    }
+
+    /// An engine Challenge verdict must not re-challenge a client that
+    /// already holds a valid clearance: the challenge would loop forever.
+    #[tokio::test]
+    async fn test_engine_challenge_skipped_with_valid_clearance() {
+        let (_guard, _agent, _dir) = install_test_agent().await;
+        _agent
+            .rule_cache
+            .update_from_site_config(&proto::SiteConfig {
+                sites: vec![proto::Site {
+                    id: "site-1".to_string(),
+                    name: "example".to_string(),
+                    domain: "example.com".to_string(),
+                    alternate_domains: Vec::new(),
+                    status: 0,
+                    rules: Some(proto::RuleBundle {
+                        site_id: "site-1".to_string(),
+                        config_hash: "hash-1".to_string(),
+                        waf: Some(proto::WafConfig {
+                            enabled: true,
+                            mode: 2, // block
+                            custom_rules: vec![proto::WafRule {
+                                id: "challenge-admin".to_string(),
+                                name: "challenge /admin".to_string(),
+                                description: String::new(),
+                                expression: r#"
+                                    http.request.uri.path starts_with "/admin"
+                                "#
+                                .to_string(),
+                                action: proto::WafAction::Challenge as i32,
+                                severity: 1,
+                                tags: vec!["custom".to_string()],
+                                enabled: true,
+                                mode: 2,
+                                priority: 0,
+                            }],
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
+                    trust_proxy_headers: false,
+                    trusted_header: String::new(),
+                    trust_last_hop: false,
+                    trusted_proxy_ranges: Vec::new(),
+                }],
+                ..Default::default()
+            })
+            .unwrap();
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        // Without a clearance the challenge page answers.
+        let RequestPluginResult::Respond(resp) =
+            run_path_request(&plugin, "/admin", None).await
+        else {
+            panic!("expected the challenge page");
+        };
+        assert_eq!(http::StatusCode::SERVICE_UNAVAILABLE, resp.status);
+
+        // With a valid clearance for this site the same request passes.
+        let secret = resolve_cookie_secret("");
+        let manager = CookieManager::new(secret.as_bytes(), 3600);
+        let cookie = manager.issue_clearance(
+            ClearanceLevel::NonInteractive,
+            "site-1",
+            "fingerprint",
+        );
+        assert!(
+            run_path_request(
+                &plugin,
+                "/admin",
+                Some(&format!("{CLEARANCE_COOKIE_NAME}={cookie}"))
+            )
+            .await
+                == RequestPluginResult::Continue
+        );
+
+        // A clearance earned on another site must not exempt this one: the
+        // cookie's site id is checked against the request's site.
+        let other = manager.issue_clearance(
+            ClearanceLevel::NonInteractive,
+            "site-9",
+            "fingerprint",
+        );
+        let RequestPluginResult::Respond(resp) = run_path_request(
+            &plugin,
+            "/admin",
+            Some(&format!("{CLEARANCE_COOKIE_NAME}={other}")),
+        )
+        .await
+        else {
+            panic!("expected the cross-site clearance to be rejected");
+        };
+        assert_eq!(http::StatusCode::SERVICE_UNAVAILABLE, resp.status);
     }
 
     /// The agent instance is a process-wide global, and cargo runs a

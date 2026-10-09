@@ -16,6 +16,7 @@ import {
   isHashKeyType,
   LB_OPTION_KEYS,
   poolFormFromPool,
+  validatePoolHealthCheck,
   type PoolFormState,
 } from './types'
 
@@ -95,6 +96,22 @@ export function PoolDialog({
       }
     }
 
+    // Mirrors the server's PoolHealthCheck validation; the stored values are
+    // checked even while the check is disabled.
+    const healthError = validatePoolHealthCheck(form)
+    if (healthError) {
+      setError(t(`pages.basic.errors.${healthError}`))
+      return
+    }
+    const healthCheck = {
+      health_check_enabled: form.healthCheckEnabled,
+      health_check_path: form.healthCheckPath.trim(),
+      health_check_interval_seconds: Number(form.healthCheckInterval.trim()),
+      health_check_timeout_ms: Number(form.healthCheckTimeout.trim()),
+      health_check_unhealthy_threshold: Number(form.healthCheckUnhealthy.trim()),
+      health_check_healthy_threshold: Number(form.healthCheckHealthy.trim()),
+    }
+
     if (editing) {
       // Empty SNI clears the field server-side, disabling HTTPS origin.
       save.mutate({
@@ -104,6 +121,7 @@ export function PoolDialog({
           lb_algorithm: lbAlgorithm,
           sni: sni ?? '',
           verify_cert: sni ? form.verifyCert : null,
+          ...healthCheck,
         },
       })
       return
@@ -115,6 +133,7 @@ export function PoolDialog({
         lb_algorithm: lbAlgorithm,
         sni,
         verify_cert: sni ? form.verifyCert : null,
+        ...healthCheck,
       },
     })
   }
@@ -187,6 +206,68 @@ export function PoolDialog({
               label={t('pages.basic.verifyCert')}
               description={t('pages.basic.verifyCertHint')}
             />
+          </>
+        )}
+        <Switch
+          checked={form.healthCheckEnabled}
+          onCheckedChange={(healthCheckEnabled) =>
+            setForm((f) => ({ ...f, healthCheckEnabled }))
+          }
+          label={t('pages.basic.healthCheck')}
+          description={t('pages.basic.healthCheckHint')}
+        />
+        {form.healthCheckEnabled && (
+          <>
+            <Input
+              label={t('pages.basic.healthCheckPath')}
+              value={form.healthCheckPath}
+              placeholder="/healthz"
+              hint={t('pages.basic.healthCheckPathHint')}
+              onChange={(e) => setForm((f) => ({ ...f, healthCheckPath: e.target.value }))}
+              required
+            />
+            <div className="grid grid-cols-2 gap-3">
+              <Input
+                label={t('pages.basic.healthCheckInterval')}
+                value={form.healthCheckInterval}
+                hint={t('pages.basic.healthCheckIntervalHint')}
+                inputMode="numeric"
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, healthCheckInterval: e.target.value }))
+                }
+                required
+              />
+              <Input
+                label={t('pages.basic.healthCheckTimeout')}
+                value={form.healthCheckTimeout}
+                hint={t('pages.basic.healthCheckTimeoutHint')}
+                inputMode="numeric"
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, healthCheckTimeout: e.target.value }))
+                }
+                required
+              />
+              <Input
+                label={t('pages.basic.healthCheckUnhealthy')}
+                value={form.healthCheckUnhealthy}
+                hint={t('pages.basic.healthCheckUnhealthyHint')}
+                inputMode="numeric"
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, healthCheckUnhealthy: e.target.value }))
+                }
+                required
+              />
+              <Input
+                label={t('pages.basic.healthCheckHealthy')}
+                value={form.healthCheckHealthy}
+                hint={t('pages.basic.healthCheckHealthyHint')}
+                inputMode="numeric"
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, healthCheckHealthy: e.target.value }))
+                }
+                required
+              />
+            </div>
           </>
         )}
         {error && (

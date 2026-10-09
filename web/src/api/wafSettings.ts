@@ -36,6 +36,8 @@ export function defaultWafSettings(): WafSettings {
     id: '',
     site_id: '',
     waf_enabled: true,
+    mode: 'off',
+    paranoia_level: 2,
     advanced_mode: false,
     monitor_categories: [],
     monitor_stacks: [],

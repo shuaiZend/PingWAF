@@ -270,6 +270,28 @@ pub struct CreatePoolRequest {
     /// `None` keeps the proxy default (certificate verification on).
     #[serde(default)]
     pub verify_cert: Option<bool>,
+    /// Enable an active HTTP health check for this pool's nodes. Off keeps
+    /// the agent's data plane on its default bare TCP probe.
+    #[serde(default)]
+    pub health_check_enabled: Option<bool>,
+    /// Probe path; must start with `/`. Default `/`.
+    #[serde(default)]
+    pub health_check_path: Option<String>,
+    /// Seconds between probe rounds (5-3600; the data plane aligns to 10s
+    /// grid steps). Default 10.
+    #[serde(default)]
+    pub health_check_interval_seconds: Option<i32>,
+    /// Probe connect/read timeout in milliseconds (100-30000). Default 3000.
+    #[serde(default)]
+    pub health_check_timeout_ms: Option<i32>,
+    /// Consecutive failed probes before a node is marked unhealthy (1-10).
+    /// Default 2.
+    #[serde(default)]
+    pub health_check_unhealthy_threshold: Option<i32>,
+    /// Consecutive successful probes before a node is marked healthy (1-10).
+    /// Default 1.
+    #[serde(default)]
+    pub health_check_healthy_threshold: Option<i32>,
 }
 
 fn default_lb_algorithm() -> String {
@@ -287,6 +309,93 @@ pub struct UpdatePoolRequest {
     pub sni: Option<String>,
     #[serde(default)]
     pub verify_cert: Option<bool>,
+    #[serde(default)]
+    pub health_check_enabled: Option<bool>,
+    /// `Some("")` resets the probe path to `/`.
+    #[serde(default)]
+    pub health_check_path: Option<String>,
+    #[serde(default)]
+    pub health_check_interval_seconds: Option<i32>,
+    #[serde(default)]
+    pub health_check_timeout_ms: Option<i32>,
+    #[serde(default)]
+    pub health_check_unhealthy_threshold: Option<i32>,
+    #[serde(default)]
+    pub health_check_healthy_threshold: Option<i32>,
+}
+
+/// A pool's health check posture with defaults applied, ready for storage
+/// and protocol translation. `enabled = false` keeps the other values (they
+/// ride along so flipping the switch later needs no re-entry).
+#[derive(Debug, Clone)]
+pub(crate) struct PoolHealthCheck {
+    pub enabled: bool,
+    pub path: String,
+    pub interval_seconds: i32,
+    pub timeout_ms: i32,
+    pub unhealthy_threshold: i32,
+    pub healthy_threshold: i32,
+}
+
+impl PoolHealthCheck {
+    pub(crate) fn default_values() -> Self {
+        Self {
+            enabled: false,
+            path: "/".to_string(),
+            interval_seconds: 10,
+            timeout_ms: 3000,
+            unhealthy_threshold: 2,
+            healthy_threshold: 1,
+        }
+    }
+
+    /// Overlays the optional request fields onto `self`.
+    pub(crate) fn apply_update(&mut self, payload: &UpdatePoolRequest) {
+        if let Some(enabled) = payload.health_check_enabled {
+            self.enabled = enabled;
+        }
+        if let Some(path) = non_empty(&payload.health_check_path) {
+            self.path = path;
+        }
+        if let Some(v) = payload.health_check_interval_seconds {
+            self.interval_seconds = v;
+        }
+        if let Some(v) = payload.health_check_timeout_ms {
+            self.timeout_ms = v;
+        }
+        if let Some(v) = payload.health_check_unhealthy_threshold {
+            self.unhealthy_threshold = v;
+        }
+        if let Some(v) = payload.health_check_healthy_threshold {
+            self.healthy_threshold = v;
+        }
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), ApiError> {
+        let path = &self.path;
+        if !path.starts_with('/')
+            || path.contains([' ', '?', '#'])
+            || path.len() > 255
+        {
+            return Err(ApiError::BadRequest(
+                "health_check_path must start with '/', without spaces, '?' \
+                 or '#', and be at most 255 characters"
+                    .to_string(),
+            ));
+        }
+        let in_range = |name: &str, v: i32, min: i32, max: i32| {
+            (min..=max).contains(&v).then_some(()).ok_or_else(|| {
+                ApiError::BadRequest(format!(
+                    "health_check {name} must be between {min} and {max}"
+                ))
+            })
+        };
+        in_range("interval_seconds", self.interval_seconds, 5, 3600)?;
+        in_range("timeout_ms", self.timeout_ms, 100, 30_000)?;
+        in_range("unhealthy_threshold", self.unhealthy_threshold, 1, 10)?;
+        in_range("healthy_threshold", self.healthy_threshold, 1, 10)?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -784,6 +893,7 @@ async fn create(
 
     // Every site starts with a default origin pool; the first origin node
     // goes into it.
+    let defaults = PoolHealthCheck::default_values();
     let pool = site_upstream_pools::ActiveModel {
         id: Set(Uuid::new_v4()),
         site_id: Set(id),
@@ -794,6 +904,12 @@ async fn create(
             .filter(|tls| *tls)
             .map(|_| origin_host(&upstream_address).to_string())),
         verify_cert: Set(None),
+        health_check_enabled: Set(defaults.enabled),
+        health_check_path: Set(defaults.path.clone()),
+        health_check_interval_seconds: Set(defaults.interval_seconds),
+        health_check_timeout_ms: Set(defaults.timeout_ms),
+        health_check_unhealthy_threshold: Set(defaults.unhealthy_threshold),
+        health_check_healthy_threshold: Set(defaults.healthy_threshold),
         is_default: Set(true),
         created_at: Set(timestamp),
     }
@@ -1182,6 +1298,25 @@ async fn create_pool(
     let sni = non_empty(&payload.sni);
     validate_pool(&name, &lb_algorithm, sni.as_deref())?;
 
+    let mut health_check = PoolHealthCheck::default_values();
+    health_check.enabled = payload.health_check_enabled.unwrap_or(false);
+    if let Some(path) = non_empty(&payload.health_check_path) {
+        health_check.path = path;
+    }
+    if let Some(v) = payload.health_check_interval_seconds {
+        health_check.interval_seconds = v;
+    }
+    if let Some(v) = payload.health_check_timeout_ms {
+        health_check.timeout_ms = v;
+    }
+    if let Some(v) = payload.health_check_unhealthy_threshold {
+        health_check.unhealthy_threshold = v;
+    }
+    if let Some(v) = payload.health_check_healthy_threshold {
+        health_check.healthy_threshold = v;
+    }
+    health_check.validate()?;
+
     let model = site_upstream_pools::ActiveModel {
         id: Set(Uuid::new_v4()),
         site_id: Set(id),
@@ -1189,6 +1324,12 @@ async fn create_pool(
         lb_algorithm: Set(lb_algorithm),
         sni: Set(sni),
         verify_cert: Set(payload.verify_cert),
+        health_check_enabled: Set(health_check.enabled),
+        health_check_path: Set(health_check.path),
+        health_check_interval_seconds: Set(health_check.interval_seconds),
+        health_check_timeout_ms: Set(health_check.timeout_ms),
+        health_check_unhealthy_threshold: Set(health_check.unhealthy_threshold),
+        health_check_healthy_threshold: Set(health_check.healthy_threshold),
         is_default: Set(false),
         created_at: Set(Utc::now()),
     }
@@ -1221,6 +1362,20 @@ async fn update_pool(
             ApiError::NotFound(format!("pool {target} not found"))
         })?;
 
+    // Overlay the patch on the current health-check configuration and
+    // validate it before anything is written: a rejected update must not
+    // persist a half-applied or invalid row.
+    let mut health_check = PoolHealthCheck {
+        enabled: row.health_check_enabled,
+        path: row.health_check_path.clone(),
+        interval_seconds: row.health_check_interval_seconds,
+        timeout_ms: row.health_check_timeout_ms,
+        unhealthy_threshold: row.health_check_unhealthy_threshold,
+        healthy_threshold: row.health_check_healthy_threshold,
+    };
+    health_check.apply_update(&payload);
+    health_check.validate()?;
+
     let mut active: site_upstream_pools::ActiveModel = row.into();
     if let Some(name) = non_empty(&payload.name) {
         active.name = Set(name);
@@ -1235,6 +1390,14 @@ async fn update_pool(
     if let Some(verify_cert) = payload.verify_cert {
         active.verify_cert = Set(Some(verify_cert));
     }
+    active.health_check_enabled = Set(health_check.enabled);
+    active.health_check_path = Set(health_check.path);
+    active.health_check_interval_seconds = Set(health_check.interval_seconds);
+    active.health_check_timeout_ms = Set(health_check.timeout_ms);
+    active.health_check_unhealthy_threshold =
+        Set(health_check.unhealthy_threshold);
+    active.health_check_healthy_threshold =
+        Set(health_check.healthy_threshold);
 
     let updated = active.update(&state.db).await?;
     validate_pool(
@@ -2066,5 +2229,127 @@ mod tests {
         );
         assert_eq!(split_origin_host_port("[::1]"), Some(("::1", None)));
         assert_eq!(split_origin_host_port("::1"), None);
+    }
+
+    #[test]
+    fn pool_health_check_defaults_apply_and_validate() {
+        // No fields: everything falls back to the documented defaults and
+        // validates even while disabled.
+        let mut hc = PoolHealthCheck::default_values();
+        hc.validate().expect("defaults must validate");
+
+        // Update overlay: only the given fields change; the path keeps the
+        // caller's spelling and must still start with '/'.
+        let payload = UpdatePoolRequest {
+            health_check_enabled: Some(true),
+            health_check_path: Some("/healthz".to_string()),
+            health_check_interval_seconds: Some(30),
+            ..Default::default()
+        };
+        hc.apply_update(&payload);
+        assert!(hc.enabled);
+        assert_eq!(hc.path, "/healthz");
+        assert_eq!(hc.interval_seconds, 30);
+        assert_eq!(hc.timeout_ms, 3000);
+        assert_eq!(hc.unhealthy_threshold, 2);
+        assert_eq!(hc.healthy_threshold, 1);
+        hc.validate().expect("the overlaid posture must validate");
+
+        // A path without the leading slash is rejected, not normalized.
+        let mut hc = PoolHealthCheck::default_values();
+        hc.apply_update(&UpdatePoolRequest {
+            health_check_path: Some("healthz".to_string()),
+            ..Default::default()
+        });
+        assert!(hc.validate().is_err());
+    }
+
+    #[test]
+    fn pool_health_check_rejects_out_of_range_values() {
+        let cases = [
+            (
+                PoolHealthCheck {
+                    path: "no-slash".to_string(),
+                    ..PoolHealthCheck::default_values()
+                },
+                "must start with '/'",
+            ),
+            (
+                PoolHealthCheck {
+                    path: "/a b".to_string(),
+                    ..PoolHealthCheck::default_values()
+                },
+                "must start with '/'",
+            ),
+            (
+                PoolHealthCheck {
+                    path: "/a?b=1".to_string(),
+                    ..PoolHealthCheck::default_values()
+                },
+                "must start with '/'",
+            ),
+            (
+                PoolHealthCheck {
+                    interval_seconds: 4,
+                    ..PoolHealthCheck::default_values()
+                },
+                "interval_seconds must be between 5 and 3600",
+            ),
+            (
+                PoolHealthCheck {
+                    interval_seconds: 3601,
+                    ..PoolHealthCheck::default_values()
+                },
+                "interval_seconds must be between 5 and 3600",
+            ),
+            (
+                PoolHealthCheck {
+                    timeout_ms: 99,
+                    ..PoolHealthCheck::default_values()
+                },
+                "timeout_ms must be between 100 and 30000",
+            ),
+            (
+                PoolHealthCheck {
+                    timeout_ms: 30_001,
+                    ..PoolHealthCheck::default_values()
+                },
+                "timeout_ms must be between 100 and 30000",
+            ),
+            (
+                PoolHealthCheck {
+                    unhealthy_threshold: 0,
+                    ..PoolHealthCheck::default_values()
+                },
+                "unhealthy_threshold must be between 1 and 10",
+            ),
+            (
+                PoolHealthCheck {
+                    healthy_threshold: 11,
+                    ..PoolHealthCheck::default_values()
+                },
+                "healthy_threshold must be between 1 and 10",
+            ),
+        ];
+        for (hc, message) in cases {
+            let err = hc
+                .validate()
+                .expect_err("expected the invalid posture to be rejected")
+                .to_string();
+            assert!(err.contains(message), "{message}: {err}");
+        }
+    }
+
+    #[test]
+    fn pool_health_check_accepts_documented_bounds() {
+        let hc = PoolHealthCheck {
+            enabled: true,
+            path: "/healthz".to_string(),
+            interval_seconds: 3600,
+            timeout_ms: 30_000,
+            unhealthy_threshold: 10,
+            healthy_threshold: 10,
+        };
+        hc.validate().expect("upper bounds must validate");
     }
 }

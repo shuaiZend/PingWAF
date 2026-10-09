@@ -158,6 +158,18 @@ export interface UpstreamPool {
   /** Non-empty SNI enables HTTPS origin; `null` means plain HTTP. */
   sni: string | null
   verify_cert: boolean | null
+  /** Active HTTP health check; off keeps the agent's default TCP probe. */
+  health_check_enabled: boolean
+  /** Probe path; always starts with `/`. */
+  health_check_path: string
+  /** Seconds between probe rounds (aligned to 10s grid steps by the agent). */
+  health_check_interval_seconds: number
+  /** Probe connect/read timeout in milliseconds. */
+  health_check_timeout_ms: number
+  /** Consecutive failed probes before a node is marked unhealthy. */
+  health_check_unhealthy_threshold: number
+  /** Consecutive successful probes before a node is marked healthy. */
+  health_check_healthy_threshold: number
   is_default: boolean
   created_at: string
 }
@@ -258,14 +270,29 @@ export interface UpdateUpstreamRequest {
   health_status?: string
 }
 
-export interface CreatePoolRequest {
+export interface PoolHealthCheckFields {
+  /** Off keeps the agent's default bare TCP probe. */
+  health_check_enabled?: boolean
+  /** Must start with `/`, no spaces, `?` or `#`; at most 255 characters. */
+  health_check_path?: string
+  /** Seconds between probe rounds (5-3600). */
+  health_check_interval_seconds?: number
+  /** Probe connect/read timeout in milliseconds (100-30000). */
+  health_check_timeout_ms?: number
+  /** Consecutive failures before a node is marked unhealthy (1-10). */
+  health_check_unhealthy_threshold?: number
+  /** Consecutive successes before a node is marked healthy (1-10). */
+  health_check_healthy_threshold?: number
+}
+
+export interface CreatePoolRequest extends PoolHealthCheckFields {
   name: string
   lb_algorithm?: string
   sni?: string | null
   verify_cert?: boolean | null
 }
 
-export interface UpdatePoolRequest {
+export interface UpdatePoolRequest extends PoolHealthCheckFields {
   name?: string
   lb_algorithm?: string
   /** Empty string clears SNI (disables HTTPS origin). */
@@ -458,6 +485,10 @@ export interface WafSettings {
   site_id: string
   /** Explicit engine switch; a missing server row means `true`. */
   waf_enabled: boolean
+  /** Site-level enforcement mode: `off` | `monitor` | `block`. */
+  mode: WafMode | string
+  /** Detection sensitivity 1-4; decoupled from rule severity. */
+  paranoia_level: number
   advanced_mode: boolean
   monitor_categories: WafCategory[] | string[]
   monitor_stacks: WafStack[] | string[]
@@ -466,9 +497,14 @@ export interface WafSettings {
   updated_at: string
 }
 
+/** Site enforcement mode, mirroring the proto `WafMode` enum. */
+export type WafMode = 'off' | 'monitor' | 'block'
+
 /** Patch semantics: omitted fields keep their current value. */
 export interface UpdateWafSettingsRequest {
   waf_enabled?: boolean
+  mode?: WafMode | string
+  paranoia_level?: number
   advanced_mode?: boolean
   monitor_categories?: string[]
   monitor_stacks?: string[]
@@ -487,6 +523,8 @@ export interface WafPosture {
     under_attack: boolean
   }
   enforcement: {
+    /** Explicit site-level enforcement mode: off | monitor | block. */
+    mode: string
     /** Managed action per attack category (`sqli`, ...): block | monitor. */
     managed: Record<string, string>
     /** Aggregate custom-rule mode: block | monitor | off. */

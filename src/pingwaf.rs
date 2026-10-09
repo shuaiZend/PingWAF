@@ -47,7 +47,9 @@ use pingap_upstream::new_upstream_health_check_task;
 use pingora::server;
 use pingora::server::configuration::Opt;
 use pingora::services::background::background_service;
-use pingwaf_agent::cache::{CachedRules, RuleCache, SslConfig};
+use pingwaf_agent::cache::{
+    CachedRules, HealthCheckConfig, RuleCache, SslConfig,
+};
 use pingwaf_agent::config::AgentConfig;
 use pingwaf_server::ServerConfig;
 use tracing::{error, info, warn};
@@ -324,6 +326,32 @@ fn site_posture_plugins(
     names
 }
 
+/// Synthesizes the data-plane health check URL from the control plane's
+/// per-pool [`HealthCheckConfig`]. The URL host is the upstream (pool) name —
+/// pingap only uses it as the probe request's Host header, nothing resolves
+/// it — and the query carries the tunables `pingap-health` understands
+/// (`check_frequency`, `connection_timeout`/`read_timeout`, `failure`,
+/// `success`). Values are clamped so a corrupt cache entry can never produce
+/// a zero-timeout or zero-frequency probe.
+fn health_check_url(upstream_name: &str, hc: &HealthCheckConfig) -> String {
+    let path = if hc.path.is_empty() {
+        "/".to_string()
+    } else if hc.path.starts_with('/') {
+        hc.path.clone()
+    } else {
+        format!("/{}", hc.path)
+    };
+    format!(
+        "http://{upstream_name}{path}?check_frequency={}s&\
+         connection_timeout={}ms&read_timeout={}ms&failure={}&success={}",
+        hc.interval_seconds.max(1),
+        hc.timeout_ms.max(1),
+        hc.timeout_ms.max(1),
+        hc.unhealthy_threshold.max(1),
+        hc.healthy_threshold.max(1),
+    )
+}
+
 fn cached_rules_to_pingap_config(
     cached: &CachedRules,
     cache_dir: &Path,
@@ -435,6 +463,12 @@ fn cached_rules_to_pingap_config(
                 })
                 .collect();
 
+            // Multi-node pools get request-level protection by default:
+            // without backend stats the circuit breaker can never observe
+            // failures, and the control plane exposes no knobs for either.
+            // Single-node pools are left untouched — with no alternative
+            // backend an open breaker only short-circuits into 503.
+            let multi_peer = up.peers.len() > 1;
             let conf = UpstreamConf {
                 addrs,
                 algo: sanitize_algo(&up.algo),
@@ -463,7 +497,17 @@ fn cached_rules_to_pingap_config(
                     .health_check
                     .as_ref()
                     .filter(|h| h.enabled)
-                    .map(|h| h.path.clone()),
+                    .map(|h| health_check_url(&name, h)),
+                enable_backend_stats: multi_peer.then_some(true),
+                circuit_break_max_consecutive_failures: multi_peer.then_some(5),
+                circuit_break_max_failure_percent: multi_peer.then_some(50),
+                circuit_break_min_requests_threshold: multi_peer.then_some(10),
+                circuit_break_open_duration: multi_peer
+                    .then_some(Duration::from_secs(10)),
+                // With several origins, a misjudged health check or an
+                // all-open breaker should degrade to the least-bad backend
+                // instead of failing the site with instant 503s.
+                enable_unhealthy_fallback: multi_peer.then_some(true),
                 ..Default::default()
             };
             if up.is_default {
@@ -1617,6 +1661,164 @@ mod tests {
         assert_eq!(loc.upstream.as_deref(), Some("site1_upstream"));
         assert_eq!(loc.host.as_deref(), Some("a.example.com"));
         assert_eq!(loc.weight, None);
+    }
+
+    #[test]
+    fn multi_peer_pool_defaults_to_stats_and_breaker() {
+        // P0-2 (NODE-EVALUATION-REPORT-20261009): the control plane exposes
+        // no knobs for backend stats or circuit breaking, so multi-node pools
+        // must get request-level protection by default — otherwise a bad
+        // origin is only caught by the 10s TCP probe and 5xx-style soft
+        // failures are never accounted for.
+        let mut site = site_rules("site1", "a.example.com");
+        site.upstreams =
+            vec![pool("", vec![peer("10.0.0.1:8080"), peer("10.0.0.2:8080")])];
+        let config = cached_rules_to_pingap_config(
+            &one_site_cache(site),
+            Path::new("/tmp/pingwaf-test-cache"),
+        )
+        .expect("config should build");
+
+        let upstream = config
+            .upstreams
+            .get("site1_upstream")
+            .expect("legacy upstream key");
+        assert_eq!(upstream.enable_backend_stats, Some(true));
+        assert_eq!(upstream.circuit_break_max_consecutive_failures, Some(5));
+        assert_eq!(upstream.circuit_break_max_failure_percent, Some(50));
+        assert_eq!(upstream.circuit_break_min_requests_threshold, Some(10));
+        assert_eq!(
+            upstream.circuit_break_open_duration,
+            Some(Duration::from_secs(10))
+        );
+        // A misjudged health check or an all-open breaker must degrade to
+        // the least-bad origin instead of failing the site with 503s.
+        assert_eq!(upstream.enable_unhealthy_fallback, Some(true));
+
+        // Single-node pools stay untouched: with no alternative backend an
+        // open breaker would only short-circuit requests into 503.
+        let mut site = site_rules("site2", "b.example.com");
+        site.upstreams = vec![pool("", vec![peer("10.0.0.3:8080")])];
+        let config = cached_rules_to_pingap_config(
+            &one_site_cache(site),
+            Path::new("/tmp/pingwaf-test-cache"),
+        )
+        .expect("config should build");
+
+        let upstream = config
+            .upstreams
+            .get("site2_upstream")
+            .expect("single upstream key");
+        assert_eq!(upstream.enable_backend_stats, None);
+        assert_eq!(upstream.circuit_break_max_consecutive_failures, None);
+        assert_eq!(upstream.circuit_break_max_failure_percent, None);
+        assert_eq!(upstream.enable_unhealthy_fallback, None);
+    }
+
+    #[test]
+    fn health_check_url_synthesis() {
+        let hc = HealthCheckConfig {
+            enabled: true,
+            path: "/healthz".to_string(),
+            interval_seconds: 15,
+            timeout_ms: 2000,
+            unhealthy_threshold: 3,
+            healthy_threshold: 2,
+        };
+        assert_eq!(
+            health_check_url("site1_upstream", &hc),
+            "http://site1_upstream/healthz?check_frequency=15s&\
+             connection_timeout=2000ms&read_timeout=2000ms&failure=3&\
+             success=2"
+        );
+
+        // Missing leading slash is normalized, empty path becomes "/".
+        let mut hc = hc.clone();
+        hc.path = "ping".to_string();
+        assert!(health_check_url("u", &hc).contains("u/ping?"));
+        hc.path = String::new();
+        assert!(health_check_url("u", &hc).contains("u/?"));
+
+        // Zeroes from a corrupt cache entry clamp to safe probe values.
+        let corrupt = HealthCheckConfig {
+            enabled: true,
+            path: "/".to_string(),
+            interval_seconds: 0,
+            timeout_ms: 0,
+            unhealthy_threshold: 0,
+            healthy_threshold: 0,
+        };
+        let url = health_check_url("u", &corrupt);
+        assert!(url.contains("check_frequency=1s&"));
+        assert!(url.contains("connection_timeout=1ms&"));
+        assert!(url.contains("failure=1&success=1"));
+    }
+
+    /// End-to-end over the config path: the server-side shape of a pool
+    /// carrying a health check (proto message → agent cache struct) must
+    /// survive the translation into a data-plane `UpstreamConf`, and the
+    /// synthesized URL must be accepted by `pingap-health` when the data
+    /// plane actually builds the upstream.
+    #[test]
+    fn health_check_flows_end_to_end_into_the_data_plane() {
+        let mut up =
+            pool("", vec![peer("10.0.0.1:8080"), peer("10.0.0.2:8080")]);
+        up.health_check = Some(HealthCheckConfig {
+            enabled: true,
+            path: "/healthz".to_string(),
+            interval_seconds: 15,
+            timeout_ms: 2000,
+            unhealthy_threshold: 3,
+            healthy_threshold: 2,
+        });
+        let mut site = site_rules("site1", "a.example.com");
+        site.upstreams = vec![up];
+        let config = cached_rules_to_pingap_config(
+            &one_site_cache(site),
+            Path::new("/tmp/pingwaf-test-cache"),
+        )
+        .expect("config should build");
+
+        let conf = config
+            .upstreams
+            .get("site1_upstream")
+            .expect("multi-node upstream key");
+        assert_eq!(
+            conf.health_check.as_deref(),
+            Some(
+                "http://site1_upstream/healthz?check_frequency=15s&\
+                 connection_timeout=2000ms&read_timeout=2000ms&failure=3&\
+                 success=2"
+            )
+        );
+
+        // Building the upstream parses the health check URL for real: a
+        // malformed synthesis fails right here instead of at traffic time.
+        pingap_upstream::Upstream::new("site1_upstream", conf, None)
+            .expect("the synthesized health check URL must build");
+
+        // A disabled check keeps the data plane on its TCP-probe default.
+        let mut up = pool("", vec![peer("10.0.0.1:8080")]);
+        up.health_check = Some(HealthCheckConfig {
+            enabled: false,
+            path: "/healthz".to_string(),
+            interval_seconds: 15,
+            timeout_ms: 2000,
+            unhealthy_threshold: 3,
+            healthy_threshold: 2,
+        });
+        let mut site = site_rules("site2", "b.example.com");
+        site.upstreams = vec![up];
+        let config = cached_rules_to_pingap_config(
+            &one_site_cache(site),
+            Path::new("/tmp/pingwaf-test-cache"),
+        )
+        .expect("config should build");
+        let conf = config
+            .upstreams
+            .get("site2_upstream")
+            .expect("single upstream key");
+        assert_eq!(conf.health_check, None);
     }
 
     #[test]

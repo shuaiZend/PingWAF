@@ -93,12 +93,40 @@ pub(crate) static PENDING_CHALLENGES: LazyLock<
 /// How long an unverified challenge stays resolvable (5 minutes).
 const PENDING_TTL_SECS: i64 = 300;
 
+/// Process-wide fallback signing secret for standalone deployments with
+/// neither an agent (whose cache dir persists a generated secret) nor a
+/// configured `cookie_secret`. Random per process: clearance cookies simply
+/// do not survive a restart, whereas the historical `"change-me"` fallback
+/// was public knowledge and let anyone forge valid clearances.
+pub(crate) static FALLBACK_COOKIE_SECRET: LazyLock<String> =
+    LazyLock::new(|| {
+        warn!(
+            "no challenge cookie_secret configured and no agent cache dir; \
+             using a per-process random key (clearances will not survive a \
+             restart) — configure `cookie_secret` to persist them"
+        );
+        uuid::Uuid::new_v4().simple().to_string()
+    });
+
 #[inline]
 fn now_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+/// Restricts a client-supplied redirect target to a same-origin absolute
+/// path. Anything that does not start with a single solidus (including
+/// protocol-relative `//host` and `/\\host`, which browsers normalize to
+/// `//host`) falls back to `/`.
+fn safe_redirect_target(url: &str) -> &str {
+    if url.starts_with('/') && !url.starts_with("//") && !url.starts_with("/\\")
+    {
+        url
+    } else {
+        "/"
+    }
 }
 
 /// Generate a random 32-hex-char nonce (the challenge crate keeps its own
@@ -370,7 +398,8 @@ pub(crate) fn resolve_cookie_secret(configured: &str) -> String {
         return configured.to_string();
     }
     let Some(agent) = PingWafAgent::instance() else {
-        return configured.to_string();
+        // Standalone: never fall back to a publicly-known key.
+        return FALLBACK_COOKIE_SECRET.clone();
     };
     let dir = Path::new(&agent.config.cache_dir);
     let path = dir.join("challenge_cookie_secret");
@@ -476,7 +505,13 @@ impl ChallengePlugin {
             return None;
         }
         let agent = PingWafAgent::instance()?;
-        let site_rules = agent.get_rules_for_domain(host)?;
+        let Some(site_rules) = agent.get_rules_for_domain(host) else {
+            // The host no longer resolves in the cache (deleted or renamed
+            // site): drop the compiled engine so the per-domain cache
+            // cannot grow without bound across config churn.
+            self.site_engines.remove(host);
+            return None;
+        };
         let cfg = site_rules
             .challenge_config
             .as_ref()
@@ -506,10 +541,13 @@ impl ChallengePlugin {
 
     /// Handle a POST to the verify endpoint: validate the proof-of-work and,
     /// on success, hand back a clearance cookie plus a redirect to the
-    /// originally requested URL.
+    /// originally requested URL. The cookie's `Secure` attribute follows the
+    /// connection's TLS state — browsers refuse to store a `Secure` cookie
+    /// on a plain HTTP page, which would make the challenge unsolvable there.
     async fn handle_verify(
         &self,
         session: &mut Session,
+        ctx: &Ctx,
     ) -> pingora::Result<RequestPluginResult> {
         let mut buf = BytesMut::with_capacity(4096);
         while let Some(chunk) = session.read_request_body().await? {
@@ -565,7 +603,9 @@ impl ChallengePlugin {
             site_id: pending.site_id,
         };
 
-        let result = self.engine.verify_solution(&submission);
+        let result = self
+            .engine
+            .verify_solution(&submission, ctx.conn.tls_version.is_some());
 
         match result {
             VerifyResult::Success {
@@ -576,13 +616,19 @@ impl ChallengePlugin {
                     "{}={}; {}",
                     self.cookie_name, cookie_value, cookie_attributes
                 );
-                let mut builder =
-                    HttpResponse::builder(StatusCode::OK).body(format!(
-                        "<html><body><script>window.location.href = \"{}\";\
-</script></body></html>",
-                        pending.original_url
-                    ));
-                builder = builder.header(HTTP_HEADER_CONTENT_HTML.clone());
+                // Redirect instead of echoing the URL into an inline script:
+                // the original URL is client-controlled, and reflecting it
+                // into a `javascript:` string is XSS. Only same-origin
+                // absolute paths are honored; anything else falls back to
+                // "/" (so `//evil.com` cannot become a protocol-relative
+                // open redirect either).
+                let target = safe_redirect_target(&pending.original_url);
+                let location = HeaderValue::from_str(target)
+                    .unwrap_or(HeaderValue::from_static("/"));
+                let builder = HttpResponse::builder(StatusCode::SEE_OTHER)
+                    .body(String::new())
+                    .header((header::LOCATION, location));
+                let mut builder = builder;
                 if let Ok(hv) = HeaderValue::from_str(&set_cookie) {
                     builder = builder.header((header::SET_COOKIE, hv));
                 }
@@ -627,7 +673,9 @@ impl TryFrom<&PluginConf> for ChallengePlugin {
         let mut cookie_secret =
             resolve_cookie_secret(&get_str_conf(value, "cookie_secret"));
         if cookie_secret.is_empty() {
-            cookie_secret = "change-me".to_string();
+            // Unreachable with the resolution above, but never sign with an
+            // empty key.
+            cookie_secret = FALLBACK_COOKIE_SECRET.clone();
         }
         let mut cookie_name = get_str_conf(value, "cookie_name");
         if cookie_name.is_empty() {
@@ -715,7 +763,7 @@ impl Plugin for ChallengePlugin {
         // The verify endpoint is always served, even if challenges would
         // otherwise be skipped for this path.
         if path == VERIFY_ENDPOINT && method == "POST" {
-            return self.handle_verify(session).await;
+            return self.handle_verify(session, ctx).await;
         }
 
         let host = get_host(session.req_header())
@@ -824,6 +872,26 @@ mod tests {
     use pingap_core::PluginStep;
     use pingora::proxy::Session;
     use tokio_test::io::Builder;
+
+    #[test]
+    fn safe_redirect_target_keeps_same_origin_paths_only() {
+        assert_eq!(safe_redirect_target("/admin?id=1"), "/admin?id=1");
+        assert_eq!(safe_redirect_target("/"), "/");
+        // Protocol-relative and absolute URLs are open-redirect material.
+        assert_eq!(safe_redirect_target("//evil.com"), "/");
+        assert_eq!(safe_redirect_target("https://evil.com/x"), "/");
+        // Backslash tricks browsers into treating this as scheme-relative.
+        assert_eq!(safe_redirect_target("/\\evil.com"), "/");
+    }
+
+    #[test]
+    fn fallback_cookie_secret_is_random_and_stable_per_process() {
+        let first = FALLBACK_COOKIE_SECRET.clone();
+        assert!(!first.is_empty());
+        assert_ne!(first, "change-me");
+        assert_eq!(first.len(), 32);
+        assert_eq!(FALLBACK_COOKIE_SECRET.clone(), first);
+    }
 
     #[test]
     fn test_challenge_params() {

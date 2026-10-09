@@ -109,5 +109,12 @@ stacks = ["php"]
   Keep `pow_difficulty` and `cookie_secret` consistent between the two.
 - The engine runs on **every** request. Leave `inspect_body` off unless you need
   body-level detection, and keep `max_body_size` bounded.
+- **Body inspection is prefix-only**: with `inspect_body` on, only the first
+  `max_body_size` bytes (default 64 KiB) are decoded and scanned; a payload
+  placed entirely after that boundary is not seen by the engine. Raise
+  `max_body_size` to cover larger expected payloads — at the cost of memory
+  and latency on big uploads — and treat the setting as a tuned trade-off,
+  not a hard security boundary. Access logs record
+  `request_body_truncated` whenever the limit cut a body short.
 - The engine is held behind `Arc<RwLock<..>>` and per-domain engines are cached,
   so control-plane rule updates hot-reload without restarting pingap.

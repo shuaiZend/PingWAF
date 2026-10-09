@@ -51,6 +51,8 @@ pub mod m20240101_000043_config_versions;
 pub mod m20240101_000044_notifications;
 pub mod m20240101_000045_site_failover;
 pub mod m20240101_000046_login_history;
+pub mod m20240101_000047_waf_settings_mode_and_paranoia;
+pub mod m20240101_000048_pool_health_check;
 
 use sea_orm_migration::prelude::*;
 
@@ -111,6 +113,10 @@ impl MigratorTrait for Migrator {
             Box::new(m20240101_000044_notifications::Migration),
             Box::new(m20240101_000045_site_failover::Migration),
             Box::new(m20240101_000046_login_history::Migration),
+            Box::new(
+                m20240101_000047_waf_settings_mode_and_paranoia::Migration,
+            ),
+            Box::new(m20240101_000048_pool_health_check::Migration),
         ]
     }
 }
@@ -122,7 +128,7 @@ mod tests {
     #[test]
     fn migrations_are_ordered_and_unique() {
         let migrations = Migrator::migrations();
-        assert_eq!(migrations.len(), 46);
+        assert_eq!(migrations.len(), 48);
         let names: Vec<String> =
             migrations.iter().map(|m| m.name().to_owned()).collect();
         let mut sorted = names.clone();

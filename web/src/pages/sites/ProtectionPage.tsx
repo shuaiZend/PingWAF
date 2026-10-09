@@ -12,7 +12,6 @@ import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { useToast } from '@/components/ui/Toast'
 import { challengeApi, challengeKeys } from '@/api/challenge'
 import { wafSettingsApi, wafSettingsKeys } from '@/api/wafSettings'
-import { ruleKeys, rulesApi } from '@/api/rules'
 import { RULE_MODES, type RuleMode } from '@/api/types'
 import { useCanWrite, useWafSettingsMutation } from '@/hooks'
 import { cn } from '@/lib/utils'
@@ -292,6 +291,47 @@ export function ProtectionPage() {
             />
           </div>
         )}
+        {settingsQuery.isPending ? (
+          <SkeletonCard className="h-16" />
+        ) : (
+          <div className="flex flex-wrap items-center justify-between gap-4 rounded-lg border border-line bg-elevated px-4 py-3">
+            <span className="flex min-w-0 items-center gap-3">
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-recessed text-fg-subtle">
+                <Gauge weight="duotone" className="h-5 w-5" />
+              </span>
+              <span className="min-w-0">
+                <span className="block text-sm font-semibold text-fg-strong">
+                  {t('pages.protection.paranoiaTitle')}
+                </span>
+                <span className="mt-0.5 block text-[13px] text-fg-subtle">
+                  {t('pages.protection.paranoiaCardHint')}
+                </span>
+                <span className="mt-2 flex items-center gap-1">
+                  {[1, 2, 3, 4].map((level) => {
+                    const active = (settings?.paranoia_level ?? 2) === level
+                    return (
+                      <button
+                        key={level}
+                        type="button"
+                        disabled={!canWrite || updateSettings.isPending}
+                        aria-label={`${t('pages.protection.paranoiaTitle')} ${level}`}
+                        onClick={() => updateSettings.mutate({ paranoia_level: level })}
+                        className={cn(
+                          'h-7 w-9 rounded-md border text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-60',
+                          active
+                            ? 'border-brand bg-brand-soft text-brand'
+                            : 'border-line text-fg-subtle hover:border-fill hover:bg-recessed',
+                        )}
+                      >
+                        {level}
+                      </button>
+                    )
+                  })}
+                </span>
+              </span>
+            </span>
+          </div>
+        )}
         </div>
       </section>
 
@@ -350,9 +390,12 @@ export function ProtectionPage() {
 }
 
 /**
- * Enforcement mode for the site's custom rules — block > monitor > off,
- * applied across the whole rule set. Moved out of the custom-rules panel so
- * the Enforcement section opens with the posture-level control.
+ * Site-level enforcement mode — the master switch the WAF engine runs in
+ * (block > monitor > off), stored on the site's WAF settings row and shipped
+ * to the data plane verbatim. Custom rules keep their per-rule mode; a
+ * monitor-mode rule only downgrades its own action while the site is in
+ * block. Kept out of the custom-rules panel so the Enforcement section opens
+ * with the posture-level control.
  */
 function EnforcementModeCard() {
   const { t } = useTranslation()
@@ -361,35 +404,34 @@ function EnforcementModeCard() {
   const canWrite = useCanWrite()
   const { siteId = '' } = useParams<{ siteId: string }>()
 
-  const rulesQuery = useQuery({
-    queryKey: ruleKeys.list(siteId),
-    queryFn: () => rulesApi.list(siteId),
-    select: (page) => page.items,
+  const settingsQuery = useQuery({
+    queryKey: wafSettingsKeys.settings(siteId),
+    queryFn: () => wafSettingsApi.get(siteId),
     enabled: Boolean(siteId),
   })
-  const allRules = rulesQuery.data ?? []
-  const loading = rulesQuery.isPending
-
-  // Derived exactly the way the control plane derives it: blocking wins.
-  const mode = allRules.some((r) => r.mode === 'block')
-    ? 'block'
-    : allRules.some((r) => r.mode === 'monitor')
-      ? 'monitor'
-      : 'off'
+  const loading = settingsQuery.isPending
+  // The stored value is authoritative; legacy rows without it read as off.
+  const mode = settingsQuery.data?.mode ?? 'off'
 
   const applyMode = useMutation({
     mutationFn: async (next: RuleMode) => {
-      const targets = allRules.filter((r) => r.mode !== next)
-      await Promise.all(targets.map((r) => rulesApi.setMode(siteId, r.id, next)))
-      return targets.length
+      await wafSettingsApi.update(siteId, { mode: next })
+      return next
     },
-    onSuccess: (changed, next) => {
-      if (changed === 0) {
-        toast.info(t('pages.waf.modeAlready'), t(`pages.waf.mode_${next}`))
-      } else {
-        toast.success(t('pages.waf.modeApplied'), `${t(`pages.waf.mode_${next}`)} · ${changed}`)
-      }
-      void queryClient.invalidateQueries({ queryKey: ruleKeys.all(siteId) })
+    onSuccess: (next) => {
+      toast.success(t('pages.waf.modeApplied'), t(`pages.waf.mode_${next}`))
+      void queryClient.invalidateQueries({
+        queryKey: wafSettingsKeys.settings(siteId),
+      })
+      void queryClient.invalidateQueries({
+        queryKey: wafSettingsKeys.posture(siteId),
+      })
+    },
+    onError: (error) => {
+      toast.error(
+        t('pages.protection.updateFailed'),
+        error instanceof Error ? error.message : undefined,
+      )
     },
   })
 
@@ -404,7 +446,7 @@ function EnforcementModeCard() {
             {t('pages.waf.modeCardHint')}
           </p>
         </div>
-        {rulesQuery.isFetching && (
+        {settingsQuery.isFetching && (
           <span className="text-xs text-fg-subtle">{t('pages.waf.applyingMode')}</span>
         )}
       </div>

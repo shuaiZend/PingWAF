@@ -21,6 +21,13 @@ pub struct Model {
     /// Explicit engine switch; `false` short-circuits WAF evaluation for the
     /// site regardless of rules or posture. A missing row means `true`.
     pub waf_enabled: bool,
+    /// Site-level enforcement mode (`off` / `monitor` / `block`). This is the
+    /// authoritative switch; rule modes only feed the one-time migration
+    /// backfill. A missing row falls back to the legacy rule derivation.
+    pub mode: String,
+    /// Detection sensitivity (1-4). Decoupled from rule severity: a missing
+    /// row means the default 2.
+    pub paranoia_level: i32,
     pub advanced_mode: bool,
     pub monitor_categories: Vec<String>,
     pub monitor_stacks: Vec<String>,
