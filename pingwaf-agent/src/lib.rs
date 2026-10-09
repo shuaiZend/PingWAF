@@ -435,8 +435,10 @@ mod tests {
         policies: Vec<proto::SitePolicy>,
         global: Option<bool>,
     ) -> PingWafAgent {
-        let mut config = AgentConfig::default();
-        config.fail_open = local_fail_open;
+        let config = AgentConfig {
+            fail_open: local_fail_open,
+            ..AgentConfig::default()
+        };
         let rule_cache =
             RuleCache::new(dir.to_path_buf(), "test".to_string()).unwrap();
         let metrics = Arc::new(MetricsCollector::new());

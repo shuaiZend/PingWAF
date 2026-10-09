@@ -25,7 +25,7 @@ use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use bytesize::ByteSize;
 use derive_more::Debug;
-use futures_util::FutureExt;
+use futures::FutureExt;
 use http::StatusCode;
 use pingap_config::Hashable;
 use pingap_config::UpstreamConf;
