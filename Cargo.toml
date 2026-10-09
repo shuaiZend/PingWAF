@@ -77,6 +77,7 @@ pingwaf-pprof = { workspace = true }
 anyhow = { workspace = true }
 pingora = { workspace = true }
 regex = { workspace = true }
+rustls = { workspace = true, features = ["ring"] }
 rust-embed = { version = "8.12.0", features = [
     "mime-guess",
     "compression",

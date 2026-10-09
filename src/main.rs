@@ -1139,6 +1139,11 @@ fn run() -> Result<(), Box<dyn Error>> {
 }
 
 fn main() {
+    // Same rationale as pingwaf::main: the graph pulls in two rustls crypto
+    // providers (ring + aws-lc-rs), so install ring explicitly before any
+    // TLS listener or client initialises. No-op if already installed.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     // Check if PingWAF mode is requested (via subcommand or PINGWAF_MODE env)
     if cli::is_pingwaf_mode() {
         pingwaf::main();

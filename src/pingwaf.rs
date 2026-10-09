@@ -1416,6 +1416,13 @@ async fn shutdown_signal() {
 
 /// Entry point called from main.rs when PingWAF mode is detected.
 pub fn main() {
+    // The dependency graph enables BOTH rustls crypto providers (ring via
+    // pingwaf-server's rustls/tonic, aws-lc-rs via instant-acme/reqwest), so
+    // rustls refuses to pick one implicitly and panics on first TLS use.
+    // Install ring explicitly — the same provider the pingora rustls backend
+    // uses. `install_default` returns Err when already installed; ignore it.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     // Initialize tracing
     init_tracing();
 
