@@ -5,7 +5,11 @@
 # Stage 3: Minimal runtime image (behavior contract unchanged)
 
 # ─── Stage 1: Frontend ───────────────────────────────────────────────────────
-FROM node:22-alpine AS frontend-builder
+# Base images pull from public.ecr.aws (AWS's official mirror of Docker Hub
+# library images): GitHub Actions runners share IP ranges and hit Docker
+# Hub's anonymous pull limit (HTTP 429) intermittently, which fails the
+# image resolve step before any layer cache can help.
+FROM public.ecr.aws/docker/library/node:22-alpine AS frontend-builder
 
 WORKDIR /app/web
 
@@ -22,7 +26,7 @@ RUN npm run build
 
 # ─── Stage 2: Rust Builder ───────────────────────────────────────────────────
 # 改进：版本从 1.98.0 升至 1.98.1，与 release.yml 的 dtolnay/rust-toolchain@1.98.1 对齐
-FROM rust:1.98.1-bookworm AS builder
+FROM public.ecr.aws/docker/library/rust:1.98.1-bookworm AS builder
 
 # SYNC: keep this list in lockstep with ci.yml / release.yml
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -143,7 +147,7 @@ RUN find . -path ./target -prune -o -name '*.rs' -print0 | xargs -0 --no-run-if-
 
 # ─── Stage 3: Runtime（行为契约保持不变）─────────────────────────────────────
 # Must use trixie (glibc 2.40) to match the builder's glibc.
-FROM debian:trixie-slim AS runtime
+FROM public.ecr.aws/docker/library/debian:trixie-slim AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
