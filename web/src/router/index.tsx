@@ -16,6 +16,7 @@ import { LogsPage } from '@/pages/LogsPage'
 import { AgentsPage } from '@/pages/AgentsPage'
 import { AssistantPage } from '@/pages/AssistantPage'
 import { SettingsPage } from '@/pages/SettingsPage'
+import { NotificationsPage } from '@/pages/NotificationsPage'
 import { AccountPage } from '@/pages/AccountPage'
 import { BotPage as BotProtectionPage } from '@/pages/sites/BotPage'
 import {
@@ -125,6 +126,7 @@ export const router = createBrowserRouter([
       { path: 'ssl', element: <GlobalSslPage /> },
       { path: 'traffic', element: <GlobalTrafficPage /> },
       { path: 'account', element: <AccountPage /> },
+      { path: 'notifications', element: <NotificationsPage /> },
       { path: 'settings', element: <SettingsPage /> },
       { path: '*', element: <NotFoundPage /> },
     ],

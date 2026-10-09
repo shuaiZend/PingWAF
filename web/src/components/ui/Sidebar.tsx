@@ -12,6 +12,7 @@ import {
   UserCircle,
   FlowArrow,
   Sparkle,
+  Bell,
   type Icon,
 } from '@phosphor-icons/react'
 import { cn } from '@/lib/utils'
@@ -46,6 +47,7 @@ export function Sidebar({ collapsed, onNavigate }: SidebarProps) {
     { to: '/logs', labelKey: 'nav.logs', icon: List },
     { to: '/assistant', labelKey: 'nav.assistant', icon: Sparkle },
     { to: '/agents', labelKey: 'nav.agents', icon: Desktop },
+    { to: '/notifications', labelKey: 'nav.notifications', icon: Bell },
     { to: '/lifecycle', labelKey: 'nav.lifecycle', icon: FlowArrow },
     { to: '/account', labelKey: 'nav.account', icon: UserCircle },
     { to: '/settings', labelKey: 'nav.settings', icon: Gear },

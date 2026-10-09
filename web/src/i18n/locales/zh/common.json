@@ -18,6 +18,7 @@
     "logs": "日志",
     "assistant": "AI 助手",
     "agents": "节点",
+    "notifications": "通知",
     "settings": "设置",
     "ipGroups": "IP 黑白名单",
     "lifecycle": "请求生命周期",
@@ -539,7 +540,8 @@
       "noKnownBots": "暂无白名单 Bot",
       "uaPatternHint": "对 User-Agent 请求头做子串匹配。",
       "quickAdd": "快速添加：",
-      "comingSoon": "即将支持"
+      "comingSoon": "即将支持",
+      "empty": "暂无内容"
     },
     "cc": {
       "title": "CC 防护",

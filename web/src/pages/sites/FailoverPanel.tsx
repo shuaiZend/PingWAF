@@ -13,9 +13,9 @@ import type { FailoverPolicy } from '@/api/types'
 
 /** Select options, ordered from "least specific" to "most explicit". */
 const POLICY_OPTIONS: { value: FailoverPolicy; labelKey: string }[] = [
-  { value: 'inherit', labelKey: 'sites.failover.policy.inherit' },
-  { value: 'open', labelKey: 'sites.failover.policy.open' },
-  { value: 'closed', labelKey: 'sites.failover.policy.closed' },
+  { value: 'inherit', labelKey: 'pages.sites.failover.policy.inherit' },
+  { value: 'open', labelKey: 'pages.sites.failover.policy.open' },
+  { value: 'closed', labelKey: 'pages.sites.failover.policy.closed' },
 ]
 
 /**
@@ -47,7 +47,7 @@ export function FailoverPanel() {
   const save = useMutation({
     mutationFn: (next: FailoverPolicy) => failoverApi.update(siteId, next),
     onSuccess: (updated) => {
-      toast.success(t('sites.failover.saved'))
+      toast.success(t('pages.sites.failover.saved'))
       setOverride(updated.failover_policy)
       void queryClient.invalidateQueries({
         queryKey: failoverKeys.all(siteId),
@@ -60,22 +60,22 @@ export function FailoverPanel() {
   if (query.isError || !query.data || policy === null) return null
 
   const defaultHint = query.data.default_fail_open
-    ? t('sites.failover.defaultOpen')
-    : t('sites.failover.defaultClosed')
+    ? t('pages.sites.failover.defaultOpen')
+    : t('pages.sites.failover.defaultClosed')
 
   return (
     <Card>
       <CardHeader
-        title={t('sites.failover.title')}
-        description={t('sites.failover.description')}
+        title={t('pages.sites.failover.title')}
+        description={t('pages.sites.failover.description')}
       />
       <CardBody>
         <Select
-          label={t('sites.failover.policyLabel')}
+          label={t('pages.sites.failover.policyLabel')}
           hint={
             policy === 'inherit'
               ? defaultHint
-              : t('sites.failover.inheritHint', { default: defaultHint })
+              : t('pages.sites.failover.inheritHint', { default: defaultHint })
           }
           value={policy}
           options={POLICY_OPTIONS.map((o) => ({

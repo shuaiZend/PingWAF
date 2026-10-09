@@ -311,7 +311,7 @@ export function NotificationsPage() {
                     disabled={eventsOffset === 0}
                     onClick={() => setEventsOffset((o) => Math.max(0, o - 50))}
                   >
-                    {t('pagination.prev')}
+                    {t('pagination.previous')}
                   </Button>
                   <Button
                     size="sm"
