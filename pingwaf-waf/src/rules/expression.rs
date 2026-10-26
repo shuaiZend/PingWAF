@@ -25,6 +25,12 @@ use ipnet::IpNet;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
+/// Configuration-controlled expressions are untrusted input: bound both the
+/// source size and the AST shape before recursive descent/evaluation.
+const MAX_EXPRESSION_LEN: usize = 16 * 1024;
+const MAX_EXPRESSION_TOKENS: usize = 512;
+const MAX_EXPRESSION_DEPTH: usize = 64;
+
 // ---------------------------------------------------------------------------
 // AST
 // ---------------------------------------------------------------------------
@@ -323,9 +329,23 @@ fn utf8_width(b: u8) -> usize {
 struct Parser {
     toks: Vec<Token>,
     pos: usize,
+    depth: usize,
 }
 
 impl Parser {
+    fn enter(&mut self) -> Result<()> {
+        self.depth += 1;
+        if self.depth > MAX_EXPRESSION_DEPTH {
+            self.depth -= 1;
+            bail!("expression nesting exceeds {MAX_EXPRESSION_DEPTH} levels");
+        }
+        Ok(())
+    }
+
+    fn leave(&mut self) {
+        self.depth = self.depth.saturating_sub(1);
+    }
+
     fn peek(&self) -> &Token {
         self.toks.get(self.pos).unwrap_or(&Token::Eof)
     }
@@ -381,7 +401,9 @@ impl Parser {
                 // for the comparison parser. Here we are at the start of a
                 // clause, so it must be unary.
                 self.next();
+                self.enter()?;
                 let inner = self.parse_unary()?;
+                self.leave();
                 return Ok(Expression::Not(Box::new(inner)));
             }
         }
@@ -392,7 +414,9 @@ impl Parser {
         match self.peek().clone() {
             Token::LParen => {
                 self.next();
+                self.enter()?;
                 let e = self.parse_or()?;
+                self.leave();
                 if self.next() != Token::RParen {
                     bail!("expected ')' in expression");
                 }
@@ -593,8 +617,24 @@ fn parse_cidr(s: &str) -> Result<IpNet> {
 
 /// Parse a Cloudflare-style expression string.
 pub fn parse_expression(input: &str) -> Result<Expression> {
+    if input.len() > MAX_EXPRESSION_LEN {
+        bail!(
+            "expression length {} exceeds {MAX_EXPRESSION_LEN} bytes",
+            input.len()
+        );
+    }
     let toks = tokenize(input)?;
-    let mut p = Parser { toks, pos: 0 };
+    if toks.len() > MAX_EXPRESSION_TOKENS {
+        bail!(
+            "expression has {} tokens, maximum is {MAX_EXPRESSION_TOKENS}",
+            toks.len()
+        );
+    }
+    let mut p = Parser {
+        toks,
+        pos: 0,
+        depth: 0,
+    };
     let e = p.parse_or()?;
     if p.peek() != &Token::Eof {
         bail!("trailing tokens after expression at position {}", p.pos);
@@ -967,5 +1007,32 @@ mod tests {
     #[test]
     fn rejects_unbalanced_parens() {
         assert!(parse_expression("(http.host eq \"x\"").is_err());
+    }
+
+    #[test]
+    fn rejects_deeply_nested_expressions() {
+        let deep = format!(
+            "{}http.host eq \"x\"{}",
+            "(".repeat(MAX_EXPRESSION_DEPTH + 1),
+            ")".repeat(MAX_EXPRESSION_DEPTH + 1)
+        );
+        assert!(parse_expression(&deep).is_err());
+    }
+
+    #[test]
+    fn rejects_long_not_chains() {
+        let chain = format!(
+            "{}http.host eq \"x\"",
+            "not ".repeat(MAX_EXPRESSION_DEPTH + 1)
+        );
+        assert!(parse_expression(&chain).is_err());
+    }
+
+    #[test]
+    fn rejects_oversized_or_token_dense_expressions() {
+        assert!(parse_expression(&"a".repeat(MAX_EXPRESSION_LEN + 1)).is_err());
+        let dense = vec!["http.host eq \"x\""; MAX_EXPRESSION_TOKENS / 3 + 1]
+            .join(" or ");
+        assert!(parse_expression(&dense).is_err());
     }
 }

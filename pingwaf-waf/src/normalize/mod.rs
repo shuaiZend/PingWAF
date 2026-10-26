@@ -267,6 +267,20 @@ pub fn normalize_request<'a>(
     expand_base64(&mut decoded_values, max_decode_layers, decode_escapes);
     expand_b64_substrings(&mut decoded_values, decode_escapes);
 
+    // Bound the total scan surface, not just individual parser inputs. A
+    // 64 KiB query or a base64-expanded form can otherwise create thousands of
+    // values (and thousands of AC/regex passes) from one small request.
+    decoded_values.truncate(MAX_DECODED_VALUES);
+    for value in &mut decoded_values {
+        if value.decoded.len() > MAX_DECODED_VALUE_LEN {
+            let mut end = MAX_DECODED_VALUE_LEN;
+            while end > 0 && !value.decoded.is_char_boundary(end) {
+                end -= 1;
+            }
+            value.decoded.truncate(end);
+        }
+    }
+
     NormalizedRequest {
         method,
         path: normalized_path,
@@ -400,7 +414,7 @@ fn parse_query(
     // cut classic command-injection payloads (`cmd=;cat /etc/passwd`) into an
     // empty value plus a name-only fragment, hiding the attack from the
     // detectors.
-    for pair in query.split('&') {
+    for pair in query.split('&').take(MAX_QUERY_PARAMS) {
         if pair.is_empty() {
             continue;
         }
@@ -529,6 +543,13 @@ const JSON_MAX_DEPTH: usize = 6;
 const JSON_MAX_VALUE_LEN: usize = 4096;
 const JSON_MAX_VALUES: usize = 64;
 
+/// Hard caps for the query/decoded scan surface. These are deliberately
+/// independent of the wire body cap: one 64 KiB query can otherwise expand
+/// into thousands of independently scanned values.
+const MAX_QUERY_PARAMS: usize = 256;
+const MAX_DECODED_VALUES: usize = 2048;
+const MAX_DECODED_VALUE_LEN: usize = 8 * 1024;
+
 /// A JSON-looking body: JSON content type or an object/array opening brace
 /// after leading whitespace. The sniff only *enables* the parse — a parse
 /// failure falls back to blob-only scanning.
@@ -548,9 +569,6 @@ fn unpack_json(
     decode_escapes: bool,
     decoded_values: &mut Vec<DecodedValue>,
 ) {
-    if body.len() > JSON_MAX_VALUE_LEN * 64 {
-        return;
-    }
     let Ok(root) = serde_json::from_str::<serde_json::Value>(body) else {
         return;
     };
