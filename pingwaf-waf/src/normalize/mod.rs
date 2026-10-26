@@ -223,14 +223,23 @@ pub fn normalize_request<'a>(
     if let Some(text) = body_text.as_deref() {
         // Form-encoded bodies are split into parameters so each value is
         // inspected separately; anything else is scanned as a single blob.
-        let ctype = headers
+        let ctype_raw = headers
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
-            .map(|(_, v)| v.to_ascii_lowercase())
+            .map(|(_, v)| v.as_str())
             .unwrap_or_default();
+        let ctype = ctype_raw.to_ascii_lowercase();
         if ctype.contains("application/x-www-form-urlencoded") {
             parse_form_body(
                 text,
+                max_decode_layers,
+                decode_escapes,
+                &mut decoded_values,
+            );
+        } else if ctype.contains("multipart/form-data") {
+            parse_multipart_body(
+                text,
+                ctype_raw,
                 max_decode_layers,
                 decode_escapes,
                 &mut decoded_values,
@@ -470,6 +479,68 @@ fn parse_query(
     out
 }
 
+/// Extract multipart field names, filenames and values. This is deliberately
+/// text-oriented and bounded: binary uploads are still covered by their
+/// filename/field metadata, while form-field payloads become typed scan
+/// surfaces instead of one opaque blob.
+fn parse_multipart_body(
+    body: &str,
+    content_type: &str,
+    max_decode_layers: usize,
+    decode_escapes: bool,
+    decoded_values: &mut Vec<DecodedValue>,
+) {
+    let Some(boundary) = content_type
+        .split(';')
+        .find_map(|part| part.trim().strip_prefix("boundary="))
+        .map(|value| value.trim_matches('"'))
+        .filter(|value| !value.is_empty())
+    else {
+        return;
+    };
+    let delimiter = format!("--{boundary}");
+    for part in body.split(&delimiter).skip(1).take(MAX_MULTIPART_PARTS) {
+        if part.starts_with("--") {
+            break;
+        }
+        let Some((headers, value)) = part.split_once("\r\n\r\n") else {
+            continue;
+        };
+        let mut name = String::new();
+        for line in headers.lines() {
+            let Some((key, val)) = line.split_once(':') else {
+                continue;
+            };
+            if key.eq_ignore_ascii_case("content-disposition") {
+                for attr in val.split(';').map(str::trim) {
+                    if let Some(v) = attr.strip_prefix("name=") {
+                        name = v.trim_matches('"').to_string();
+                    }
+                }
+            }
+        }
+        let value = value.trim_end_matches("\r\n");
+        if value.len() > MAX_DECODED_VALUE_LEN {
+            continue;
+        }
+        let decoded = decode_value(value, max_decode_layers, decode_escapes);
+        decoded_values.push(DecodedValue {
+            source: ValueSource::Body,
+            name: name.clone(),
+            decoded: decoded.clone(),
+            field: true,
+        });
+        if !name.is_empty() && name.len() <= 1024 {
+            decoded_values.push(DecodedValue {
+                source: ValueSource::Body,
+                name: String::new(),
+                decoded: name,
+                field: true,
+            });
+        }
+    }
+}
+
 /// Parse a `application/x-www-form-urlencoded` body. Same shape as
 /// [`parse_query`] but tags every value with [`ValueSource::Body`] so the
 /// engine can weight body hits differently from query-string hits.
@@ -549,6 +620,7 @@ const JSON_MAX_VALUES: usize = 64;
 const MAX_QUERY_PARAMS: usize = 256;
 const MAX_DECODED_VALUES: usize = 2048;
 const MAX_DECODED_VALUE_LEN: usize = 8 * 1024;
+const MAX_MULTIPART_PARTS: usize = 64;
 
 /// A JSON-looking body: JSON content type or an object/array opening brace
 /// after leading whitespace. The sniff only *enables* the parse — a parse
@@ -1441,5 +1513,36 @@ mod tests {
             .find(|v| v.name == "q.b64.policy.b64")
             .expect("layer-2 expansion");
         assert_eq!(layer2.decoded, "; echo `/bin/cat /etc/hosts`");
+    }
+
+    #[test]
+    fn multipart_fields_are_typed_scan_surfaces() {
+        let body = concat!(
+            "--X\r\n",
+            "Content-Disposition: form-data; name=\"cmd\"\r\n",
+            "\r\n",
+            "cat /etc/passwd\r\n",
+            "--X--\r\n"
+        );
+        let headers = vec![(
+            "content-type".to_string(),
+            "multipart/form-data; boundary=X".to_string(),
+        )];
+        let req = normalize_request(
+            "POST",
+            "/upload",
+            "",
+            &headers,
+            Some(body.as_bytes()),
+            3,
+            false,
+        );
+        let field = req
+            .decoded_values
+            .iter()
+            .find(|value| value.name == "cmd")
+            .expect("multipart field");
+        assert!(field.field);
+        assert!(field.decoded.contains("/etc/passwd"));
     }
 }
