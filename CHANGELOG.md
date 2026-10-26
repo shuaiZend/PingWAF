@@ -30,11 +30,31 @@ breaking changes.
   readiness read/report and the 250ms CPU sample are bounded or moved to the
   blocking pool.
 
+- **WAF expression/body inspection is bounded.** Expressions are capped at
+  16 KiB, 512 tokens and 64 nesting levels; JSON no longer abandons typed
+  members at 256 KiB, multipart fields are parsed as typed surfaces, query /
+  decoded-value / encoding-layer limits were added, and invalid body/threshold
+  settings are clamped or rejected.
+- **Public proxy listeners have safe defaults.** Generated listeners now set
+  bounded downstream read/write timeouts, H2 idle timeout and keepalive request
+  limit; locations default to a 16 MB body cap. Upstream certificate
+  verification defaults to strict, and connection retries are capped at three
+  with non-idempotent methods excluded.
+- **Control-plane large uploads are not buffered by the WAF.** Backup and GeoIP
+  upload routes skip WAF body buffering (header/query rules still apply), and
+  authenticated requests reuse the `AuthUser` resolved by the password-change
+  middleware instead of querying the users table twice.
+- **Heartbeat sweeps are indexed and throttled.** Added migration 082 indexes
+  for retention/sweep queries; certificate sweep is hourly, blocked-IP empty
+  reports collapse to one DELETE, and `mark_offline` uses a conditional
+  update so a stale row cannot overwrite a newer heartbeat.
+
 ### Documentation
 
 - Document the 9080/9090 exposure boundary, private binding/VPN guidance, and
   the distinction between management-plane pre-handshake limits and data-plane
-  downstream timeouts.
+  downstream timeouts. Note the stricter upstream certificate default and the
+  16 MB default request-body cap for generated sites.
 
 ## [PingWAF 0.31.1] — 2026-10-26
 

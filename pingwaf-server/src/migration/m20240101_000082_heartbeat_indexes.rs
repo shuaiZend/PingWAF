@@ -1,7 +1,7 @@
 //! Indexes for heartbeat retention sweeps and liveness queries.
 //!
 //! The heartbeat path is read/write hot; these indexes keep the periodic
-//! retention DELETEs and the stale-pending certificate sweep from scanning
+//! retention DELETE statements and the stale-pending certificate sweep from scanning
 //! whole tables.
 
 use sea_orm_migration::prelude::*;

@@ -378,10 +378,19 @@ pub fn parse_from_conf(conf: PingapConfig) -> Vec<ServerConf> {
 
 #[cfg(test)]
 mod tests {
-    use super::ServerConf;
+    use super::{ServerConf, is_public_listener};
     use pingora::protocols::l4::ext::TcpKeepalive;
     use pretty_assertions::assert_eq;
     use std::time::Duration;
+
+    #[test]
+    fn public_listener_detection_covers_both_ip_families() {
+        assert!(is_public_listener("0.0.0.0:80"));
+        assert!(is_public_listener("[::]:443"));
+        assert!(is_public_listener("0.0.0.0:80,127.0.0.1:3000"));
+        assert!(!is_public_listener("127.0.0.1:3000"));
+        assert!(!is_public_listener("127.0.0.1:8080"));
+    }
 
     #[test]
     fn test_server_conf() {

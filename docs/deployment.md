@@ -580,6 +580,12 @@ health probes; it does not rely on the kernel accept queue for backpressure.
 The Compose healthcheck uses `curl --connect-timeout 2 --max-time 3`; use the
 same bounded probe in an external watchdog rather than an unbounded `curl`.
 
+Generated public listeners now default to 60s downstream read/write timeouts,
+a 16 MB request-body cap and HTTPS upstream certificate verification. A
+self-signed origin must be explicitly allowed in the site's origin settings;
+this is a deliberate behavior change from the previous lenient default. See
+the release notes before upgrading an existing deployment.
+
 ### Login Rate Limiting
 
 The control plane rate-limits its credential endpoints (`login`, passkey
