@@ -525,6 +525,7 @@ fn exempt(path: &str) -> bool {
 /// turn every backup/GeoIP upload into a 413 before the handler runs.
 fn body_inspection_exempt(path: &str) -> bool {
     path.ends_with("/config-backups/upload")
+        || (path.contains("/config-backups/") && path.ends_with("/upload"))
         || path.ends_with("/login-security/geoip")
 }
 

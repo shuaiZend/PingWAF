@@ -1217,16 +1217,10 @@ fn cached_rules_to_pingap_config(
 
     Some(PingapConfig {
         basic: BasicConf {
-            // Always a concrete value, never `None`: the pools that do not
-            // state their own `verify_cert` (anything created before the
-            // global switch existed, and anything that explicitly opted into
-            // "follow the default") resolve against it, and a `None` here
-            // would fall through to pingora's strict default and 502 every
-            // self-signed origin. An agent that has not synced yet keeps the
-            // historical lenient behaviour, which is also the control
-            // plane's default.
-            // Secure by default: a self-signed origin must be explicitly
-            // allowed by the control plane, not silently trusted.
+            // Always a concrete value, never `None`: pools that do not state
+            // their own `verify_cert` resolve against it. The default is
+            // strict; a self-signed origin must be explicitly allowed by the
+            // control plane rather than silently trusted.
             origin_verify_cert: Some(cached.origin_verify_cert.unwrap_or(true)),
             ..Default::default()
         },

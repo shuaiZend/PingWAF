@@ -1746,9 +1746,7 @@ impl ProxyHttp for Server {
         if let Some(upstream_instance) = &ctx.upstream.upstream_instance {
             upstream_instance.on_transport_failure(&ctx.upstream.address);
         }
-        let Some(max_retries) = ctx.upstream.max_retries else {
-            return e;
-        };
+        let max_retries = ctx.upstream.max_retries.unwrap_or(3);
         if ctx.upstream.retries >= max_retries {
             return e;
         }

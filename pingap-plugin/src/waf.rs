@@ -3097,9 +3097,12 @@ impl TryFrom<&PluginConf> for WafPlugin {
         let paranoia_level =
             (get_int_conf_or_default(value, "paranoia_level", 2) as u8)
                 .clamp(1, 4);
-        let anomaly_threshold =
-            get_int_conf_or_default(value, "anomaly_threshold", 40)
-                .clamp(1, 10_000) as u32;
+        let threshold = get_int_conf_or_default(value, "anomaly_threshold", 40);
+        let anomaly_threshold = if threshold > 0 {
+            threshold.min(10_000) as u32
+        } else {
+            40
+        };
         let detections = get_str_slice_conf(value, "detections");
         let monitor_categories = parse_monitor_categories(&get_str_slice_conf(
             value,

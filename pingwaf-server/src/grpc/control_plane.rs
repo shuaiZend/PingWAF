@@ -1200,7 +1200,16 @@ async fn persist_heartbeat(
     // This sweep scans for stale pending rows; it is not part of liveness and
     // must not run on every agent heartbeat. One attempt per hour is enough.
     let now = Utc::now().timestamp();
-    if now.saturating_sub(LAST_CERT_SWEEP.swap(now, Ordering::Relaxed)) >= 3600
+    let previous = LAST_CERT_SWEEP.load(Ordering::Relaxed);
+    if now.saturating_sub(previous) >= 3600
+        && LAST_CERT_SWEEP
+            .compare_exchange(
+                previous,
+                now,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            )
+            .is_ok()
     {
         sweep_stale_pending_certificates(db).await;
     }

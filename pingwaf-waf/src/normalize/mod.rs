@@ -490,12 +490,20 @@ fn parse_multipart_body(
     decode_escapes: bool,
     decoded_values: &mut Vec<DecodedValue>,
 ) {
-    let Some(boundary) = content_type
-        .split(';')
-        .find_map(|part| part.trim().strip_prefix("boundary="))
-        .map(|value| value.trim_matches('"'))
-        .filter(|value| !value.is_empty())
-    else {
+    let Some(boundary) = content_type.split(';').find_map(|part| {
+        let (key, value) = part.trim().split_once('=')?;
+        key.eq_ignore_ascii_case("boundary")
+            .then(|| value.trim_matches('"'))
+            .filter(|value| !value.is_empty())
+    }) else {
+        // No boundary: keep the whole body as a weak blob instead of silently
+        // dropping it from the scan surface.
+        decoded_values.push(DecodedValue {
+            source: ValueSource::Body,
+            name: String::new(),
+            decoded: decode_value(body, max_decode_layers, decode_escapes),
+            field: false,
+        });
         return;
     };
     let delimiter = format!("--{boundary}");
@@ -520,9 +528,15 @@ fn parse_multipart_body(
             }
         }
         let value = value.trim_end_matches("\r\n");
-        if value.len() > MAX_DECODED_VALUE_LEN {
-            continue;
-        }
+        let value = if value.len() > MAX_DECODED_VALUE_LEN {
+            let mut end = MAX_DECODED_VALUE_LEN;
+            while end > 0 && !value.is_char_boundary(end) {
+                end -= 1;
+            }
+            &value[..end]
+        } else {
+            value
+        };
         let decoded = decode_value(value, max_decode_layers, decode_escapes);
         decoded_values.push(DecodedValue {
             source: ValueSource::Body,
