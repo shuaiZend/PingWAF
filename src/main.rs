@@ -282,6 +282,9 @@ fn new_server_config(
 ) -> server::configuration::ServerConf {
     let basic_conf = &conf.basic;
     let mut server_conf = server::configuration::ServerConf {
+        // Pingora's built-in default is 16 attempts. Keep a small, explicit
+        // ceiling even for configs that only set a per-location limit.
+        max_retries: 3,
         pid_file: basic_conf.get_pid_file(),
         upgrade_sock: upgrade_sock_path(basic_conf),
         user: basic_conf.user.clone(),

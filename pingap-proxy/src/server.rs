@@ -746,8 +746,14 @@ impl Server {
     }
     #[inline]
     fn initialize_context(&self, session: &mut Session, ctx: &mut Ctx) {
-        session.set_read_timeout(self.downstream_read_timeout);
-        session.set_write_timeout(self.downstream_write_timeout);
+        // Do not overwrite Pingora's session defaults with `None`: an
+        // unset generic listener still needs its 60s read timeout.
+        if let Some(timeout) = self.downstream_read_timeout {
+            session.set_read_timeout(Some(timeout));
+        }
+        if let Some(timeout) = self.downstream_write_timeout {
+            session.set_write_timeout(Some(timeout));
+        }
 
         if let Some(stream) = session.stream() {
             ctx.conn.id = stream.id() as usize;
@@ -1724,11 +1730,17 @@ impl ProxyHttp for Server {
     }
     fn fail_to_connect(
         &self,
-        _session: &mut Session,
+        session: &mut Session,
         _peer: &HttpPeer,
         ctx: &mut Self::CTX,
         mut e: Box<pingora::Error>,
     ) -> Box<pingora::Error> {
+        // Connection attempts can be retried safely, but do not multiply
+        // non-idempotent methods across the default retry budget.
+        let method = session.req_header().method.as_str();
+        if !matches!(method, "GET" | "HEAD" | "OPTIONS" | "TRACE") {
+            return e;
+        }
         // The peer is the one `upstream_peer` just returned, whose address
         // it recorded on the context; no need to format it again.
         if let Some(upstream_instance) = &ctx.upstream.upstream_instance {

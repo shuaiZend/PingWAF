@@ -20,6 +20,23 @@ use std::time::Duration;
 static ERROR_TEMPLATE: &str = include_str!("error.html");
 
 // ServerConf struct represents the configuration for a server instance
+const DEFAULT_PUBLIC_DOWNSTREAM_READ_TIMEOUT: Duration =
+    Duration::from_secs(60);
+const DEFAULT_PUBLIC_DOWNSTREAM_WRITE_TIMEOUT: Duration =
+    Duration::from_secs(60);
+const DEFAULT_PUBLIC_H2_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+const DEFAULT_PUBLIC_KEEPALIVE_REQUEST_LIMIT: u32 = 1000;
+
+/// Public HTTP listeners must not inherit the historic "unlimited" downstream
+/// policy. Generic/internal listeners keep the operator's explicit value (and
+/// Pingora's own default when unset).
+fn is_public_listener(addr: &str) -> bool {
+    addr.split(',').any(|addr| {
+        let addr = addr.trim();
+        addr.ends_with(":80") || addr.ends_with(":443")
+    })
+}
+
 #[derive(Debug, Default)]
 pub struct ServerConf {
     // Whether this server instance handles admin-related functionality
@@ -283,6 +300,33 @@ pub fn parse_from_conf(conf: PingapConfig) -> Vec<ServerConf> {
             None
         };
 
+        let public_listener = is_public_listener(&item.addr);
+        // The connection/handshake timeout bounds the first read (pingora
+        // has no separate handshake knob); a shorter read timeout wins. For
+        // public listeners a missing value must not become `None`: that would
+        // override Pingora's 60s session default and enable Slowloris.
+        let downstream_read_timeout = match (
+            item.downstream_connection_timeout,
+            item.downstream_read_timeout,
+        ) {
+            (Some(connect), Some(read)) => Some(connect.min(read)),
+            (Some(connect), None) => Some(connect),
+            (None, Some(read)) => Some(read),
+            (None, None) if public_listener => {
+                Some(DEFAULT_PUBLIC_DOWNSTREAM_READ_TIMEOUT)
+            },
+            (None, None) => None,
+        };
+        let downstream_write_timeout =
+            item.downstream_write_timeout.or(public_listener
+                .then_some(DEFAULT_PUBLIC_DOWNSTREAM_WRITE_TIMEOUT));
+        let h2_idle_timeout = item
+            .h2_idle_timeout
+            .or(public_listener.then_some(DEFAULT_PUBLIC_H2_IDLE_TIMEOUT));
+        let keepalive_request_limit =
+            item.keepalive_request_limit.or(public_listener
+                .then_some(DEFAULT_PUBLIC_KEEPALIVE_REQUEST_LIMIT));
+
         // Create server configuration with all settings
         servers.push(ServerConf {
             name,
@@ -313,7 +357,7 @@ pub fn parse_from_conf(conf: PingapConfig) -> Vec<ServerConf> {
             h2_initial_connection_window_size: item
                 .h2_initial_connection_window_size
                 .map(|v| u32::try_from(v.as_u64()).unwrap_or(u32::MAX)),
-            h2_idle_timeout: item.h2_idle_timeout,
+            h2_idle_timeout,
             h1_pipelining: item.h1_pipelining.unwrap_or_default(),
             tcp_keepalive,
             tcp_fastopen: item.tcp_fastopen,
@@ -323,18 +367,9 @@ pub fn parse_from_conf(conf: PingapConfig) -> Vec<ServerConf> {
             modules: item.modules.clone(),
             enable_server_timing: item.enable_server_timing.unwrap_or_default(),
             error_template,
-            // The connection/handshake timeout bounds the first read (pingora
-            // has no separate handshake knob); a shorter read timeout wins.
-            downstream_read_timeout: match (
-                item.downstream_connection_timeout,
-                item.downstream_read_timeout,
-            ) {
-                (Some(connect), Some(read)) => Some(connect.min(read)),
-                (Some(connect), None) => Some(connect),
-                (None, read) => read,
-            },
-            downstream_write_timeout: item.downstream_write_timeout,
-            keepalive_request_limit: item.keepalive_request_limit,
+            downstream_read_timeout,
+            downstream_write_timeout,
+            keepalive_request_limit,
         });
     }
 

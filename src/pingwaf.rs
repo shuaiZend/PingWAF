@@ -1207,6 +1207,14 @@ fn cached_rules_to_pingap_config(
         },
     );
 
+    // A generated site must not accept an unbounded request body by default.
+    // Explicit per-location caps from the control plane still win.
+    for location in locations.values_mut() {
+        if location.client_max_body_size.is_none() {
+            location.client_max_body_size = "16MB".parse().ok();
+        }
+    }
+
     Some(PingapConfig {
         basic: BasicConf {
             // Always a concrete value, never `None`: the pools that do not
@@ -1217,9 +1225,9 @@ fn cached_rules_to_pingap_config(
             // self-signed origin. An agent that has not synced yet keeps the
             // historical lenient behaviour, which is also the control
             // plane's default.
-            origin_verify_cert: Some(
-                cached.origin_verify_cert.unwrap_or(false),
-            ),
+            // Secure by default: a self-signed origin must be explicitly
+            // allowed by the control plane, not silently trusted.
+            origin_verify_cert: Some(cached.origin_verify_cert.unwrap_or(true)),
             ..Default::default()
         },
         upstreams,
@@ -3016,8 +3024,8 @@ mod tests {
 
         // A pool with no opinion of its own passes `null` through and is
         // resolved against the deployment default, which the generator
-        // states explicitly; `None` here would mean "let pingora decide",
-        // i.e. strict, and every self-signed origin would 502.
+        // states explicitly. The default is now strict so a self-signed
+        // origin must opt out explicitly.
         assert_eq!(
             config.upstreams.get("pool-c").unwrap().verify_cert,
             None,
@@ -3025,8 +3033,8 @@ mod tests {
         );
         assert_eq!(
             config.basic.origin_verify_cert,
-            Some(false),
-            "the deployment default is always stated and defaults to lenient"
+            Some(true),
+            "the deployment default is always stated and defaults to strict"
         );
         assert_eq!(
             config.upstreams.get("pool-d").unwrap().verify_cert,
