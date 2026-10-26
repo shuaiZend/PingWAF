@@ -520,6 +520,14 @@ fn exempt(path: &str) -> bool {
     crate::api::is_health_probe(path)
 }
 
+/// Routes whose body is already bounded by their own (much larger) upload
+/// limit. Reading them through the control-plane WAF's 128 KiB buffer would
+/// turn every backup/GeoIP upload into a 413 before the handler runs.
+fn body_inspection_exempt(path: &str) -> bool {
+    path.ends_with("/config-backups/upload")
+        || path.ends_with("/login-security/geoip")
+}
+
 /// The peer address of the connection, when the serve layer provided one.
 pub(crate) fn peer_addr(request: &Request) -> Option<std::net::SocketAddr> {
     request
@@ -736,23 +744,33 @@ pub async fn waf_guard(
     };
 
     let (parts, body) = request.into_parts();
-    let bytes = match axum::body::to_bytes(body, WAF_BODY_LIMIT).await {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            tracing::warn!(error = %err, "control plane request body exceeded the WAF inspection limit");
-            let mut response = error_response(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "request_body_too_large",
-                "request body exceeds the control plane WAF inspection limit",
-            );
-            response.extensions_mut().insert(ProtectionOutcome {
-                action: action::BLOCKED_WAF,
-                reason: Some(format!(
-                    "body larger than {WAF_BODY_LIMIT} bytes was not inspected"
-                )),
-            });
-            return response;
-        },
+    let (scan_body, request_body) = if body_inspection_exempt(parts.uri.path())
+    {
+        // Keep the body streaming to the route-level handler; header/query
+        // rules still run below.
+        (None, body)
+    } else {
+        match axum::body::to_bytes(body, WAF_BODY_LIMIT).await {
+            Ok(bytes) => {
+                let request_body = axum::body::Body::from(bytes.clone());
+                (Some(bytes), request_body)
+            },
+            Err(err) => {
+                tracing::warn!(error = %err, "control plane request body exceeded the WAF inspection limit");
+                let mut response = error_response(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "request_body_too_large",
+                    "request body exceeds the control plane WAF inspection limit",
+                );
+                response.extensions_mut().insert(ProtectionOutcome {
+                    action: action::BLOCKED_WAF,
+                    reason: Some(format!(
+                        "body larger than {WAF_BODY_LIMIT} bytes was not inspected"
+                    )),
+                });
+                return response;
+            },
+        }
     };
 
     let request_data = RequestData {
@@ -769,7 +787,10 @@ pub async fn waf_guard(
                     .map(|value| (name.as_str().to_string(), value.to_string()))
             })
             .collect(),
-        body: (!bytes.is_empty()).then(|| bytes.to_vec()),
+        body: scan_body
+            .as_ref()
+            .filter(|bytes| !bytes.is_empty())
+            .map(|bytes| bytes.to_vec()),
         client_ip,
         country_code: None,
         scheme,
@@ -777,7 +798,7 @@ pub async fn waf_guard(
     };
     let verdict = engine.inspect(&request_data);
 
-    let request = Request::from_parts(parts, axum::body::Body::from(bytes));
+    let request = Request::from_parts(parts, request_body);
     let blocking = policy.waf_blocking
         && matches!(verdict.action, WafAction::Block | WafAction::Challenge);
     if blocking {

@@ -256,6 +256,9 @@ pub async fn require_password_change(
         let request = Request::from_parts(parts, _body);
         return next.run(request).await;
     };
+    // The handler extractor runs after this middleware. Reuse the identity
+    // instead of issuing the same users SELECT and JWT verification twice.
+    parts.extensions.insert(user.clone());
     let request = Request::from_parts(parts, _body);
     if !user.must_change_password {
         return next.run(request).await;
@@ -344,6 +347,10 @@ where
         parts: &mut Parts,
         state: &S,
     ) -> Result<Self, Self::Rejection> {
+        // `require_password_change` resolved this request already.
+        if let Some(user) = parts.extensions.get::<AuthUser>() {
+            return Ok(user.clone());
+        }
         let app_state = AppState::from_ref(state);
         let token = bearer_token(parts)?;
         let claims = verify_user_token(&token, app_state.jwt_secret())?;
