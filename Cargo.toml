@@ -107,6 +107,9 @@ kdl = { workspace = true }
 # Global allocator for every target (see src/main.rs): replaces musl's default
 # allocator and glibc malloc's un-trimmed per-thread arenas.
 mimalloc = "0.1.47"
+# Analysis-only heap profiler; mutually exclusive with mimalloc's global
+# allocator and never enabled by default.
+dhat = { version = "0.3.3", optional = true }
 
 [build-dependencies]
 vergen = { version = "10.0.3", features = ["build"] }
@@ -114,6 +117,9 @@ vergen-git2 = "10.0.3"
 
 [features]
 default = ["openssl"]
+# Analysis-only: replace mimalloc with dhat's instrumented allocator and emit
+# dhat-heap.json. Never enable this in a shipped binary.
+dhat = ["dep:dhat"]
 # TLS backend: exactly one of `openssl` (default) and `tls-rustls`. Build the
 # rustls variant with `--no-default-features --features tls-rustls[,full]`.
 openssl = [

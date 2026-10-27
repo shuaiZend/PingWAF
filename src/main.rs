@@ -79,6 +79,7 @@ use sysinfo::System;
 use tracing::{error, info, warn};
 
 mod admin;
+#[cfg(not(feature = "dhat"))]
 mod allocator_tune;
 mod certificates;
 mod cli;
@@ -107,8 +108,13 @@ mod webhook;
 // image (and with it the pprof heap-dump path) was removed on 2026-10-19.
 // CPU/memory attribution now comes from `pingwaf-profiler`, which does not
 // depend on the allocator at all.
+#[cfg(not(feature = "dhat"))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+#[cfg(feature = "dhat")]
+#[global_allocator]
+static GLOBAL: dhat::Alloc = dhat::Alloc;
 
 static TEMPLATE_CONFIG: &str = r###"
 [basic]
@@ -1194,13 +1200,21 @@ fn run() -> Result<(), Box<dyn Error>> {
 }
 
 fn main() {
+    #[cfg(feature = "dhat")]
+    let _dhat = dhat::Profiler::builder()
+        .file_name("dhat-heap.json")
+        .build();
+
     // Same rationale as pingwaf::main: the graph pulls in two rustls crypto
     // providers (ring + aws-lc-rs), so install ring explicitly before any
     // TLS listener or client initialises. No-op if already installed.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     // Allocator retention policy (adaptive by memory ceiling, überridable
-    // via env). Runs before any workload; no-op on repeated calls.
+    // via env). Runs before any workload; no-op on repeated calls. It calls
+    // mimalloc's FFI directly, so it is meaningless (and unsafe to mix) when
+    // dhat owns the global allocator.
+    #[cfg(not(feature = "dhat"))]
     allocator_tune::apply();
 
     // Check if PingWAF mode is requested (via subcommand or PINGWAF_MODE env)
