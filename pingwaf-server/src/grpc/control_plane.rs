@@ -1989,7 +1989,7 @@ async fn persist_blocked_ips(
     use std::collections::HashSet;
 
     // Empty is the common steady state. It means "no blocks": clear the
-    // mirror with one DELETE instead of SELECTing every row and then deleting
+    // mirror with one DELETE instead of reading every row and then deleting
     // the stale set on every heartbeat.
     if blocked_ips.is_empty() {
         if let Err(err) = agent_blocked_ip::Entity::delete_many()
