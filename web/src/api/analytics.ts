@@ -8,6 +8,7 @@ import type {
   SitesOverviewResponse,
   StatusCodeCount,
   TimeBucket,
+  TopIpsQuery,
   TopIp,
   TopPath,
   TopRule,
@@ -42,7 +43,8 @@ export const analyticsApi = {
   topRules: (params: RangeQuery = {}) =>
     apiClient.get<TopRule[]>('/analytics/top-rules', { query: { limit: 10, ...params } }),
 
-  topIps: (params: RangeQuery = {}) =>
+  /** `blocked_only: true` filters to IPs that actually got blocked requests. */
+  topIps: (params: TopIpsQuery = {}) =>
     apiClient.get<TopIp[]>('/analytics/top-ips', { query: { limit: 10, ...params } }),
 
   topPaths: (params: RangeQuery = {}) =>
@@ -129,7 +131,7 @@ export const analyticsKeys = {
     [...analyticsKeys.all, 'bandwidth', params] as const,
   sitesOverTime: (params: RangeQuery) => [...analyticsKeys.all, 'sites-over-time', params] as const,
   topRules: (params: RangeQuery) => [...analyticsKeys.all, 'top-rules', params] as const,
-  topIps: (params: RangeQuery) => [...analyticsKeys.all, 'top-ips', params] as const,
+  topIps: (params: TopIpsQuery) => [...analyticsKeys.all, 'top-ips', params] as const,
   topPaths: (params: RangeQuery) => [...analyticsKeys.all, 'top-paths', params] as const,
   statusCodes: (params: RangeQuery) => [...analyticsKeys.all, 'status-codes', params] as const,
   sites: (params: RangeQuery) => [...analyticsKeys.all, 'sites', params] as const,

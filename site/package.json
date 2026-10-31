@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "description": "Official PingWAF portal — static, multilingual, Cloudflare Pages ready",
   "scripts": {
     "dev": "astro dev",
@@ -13,7 +16,8 @@
     "check:content": "node --experimental-strip-types scripts/check-content.ts",
     "check:links": "node scripts/check-links.mjs",
     "verify": "npm run check:content && npm run check && npm run build && npm run check:links",
-    "capture": "node scripts/capture-screenshots.mjs"
+    "capture": "node scripts/capture-screenshots.mjs",
+    "capture:install": "node scripts/capture-install-screenshots.mjs"
   },
   "devDependencies": {
     "@astrojs/check": "^0.9.12",

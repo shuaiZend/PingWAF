@@ -1,0 +1,403 @@
+---
+import Icon from "../Icon.astro";
+import CodeBlock from "../CodeBlock.astro";
+import ScreenshotFrame from "../ScreenshotFrame.astro";
+import type { InstallContent } from "../../content/schema";
+import type { Locale } from "../../i18n/config";
+
+interface Props {
+  compose: InstallContent["deployment"]["compose"];
+  locale: Locale;
+  /** Copy button labels, reused from the script builder content. */
+  copyLabel: string;
+  copiedLabel: string;
+}
+
+const { compose, locale, copyLabel, copiedLabel } = Astro.props;
+
+// Same shape as the client-side builder: the server-rendered preview matches
+// the defaults, so there is no flash before the script runs.
+const composeDefaults = Object.fromEntries(
+  compose.fields.map((field) => [field.key, field.defaultValue]),
+);
+const SAFE_ENV = /^[A-Za-z0-9_.@:/=+~-]+$/;
+const envValue = (raw: string): string => {
+  const value = raw.replace(/[\r\n]+/g, " ").trim();
+  if (!value) return "";
+  if (SAFE_ENV.test(value)) return value;
+  // Compose .env quoting: double quotes with escaped backslash, double quote
+  // and dollar sign — no newline ever reaches the file.
+  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\$/g, "\\$")}"`;
+};
+const envLines = [
+  `PINGWAF_TAG=${envValue(composeDefaults.tag)}`,
+  `ADMIN_EMAIL=${envValue(composeDefaults.adminEmail)}`,
+  composeDefaults.adminPassword ? `ADMIN_PASSWORD=${envValue(composeDefaults.adminPassword)}` : "",
+].filter(Boolean);
+const composeDefaultsJson = JSON.stringify(composeDefaults);
+---
+<div class="compose" data-compose-builder data-compose-defaults={composeDefaultsJson}>
+  <p class="compose__eyebrow">{compose.tabLabel}</p>
+  <h3 class="compose__title">{compose.title}</h3>
+  <p class="compose__lead">{compose.lead}</p>
+
+  <ul class="compose__reqs">
+    {
+      compose.requirements.map((item) => (
+        <li>
+          <Icon name="check" size={13} />
+          <span>{item}</span>
+        </li>
+      ))
+    }
+  </ul>
+
+  <ol class="compose__steps">
+    {
+      compose.steps.map((step, index) => (
+        <li class="compose__step">
+          <span class="compose__step-num">{index + 1}</span>
+          <div>
+            <h4 class="compose__step-title">{step.title}</h4>
+            <p class="compose__step-body">{step.body}</p>
+          </div>
+        </li>
+      ))
+    }
+  </ol>
+
+  <div class="compose__fields">
+    {
+      compose.fields.map((field) => (
+        <label class="compose__field">
+          <span class="compose__field-label">{field.label}</span>
+          <input
+            type={field.secret ? "password" : "text"}
+            data-env-field={field.key}
+            value={field.defaultValue}
+            placeholder={field.placeholder}
+            autocomplete="off"
+            spellcheck="false"
+          />
+          <span class="compose__field-hint">{field.hint}</span>
+        </label>
+      ))
+    }
+  </div>
+
+  <div class="compose__panel">
+    <div class="compose__panel-head">
+      <span>{compose.envTitle}</span>
+      <button type="button" class="compose__copy" data-copy="compose-env">
+        <Icon name="copy" />
+        <span data-copy-label data-copied={copiedLabel}>{copyLabel}</span>
+      </button>
+    </div>
+    <pre class="compose__code mono" id="compose-env" data-env>{envLines.join("\n")}</pre>
+  </div>
+
+  <div class="compose__panel">
+    <div class="compose__panel-head">
+      <span>{compose.commandTitle}</span>
+      <button type="button" class="compose__copy" data-copy="compose-command">
+        <Icon name="copy" />
+        <span data-copy-label data-copied={copiedLabel}>{copyLabel}</span>
+      </button>
+    </div>
+    <pre class="compose__code mono" id="compose-command">docker compose up -d</pre>
+    <p class="compose__note">{compose.note}</p>
+  </div>
+
+  <div class="compose__upgrade">
+    <h4 class="compose__upgrade-title">{compose.upgradeTitle}</h4>
+    <p class="compose__upgrade-body">{compose.upgradeBody}</p>
+    <CodeBlock locale={locale} lang="bash" filename="bash" code={compose.upgradeCommand} />
+  </div>
+
+  {
+    compose.screenshot && (
+      <ScreenshotFrame
+        shot={{ ...compose.screenshot, url: "docker compose up -d" }}
+        chrome={false}
+        sizes="(max-width: 1080px) 92vw, 720px"
+      />
+    )
+  }
+</div>
+
+<script>
+  const root = document.querySelector<HTMLElement>("[data-compose-builder]");
+  if (root) {
+    const envEl = root.querySelector<HTMLElement>("[data-env]");
+    const inputs = Array.from(root.querySelectorAll<HTMLInputElement>("[data-env-field]"));
+    let composeDefaults: Record<string, string> = {};
+    try {
+      composeDefaults = JSON.parse(root.getAttribute("data-compose-defaults") ?? "{}") as Record<
+        string,
+        string
+      >;
+    } catch {
+      composeDefaults = {};
+    }
+
+    const SAFE = /^[A-Za-z0-9_.@:/=+~-]+$/;
+    /** Quote a value for a compose `.env` file: no newlines, no broken quotes. */
+    const envValue = (raw: string) => {
+      const value = raw.replace(/[\r\n]+/g, " ").trim();
+      if (!value) return "";
+      if (SAFE.test(value)) return value;
+      return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\$/g, "\\$")}"`;
+    };
+
+    const build = () => {
+      if (!envEl) return;
+      const values: Record<string, string> = {};
+      inputs.forEach((input) => {
+        values[input.dataset.envField ?? ""] = input.value;
+      });
+      const line = (key: string, env: string, always = false) => {
+        const value = envValue(values[key] ?? "");
+        if (!value) return "";
+        if (!always && value === envValue(composeDefaults[key] ?? "")) return "";
+        return `${env}=${value}`;
+      };
+      // Identity lines are always present so the .env stays self-describing;
+      // everything else only appears when it deviates from the default.
+      const lines = [
+        line("tag", "PINGWAF_TAG", true),
+        line("adminEmail", "ADMIN_EMAIL", true),
+        line("adminPassword", "ADMIN_PASSWORD", true),
+        line("tlsSans", "PINGWAF_TLS_SANS"),
+        line("httpPort", "PINGWAF_HTTP_PORT"),
+        line("httpsPort", "PINGWAF_HTTPS_PORT"),
+        line("adminPort", "PINGWAF_ADMIN_PORT"),
+      ].filter(Boolean);
+      envEl.textContent = lines.join("\n");
+    };
+
+    inputs.forEach((input) => {
+      input.addEventListener("input", build);
+    });
+    build();
+  }
+</script>
+
+<style>
+  .compose {
+    display: flex;
+    flex-direction: column;
+    gap: 22px;
+  }
+
+  .compose__eyebrow {
+    margin: 0;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--color-text-subtle);
+  }
+
+  .compose__title {
+    margin: 0;
+    font-size: 19px;
+    font-weight: 700;
+    color: var(--color-text-strong);
+  }
+
+  .compose__lead {
+    margin: 0;
+    font-size: var(--site-text-sm);
+    line-height: 1.65;
+    color: var(--color-text-subtle);
+    max-width: 70ch;
+  }
+
+  .compose__reqs {
+    margin: 0;
+    padding: 16px 18px;
+    list-style: none;
+    display: grid;
+    gap: 9px;
+    border: 1px solid var(--color-border-line);
+    border-radius: var(--radius-lg);
+    background: var(--site-surface-inset);
+  }
+
+  .compose__reqs li {
+    display: flex;
+    gap: 9px;
+    align-items: flex-start;
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--color-text-strong);
+  }
+
+  .compose__reqs :global(.icon) {
+    flex: none;
+    margin-top: 3px;
+    color: var(--color-bg-brand);
+  }
+
+  .compose__steps {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: grid;
+    gap: 14px;
+  }
+
+  .compose__step {
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+  }
+
+  .compose__step-num {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    margin-top: 1px;
+    border-radius: 50%;
+    background: var(--site-brand-soft);
+    color: var(--color-text-strong);
+    font-size: 11.5px;
+    font-weight: 700;
+  }
+
+  .compose__step-title {
+    margin: 0 0 3px;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--color-text-strong);
+  }
+
+  .compose__step-body {
+    margin: 0;
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--color-text-subtle);
+    max-width: 70ch;
+  }
+
+  .compose__fields {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 18px;
+  }
+
+  .compose__field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .compose__field-label {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--color-text-strong);
+  }
+
+  .compose__field input {
+    width: 100%;
+    padding: 9px 12px;
+    border: 1px solid var(--color-border-line);
+    border-radius: var(--radius-md);
+    background: var(--color-bg-base);
+    color: var(--color-text-strong);
+    font-family: var(--site-font-mono);
+    font-size: 13px;
+  }
+
+  .compose__field input:focus {
+    outline: none;
+    border-color: var(--color-bg-brand);
+  }
+
+  .compose__field-hint {
+    font-size: 12px;
+    line-height: 1.55;
+    color: var(--color-text-subtle);
+  }
+
+  .compose__panel {
+    border: 1px solid var(--color-border-line);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+    background: #1d1d1d;
+    color: #e8e8e8;
+  }
+
+  .compose__panel-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 12px;
+    background: #262626;
+    border-bottom: 1px solid #303030;
+    font-size: 12.5px;
+    color: #9a9a9a;
+  }
+
+  .compose__copy {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 10px;
+    border: 1px solid #3a3a3a;
+    border-radius: var(--radius-sm);
+    background: #1d1d1d;
+    color: #cfcfcf;
+    font-size: 12px;
+    cursor: pointer;
+  }
+
+  .compose__copy:hover {
+    color: #ffffff;
+    border-color: #4a4a4a;
+  }
+
+  .compose__code {
+    margin: 0;
+    padding: 16px 18px;
+    font-family: var(--site-font-mono);
+    font-size: 13px;
+    line-height: 1.65;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .compose__note {
+    margin: 0;
+    padding: 12px 18px 14px;
+    border-top: 1px solid #303030;
+    color: #9a9a9a;
+    font-size: 12px;
+    line-height: 1.6;
+  }
+
+  .compose__upgrade-title {
+    margin: 0 0 6px;
+    font-size: 14.5px;
+    font-weight: 600;
+    color: var(--color-text-strong);
+  }
+
+  .compose__upgrade-body {
+    margin: 0 0 14px;
+    font-size: 13px;
+    line-height: 1.65;
+    color: var(--color-text-subtle);
+    max-width: 70ch;
+  }
+
+  @media (max-width: 1080px) {
+    .compose__fields {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+</style>

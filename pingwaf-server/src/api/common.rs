@@ -107,6 +107,48 @@ where
     deserializer.deserialize_any(U64Visitor)
 }
 
+/// Accepts a signed integer whether it arrives as a number or as a string.
+///
+/// Same flattening constraint as [`deserialize_u64`]: a struct flattened into a
+/// query struct (see `TopIpsQuery`) is buffered as strings before parsing, so
+/// the default `i64` visitor would reject `?limit=8` with "invalid type: string
+/// \"8\", expected i64".
+pub(crate) fn deserialize_i64<'de, D>(deserializer: D) -> Result<i64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use std::fmt;
+
+    use serde::de::{Error, Visitor};
+
+    struct I64Visitor;
+
+    impl<'de> Visitor<'de> for I64Visitor {
+        type Value = i64;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("an integer or a decimal string")
+        }
+
+        fn visit_i64<E: Error>(self, value: i64) -> Result<i64, E> {
+            Ok(value)
+        }
+
+        fn visit_u64<E: Error>(self, value: u64) -> Result<i64, E> {
+            i64::try_from(value).map_err(|_| E::custom("expected an i64"))
+        }
+
+        fn visit_str<E: Error>(self, value: &str) -> Result<i64, E> {
+            value
+                .trim()
+                .parse()
+                .map_err(|_| E::custom(format!("invalid integer '{value}'")))
+        }
+    }
+
+    deserializer.deserialize_any(I64Visitor)
+}
+
 fn default_page() -> u64 {
     1
 }

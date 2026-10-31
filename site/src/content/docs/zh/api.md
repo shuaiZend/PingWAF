@@ -33,6 +33,33 @@ curl -s https://localhost:9080/api/v1/sites -H "Authorization: Bearer $TOKEN"
 
 站点级接口通过租户边界（`load_site_read` / `load_site_write`）读写，token 只能看到自己有权管理的站点。包含全部查询参数与响应结构的完整参考见仓库中的 `docs/api.md`。
 
+## 证书共享
+
+一张证书（例如泛域名证书）可以服务多个站点。站点能看到自己拥有的证书以及共享给它的证书——每项带 `relation` 字段（`owner`、`linked` 或 `available`）。证书的归属站点仍然负责续期与 ACME 记账。
+
+| 端点 | 用途 |
+| --- | --- |
+| `GET /sites/{id}/certificate-links` | 共享给本站的证书（与证书列表同构） |
+| `POST /sites/{id}/certificate-links` | 关联证书：`{ "certificate_id": "uuid" }` → `201`；本站已拥有或已关联 → `409`；无权读取归属站点 → `404` |
+| `DELETE /sites/{id}/certificate-links/{cert_id}` | 解除关联 → `204`；该证书是本站当前 TLS 证书 → `409` |
+| `GET /sites/{id}/certificates/available` | 本站还可关联的证书 |
+
+`PUT /sites/{id}/ssl-settings` 接受本站拥有或已关联的 `certificate_id`（否则 `400 does not belong to this site and is not linked to it`），以及用于解绑的 `clear_certificate: true`。选中证书后会清空 `site_ssl` 上的旧内联 PEM 副本——边缘始终以下发的选中证书为准。
+
+## 路径例外
+
+处于观察模式（`waf_settings.mode = monitor`）的站点可以把若干请求路径加白，使其跳过选定的防护层（`waf`、`bot`、`access`、`basic_auth`、`mtls`、`ai_bot`、`rate_limit`、`challenge`，或 `*` 表示全部）。非观察模式下保存返回 `409`；数据面在非观察站点上也会完全忽略例外。暂停站点、fail-closed 边缘与动态 IP 封禁不可绕过。`log_hits: true` 时每次命中都会写入 `path_bypass` 安全事件。
+
+| 端点 | 用途 |
+| --- | --- |
+| `GET /sites/{id}/path-exceptions` | 列出例外（每站最多 64 条，`path` 唯一） |
+| `POST /sites/{id}/path-exceptions` | 创建：`path`（以 `/` 开头，≤512）、`match_type`（`prefix`/`exact`/`wildcard`）、`skip_layers`、`note`、`log_hits`、`enabled` |
+| `GET|PUT|DELETE /sites/{id}/path-exceptions/{id}` | 读取 / 部分更新 / 删除（`204`） |
+
+## 日志实时同步
+
+`POST /agents/flush-logs`（管理员）要求所有在线 agent 立即上报内存中的日志缓冲，而不是等待批次间隔。返回 `{ "delivered": N, "offline": M }`；离线 agent 只计数、不入队，且 `delivered` 表示命令已下发——不等于日志已入库。
+
 ## gRPC
 
 Agent 使用 `9090` 上的 `ControlPlane` 服务，定义在 `pingwaf-proto/proto/control_plane.proto`。它承载 `RegisterAgent`、`Heartbeat`、`SyncRules`、`ShipLogs`、`ShipCertEvents`、`ShipMetrics`、`GetSiteConfig`，以及挑战流程使用的访客会话 RPC。TLS 为默认；`grpc_tls_mode = "off"` 只应在可信网络内使用。

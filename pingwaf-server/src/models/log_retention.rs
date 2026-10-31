@@ -52,8 +52,7 @@ pub const MAX_STATIC_SUFFIX_LEN: usize = 10;
 /// into a 400 instead of silently dropping input.
 pub fn normalize_suffix(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
-    let stripped =
-        trimmed.strip_prefix('.').unwrap_or(trimmed).to_lowercase();
+    let stripped = trimmed.strip_prefix('.').unwrap_or(trimmed).to_lowercase();
     if stripped.is_empty()
         || stripped.len() > MAX_STATIC_SUFFIX_LEN
         || !stripped
@@ -68,9 +67,7 @@ pub fn normalize_suffix(raw: &str) -> Option<String> {
 /// Normalizes and validates a whole suffix list: rejects invalid entries,
 /// deduplicates preserving order, enforces the length cap. `Err` carries the
 /// first offending raw entry for the API error message.
-pub fn normalize_suffix_list(
-    raw: &[String],
-) -> Result<Vec<String>, String> {
+pub fn normalize_suffix_list(raw: &[String]) -> Result<Vec<String>, String> {
     if raw.len() > MAX_STATIC_SUFFIXES {
         return Err(format!(
             "at most {MAX_STATIC_SUFFIXES} suffixes are allowed"

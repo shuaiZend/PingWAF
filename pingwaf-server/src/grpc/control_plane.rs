@@ -51,8 +51,8 @@ use crate::grpc::registry::{
 };
 use crate::models::{
     access_log, action, agent, agent_blocked_ip, agent_metric, agent_status,
-    api_key, certificate_events, host_sample, security_event, site,
-    site_certificates,
+    api_key, certificate_events, certificate_links, host_sample,
+    security_event, site, site_certificates,
 };
 
 /// Stream type returned by the server-streaming RPCs.
@@ -1270,7 +1270,10 @@ async fn persist_site_certificates(
     // shape issued one UPDATE per site per heartbeat even when nothing
     // changed. The UPDATE guard below still protects against a concurrent
     // change after this snapshot.
-    let targets: Vec<(Uuid, &str, DateTime<Utc>)> = statuses
+    // `certificate_id` identifies the exact row: one certificate can be shared
+    // by several sites, so matching on `site_id` alone would update whichever
+    // pending row happens to belong to the reporting site.
+    let targets: Vec<(Uuid, Option<Uuid>, &str, DateTime<Utc>)> = statuses
         .iter()
         .filter_map(|status| {
             let row_status = match status.ssl_status.as_str() {
@@ -1279,17 +1282,18 @@ async fn persist_site_certificates(
                 _ => return None,
             };
             let site_id = Uuid::parse_str(&status.site_id).ok()?;
+            let certificate_id = Uuid::parse_str(&status.certificate_id).ok();
             let expires_at = status
                 .ssl_expires_at
                 .and_then(|ts| DateTime::from_timestamp(ts.seconds, 0))?;
-            Some((site_id, row_status, expires_at))
+            Some((site_id, certificate_id, row_status, expires_at))
         })
         .collect();
     if targets.is_empty() {
         return;
     }
 
-    let site_ids: Vec<Uuid> = targets.iter().map(|(id, _, _)| *id).collect();
+    let site_ids: Vec<Uuid> = targets.iter().map(|(id, _, _, _)| *id).collect();
     let current = match site_certificates::Entity::find()
         .filter(site_certificates::Column::SiteId.is_in(site_ids))
         .filter(site_certificates::Column::CertPem.is_null())
@@ -1312,12 +1316,49 @@ async fn persist_site_certificates(
             .push((row.status, row.expires_at));
     }
 
-    for (site_id, row_status, expires_at) in targets {
-        if current_by_site.get(&site_id).is_some_and(|rows| {
-            rows.iter().all(|(status, expiry)| {
-                status == row_status && *expiry == Some(expires_at)
+    for (site_id, certificate_id, row_status, expires_at) in targets {
+        // The agent names the certificate row it observed. Accept it only when
+        // the reporting site owns or is linked to that row: an agent must not
+        // be able to rewrite another site's issuance state by reporting a
+        // foreign id.
+        if let Some(cert_id) = certificate_id {
+            let owned = site_certificates::Entity::find_by_id(cert_id)
+                .filter(site_certificates::Column::SiteId.eq(site_id))
+                .one(db)
+                .await
+                .ok()
+                .flatten()
+                .is_some();
+            let linked = if owned {
+                true
+            } else {
+                certificate_links::Entity::find()
+                    .filter(certificate_links::Column::SiteId.eq(site_id))
+                    .filter(
+                        certificate_links::Column::CertificateId.eq(cert_id),
+                    )
+                    .one(db)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some()
+            };
+            if !linked {
+                tracing::warn!(
+                    %site_id,
+                    %cert_id,
+                    "ignoring certificate status for a certificate this site does not own or link"
+                );
+                continue;
+            }
+        }
+        if certificate_id.is_none()
+            && current_by_site.get(&site_id).is_some_and(|rows| {
+                rows.iter().all(|(status, expiry)| {
+                    status == row_status && *expiry == Some(expires_at)
+                })
             })
-        }) {
+        {
             continue;
         }
 
@@ -1339,7 +1380,10 @@ async fn persist_site_certificates(
                 Expr::value(Option::<String>::None),
             )
             .col_expr(site_certificates::Column::UpdatedAt, Expr::value(now))
-            .filter(site_certificates::Column::SiteId.eq(site_id))
+            .filter(match certificate_id {
+                Some(id) => site_certificates::Column::Id.eq(id),
+                None => site_certificates::Column::SiteId.eq(site_id),
+            })
             .filter(site_certificates::Column::CertPem.is_null())
             .filter(
                 Condition::any()

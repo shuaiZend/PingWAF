@@ -7,6 +7,7 @@ import type {
   AgentEnrollResponse,
   AgentListQuery,
   AgentSamplesQuery,
+  FlushLogsResult,
   HostSample,
   Page,
 } from './types'
@@ -46,6 +47,14 @@ export const agentsApi = {
    */
   sendCommand: (id: string, data: AgentCommandRequest) =>
     apiClient.post<AgentCommandResult>(`/agents/${id}/commands`, data),
+
+  /**
+   * Asks every agent to push whatever access/security logs sit in its
+   * buffer right now (`POST /agents/flush-logs`, admin only). Only logs
+   * already in an agent's buffer are affected — entries the channel dropped
+   * when it was full are gone for good.
+   */
+  flushLogs: () => apiClient.post<FlushLogsResult>('/agents/flush-logs'),
 }
 
 /** Status ordering used for the summary counters. */

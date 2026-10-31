@@ -21,7 +21,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::api::common::{
-    load_site_read, non_empty, parse_optional_datetime, parse_uuid, query_all,
+    deserialize_i64, load_site_read, non_empty, parse_optional_datetime,
+    parse_uuid, query_all,
 };
 use crate::api::error::ApiError;
 use crate::api::state::AppState;
@@ -66,8 +67,49 @@ pub struct RangeQuery {
     /// `minute`, `hour` (default), `day` or `week`.
     #[serde(default = "default_interval")]
     pub interval: String,
-    #[serde(default = "default_limit")]
+    /// `deserialize_i64` keeps the value usable when the struct is flattened
+    /// into another query struct (`TopIpsQuery`), where serde buffers every
+    /// value as a string before parsing.
+    #[serde(default = "default_limit", deserialize_with = "deserialize_i64")]
     pub limit: i64,
+}
+
+/// Query string of `GET /api/v1/analytics/top-ips`.
+///
+/// `blocked_only` is kept out of [`RangeQuery`] on purpose: the rest of the
+/// analytics endpoints share that struct, and an ignored-but-accepted parameter
+/// would be a wider contract than the endpoint actually honours.
+#[derive(Debug, Deserialize)]
+pub struct TopIpsQuery {
+    #[serde(flatten)]
+    pub range: RangeQuery,
+    /// `true` restricts the ranking to IPs that produced at least one blocked
+    /// request (403/429) and orders them by block count — what the dashboard's
+    /// "top threat IPs" card promises. Absent or `false` keeps the historical
+    /// "top client IPs" ordering used by the per-site traffic page.
+    #[serde(default)]
+    pub blocked_only: Option<String>,
+}
+
+/// Parses `blocked_only`; anything outside the documented set is a 400 rather
+/// than a silent fallback, so a typo cannot quietly narrow or widen the table.
+fn parse_blocked_only(raw: Option<String>) -> Result<bool, Box<Response>> {
+    fn invalid() -> Box<Response> {
+        Box::new(crate::api::contract_error(
+            axum::http::StatusCode::BAD_REQUEST,
+            "invalid_blocked_only",
+            "blocked_only must be one of true, false, 1, 0, yes, no",
+        ))
+    }
+
+    match raw {
+        None => Ok(false),
+        Some(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" | "yes" => Ok(true),
+            "false" | "0" | "no" => Ok(false),
+            _ => Err(invalid()),
+        },
+    }
 }
 
 /// Maps a named `range` value onto its window length in hours
@@ -1152,26 +1194,59 @@ async fn top_rules(
     ))
 }
 
-/// `GET /api/v1/analytics/top-ips`
-async fn top_ips(
-    State(state): State<AppState>,
-    current: AuthUser,
-    Query(query): Query<RangeQuery>,
-) -> Result<Json<Vec<TopIp>>, ApiError> {
-    let resolved = resolve(&state, &current, &query).await?;
+/// The blocked-response predicate, shared by the projected `blocked` column and
+/// the `blocked_only` HAVING clause so the two can never drift apart.
+const BLOCKED_REQUESTS_FILTER: &str =
+    "COUNT(*) FILTER (WHERE status_code = 403 OR status_code = 429)";
+
+/// Statement for `top-ips`; see [`top_rules_sql`] for the bound-limit rule.
+///
+/// `blocked_only` filters *after* grouping (`HAVING`), so `limit` still means
+/// "the top N of the blocked subset" — the dashboard's threat table must not be
+/// crowded out by high-traffic IPs that were never blocked. PostgreSQL does not
+/// allow output aliases in `HAVING`, so the aggregate is repeated there;
+/// `ORDER BY` may use the alias.
+fn top_ips_sql(
+    resolved: &Resolved,
+    blocked_only: bool,
+) -> (String, Vec<Value>) {
     let (where_sql, mut values) = resolved.filter("access_logs");
-    let limit_placeholder = resolved.next_placeholder();
-    values.push(Value::from(resolved.limit));
+    let placeholder = resolved.next_placeholder();
+    values.push(Value::from(resolved.bound_limit()));
+
+    let (having, order) = if blocked_only {
+        (
+            format!("HAVING {BLOCKED_REQUESTS_FILTER} > 0 "),
+            "ORDER BY blocked DESC, requests DESC, client_ip ASC",
+        )
+    } else {
+        (String::new(), "ORDER BY requests DESC")
+    };
 
     let sql = format!(
         "SELECT client_ip, \
                 MAX(country_code) AS country_code, \
                 COUNT(*) AS requests, \
-                COUNT(*) FILTER (WHERE status_code = 403 OR status_code = 429) AS blocked, \
+                {BLOCKED_REQUESTS_FILTER} AS blocked, \
                 (ARRAY_AGG(site_id ORDER BY timestamp DESC))[1] AS top_site_id \
          FROM access_logs WHERE {where_sql} \
-         GROUP BY client_ip ORDER BY requests DESC LIMIT ${limit_placeholder}"
+         GROUP BY client_ip {having}{order} LIMIT ${placeholder}"
     );
+    (sql, values)
+}
+
+/// `GET /api/v1/analytics/top-ips`
+async fn top_ips(
+    State(state): State<AppState>,
+    current: AuthUser,
+    Query(query): Query<TopIpsQuery>,
+) -> Result<Response, ApiError> {
+    let blocked_only = match parse_blocked_only(query.blocked_only) {
+        Ok(blocked_only) => blocked_only,
+        Err(response) => return Ok(*response),
+    };
+    let resolved = resolve(&state, &current, &query.range).await?;
+    let (sql, values) = top_ips_sql(&resolved, blocked_only);
 
     let rows = query_all(&state.db, &sql, values).await?;
     Ok(Json(
@@ -1183,8 +1258,9 @@ async fn top_ips(
                 blocked: get_value::<i64>(row, "blocked"),
                 top_site_id: try_get::<Uuid>(row, "top_site_id"),
             })
-            .collect(),
-    ))
+            .collect::<Vec<_>>(),
+    )
+    .into_response())
 }
 
 /// `GET /api/v1/analytics/top-paths`
@@ -1414,9 +1490,12 @@ mod tests {
     #[test]
     fn top_endpoints_bind_the_limit_instead_of_interpolating_it() {
         for resolved in [resolved(None), resolved(Some(Uuid::new_v4()))] {
-            for (sql, values) in
-                [top_paths_sql(&resolved), top_rules_sql(&resolved)]
-            {
+            for (sql, values) in [
+                top_paths_sql(&resolved),
+                top_rules_sql(&resolved),
+                top_ips_sql(&resolved, false),
+                top_ips_sql(&resolved, true),
+            ] {
                 let placeholder =
                     format!("LIMIT ${}", resolved.next_placeholder());
                 assert!(sql.ends_with(&placeholder), "{sql}");
@@ -1431,6 +1510,83 @@ mod tests {
                 assert_eq!(values.len(), resolved.next_placeholder());
             }
         }
+    }
+
+    /// The dashboard's "top threat IPs" contract: only IPs with at least one
+    /// blocked request, ranked by block count. `blocked_only=false` must keep
+    /// the historical "top client IPs" shape byte for byte, because the
+    /// per-site traffic page shares this statement.
+    #[test]
+    fn top_ips_filters_blocked_only_when_asked() {
+        let (sql, _) = top_ips_sql(&resolved(None), false);
+        assert!(!sql.contains("HAVING"), "{sql}");
+        assert!(
+            sql.ends_with("GROUP BY client_ip ORDER BY requests DESC LIMIT $3"),
+            "{sql}"
+        );
+
+        let scoped = resolved(Some(Uuid::new_v4()));
+        let (sql, values) = top_ips_sql(&scoped, true);
+        assert!(
+            sql.contains(&format!("HAVING {BLOCKED_REQUESTS_FILTER} > 0")),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("ORDER BY blocked DESC, requests DESC, client_ip ASC"),
+            "{sql}"
+        );
+        // The projected `blocked` column and the HAVING filter must be the
+        // same aggregate expression; two occurrences prove they are.
+        assert_eq!(sql.matches(BLOCKED_REQUESTS_FILTER).count(), 2, "{sql}");
+        assert_eq!(values.len(), scoped.next_placeholder());
+    }
+
+    #[test]
+    fn blocked_only_parsing_is_strict() {
+        assert!(!parse_blocked_only(None).expect("absent means false"));
+        for raw in ["true", "1", "YES", " True "] {
+            assert!(
+                parse_blocked_only(Some(raw.to_string())).expect(raw),
+                "{raw}"
+            );
+        }
+        for raw in ["false", "0", "no", "No"] {
+            assert!(
+                !parse_blocked_only(Some(raw.to_string())).expect(raw),
+                "{raw}"
+            );
+        }
+        for raw in ["", "maybe", "2", "true;"] {
+            assert!(
+                parse_blocked_only(Some(raw.to_string())).is_err(),
+                "{raw} must be rejected"
+            );
+        }
+    }
+
+    /// The real extractor path: the query string is flattened into
+    /// `TopIpsQuery`, where serde hands every value over as a string. Without
+    /// `deserialize_i64` on `RangeQuery::limit` this would fail with
+    /// "invalid type: string \"8\", expected i64".
+    #[test]
+    fn blocked_only_survives_query_string_flattening() {
+        let uri: axum::http::Uri =
+            "/api/v1/analytics/top-ips?limit=8&blocked_only=true&interval=day"
+                .parse()
+                .expect("valid uri");
+        let Query(query) =
+            Query::<TopIpsQuery>::try_from_uri(&uri).expect("query parses");
+        assert_eq!(query.range.limit, 8);
+        assert_eq!(query.range.interval, "day");
+        assert_eq!(query.blocked_only.as_deref(), Some("true"));
+
+        // The shared `RangeQuery` extractor keeps working as before.
+        let uri: axum::http::Uri = "/api/v1/analytics/top-paths?limit=8"
+            .parse()
+            .expect("valid uri");
+        let Query(query) =
+            Query::<RangeQuery>::try_from_uri(&uri).expect("query parses");
+        assert_eq!(query.limit, 8);
     }
 
     /// D19: the bound cap is clamped even if a caller hands `Resolved` an
@@ -1623,8 +1779,7 @@ mod tests {
             sql.contains("user_agent IS NULL OR user_agent = '' THEN 'other'")
         );
         // No user input can reach this SQL: only the constant patterns above.
-        for pattern in mobile.iter().chain(ai_bots.iter()).chain(other.iter())
-        {
+        for pattern in mobile.iter().chain(ai_bots.iter()).chain(other.iter()) {
             assert!(sql.contains(&format!("ILIKE '%{pattern}%'")));
         }
         assert_eq!(
@@ -1679,11 +1834,13 @@ mod tests {
             return kind == "other";
         }
         match kind {
-            "mobile" => ilike(ua, "mobile")
-                || ilike(ua, "android")
-                || ilike(ua, "iphone")
-                || ilike(ua, "ipad")
-                || ilike(ua, "ipod"),
+            "mobile" => {
+                ilike(ua, "mobile")
+                    || ilike(ua, "android")
+                    || ilike(ua, "iphone")
+                    || ilike(ua, "ipad")
+                    || ilike(ua, "ipod")
+            },
             "ai_bots" => {
                 ilike(ua, "gpt")
                     || ilike(ua, "claude")

@@ -1,0 +1,374 @@
+---
+import BaseLayout from "../../layouts/BaseLayout.astro";
+import CommandBuilder from "./CommandBuilder.astro";
+import ComposeBuilder from "./ComposeBuilder.astro";
+import DeployTabs from "./DeployTabs.astro";
+import CtaBand from "../CtaBand.astro";
+import CodeBlock from "../CodeBlock.astro";
+import Icon from "../Icon.astro";
+import Notice from "../Notice.astro";
+import ScreenshotFrame from "../ScreenshotFrame.astro";
+import SectionHeading from "../SectionHeading.astro";
+import { getContent } from "../../content";
+import { resolveLink } from "../../i18n/utils";
+import type { Locale } from "../../i18n/config";
+import type { Shot } from "../../content/schema";
+
+interface Props {
+  locale: Locale;
+}
+
+const { locale } = Astro.props;
+const { install } = getContent(locale);
+
+// The interactive screenshots are terminal transcripts, so the browser-chrome
+// bar is hidden (`chrome={false}`); `url` is required by `Shot` but unused.
+const shots: Shot[] = install.interactive.shots.map((shot, index) => ({
+  ...shot,
+  url: index === 0 ? "bash install.sh" : "curl … | bash",
+}));
+---
+<BaseLayout
+  locale={locale}
+  path="/install/"
+  title={install.meta.title}
+  description={install.meta.description}
+>
+  <header class="page-head">
+    <div class="container page-head__inner">
+      <p class="eyebrow">{install.hero.eyebrow}</p>
+      <h1 class="title title--xl">{install.hero.title}</h1>
+      <p class="lead">{install.hero.lead}</p>
+      <div class="page-head__meta">
+        {
+          install.hero.badges.map((badge) => (
+            <span class="badge">
+              <Icon name={badge.icon} size={13} />
+              <span class="badge__label">{badge.label}</span>
+              <strong class="badge__value">{badge.value}</strong>
+            </span>
+          ))
+        }
+      </div>
+      <div class="install-hero-command reveal">
+        <CodeBlock locale={locale} lang="bash" filename="bash" code={install.hero.oneLiner} />
+      </div>
+    </div>
+  </header>
+
+  <nav class="toc-pills" aria-label={install.hero.eyebrow}>
+    <div class="container toc-pills__inner">
+      {
+        install.hero.toc.map((entry) => (
+          <a href={`#${entry.id}`}>{entry.label}</a>
+        ))
+      }
+    </div>
+  </nav>
+
+  <div class="container">
+    <section class="section" id={install.builder.id}>
+      <SectionHeading
+        eyebrow={install.builder.eyebrow}
+        title={install.builder.title}
+        lead={install.builder.lead}
+        class="reveal"
+      />
+      <div class="reveal">
+        <DeployTabs deployment={install.deployment}>
+          <ComposeBuilder
+            compose={install.deployment.compose}
+            locale={locale}
+            copyLabel={install.builder.copy}
+            copiedLabel={install.builder.copied}
+            slot="compose"
+          />
+          <CommandBuilder
+            builder={install.builder}
+            oneLiner={install.hero.oneLiner}
+            locale={locale}
+            slot="script"
+          />
+        </DeployTabs>
+      </div>
+    </section>
+
+    <section class="section" id={install.interactive.id}>
+      <SectionHeading
+        eyebrow={install.interactive.eyebrow}
+        title={install.interactive.title}
+        lead={install.interactive.lead}
+        class="reveal"
+      />
+      <ol class="install-timeline reveal">
+        {
+          install.interactive.steps.map((step) => (
+            <li class="install-timeline__step">
+              <h3 class="install-timeline__title">{step.title}</h3>
+              <p class="install-timeline__body">{step.body}</p>
+            </li>
+          ))
+        }
+      </ol>
+      <Notice variant="info" class="install-terminal-note">
+        <span class="mono">{install.interactive.terminalNote}</span>
+      </Notice>
+      <div class="install-shots">
+        {
+          shots.map((shot) => (
+            <ScreenshotFrame
+              shot={shot}
+              chrome={false}
+              sizes="(max-width: 1080px) 92vw, 560px"
+            />
+          ))
+        }
+      </div>
+    </section>
+
+    <section class="section" id={install.reference.id}>
+      <SectionHeading
+        eyebrow={install.reference.eyebrow}
+        title={install.reference.title}
+        lead={install.reference.lead}
+        class="reveal"
+      />
+      <div class="install-ref reveal">
+        {
+          install.reference.rows.map((row) => (
+            <div class="install-ref__row">
+              <code class="install-ref__flag mono">{row.flag}</code>
+              <p class="install-ref__desc">{row.description}</p>
+            </div>
+          ))
+        }
+      </div>
+      <a
+        class="install-ref__link"
+        href={resolveLink(install.reference.link.path, locale)}
+        target="_blank"
+        rel="noopener noreferrer"
+      >
+        {install.reference.link.label}
+        <Icon name="external-link" />
+      </a>
+    </section>
+
+    <section class="section" id={install.troubleshooting.id}>
+      <SectionHeading
+        eyebrow={install.troubleshooting.eyebrow}
+        title={install.troubleshooting.title}
+        lead={install.troubleshooting.lead}
+        class="reveal"
+      />
+      <div class="faq reveal">
+        {
+          install.troubleshooting.items.map((item) => (
+            <details class="faq__item">
+              <summary>
+                <span>{item.q}</span>
+                <Icon name="chevron-down" />
+              </summary>
+              <p>{item.a}</p>
+            </details>
+          ))
+        }
+      </div>
+    </section>
+
+    <section class="section section--tight">
+      <CtaBand cta={install.cta} locale={locale} />
+    </section>
+  </div>
+</BaseLayout>
+
+<style>
+  .toc-pills__inner {
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .toc-pills__inner::-webkit-scrollbar {
+    display: none;
+  }
+
+  .install-hero-command {
+    margin-top: 28px;
+    max-width: 760px;
+  }
+
+  .badge__label {
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    opacity: 0.7;
+  }
+
+  .badge__value {
+    font-weight: 600;
+    color: var(--color-text-default);
+  }
+
+  .install-timeline {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: grid;
+    gap: 26px;
+    border-left: 1px solid var(--color-border-line);
+    max-width: 640px;
+  }
+
+  .install-timeline__step {
+    position: relative;
+    padding-left: 26px;
+  }
+
+  .install-timeline__step::before {
+    content: "";
+    position: absolute;
+    left: -5.5px;
+    top: 6px;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--color-bg-brand);
+    border: 2px solid var(--color-bg-elevated);
+  }
+
+  .install-timeline__title {
+    margin: 0 0 4px;
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--color-text-strong);
+  }
+
+  .install-timeline__body {
+    margin: 0;
+    font-size: var(--site-text-sm);
+    line-height: 1.65;
+    color: var(--color-text-subtle);
+    max-width: 62ch;
+  }
+
+  .install-terminal-note {
+    margin-top: 26px;
+    font-size: 12.5px;
+  }
+
+  .install-shots {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 22px;
+    margin-top: 26px;
+    align-items: start;
+  }
+
+  .install-ref {
+    border: 1px solid var(--color-border-line);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+  }
+
+  .install-ref__row {
+    display: grid;
+    grid-template-columns: minmax(180px, 280px) minmax(0, 1fr);
+    gap: 20px;
+    padding: 13px 18px;
+    border-bottom: 1px solid var(--color-border-line);
+  }
+
+  .install-ref__row:last-child {
+    border-bottom: none;
+  }
+
+  .install-ref__row:nth-child(odd) {
+    background: var(--site-surface-inset);
+  }
+
+  .install-ref__flag {
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--color-text-strong);
+    overflow-wrap: anywhere;
+  }
+
+  .install-ref__desc {
+    margin: 0;
+    font-size: 13.5px;
+    line-height: 1.6;
+    color: var(--color-text-subtle);
+  }
+
+  .install-ref__link {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    margin-top: 16px;
+    font-size: 13.5px;
+    font-weight: 600;
+    color: var(--color-text-strong);
+    text-decoration: none;
+  }
+
+  .install-ref__link:hover {
+    text-decoration: underline;
+  }
+
+  .faq {
+    display: grid;
+    gap: 10px;
+    border-top: 1px solid var(--color-border-line);
+  }
+
+  .faq__item {
+    border-bottom: 1px solid var(--color-border-line);
+  }
+
+  .faq__item summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 14px 2px;
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 14.5px;
+    color: var(--color-text-strong);
+    list-style: none;
+  }
+
+  .faq__item summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .faq__item summary :global(.icon) {
+    transition: transform 180ms var(--site-ease);
+    color: var(--color-text-subtle);
+  }
+
+  .faq__item[open] summary :global(.icon) {
+    transform: rotate(180deg);
+  }
+
+  .faq__item p {
+    padding: 0 2px 16px;
+    font-size: var(--site-text-sm);
+    color: var(--color-text-subtle);
+    line-height: 1.65;
+    max-width: 78ch;
+  }
+
+  @media (max-width: 1080px) {
+    .install-shots {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .install-ref__row {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 6px;
+    }
+  }
+</style>

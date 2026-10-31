@@ -54,7 +54,17 @@ cargo build --release --bin pingwaf --features full
   --db-url "postgres://pingwaf:pingwaf@localhost:5432/pingwaf"
 ```
 
-在 Linux 上，`install.sh` 会下载预编译包、安装到 `/usr/local/bin`、生成 `/etc/pingwaf/pingwaf.toml` 与 systemd 单元，并自动启动 Agent（`--mode all-in-one|server|agent`，`--no-systemd` 可跳过单元安装）。
+在 Linux 上，`install.sh` 会下载预编译包、安装到 `/usr/local/bin`、生成 `/etc/pingwaf/pingwaf.toml` 与 systemd 单元，并启动服务。在终端上不带参数运行它会进入交互引导（部署模式、管理员凭证、PostgreSQL URL、证书 SAN 列表、版本）；通过管道执行则是一行命令的无人值守安装。
+
+```bash
+# 交互安装：打印安装计划并确认
+curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh -o install.sh && bash install.sh
+
+# 一行命令、无人值守（管道执行没有终端，因此不做任何提问）
+curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh | bash -s -- --mode all-in-one
+```
+
+参数：`--mode all-in-one|server|agent`，`--no-systemd` 跳过单元安装，`--admin-email` / `--admin-password` / `--tls-sans`（或对应的 `PINGWAF_*` 环境变量）免提问写入初始设置，`--dry-run` 只预览安装计划不做改动。
 
 ## 配置优先级
 

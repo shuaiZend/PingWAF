@@ -246,6 +246,24 @@ fn validate_group(name: &str, phase: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// Rejects action/mode pairs whose runtime meaning contradicts the label the
+/// operator sees. `allow` short-circuits before every block rule, so pairing it
+/// with `mode=block` promises enforcement that can never happen.
+fn validate_action_mode(
+    rule_action: &str,
+    rule_mode: &str,
+) -> Result<(), ApiError> {
+    if rule_action == action::ALLOW && rule_mode == mode::BLOCK {
+        return Err(ApiError::BadRequest(
+            "action 'allow' cannot use mode 'block': an allow rule always \
+             passes the request, so the block mode would never apply; use \
+             'monitor' or 'off'"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_rule(
     name: &str,
     expression: &str,
@@ -268,6 +286,7 @@ fn validate_rule(
         )));
     }
     validate_mode(rule_mode)?;
+    validate_action_mode(rule_action, rule_mode)?;
     if !(1..=5).contains(&severity) {
         return Err(ApiError::BadRequest(
             "severity must be between 1 and 5".to_string(),
@@ -510,6 +529,10 @@ async fn update_rule(
     load_site_write(&state.db, id, &current).await?;
 
     let row = find_rule(&state, id, target).await?;
+    // Effective values for the combination check: a PATCH that changes only one
+    // side must still be validated against the stored other side.
+    let mut effective_action = row.action.clone();
+    let mut effective_mode = row.mode.clone();
     let mut active: rule::ActiveModel = row.into();
 
     if let Some(name) = non_empty(&payload.name) {
@@ -536,6 +559,7 @@ async fn update_rule(
                 "unknown action '{rule_action}'"
             )));
         }
+        effective_action = rule_action.clone();
         active.action = Set(rule_action);
     }
     if let Some(severity) = payload.severity {
@@ -554,8 +578,10 @@ async fn update_rule(
     }
     if let Some(rule_mode) = non_empty(&payload.mode) {
         validate_mode(&rule_mode)?;
+        effective_mode = rule_mode.clone();
         active.mode = Set(rule_mode);
     }
+    validate_action_mode(&effective_action, &effective_mode)?;
     if let Some(priority) = payload.priority {
         active.priority = Set(priority);
     }

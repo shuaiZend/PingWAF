@@ -227,13 +227,27 @@ cargo build --release --bin pingwaf --features full
 
 ### 方式 C —— 安装脚本（Linux）
 
-在 Linux 服务器上，一键脚本会下载预编译二进制并安装，可选配置 systemd 服务：
+脚本会下载预编译二进制并安装，可选配置 systemd 服务。它有两种运行方式：
 
 ```bash
+# 交互安装：在终端上依次询问部署模式、管理员凭证、PostgreSQL URL、
+# 证书 SAN 列表与版本，随后打印安装计划并确认
+curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh -o install.sh
+bash install.sh
+
+# 一行命令、无人值守：使用默认值，不做任何提问（参数跟在 `-s --` 之后）
 curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh | sudo bash -s -- --mode all-in-one
 ```
 
+> `curl | bash` 无法显示交互提示——通过管道执行时会自动以默认值非交互安装。
+> 管理员与 TLS 设置请用环境变量（`PINGWAF_ADMIN_EMAIL`、`PINGWAF_ADMIN_PASSWORD`、
+> `PINGWAF_TLS_SANS`）或参数（`--admin-email`、`--admin-password`、`--tls-sans`）
+> 传入；`--dry-run` 只打印解析后的安装计划，不做任何改动。安装引导页：
+> <https://www.pingwaf.com/install/>。
+>
 > 每个架构的 release 同时提供两种归档：`pingwaf-linux-{amd64,arm64}.tar.xz`（主格式，更小）与 `.tar.gz`（兼容回退），各带 `.sha256` 校验文件。脚本优先下载 `.tar.xz`，在本地缺少 `xz(1)` 或下载失败时回退到 `.tar.gz`。
+>
+> 二进制还内置管理员运维子命令（`user`、`mode`、`security`、`config`），控制台不可达时可直连 PostgreSQL 处置——见 **[docs/cli.md](./docs/cli.md)**（[中文版](./docs/zh/cli.md)）。
 
 ---
 
@@ -309,6 +323,7 @@ PINGWAF_CONFIG=/etc/pingwaf/pingwaf.toml pingwaf all-in-one   # 等价写法
 | --- | --- |
 | [docs/quick-start.md](./docs/quick-start.md) | 从零开始，保护你的第一个站点 |
 | [docs/deployment.md](./docs/deployment.md) | Docker、二进制 + systemd、分布式拓扑 |
+| [docs/cli.md](./docs/cli.md) | 管理员二进制 CLI——运行模式、运维子命令、故障处置手册（[中文版](./docs/zh/cli.md)） |
 | [docs/user-guide.md](./docs/user-guide.md) | 控制台使用、站点、规则与策略 |
 | [docs/zh/http-lifecycle.md](./docs/zh/http-lifecycle.md) | 请求生命周期：各项功能在流水线中的执行阶段（WAF 检查顺序、缓存、错误页）与调试方法 |
 | [docs/api.md](./docs/api.md) | REST API 参考（`https://<host>:9080/api/v1`） |

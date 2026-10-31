@@ -8,9 +8,12 @@ import {
   Certificate,
   Check,
   Info,
+  Link as LinkIcon,
   Lock,
   ShieldCheck,
   Trash,
+  LinkBreak,
+  Users,
   Warning,
 } from '@phosphor-icons/react'
 import { PageHeader } from '@/components/PageHeader'
@@ -31,7 +34,7 @@ import { SkeletonRows, SkeletonStat } from '@/components/ui/Skeleton'
 import { useToast } from '@/components/ui/Toast'
 import { ErrorState } from '@/components/ErrorState'
 import { CertWarningsBadge } from '@/components/ssl/CertWarnings'
-import { sslApi, sslKeys, daysUntilExpiry, expiryTone } from '@/api/ssl'
+import { sslApi, sslKeys, daysUntilExpiry, expiryTone, groupCertsByRelation } from '@/api/ssl'
 import { MtlsMaterial } from '@/pages/sites/MtlsMaterial'
 import { useCanWrite, useNow } from '@/hooks'
 import { cn } from '@/lib/utils'
@@ -240,6 +243,10 @@ export function SslPage() {
   const [protocolsError, setProtocolsError] = useState<string | null>(null)
   const [pendingDelete, setPendingDelete] = useState<SslCertificate | null>(null)
   const [details, setDetails] = useState<SslCertificate | null>(null)
+  /** "share" opens the shared-certificate picker; "unlink" confirms unbinding. */
+  const [shareOpen, setShareOpen] = useState(false)
+  const [pendingUnlink, setPendingUnlink] = useState(false)
+  const [howToShareOpen, setHowToShareOpen] = useState(false)
 
   const certsQuery = useQuery({
     queryKey: sslKeys.list(siteId),
@@ -280,6 +287,11 @@ export function SslPage() {
     [certsQuery.data, now],
   )
 
+  const { ownerCerts, linkedCerts } = useMemo(() => {
+    const grouped = groupCertsByRelation(certs)
+    return { ownerCerts: grouped.owner, linkedCerts: grouped.linked }
+  }, [certs])
+
   const currentCert = useMemo(
     () => certs.find((c) => c.id === drafts?.https.certificate_id) ?? null,
     [certs, drafts?.https.certificate_id],
@@ -299,6 +311,58 @@ export function SslPage() {
    * One mutation for all three cards: `scope` says which draft to refresh from
    * the response, so the fields of the other cards survive untouched.
    */
+  // Shared certificates other sites offer this one — fetched only while the
+  // picker dialog is open.
+  const availableQuery = useQuery({
+    queryKey: sslKeys.available(siteId),
+    queryFn: () => sslApi.listAvailable(siteId),
+    enabled: shareOpen && Boolean(siteId),
+  })
+  const availableCerts = availableQuery.data?.items ?? []
+
+  const linkCert = useMutation({
+    mutationFn: (certId: string) => sslApi.createLink(siteId, { certificate_id: certId }),
+    onSuccess: (_data, certId) => {
+      toast.success(t('pages.ssl.linkCreated'), availableCerts.find((c) => c.id === certId)?.domain)
+      void queryClient.invalidateQueries({ queryKey: sslKeys.site(siteId) })
+    },
+    onError: (e) =>
+      toast.error(t('pages.ssl.linkFailed'), e instanceof Error ? e.message : undefined),
+  })
+
+  const unlinkCert = useMutation({
+    mutationFn: (certId: string) => sslApi.deleteLink(siteId, certId),
+    onSuccess: (_data, certId) => {
+      toast.success(t('pages.ssl.linkRemoved'), certs.find((c) => c.id === certId)?.domain)
+      setPendingDelete(null)
+      // A removed share must not stay selected, or the next save would
+      // reference a certificate this site can no longer serve.
+      setDrafts((prev) =>
+        prev && prev.https.certificate_id === certId
+          ? { ...prev, https: { ...prev.https, certificate_id: null } }
+          : prev,
+      )
+      void queryClient.invalidateQueries({ queryKey: sslKeys.site(siteId) })
+    },
+    onError: (e) =>
+      toast.error(t('pages.ssl.unlinkFailed'), e instanceof Error ? e.message : undefined),
+  })
+
+  /** Clears the selected certificate — `clear_certificate: true`, mutually exclusive with the id. */
+  const clearCurrentCert = useMutation({
+    mutationFn: () => sslApi.updateSettings(siteId, { clear_certificate: true }),
+    onSuccess: (saved) => {
+      queryClient.setQueryData(sslKeys.settings(siteId), saved)
+      setDrafts((prev) =>
+        prev ? { ...prev, https: { ...prev.https, certificate_id: null } } : prev,
+      )
+      setPendingUnlink(false)
+      toast.success(t('pages.ssl.certificateCleared'))
+    },
+    onError: (e) =>
+      toast.error(t('pages.ssl.clearFailed'), e instanceof Error ? e.message : undefined),
+  })
+
   const saveSettings = useMutation({
     mutationFn: ({
       payload,
@@ -450,6 +514,11 @@ export function SslPage() {
                   {t('pages.ssl.current')}
                 </Badge>
               )}
+              {c.relation === 'linked' && (
+                <Badge tone="info" size="sm">
+                  {t('pages.ssl.sharedBadge')}
+                </Badge>
+              )}
               <CertWarningsBadge warnings={c.warnings} />
             </div>
             <p className="truncate text-xs text-fg-subtle">
@@ -521,19 +590,31 @@ export function SslPage() {
             size="icon"
             variant="ghost"
             aria-label={t('pages.ssl.renew')}
-            disabled={!canWrite || renew.isPending}
+            disabled={!canWrite || renew.isPending || c.relation === 'linked'}
             onClick={() => renew.mutate(c)}
             icon={<ArrowsClockwise weight="duotone" className="h-4 w-4" />}
           />
-          <Button
-            size="icon"
-            variant="ghost"
-            className="hover:text-fg-danger"
-            aria-label={t('common.delete')}
-            disabled={!canWrite}
-            onClick={() => setPendingDelete(c)}
-            icon={<Trash weight="duotone" className="h-4 w-4" />}
-          />
+          {c.relation === 'linked' ? (
+            <Button
+              size="icon"
+              variant="ghost"
+              className="hover:text-fg-danger"
+              aria-label={t('pages.ssl.removeShare')}
+              disabled={!canWrite || unlinkCert.isPending}
+              onClick={() => setPendingDelete(c)}
+              icon={<LinkBreak weight="duotone" className="h-4 w-4" />}
+            />
+          ) : (
+            <Button
+              size="icon"
+              variant="ghost"
+              className="hover:text-fg-danger"
+              aria-label={t('common.delete')}
+              disabled={!canWrite}
+              onClick={() => setPendingDelete(c)}
+              icon={<Trash weight="duotone" className="h-4 w-4" />}
+            />
+          )}
         </div>
       ),
     },
@@ -698,12 +779,74 @@ export function SslPage() {
                       hint={t('pages.ssl.certificateSelectHint')}
                       options={[
                         { value: '', label: t('pages.ssl.selectCertificate') },
-                        ...certs.map((c) => ({ value: c.id, label: certOptionLabel(c) })),
+                        // Group headers are disabled placeholder rows so the
+                        // native select shows owned vs shared-in clearly.
+                        ...(ownerCerts.length > 0
+                          ? [
+                              {
+                                value: '__group-owner',
+                                label: t('pages.ssl.groupOwner'),
+                                disabled: true,
+                              },
+                              ...ownerCerts.map((c) => ({
+                                value: c.id,
+                                label: certOptionLabel(c),
+                              })),
+                            ]
+                          : []),
+                        ...(linkedCerts.length > 0
+                          ? [
+                              {
+                                value: '__group-linked',
+                                label: t('pages.ssl.groupLinked'),
+                                disabled: true,
+                              },
+                              ...linkedCerts.map((c) => ({
+                                value: c.id,
+                                label: certOptionLabel(c),
+                              })),
+                            ]
+                          : []),
                       ]}
-                      onChange={(e) =>
-                        patchHttps({ certificate_id: e.target.value || null })
-                      }
+                      onChange={(e) => {
+                        const value = e.target.value
+                        if (value.startsWith('__group-')) return
+                        patchHttps({ certificate_id: value || null })
+                      }}
                     />
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        onClick={() => setShareOpen(true)}
+                        icon={<Users weight="duotone" className="h-4 w-4" />}
+                      >
+                        {t('pages.ssl.sharedCertificates')}
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => setHowToShareOpen(true)}
+                        icon={<LinkIcon weight="duotone" className="h-4 w-4" />}
+                      >
+                        {t('pages.ssl.shareOut')}
+                      </Button>
+                      {/* Unbind: clear_certificate, confirmed below. */}
+                      {canWrite &&
+                        !drafts.https.self_signed &&
+                        drafts.https.certificate_id && (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="hover:text-fg-danger"
+                            loading={clearCurrentCert.isPending}
+                            onClick={() => setPendingUnlink(true)}
+                            icon={<LinkBreak weight="duotone" className="h-4 w-4" />}
+                          >
+                            {t('pages.ssl.unbind')}
+                          </Button>
+                        )}
+                    </div>
                     {certs.length === 0 && (
                       <p className="text-xs leading-relaxed text-fg-subtle">
                         {t('pages.ssl.emptyDescription')} {t('pages.ssl.issueElsewhereHint')}
@@ -1031,6 +1174,16 @@ export function SslPage() {
         {details && (
           <dl className="grid grid-cols-1 gap-x-6 gap-y-3 text-sm sm:grid-cols-2">
             <Detail label={t('pages.ssl.domain')} value={details.domain} mono />
+            {details.relation && (
+              <Detail
+                label={t('pages.ssl.relation')}
+                value={
+                  details.relation === 'linked'
+                    ? t('pages.ssl.groupLinked')
+                    : t('pages.ssl.groupOwner')
+                }
+              />
+            )}
             {details.warnings && details.warnings.length > 0 && (
               <div className="sm:col-span-2">
                 <p className="text-[13px] font-medium text-fg-warning">
@@ -1065,16 +1218,135 @@ export function SslPage() {
       <ConfirmDialog
         open={pendingDelete !== null}
         onClose={() => setPendingDelete(null)}
-        onConfirm={() => pendingDelete && remove.mutate(pendingDelete.id)}
-        title={t('pages.ssl.deleteTitle')}
-        description={t('pages.ssl.deleteDescription')}
-        confirmLabel={t('common.delete')}
-        loading={remove.isPending}
+        onConfirm={() => {
+          if (!pendingDelete) return
+          if (pendingDelete.relation === 'linked') unlinkCert.mutate(pendingDelete.id)
+          else remove.mutate(pendingDelete.id)
+        }}
+        title={
+          pendingDelete?.relation === 'linked'
+            ? t('pages.ssl.removeShareTitle')
+            : t('pages.ssl.deleteTitle')
+        }
+        description={
+          pendingDelete?.relation === 'linked'
+            ? t('pages.ssl.removeShareDescription')
+            : t('pages.ssl.deleteDescription')
+        }
+        confirmLabel={
+          pendingDelete?.relation === 'linked' ? t('pages.ssl.removeShare') : t('common.delete')
+        }
+        loading={remove.isPending || unlinkCert.isPending}
       >
         {pendingDelete && (
           <div className="rounded-md border border-line bg-recessed px-3 py-2">
             <p className="pw-mono text-[13px] font-medium text-fg-strong">
               {pendingDelete.domain}
+            </p>
+          </div>
+        )}
+      </ConfirmDialog>
+      {/* Shared-certificate picker: link a certificate owned by another site. */}
+      <Dialog
+        open={shareOpen}
+        onClose={() => setShareOpen(false)}
+        size="md"
+        title={t('pages.ssl.sharedCertificates')}
+        description={t('pages.ssl.sharedCertificatesHint')}
+        footer={
+          <Button variant="secondary" onClick={() => setShareOpen(false)}>
+            {t('common.close')}
+          </Button>
+        }
+      >
+        <div className="flex flex-col gap-2">
+          {availableQuery.isPending ? (
+            <SkeletonRows rows={3} columns={2} />
+          ) : availableCerts.length === 0 ? (
+            <EmptyState
+              className="border-0 py-8"
+              icon={<Certificate weight="duotone" className="h-7 w-7" />}
+              title={t('pages.ssl.sharedEmpty')}
+              description={t('pages.ssl.sharedEmptyHint')}
+            />
+          ) : (
+            availableCerts.map((cert) => {
+              const linked = certs.some((c) => c.id === cert.id)
+              const days = daysUntilExpiry(cert.expires_at, now)
+              return (
+                <div
+                  key={cert.id}
+                  className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-line bg-elevated px-3 py-2"
+                >
+                  <div className="min-w-0">
+                    <p className="pw-mono truncate text-[13px] font-medium text-fg-strong">
+                      {cert.domain}
+                    </p>
+                    <p className="text-xs text-fg-subtle">
+                      {cert.expires_at ? formatDateTime(cert.expires_at) : '—'}
+                      {days !== null && days < 0 ? ` · ${t('status.expired')}` : ''}
+                    </p>
+                    {cert.warnings && cert.warnings.length > 0 && (
+                      <p className="mt-1 flex items-start gap-1 text-xs text-fg-warning">
+                        <Warning weight="duotone" className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                        {cert.warnings.join(' ')}
+                      </p>
+                    )}
+                  </div>
+                  {linked ? (
+                    <Badge tone="success" size="sm" dot>
+                      {t('pages.ssl.alreadyLinked')}
+                    </Badge>
+                  ) : (
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      loading={linkCert.isPending && linkCert.variables === cert.id}
+                      disabled={!canWrite}
+                      onClick={() => linkCert.mutate(cert.id)}
+                      icon={<LinkIcon weight="duotone" className="h-4 w-4" />}
+                    >
+                      {t('pages.ssl.link')}
+                    </Button>
+                  )}
+                </div>
+              )
+            })
+          )}
+        </div>
+      </Dialog>
+
+      {/* Sharing out happens from the target site — explain the flow. */}
+      <Dialog
+        open={howToShareOpen}
+        onClose={() => setHowToShareOpen(false)}
+        size="sm"
+        title={t('pages.ssl.shareOutTitle')}
+        footer={
+          <Button variant="secondary" onClick={() => setHowToShareOpen(false)}>
+            {t('common.close')}
+          </Button>
+        }
+      >
+        <p className="text-[13px] leading-relaxed text-fg-subtle">
+          {t('pages.ssl.shareOutHint')}
+        </p>
+      </Dialog>
+
+      <ConfirmDialog
+        open={pendingUnlink}
+        onClose={() => setPendingUnlink(false)}
+        onConfirm={() => clearCurrentCert.mutate()}
+        title={t('pages.ssl.unbindTitle')}
+        description={t('pages.ssl.unbindDescription')}
+        confirmLabel={t('pages.ssl.unbind')}
+        tone="danger"
+        loading={clearCurrentCert.isPending}
+      >
+        {currentCert && (
+          <div className="rounded-md border border-line bg-recessed px-3 py-2">
+            <p className="pw-mono text-[13px] font-medium text-fg-strong">
+              {currentCert.domain}
             </p>
           </div>
         )}

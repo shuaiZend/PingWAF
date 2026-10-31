@@ -8,6 +8,186 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.32.3] — 2026-10-31
+
+Installer and operations release: the install script learns an interactive
+mode and a full set of non-interactive parameters, the systemd unit can bind
+privileged ports without root, and the administrator maintenance commands get
+a proper handbook. Two migrations ship (85: certificate sharing, 86: path
+exceptions), and one upgrade note matters: the first TLS settings save after
+the upgrade clears the legacy inline certificate copy on `site_ssl` — back
+that table up if you may need to roll back.
+
+### Added
+
+- **Certificate sharing between sites.** One wildcard or multi-hostname
+  certificate can now serve several sites: `site_certificate_links` records
+  which sites may serve a certificate owned by another site, while
+  `site_certificates.site_id` stays the owner (it still drives config-version
+  scoping, backups and ACME bookkeeping; migration 85 backfills a link for
+  every certificate a site has already selected). New endpoints:
+  `GET /sites/{id}/certificate-links` (same page as the certificate list),
+  `POST /sites/{id}/certificate-links` (201; `409 certificate already belongs
+  to this site` / `already linked`; `404` when the caller cannot read the
+  owning site), `DELETE /sites/{id}/certificate-links/{cert_id}` (204;
+  `409` while the certificate is the site's current TLS selection), and
+  `GET /sites/{id}/certificates/available` (linkable candidates). The
+  certificate list returns owned **plus linked** certificates, each with a new
+  `relation` field (`owner` / `linked` / `available`), and
+  `PUT /sites/{id}/ssl-settings` accepts a `certificate_id` the site owns or
+  has linked, plus `clear_certificate: true` to detach the current one
+  (mutually exclusive with `certificate_id`, `400` when both are sent).
+- **Path exceptions (observation-mode bypasses).** A site in observation mode
+  can whitelist request paths that skip selected protection layers: new
+  `GET|POST /sites/{id}/path-exceptions` and
+  `GET|PUT|DELETE /sites/{id}/path-exceptions/{id}` (migration 86). Fields:
+  `path` (≤512, must start with `/`, no whitespace/control characters),
+  `match_type` (`prefix` default / `exact` / `wildcard` with a single trailing
+  `*`), `skip_layers` (`*`, `waf`, `bot`, `access`, `basic_auth`, `mtls`,
+  `ai_bot`, `rate_limit`, `challenge`; empty array rejected, `*` collapses the
+  list), `note` (≤200), `log_hits` (default `false`), `enabled`. Limits: 64
+  per site, `(site_id, path)` unique (`409` on a duplicate). The safety gate:
+  saving requires `waf_settings.mode = monitor` — otherwise `409`
+  (`path exceptions require the site to be in observation mode; ...`) — and
+  the data plane ignores exceptions on non-observing sites entirely. Paused
+  sites, fail-closed edges and active dynamic IP bans are never bypassed.
+  `prefix` matches by path segment (`/api` does not match `/apix`). With
+  `log_hits: true` each hit writes a `security_events` row
+  (`event_type=path_bypass`, `action=log`, `rule_id`=exception id,
+  `rule_name`=note or path, `waf_details=bypassed: …`).
+- **Log flush broadcast** — `POST /agents/flush-logs` (administrators) tells
+  every connected agent to ship its in-memory log buffer immediately instead
+  of waiting out the batch interval. Returns `{ "delivered", "offline" }`;
+  offline agents are counted but not queued, and `delivered` means the command
+  was handed over, not that the entries are stored yet.
+- **The install script runs in two modes.** With no arguments on a terminal it
+  now guides the install: deployment mode, administrator e-mail and password
+  (twice; empty keeps the default, which the dashboard forces to change at
+  first login), PostgreSQL URL, certificate SAN list and version, then prints
+  an **Installation plan** summary and asks for confirmation. Any argument
+  switches it to fully non-interactive; `curl ... | bash` (no terminal on
+  stdin) installs with the defaults automatically, and options travel through
+  the pipe as `bash -s -- <options>`. New options: `--admin-email`,
+  `--admin-password`, `--tls-sans`, `--interactive`, `--non-interactive` /
+  `--yes`, `--dry-run`; the same values can be handed over as
+  `PINGWAF_ADMIN_EMAIL`, `PINGWAF_ADMIN_PASSWORD` and `PINGWAF_TLS_SANS`.
+  `--dry-run` prints the resolved plan and exits without touching the system.
+- **Administrator CLI handbook** — `docs/cli.md` (and `docs/zh/cli.md` in
+  Chinese) documents the run modes, the global options with their
+  `PINGWAF_*` environment variables and defaults, every maintenance command
+  (`user`, `mode`, `security`, `config`) and incident runbooks (forgot admin
+  password, allowlist lockout, observation mode, configuration rollback,
+  service logs, privileged-port binding). The deployment guide's maintenance
+  table now links there instead of growing a second, drifting copy.
+- **Install page on the website** — https://www.pingwaf.com/install/ walks
+  through both install modes; the READMEs link to it alongside the script
+  options.
+
+### Fixed
+
+- **Delete buttons no longer open the edit view.** Tables whose rows open an
+  editor (`Table`'s `onRowClick`) let the row handler receive clicks that
+  started on a row control, so pressing Delete on a route — and on every other
+  affected table — navigated to the edit screen and unmounted the confirmation
+  dialog before it could be answered. The row handler now ignores events whose
+  target is a button, link, input, select, textarea, label, summary or an
+  explicit `data-row-click="ignore"` container; plain cells still open the
+  editor. A dedicated E2E spec covers route, rate-limit, IP-rule and site
+  deletion (open → cancel → confirm) and asserts the row shortcut still works.
+- **Switching a site's certificate now takes effect.** The data plane used to
+  prefer the legacy certificate copy stored directly on `site_ssl`
+  (`cert_pem`/`key_pem`) over the selected certificate row, so on
+  installations that predate the certificate table, selecting a different
+  certificate looked like it did nothing. Two fixes: the config push now
+  prefers the selected certificate's material, and saving the site's TLS
+  settings with a selected certificate clears the inline copy server-side.
+  **Upgrade note:** after upgrading, the first TLS settings save on such a
+  site removes the old inline certificate — back up the `site_ssl` table
+  first if you may need to roll back (see the deployment guide's upgrade
+  section).
+- **Deleting an in-use certificate is refused instead of orphaned.** A
+  certificate still selected by a site now returns
+  `409 certificate is selected by site(s) …; clear or replace it there first`;
+  the previous behaviour left a dangling `site_ssl.certificate_id` and the site
+  stopped serving a certificate without warning. Shares are still removed with
+  the certificate once it is free.
+- **ACME write-backs target the exact certificate row.** The edge reports the
+  certificate id it is serving (`SiteStatus.certificate_id`); the control
+  plane used to match heartbeats on `site_id` alone, so with a shared
+  certificate the live/expired state (and terminal failures) could land on
+  whichever pending row happened to belong to the reporting site. The
+  reported id now pins the row; agents that send no id (empty string, old
+  versions) keep the previous per-site matching.
+- **The systemd unit can bind 80/443 as the unprivileged `pingwaf` user.**
+  The unit now carries `AmbientCapabilities=CAP_NET_BIND_SERVICE` +
+  `CapabilityBoundingSet=CAP_NET_BIND_SERVICE`; previously the service failed
+  to start with `Permission denied` (`bind() failed on 0.0.0.0:443`) unless it
+  ran as root or the operator added the capability by hand. Upgrades run with
+  `--no-systemd` on an old unit detect the missing capability and print the
+  `systemctl edit pingwaf` drop-in instead of failing silently later — drop
+  `--no-systemd` or apply the snippet, then verify with
+  `systemctl show pingwaf -p AmbientCapabilities`.
+- **The generated configuration file is no longer world-readable.** Root
+  installs left `/etc/pingwaf/pingwaf.toml` at mode 644 owned by root, so the
+  seeded admin password and the JWT secret were readable by every local user.
+  The file is now unconditionally `chown`ed to `pingwaf:pingwaf` and `chmod`
+  640.
+- **`GET /api/v1/analytics/top-ips` accepts `blocked_only`.** When truthy
+  (`true`/`1`/`yes`, case-insensitive) the ranking is restricted to IPs with
+  at least one blocked request (HTTP 403 or 429), ordered by
+  `blocked DESC, requests DESC, client_ip ASC` — what the dashboard's "top
+  threat IPs" card promises. Absent or false keeps the historical "top client
+  IPs" behavior unchanged; anything outside the accepted set is a 400
+  `invalid_blocked_only` instead of a silent fallback.
+- **`action: "allow"` can no longer be saved with `mode: "block"`.** An allow
+  rule always passes the request, so the block mode would never apply — the
+  API now rejects the pair with
+  `action 'allow' cannot use mode 'block': an allow rule always passes the
+  request, so the block mode would never apply; use 'monitor' or 'off'`,
+  on create and on update (including updates that change only one side, where
+  the stored value of the other completes the pair). `monitor` and `off`
+  remain allowed with `allow`.
+
+### Changed
+
+- **Rate-limit time window is a single seconds input.** The console replaces
+  the split unit pickers with one number field (1–86400 seconds, default 60 —
+  the backend is unchanged) plus a live preview, so a rule that says "5
+  minutes" can no longer actually mean 5 seconds.
+- The VitePress documentation site (`website/`) was removed; the website is
+  built from `site/` (Astro), whose deployment pages now document both install
+  modes.
+
+### Fixed
+
+- **The systemd unit can bind 80/443 as the unprivileged `pingwaf` user.**
+  The unit now carries `AmbientCapabilities=CAP_NET_BIND_SERVICE` +
+  `CapabilityBoundingSet=CAP_NET_BIND_SERVICE`; previously the service failed
+  to start with `Permission denied` (`bind() failed on 0.0.0.0:443`) unless it
+  ran as root or the operator added the capability by hand. Upgrades run with
+  `--no-systemd` on an old unit detect the missing capability and print the
+  `systemctl edit pingwaf` drop-in instead of failing silently later — drop
+  `--no-systemd` or apply the snippet, then verify with
+  `systemctl show pingwaf -p AmbientCapabilities`.
+- **The generated configuration file is no longer world-readable.** Root
+  installs left `/etc/pingwaf/pingwaf.toml` at mode 644 owned by root, so the
+  seeded admin password and the JWT secret were readable by every local user.
+  The file is now unconditionally `chown`ed to `pingwaf:pingwaf` and `chmod`
+  640.
+- **`GET /api/v1/analytics/top-ips` accepts `blocked_only`.** When truthy
+  (`true`/`1`/`yes`, case-insensitive) the ranking is restricted to IPs with
+  at least one blocked request (HTTP 403 or 429), ordered by
+  `blocked DESC, requests DESC, client_ip ASC` — what the dashboard's "top
+  threat IPs" card promises. Absent or false keeps the historical "top client
+  IPs" behavior unchanged; anything outside the accepted set is a 400
+  `invalid_blocked_only` instead of a silent fallback.
+
+### Changed
+
+- The VitePress documentation site (`website/`) was removed; the website is
+  built from `site/` (Astro), whose deployment pages now document both install
+  modes.
+
 ## [PingWAF 0.33.0] — 2026-10-31
 
 Feature release: static-asset access-log filtering, AI bots as a first-class

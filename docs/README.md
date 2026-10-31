@@ -13,6 +13,7 @@ centrally-controlled Web Application Firewall built on
 | --- | --- |
 | [quick-start.md](./quick-start.md) | From zero to your first protected site: prerequisites, install, first run |
 | [deployment.md](./deployment.md) | Docker Compose, binary + systemd, and distributed (server + agents) topologies |
+| [cli.md](./cli.md) | Administrator binary CLI — run modes, break-glass maintenance commands (`user`/`mode`/`security`/`config`), incident runbooks |
 | [user-guide.md](./user-guide.md) | Dashboard walkthrough — sites, rules, policies, IP access, rate limiting |
 | [http-lifecycle.md](./http-lifecycle.md) | Where every feature acts in the request pipeline — the WAF check order, caching, error pages, and how to debug with it |
 | [api.md](./api.md) | REST API reference (base URL `https://<host>:9080/api/v1`) |

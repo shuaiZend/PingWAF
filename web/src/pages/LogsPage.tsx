@@ -24,6 +24,7 @@ import {
   Prohibit,
   Users,
   Copy,
+  Broadcast,
 } from '@phosphor-icons/react'
 import { PageHeader } from '@/components/PageHeader'
 import { Card, CardBody } from '@/components/ui/Card'
@@ -41,6 +42,8 @@ import { useToast } from '@/components/ui/Toast'
 import { Tooltip } from '@/components/ui/Tooltip'
 import { ErrorState } from '@/components/ErrorState'
 import { IpGroupPickerDialog } from '@/components/logs/IpGroupPickerDialog'
+import { agentsApi } from '@/api/agents'
+import { errorMessage } from '@/api/errors'
 import { downloadJson, fileTimestamp, logKeys, logsApi } from '@/api/logs'
 import { apiProtectionApi, apiProtectionKeys } from '@/api/apiProtection'
 import { blockedIpsApi } from '@/api/blockedIps'
@@ -273,6 +276,23 @@ export function LogsPage() {
   const total = active.data?.total ?? 0
   const totalTruncated = active.data?.total_truncated ?? false
   const rows = active.data?.items ?? []
+
+  // Real-time sync: asks every agent to push what sits in its log buffer
+  // right now. Only buffered entries are affected — logs the agent dropped
+  // when its channel was full are unrecoverable, so the tooltip says so.
+  const flushLogs = useMutation({
+    mutationFn: () => agentsApi.flushLogs(),
+    onSuccess: (result) => {
+      toast.success(
+        t('pages.logs.flushDone', { delivered: result.delivered, offline: result.offline }),
+        t('pages.logs.flushDoneHint'),
+      )
+      void securityQuery.refetch()
+      void accessQuery.refetch()
+      void controlQuery.refetch()
+    },
+    onError: (e) => toast.error(t('pages.logs.flushFailed'), errorMessage(e)),
+  })
 
   const purge = useMutation({
     mutationFn: () =>
@@ -939,6 +959,18 @@ export function LogsPage() {
         description={t('pages.logs.description')}
         actions={
           <div className="flex items-center gap-2">
+            {isAdmin && (
+              <Tooltip content={t('pages.logs.flushHint')}>
+                <Button
+                  variant="secondary"
+                  loading={flushLogs.isPending}
+                  onClick={() => flushLogs.mutate()}
+                  icon={<Broadcast weight="duotone" className="h-4 w-4" />}
+                >
+                  {t('pages.logs.flush')}
+                </Button>
+              </Tooltip>
+            )}
             <Button
               variant="secondary"
               loading={active.isFetching}

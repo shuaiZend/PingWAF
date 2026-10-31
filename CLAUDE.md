@@ -154,6 +154,17 @@ CLI flags worth knowing: `-c/--conf <url>`, `-d/--daemon`, `-u/--upgrade` (hot u
 - The git pre-commit hook (installed via `make hooks`) just runs `make lint`.
 - `typos.toml` excludes `*.md` and `*.toml` from the spell check — typos in those file types will not be caught by `make lint`.
 
+## Defect discovery & similar-issue sweep
+
+How to find, diagnose and close defects (applies to bug fixes and to defect-hunting during feature work; enforced via `.codebuddy/rules/pingwaf-engineering-discipline/RULE.mdc` and checked by the reviewer checklist):
+
+- **Evidence before conclusion.** Every defect claim carries a trigger condition plus evidence — `file:line`, log excerpt, failing test, or a repro command. Mark each finding as *confirmed* (evidence in hand) or *hypothesis* (unverified). Never close a diagnosis with "should be" / "probably".
+- **Root cause, not symptom.** Follow the call chain upward (API handler → service → model/migration → data-plane or frontend render) and pin down where the bad state is *written*, not where it is *observed*. A fix explanation must answer both "why does this happen" and "why was it not caught until now".
+- **Map the impact before editing.** List affected callers, data structures, config distribution (settings row → `RuleBundle` → agent cache → `src/pingwaf.rs` translation), backup/restore + config-version snapshots, and permission boundaries (`require_admin`, agent auth). Fix the one file and forget the map, and the fix is incomplete.
+- **Similar-issue sweep is mandatory.** After fixing one instance, search for the same pattern elsewhere — same API semantics, same field/NULL-tri-state assumption, same UI control pattern, same SQL constraint, same proto field — and record the sweep command and its conclusion in the delivery. "No other hits" is only a valid conclusion if the search scope is stated.
+- **Regression, not vibes.** A fix ships with a test that fails without the fix (unit, contract, or a verified browser check for admin UI), and the delivery states how that test covers the original defect. "Fixed" without a way it could fail again is not a fixed status.
+- **Recording.** User-visible impact goes into `CHANGELOG.md` under Unreleased; internal-only defects go into the commit message (or the delivery report if not committing). Security fixes additionally follow the bypass/regression requirements in `.codebuddy/rules/pingwaf-security/RULE.mdc`.
+
 ## CI gates
 
 `.github/workflows/ci.yml` runs every gate listed below on pushes to `main` and on pull requests; any one of them failing breaks the build. It has eight jobs: `changes` (paths filter), `rust` (fmt / clippy `--features full -D warnings` / `cargo nextest run --workspace --features full --no-fail-fast` plus `cargo test --doc` / `typos`, on the MSRV and stable legs), `rustls` (clippy + nextest with `--no-default-features --features tls-rustls,full`), `web` (`npm ci` / `npm run lint` / `npm test` / `npm run build` in `web/`), `dockerfile` (builds only the `frontend-builder` stage of `Dockerfile` and `Dockerfile.perf`, `push: false`), `release-binary` (`cargo build --release --bin pingwaf --features full`), `docs` (`./scripts/check-docs-prompts.sh`, always runs, even on docs-only PRs), and `docker`, which packs the `release-binary` artifact into the amd64 image and pushes the `ghcr.io/shuaizend/pingwaf:main` **snapshot** tag — `release-binary` and `docker` only run on pushes to `main`, never on a PR. The versioned `:latest` / `:<major.minor>` / `:<version>` multi-arch manifests are published by `release.yml` (tag-triggered), which also builds the tarballs `install.sh` downloads.
@@ -224,13 +235,25 @@ each upstream's `hash_key` input **before** the key is computed, with the
 change also compared explicitly in `src/process/auto_restart.rs`, or toggling
 it changes nothing for upstreams that are already running.
 
-## Documentation site (`website/`)
+## Official site (`site/`) and docs (`docs/`)
 
-**Any behaviour change must be reflected in the docs the site is built from.** The site is not written separately — `scripts/build-website.sh` assembles it from files in the repo into a **VitePress** site (`website/package.json`, `website/BUILD.md`), so a feature that changes a config key, a default, a CLI flag or a plugin's behaviour is only documented once those source files are updated.
+**Any behaviour change must be reflected in the docs.** The official site is
+`site/` — an **Astro** project deployed to **Cloudflare Workers** at
+`www.pingwaf.com`. It is not generated from the repo's markdown: the site
+ships its own docs under `site/src/content/docs/**`, while `docs/` remains the
+**repository documentation source** (validated by `make check-docs`). A
+feature that changes a config key, a default, a CLI flag or a plugin's
+behaviour is only fully documented once both trees are updated.
 
-There is **no `pages.yml` workflow**: the site is built and published by `scripts/build-website.sh` under whatever Pages pipeline the deployment uses; check `.github/workflows/` before assuming an automated deploy exists.
+Site development and checks:
 
-Linking rules:
+```bash
+cd site && npm install
+npm run verify        # content contract + checks + build + link check
+npm run capture       # regenerate screenshots
+```
+
+Linking rules (for repo files read on GitHub and for `docs/`):
 
 - **In repo files read on GitHub** (`README.md`, `README_zh.md`, `docs/README.md`) use plain relative paths (`./docs/quick-start.md`); they must resolve on github.com.
 - **Between pages of the same language** use plain relative markdown (`plugins/jwt.md`).
@@ -241,24 +264,11 @@ Linking rules:
 | Change | Update |
 | --- | --- |
 | Plugin config key / default / behaviour | `pingap-plugin/docs/<plugin>.md` **and** `docs/zh/plugins/<plugin>.md` (only for plugins that have a Chinese page) |
-| New plugin | both of the above, plus the index table in `pingap-plugin/README.md` and `docs/zh/plugins/README.md`, plus the sidebar lists in `scripts/build-website.sh` |
+| New plugin | both of the above, plus the index table in `pingap-plugin/README.md` and `docs/zh/plugins/README.md`, plus the site's content contract (`site/src/content/schema.ts`) and navigation (`site/src/i18n/ui.ts`) |
 | Crate-level feature | `pingap-<crate>/README.md` **and** `docs/zh/crates/<crate>.md` |
 | CLI flag / env var / quick start | `README.md`, `README_zh.md`, `docs/quick-start.md`, `docs/deployment.md` |
 | Architecture / ACME flow / examples | `docs/modules.md`, `docs/acme_chart.md`, `examples/README.md` and their `docs/zh/guide/*` counterparts |
 | WAF control plane / agent / dashboard | `docs/user-guide.md`, `docs/api.md`, `README.md` and `README_zh.md` |
 | Agent roles / collaboration protocol / prompt regression checklist | `.codebuddy/agents/*.md`, `.codebuddy/agents/PROMPT_REGRESSION.md`, `.codebuddy/rules/pingwaf-multi-agent/RULE.mdc`, `CODEBUDDY.md` — gate with `make check-docs` (**note:** `.codebuddy/` is local-only IDE tooling, gitignored and not shipped with the repo; only `CODEBUDDY.md` is committed) |
 
-The Chinese tree is a **maintained translation**, not a generated one: adding an English page without its `docs/zh/` counterpart leaves a gap in the Chinese site. `docs/zh/README.md` is the Chinese home page and must stay a PingWAF page — it must never fall back to upstream pingap content.
-
-### Build and preview
-
-```bash
-./scripts/build-website.sh
-cd website && npm run docs:dev        # VitePress dev server; / is English, /zh/ is Chinese
-```
-
-Generated (gitignored — never edit directly): `website/index.md`, `website/plugins/`, `website/crates/`, `website/guide/`, `website/zh/`. The `website/en/`, `website/README.md`, `website/_sidebar.md`, `website/_navbar.md` and `website/assets/*` entries that `.gitignore` still lists are docsify leftovers the script only deletes.
-
-Hand-maintained and tracked: `website/BUILD.md`, `website/package.json`, `website/package-lock.json`, `website/.nojekyll`, `website/public/`, and the VitePress config `website/.vitepress/config.mts` plus `website/.vitepress/theme/`. Only `website/.vitepress/{dist,cache}/` and `website/node_modules/` are ignored.
-
-A Pages deploy would need to rerun the script and publish on pushes that touch `website/**`, `scripts/build-website.sh`, `pingap-*/README.md`, `pingap-plugin/docs/**`, `docs/**`, `examples/README.md`, `README.md` or `README_zh.md`. **No workflow does this today** — `website/BUILD.md` documents the manual steps and flags the missing `pages.yml`.
+The Chinese tree is a **maintained translation**, not a generated one: adding an English page without its `docs/zh/` counterpart leaves a gap in the Chinese docs. `docs/zh/README.md` is the Chinese home page and must stay a PingWAF page — it must never fall back to upstream pingap content.

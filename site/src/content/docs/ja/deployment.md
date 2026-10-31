@@ -54,7 +54,17 @@ cargo build --release --bin pingwaf --features full
   --db-url "postgres://pingwaf:pingwaf@localhost:5432/pingwaf"
 ```
 
-Linux では `install.sh` がアーカイブを取得し、`/usr/local/bin` に導入、`/etc/pingwaf/pingwaf.toml` と systemd ユニットを作成してエージェントを起動します（`--no-systemd` で省略）。
+Linux では `install.sh` がアーカイブを取得し、`/usr/local/bin` に導入、`/etc/pingwaf/pingwaf.toml` と systemd ユニットを作成してサービスを起動します。ターミナルで引数なしで実行すると対話ウィザード（モード、管理者認証情報、PostgreSQL URL、証明書 SAN、バージョン）が始まり、パイプで渡すと 1 行の無人インストールになります。
+
+```bash
+# 対話ウィザード：インストール計画の表示と確認つき
+curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh -o install.sh && bash install.sh
+
+# 1 行・無人（パイプ経由は端末がないため質問なし）
+curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh | bash -s -- --mode all-in-one
+```
+
+主なオプション：`--mode all-in-one|server|agent`、ユニット作成を省略する `--no-systemd`、質問なしで初期値を渡す `--admin-email` / `--admin-password` / `--tls-sans`（対応する `PINGWAF_*` 環境変数でも可）、変更せずに計画だけ確認する `--dry-run`。
 
 ## 設定の優先順位
 

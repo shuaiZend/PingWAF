@@ -143,6 +143,23 @@ pub static SITE_TABLES: &[TableSpec] = &[
         secrets: &["key_pem", "acme_dns_config"],
         ..site("site_ssl", 4, "id")
     },
+    // Certificate usage grants (certificate sharing). No `id` column: the
+    // composite key `(site_id, certificate_id)` is the identity, like
+    // `ip_group_sites`. `certificate_id` is deliberately **not** validated
+    // as a cross-site reference at restore time — restoring one site must
+    // not fail because the grant points at another site's certificate.
+    TableSpec {
+        name: "site_certificate_links",
+        scopes: SD,
+        filter: Filter::SiteId,
+        layer: 4,
+        key: None,
+        order: "certificate_id",
+        secrets: &[],
+    },
+    // Operator-curated paths that skip selected protection layers in
+    // observation mode.
+    site("site_path_exceptions", 4, "path"),
     site("ip_access_rules", 3, "id"),
     TableSpec {
         name: "ip_group_sites",
@@ -517,17 +534,17 @@ mod tests {
 
     #[test]
     fn catalogue_covers_the_confirmed_configuration() {
-        assert_eq!(SITE_TABLES.len(), 24);
+        assert_eq!(SITE_TABLES.len(), 26);
         // log_retention_settings moved from deployment-only to global: the
         // static-asset access-log filter rides inside every rule bundle.
         assert_eq!(GLOBAL_TABLES.len(), 5);
         assert_eq!(DEPLOYMENT_ONLY_TABLES.len(), 9);
-        assert_eq!(tables_for(VersionScope::Deployment).len(), 38);
+        assert_eq!(tables_for(VersionScope::Deployment).len(), 40);
         let names: BTreeSet<_> = tables_for(VersionScope::Deployment)
             .into_iter()
             .map(|table| table.name)
             .collect();
-        assert_eq!(names.len(), 38, "table names must be unique");
+        assert_eq!(names.len(), 40, "table names must be unique");
     }
 
     #[test]

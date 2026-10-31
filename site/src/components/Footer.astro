@@ -20,6 +20,7 @@ const GITHUB = "https://github.com/shuaiZend/PingWAF";
 const product = [
   { label: ui.nav.features, href: href(ROUTES.features, locale) },
   { label: ui.nav.quickstart, href: href(ROUTES.quickstart, locale) },
+  { label: ui.nav.install, href: href(ROUTES.install, locale) },
   { label: ui.nav.docs, href: href(ROUTES.docs, locale) },
   ...DOC_SLUGS.map((slug) => ({
     label: docs.cards.find((card) => card.slug === slug)?.title ?? slug,

@@ -230,13 +230,31 @@ cargo build --release --bin pingwaf --features full
 
 ### Option C — Install script (Linux)
 
-On a Linux server, the one-line script downloads the prebuilt binary, installs it and (optionally) sets up a systemd service:
+The script downloads the prebuilt binary, installs it and (optionally) sets up
+a systemd service. It runs in two modes:
 
 ```bash
+# Interactive: on a terminal it asks for the mode, admin credentials,
+# PostgreSQL URL, certificate SANs and version, then shows a plan
+curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh -o install.sh
+bash install.sh
+
+# One line, unattended: defaults, no prompts (flags go after `-s --`)
 curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh | sudo bash -s -- --mode all-in-one
 ```
 
+> `curl | bash` cannot show interactive prompts — piping installs
+> non-interactively with the defaults. Pass admin/TLS settings as environment
+> variables (`PINGWAF_ADMIN_EMAIL`, `PINGWAF_ADMIN_PASSWORD`,
+> `PINGWAF_TLS_SANS`) or flags (`--admin-email`, `--admin-password`,
+> `--tls-sans`); `--dry-run` prints the resolved plan without installing.
+> Install walkthrough: <https://www.pingwaf.com/install/>.
+>
 > Releases ship two archives per architecture: `pingwaf-linux-{amd64,arm64}.tar.xz` (primary, smaller) and `.tar.gz` (compatibility fallback), each with a `.sha256` sidecar. The script prefers `.tar.xz` and falls back to `.tar.gz` when `xz(1)` is missing locally or the download fails.
+>
+> The binary also carries administrator maintenance subcommands (`user`,
+> `mode`, `security`, `config`) that talk straight to PostgreSQL when the
+> console is unreachable — see **[docs/cli.md](./docs/cli.md)**.
 
 👉 For a full walkthrough (database setup, first site, distributed agents, systemd), see **[docs/quick-start.md](./docs/quick-start.md)**.
 
@@ -315,6 +333,7 @@ PINGWAF_CONFIG=/etc/pingwaf/pingwaf.toml pingwaf all-in-one   # equivalent
 | --- | --- |
 | [docs/quick-start.md](./docs/quick-start.md) | From zero to your first protected site |
 | [docs/deployment.md](./docs/deployment.md) | Docker, binary + systemd, distributed topologies |
+| [docs/cli.md](./docs/cli.md) | Administrator binary CLI — run modes, break-glass maintenance commands, incident runbooks |
 | [docs/user-guide.md](./docs/user-guide.md) | Dashboard walkthrough, sites, rules, policies |
 | [docs/http-lifecycle.md](./docs/http-lifecycle.md) | Where every feature acts in the request pipeline (WAF check order, caching, error pages) and how to debug with it |
 | [docs/api.md](./docs/api.md) | REST API reference (`https://<host>:9080/api/v1`) |

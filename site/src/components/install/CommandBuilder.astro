@@ -1,0 +1,456 @@
+---
+import Icon from "../Icon.astro";
+import type { InstallContent } from "../../content/schema";
+import type { Locale } from "../../i18n/config";
+
+interface Props {
+  builder: InstallContent["builder"];
+  /** Hero one-liner: server-rendered fallback so the panel is never blank without JS. */
+  oneLiner: string;
+  locale: Locale;
+}
+
+const { builder, oneLiner, locale } = Astro.props;
+
+/**
+ * Installer defaults, verified against install.sh: VERSION resolves "latest"
+ * to the newest release, DB_URL and ADMIN_EMAIL fall back to exactly these
+ * values, and the remaining fields start empty. Fields pre-filled with their
+ * default are omitted from the generated command, so the untouched builder
+ * renders the shortest one-liner.
+ */
+const SCRIPT_DEFAULTS: Record<string, string> = {
+  version: "latest",
+  dbUrl: "postgres://pingwaf:pingwaf@localhost:5432/pingwaf",
+  adminEmail: "admin@pingwaf.local",
+  serverUrl: "",
+  apiKey: "",
+  tlsSans: "",
+  adminPassword: "",
+};
+const defaultsJson = JSON.stringify(SCRIPT_DEFAULTS);
+---
+<div
+  class="builder"
+  data-install-builder
+  data-script-url={builder.scriptUrl}
+  data-one-liner={oneLiner}
+  data-empty-hint={builder.emptyHint}
+  data-defaults={defaultsJson}
+  data-mode="all-in-one"
+>
+  <div class="builder__modes" role="group" aria-label={builder.eyebrow}>
+    {
+      builder.modes.map((mode, index) => (
+        <button
+          type="button"
+          class="builder__mode"
+          data-mode-card={mode.id}
+          aria-pressed={index === 0 ? "true" : "false"}
+        >
+          <span class="builder__mode-label">{mode.label}</span>
+          <span class="builder__mode-body">{mode.body}</span>
+          <code class="builder__mode-flags mono">{mode.flags.join(" ")}</code>
+        </button>
+      ))
+    }
+  </div>
+
+  <div class="builder__fields">
+    {
+      builder.fields
+        // The password is never written into the command (it would land in
+        // shell history), so showing an input for it would lie about the result.
+        .filter((field) => field.key !== "adminPassword")
+        .map((field) => (
+        <label class="builder__field" data-field-wrap={field.key} data-modes={field.modes.join(" ")}>
+          <span class="builder__field-head">
+            <span class="builder__field-label">{field.label}</span>
+            {field.optional && <span class="builder__field-opt">{builder.optionalLabel}</span>}
+          </span>
+          <input
+            type={field.secret ? "password" : "text"}
+            data-field={field.key}
+            value={SCRIPT_DEFAULTS[field.key] ?? ""}
+            placeholder={field.placeholder}
+            autocomplete={field.secret ? "new-password" : "off"}
+            spellcheck="false"
+          />
+          <span class="builder__field-hint">{field.hint}</span>
+        </label>
+      ))
+    }
+  </div>
+
+  <div class="builder__defaults-row">
+    <p class="builder__defaults">{builder.defaultsLabel}</p>
+    <button type="button" class="builder__reset" data-reset>{builder.resetLabel}</button>
+  </div>
+
+  <div class="builder__panel">
+    <div class="builder__panel-head">
+      <span>{builder.commandTitle}</span>
+      <button type="button" class="builder__copy" data-copy="install-command">
+        <Icon name="copy" />
+        <span data-copy-label data-copied={builder.copied}>{builder.copy}</span>
+      </button>
+    </div>
+    <pre class="builder__command mono" id="install-command" data-command>{oneLiner}</pre>
+    <p class="builder__missing" data-missing hidden></p>
+    <p class="builder__warn" data-secret-warning hidden>
+      <Icon name="alert-triangle" />
+      <span>{builder.secretWarning}</span>
+    </p>
+    <p class="builder__note">{builder.note}</p>
+  </div>
+</div>
+
+<script>
+  const root = document.querySelector<HTMLElement>("[data-install-builder]");
+  if (root) {
+    const scriptUrl = root.getAttribute("data-script-url") ?? "";
+    const oneLiner = root.getAttribute("data-one-liner") ?? `curl -fsSL ${scriptUrl} | bash`;
+    const emptyHint = root.getAttribute("data-empty-hint") ?? "";
+    let defaults: Record<string, string> = {};
+    try {
+      defaults = JSON.parse(root.getAttribute("data-defaults") ?? "{}") as Record<string, string>;
+    } catch {
+      defaults = {};
+    }
+    const resetBtn = root.querySelector<HTMLButtonElement>("[data-reset]");
+    const commandEl = root.querySelector<HTMLElement>("[data-command]");
+    const missingEl = root.querySelector<HTMLElement>("[data-missing]");
+    const warnEl = root.querySelector<HTMLElement>("[data-secret-warning]");
+    const modeCards = Array.from(root.querySelectorAll<HTMLElement>("[data-mode-card]"));
+    const fieldWraps = Array.from(root.querySelectorAll<HTMLElement>("[data-field-wrap]"));
+    const inputs = Array.from(root.querySelectorAll<HTMLInputElement>("[data-field]"));
+
+    let mode = "all-in-one";
+
+    /** Single-quote a value only when the shell could otherwise interpret it. */
+    const SAFE = /^[A-Za-z0-9%_@.:/=+~-]+$/;
+    const shellQuote = (value: string) => {
+      if (SAFE.test(value)) return value;
+      return `'${value.replace(/'/g, "'\\''")}'`;
+    };
+
+    const applyMode = () => {
+      root.dataset.mode = mode;
+      modeCards.forEach((card) => {
+        card.setAttribute("aria-pressed", card.dataset.modeCard === mode ? "true" : "false");
+      });
+      fieldWraps.forEach((wrap) => {
+        const modes = (wrap.dataset.modes ?? "").split(" ");
+        wrap.hidden = !modes.includes(mode);
+      });
+      // The warning is about the enrolment key, which only agent mode sends.
+      if (warnEl) warnEl.hidden = mode !== "agent";
+    };
+
+    const build = () => {
+      if (!commandEl) return;
+      const values: Record<string, string> = {};
+      inputs.forEach((input) => {
+        values[input.dataset.field ?? ""] = input.value.trim();
+      });
+
+      // Only deviations from the installer defaults become flags, so the
+      // untouched builder renders the shortest one-liner. --mode defaults to
+      // all-in-one in the installer, so it is likewise only sent when changed.
+      const parts: string[] = [];
+      if (mode !== "all-in-one") parts.push(`--mode ${mode}`);
+
+      const push = (key: string, flag: string) => {
+        const value = values[key];
+        if (!value || value === (defaults[key] ?? "")) return;
+        // tlsSans is comma separated: whitespace never survives the installer.
+        const cleaned = key === "tlsSans" ? value.replace(/\s+/g, "") : value;
+        if (!cleaned) return;
+        parts.push(`${flag} ${shellQuote(cleaned)}`);
+      };
+
+      push("version", "--version");
+      if (mode === "agent") {
+        push("serverUrl", "--server-url");
+        push("apiKey", "--api-key");
+      } else {
+        push("dbUrl", "--db-url");
+        push("adminEmail", "--admin-email");
+        push("tlsSans", "--tls-sans");
+      }
+      // --admin-password is intentionally never emitted: the value would land
+      // in shell history. The field hint tells users how to add it themselves.
+
+      const tail = parts.length ? ` | bash -s -- ${parts.join(" ")}` : " | bash";
+      commandEl.textContent = `curl -fsSL ${scriptUrl}${tail}`;
+
+      if (missingEl) {
+        const missing = mode === "agent" && (!values.serverUrl || !values.apiKey);
+        missingEl.hidden = !missing;
+        if (missing) missingEl.textContent = emptyHint;
+      }
+    };
+
+    modeCards.forEach((card) => {
+      card.addEventListener("click", () => {
+        mode = card.dataset.modeCard ?? "all-in-one";
+        applyMode();
+        build();
+      });
+    });
+    inputs.forEach((input) => {
+      input.addEventListener("input", build);
+    });
+    resetBtn?.addEventListener("click", () => {
+      inputs.forEach((input) => {
+        input.value = defaults[input.dataset.field ?? ""] ?? "";
+      });
+      build();
+    });
+
+    applyMode();
+    build();
+  }
+</script>
+
+<style>
+  .builder {
+    display: flex;
+    flex-direction: column;
+    gap: 22px;
+  }
+
+  .builder__modes {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 14px;
+  }
+
+  .builder__mode {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 9px;
+    padding: 18px;
+    text-align: left;
+    border: 1px solid var(--color-border-line);
+    border-radius: var(--radius-lg);
+    background: var(--color-bg-elevated);
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+    transition: border-color 140ms var(--site-ease), background 140ms var(--site-ease);
+  }
+
+  .builder__mode:hover {
+    border-color: var(--color-border-fill);
+  }
+
+  .builder__mode[aria-pressed="true"] {
+    border-color: var(--color-bg-brand);
+    background: var(--site-brand-soft);
+  }
+
+  .builder__mode-label {
+    font-weight: 600;
+    font-size: 14.5px;
+    color: var(--color-text-strong);
+  }
+
+  .builder__mode-body {
+    font-size: var(--site-text-sm);
+    line-height: 1.6;
+    color: var(--color-text-subtle);
+  }
+
+  .builder__mode-flags {
+    font-size: 11.5px;
+    color: var(--color-text-subtle);
+    overflow-wrap: anywhere;
+  }
+
+  .builder__fields {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 18px;
+  }
+
+  .builder__field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  /* `hidden` alone loses to the author `display: flex` above, so the mode
+     switch would leave every field visible. */
+  .builder__field[hidden] {
+    display: none;
+  }
+
+  .builder__field-head {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+  }
+
+  .builder__field-label {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--color-text-strong);
+  }
+
+  .builder__field-opt {
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--color-text-subtle);
+  }
+
+  .builder__field input {
+    width: 100%;
+    padding: 9px 12px;
+    border: 1px solid var(--color-border-line);
+    border-radius: var(--radius-md);
+    background: var(--color-bg-base);
+    color: var(--color-text-strong);
+    font-family: var(--site-font-mono);
+    font-size: 13px;
+  }
+
+  .builder__field input:focus {
+    outline: none;
+    border-color: var(--color-bg-brand);
+  }
+
+  .builder__field-hint {
+    font-size: 12px;
+    line-height: 1.55;
+    color: var(--color-text-subtle);
+  }
+
+  .builder__defaults-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+  }
+
+  .builder__defaults {
+    margin: 0;
+    font-size: 12.5px;
+    line-height: 1.55;
+    color: var(--color-text-subtle);
+  }
+
+  .builder__reset {
+    flex: none;
+    padding: 7px 14px;
+    border: 1px solid var(--color-border-line);
+    border-radius: var(--radius-md);
+    background: transparent;
+    color: var(--color-text-strong);
+    font-size: 12.5px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: border-color 140ms var(--site-ease), background 140ms var(--site-ease);
+  }
+
+  .builder__reset:hover {
+    border-color: var(--color-border-fill);
+    background: var(--site-surface-inset);
+  }
+
+  .builder__panel {
+    border: 1px solid var(--color-border-line);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+    background: #1d1d1d;
+    color: #e8e8e8;
+  }
+
+  .builder__panel-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 12px;
+    background: #262626;
+    border-bottom: 1px solid #303030;
+    font-size: 12.5px;
+    color: #9a9a9a;
+  }
+
+  .builder__copy {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 10px;
+    border: 1px solid #3a3a3a;
+    border-radius: var(--radius-sm);
+    background: #1d1d1d;
+    color: #cfcfcf;
+    font-size: 12px;
+    cursor: pointer;
+  }
+
+  .builder__copy:hover {
+    color: #ffffff;
+    border-color: #4a4a4a;
+  }
+
+  .builder__command {
+    margin: 0;
+    padding: 16px 18px;
+    font-family: var(--site-font-mono);
+    font-size: 13px;
+    line-height: 1.65;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .builder__missing {
+    margin: 0;
+    padding: 10px 18px;
+    border-top: 1px solid #303030;
+    background: rgba(255, 178, 36, 0.08);
+    color: #ffb224;
+    font-size: 12.5px;
+    line-height: 1.55;
+  }
+
+  .builder__warn {
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+    margin: 0;
+    padding: 12px 18px;
+    border-top: 1px solid #303030;
+    color: #ffb224;
+    font-size: 12.5px;
+    line-height: 1.55;
+  }
+
+  .builder__warn :global(.icon) {
+    flex: none;
+    margin-top: 2px;
+  }
+
+  .builder__note {
+    margin: 0;
+    padding: 12px 18px 14px;
+    border-top: 1px solid #303030;
+    color: #9a9a9a;
+    font-size: 12px;
+    line-height: 1.6;
+  }
+
+  @media (max-width: 1080px) {
+    .builder__modes {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .builder__fields {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+</style>

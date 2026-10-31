@@ -29,12 +29,13 @@ use crate::api::validation::validate_pem_bundle;
 use crate::auth::AuthUser;
 use crate::grpc::notify_config_changed;
 use crate::models::{
-    acme_challenge, bot_protection, cache_rules, challenge_settings, geo_rules,
-    ip_access_rules, ip_groups, rate_limit_rules, rewrite_rules,
-    route_match_type, rule, rule_groups, site, site_ai_bot_policies,
-    site_ai_crawl_settings, site_certificates, site_routes, site_ssl,
-    site_status, site_upstream_pools, site_upstreams, tls_version,
-    trusted_header, waf_settings, ResponseReplaceConfig, ResponseReplaceRule,
+    acme_challenge, bot_protection, cache_rules, certificate_links,
+    challenge_settings, geo_rules, ip_access_rules, ip_groups,
+    rate_limit_rules, rewrite_rules, route_match_type, rule, rule_groups, site,
+    site_ai_bot_policies, site_ai_crawl_settings, site_certificates,
+    site_routes, site_ssl, site_status, site_upstream_pools, site_upstreams,
+    tls_version, trusted_header, waf_settings, ResponseReplaceConfig,
+    ResponseReplaceRule,
 };
 
 /// Longest accepted route `rewrite_path`, in **bytes**, mirroring
@@ -667,6 +668,11 @@ pub struct TlsPostureRequest {
     pub self_signed: Option<bool>,
     #[serde(default)]
     pub certificate_id: Option<Uuid>,
+    /// Explicitly detach the current certificate. `certificate_id: null`
+    /// cannot express this: `None` means "not provided" for every other field
+    /// of this request, and making it mean "clear" would break partial updates.
+    #[serde(default)]
+    pub clear_certificate: bool,
     #[serde(default)]
     pub mtls_enabled: Option<bool>,
     #[serde(default)]
@@ -763,8 +769,17 @@ impl TlsPosture {
         if let Some(value) = req.self_signed {
             next.self_signed = value;
         }
+        if req.certificate_id.is_some() && req.clear_certificate {
+            return Err(ApiError::BadRequest(
+                "certificate_id and clear_certificate are mutually exclusive"
+                    .to_string(),
+            ));
+        }
         if let Some(value) = req.certificate_id {
             next.certificate_id = Some(value);
+        }
+        if req.clear_certificate {
+            next.certificate_id = None;
         }
         if let Some(value) = req.mtls_enabled {
             next.mtls_enabled = value;
@@ -866,6 +881,14 @@ impl TlsPosture {
         active.max_tls_version = Set(self.max_tls_version.clone());
         active.self_signed = Set(self.self_signed);
         active.certificate_id = Set(self.certificate_id);
+        if self.certificate_id.is_some() {
+            // Legacy certificates live in `site_ssl.cert_pem/key_pem`; the
+            // data plane used to prefer that copy over the selected row, which
+            // made "switch certificate" look like it did nothing. Clear the
+            // shadow copy when a managed certificate is selected.
+            active.cert_pem = Set(None);
+            active.key_pem = Set(None);
+        }
         active.mtls_enabled = Set(self.mtls_enabled);
         active.mtls_client_ca = Set(self.mtls_client_ca.clone());
         active.mtls_organization = Set(self.mtls_organization.clone());
@@ -894,14 +917,27 @@ pub(crate) async fn save_tls_posture<C: ConnectionTrait>(
         .await?;
 
     if let Some(cert_id) = req.certificate_id {
+        // A site may select a certificate it owns or one shared with it
+        // through `site_certificate_links`. Sharing is the authorisation; the
+        // row itself still has an owning site.
         let owned = site_certificates::Entity::find_by_id(cert_id)
             .filter(site_certificates::Column::SiteId.eq(site.id))
             .one(db)
             .await?
             .is_some();
-        if !owned {
+        let linked = if owned {
+            false
+        } else {
+            certificate_links::Entity::find()
+                .filter(certificate_links::Column::SiteId.eq(site.id))
+                .filter(certificate_links::Column::CertificateId.eq(cert_id))
+                .one(db)
+                .await?
+                .is_some()
+        };
+        if !owned && !linked {
             return Err(ApiError::BadRequest(format!(
-                "certificate {cert_id} does not belong to this site"
+                "certificate {cert_id} does not belong to this site and is not linked to it"
             )));
         }
     }
@@ -1468,7 +1504,11 @@ async fn clone_site(
     }
 
     // TLS material travels with the site: the clone serves the same
-    // certificate and protocol switches until an operator changes them.
+    // certificate and protocol switches until an operator changes them. The
+    // certificate *selection* does not: `certificate_id` points at a
+    // specific `site_certificates` row owned by (or granted to) the source,
+    // and carrying it over would silently bind the clone to a certificate
+    // it has no grant for. The operator picks one for the new domain.
     if let Some(row) = site_ssl::Entity::find()
         .filter(site_ssl::Column::SiteId.eq(source_id))
         .one(&txn)
@@ -1478,6 +1518,7 @@ async fn clone_site(
         node.id = Set(Uuid::new_v4());
         node.site_id = Set(new_id);
         node.domain = Set(domain.clone());
+        node.certificate_id = Set(None);
         node.created_at = Set(timestamp);
         node.insert(&txn).await?;
     }

@@ -87,7 +87,10 @@ const MAX_REPLACE_BODY_REPLACEMENT_LEN: usize = 2048;
 /// Validates one rule's operations: every entry must carry a whitelisted
 /// `type`, and `replace_body` entries honour the pattern/replacement caps
 /// with a compilable regular expression when `is_regex` is set.
-fn validate_operations(ops: &serde_json::Value, direction: &str) -> Result<(), ApiError> {
+fn validate_operations(
+    ops: &serde_json::Value,
+    direction: &str,
+) -> Result<(), ApiError> {
     let Some(items) = ops.as_array() else {
         return Err(ApiError::BadRequest(
             "operations must be a JSON array".to_string(),
@@ -99,10 +102,8 @@ fn validate_operations(ops: &serde_json::Value, direction: &str) -> Result<(), A
                 "every operation must be a JSON object".to_string(),
             ));
         };
-        let op_type = obj
-            .get("type")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
+        let op_type =
+            obj.get("type").and_then(|v| v.as_str()).unwrap_or_default();
         if !OPERATION_TYPES.contains(&op_type) {
             return Err(ApiError::BadRequest(format!(
                 "unknown operation type '{op_type}'"
@@ -122,8 +123,7 @@ fn validate_operations(ops: &serde_json::Value, direction: &str) -> Result<(), A
         }
         let pattern =
             obj.get("name").and_then(|v| v.as_str()).unwrap_or_default();
-        if pattern.is_empty() || pattern.len() > MAX_REPLACE_BODY_PATTERN_LEN
-        {
+        if pattern.is_empty() || pattern.len() > MAX_REPLACE_BODY_PATTERN_LEN {
             return Err(ApiError::BadRequest(format!(
                 "replace_body pattern must be 1-{MAX_REPLACE_BODY_PATTERN_LEN} bytes"
             )));
@@ -138,7 +138,11 @@ fn validate_operations(ops: &serde_json::Value, direction: &str) -> Result<(), A
                  {MAX_REPLACE_BODY_REPLACEMENT_LEN} bytes"
             )));
         }
-        if obj.get("is_regex").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if obj
+            .get("is_regex")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
             // The data plane compiles body patterns as `regex::bytes::Regex`
             // (it matches raw body bytes), so the same crate type decides
             // validity here — a text-only `Regex` would wrongly reject
@@ -288,11 +292,13 @@ async fn update(
         // would silently do nothing). The console clears such operations on a
         // direction change; the API refuses the combination instead.
         if direction != existing_direction && payload.operations.is_none() {
-            let incompatible = existing_operations.as_array().is_some_and(|items| {
-                items.iter().any(|item| {
-                    item.get("type").and_then(|v| v.as_str()) == Some("replace_body")
-                })
-            });
+            let incompatible =
+                existing_operations.as_array().is_some_and(|items| {
+                    items.iter().any(|item| {
+                        item.get("type").and_then(|v| v.as_str())
+                            == Some("replace_body")
+                    })
+                });
             if incompatible {
                 return Err(ApiError::BadRequest(
                     "cannot switch this rule to a request direction while it \
@@ -402,9 +408,11 @@ mod tests {
 
     #[test]
     fn replace_body_is_rejected_on_request_rules() {
-        let ops = json!([{ "type": "replace_body", "name": "a", "value": "b" }]);
-        let err = validate_operations(&ops, "request")
-            .expect_err("body replacement on a request rule would silently no-op");
+        let ops =
+            json!([{ "type": "replace_body", "name": "a", "value": "b" }]);
+        let err = validate_operations(&ops, "request").expect_err(
+            "body replacement on a request rule would silently no-op",
+        );
         assert!(
             err.to_string().contains("only valid on response rules"),
             "{err}"
@@ -414,7 +422,8 @@ mod tests {
 
     #[test]
     fn replace_body_enforces_pattern_and_replacement_caps() {
-        let ok = json!([{ "type": "replace_body", "name": "PingWAF", "value": "" }]);
+        let ok =
+            json!([{ "type": "replace_body", "name": "PingWAF", "value": "" }]);
         assert!(validate_operations(&ok, "response").is_ok());
 
         let long_name = "a".repeat(513);
@@ -437,7 +446,8 @@ mod tests {
         .expect_err("a 2049-byte replacement is over the cap");
         assert!(err.to_string().contains("2048"), "{err}");
 
-        let empty = json!([{ "type": "replace_body", "name": "", "value": "b" }]);
+        let empty =
+            json!([{ "type": "replace_body", "name": "", "value": "b" }]);
         assert!(validate_operations(&empty, "response").is_err());
     }
 

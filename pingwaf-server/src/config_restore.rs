@@ -429,6 +429,12 @@ async fn validate_references<C: ConnectionTrait>(
                 "site_ssl" => {
                     refs.push(("certificate_id", "site_certificates"))
                 },
+                // `site_certificate_links.certificate_id` is deliberately
+                // NOT validated: a link grants another site's certificate,
+                // and restoring one site must not fail (nor cascade a
+                // cross-site delete) because that grant points outside the
+                // restored scope. Dangling grants are swept in
+                // `delete_rows` instead.
                 "rules" => refs.push(("group_id", "rule_groups")),
                 "site_upstreams" => {
                     refs.push(("pool_id", "site_upstream_pools"))
@@ -770,6 +776,36 @@ async fn delete_rows(
         values,
     ))
     .await?;
+    if spec.name == "site_certificates" {
+        // A site-level restore removes the certificates this site owns, but
+        // other sites may hold usage grants (`site_certificate_links`) to
+        // them: without the sweep those grants dangle after the certificates
+        // are gone. Deployment scope deletes every certificate, so the
+        // dangling-link sweep covers the whole table instead. Runs after the
+        // delete above, while the removed ids are already gone.
+        match site_id {
+            Some(id) => {
+                txn.execute(statement(
+                    txn,
+                    "DELETE FROM site_certificate_links \
+                     WHERE site_id <> $2 AND certificate_id IN \
+                     (SELECT id FROM site_certificates WHERE site_id = $1)",
+                    vec![id.into(), id.into()],
+                ))
+                .await?;
+            },
+            None => {
+                txn.execute(statement(
+                    txn,
+                    "DELETE FROM site_certificate_links \
+                     WHERE certificate_id NOT IN \
+                     (SELECT id FROM site_certificates)",
+                    Vec::new(),
+                ))
+                .await?;
+            },
+        }
+    }
     Ok(())
 }
 

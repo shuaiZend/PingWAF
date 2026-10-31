@@ -17,7 +17,7 @@ const contentDir = path.join(root, "src", "content");
 const docsDir = path.join(contentDir, "docs");
 
 const LOCALES = ["en", "zh", "es", "fr", "ja"] as const;
-const MODULES = ["intro", "features", "quickstart", "docs"] as const;
+const MODULES = ["intro", "features", "quickstart", "docs", "install"] as const;
 
 const errors: string[] = [];
 const warnings: string[] = [];
@@ -88,14 +88,17 @@ function compareShape(
       fail(`${where} — expected a string`);
       return;
     }
-    if (candidate.trim().length === 0) {
+    // A builder default of "" is part of the contract ("leave empty"), so
+    // empty `defaultValue` fields are legitimate.
+    if (candidate.trim().length === 0 && !/\.defaultValue$/.test(where)) {
       fail(`${where} — empty string`);
     }
     if (/\b(TODO|FIXME):|\blorem ipsum\b/i.test(candidate)) {
       fail(`${where} — placeholder copy left in translation`);
     }
     // Machine identifiers legitimately stay identical across locales.
-    const technical = /(\.(code|lang|id|key|url|path|slug|icon|verdict)$|\.topics\.\d+$)/;
+    const technical =
+      /(\.(code|lang|id|key|url|path|slug|icon|verdict)$|\.topics\.\d+$|\.oneLiner$|\.scriptUrl$|\.flag$|\.flags\.\d+$|\.modes\.\d+$|\.defaultValue$|\.upgradeCommand$|\.tabLabel$|\.tabs\.compose$)/;
     if (candidate === reference && locale !== "en" && !technical.test(where)) {
       warnings.push(`${where} — identical to English (check the translation)`);
     }
@@ -116,6 +119,7 @@ const knownPaths = new Set<string>([
   ROUTES.home,
   ROUTES.features,
   ROUTES.quickstart,
+  ROUTES.install,
   ROUTES.docs,
   ...DOC_SLUGS.map((slug) => docPath(slug)),
 ]);

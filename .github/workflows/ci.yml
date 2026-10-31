@@ -71,7 +71,6 @@ jobs:
               - '**'
               - '!docs/**'
               - '!**/*.md'
-              - '!website/**'
 
   rust:
     name: Rust ${{ matrix.toolchain }} (test)
@@ -249,6 +248,40 @@ jobs:
           name: web-dist
           path: web/dist
           retention-days: 1
+
+  # The official portal (`site/`) is deployed by Cloudflare from its own build,
+  # so nothing else here would catch a broken content contract, an Astro type
+  # error or a dead internal link before it reaches the live site. `npm run
+  # verify` is the same gate contributors run locally: content parity across the
+  # five locales, `astro check`, the production build, then the link check.
+  site:
+    name: Site (content / build / links)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: site
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # Node 22 LTS matches the Cloudflare Workers Builds default, so the gate
+      # runs the same runtime the deploy does (the `--experimental-strip-types`
+      # flag used by `check:content` exists on both 22 and 26, but only one of
+      # them is also what production builds with).
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify (content, types, build, links)
+        run: npm run verify
 
   # Nothing else builds the source `Dockerfile`: CI and the release pipeline
   # build `Dockerfile.runtime` from a prebuilt binary, and `Dockerfile.perf`

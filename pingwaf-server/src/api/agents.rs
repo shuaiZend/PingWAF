@@ -9,7 +9,8 @@ use axum::Json;
 use axum::Router;
 use chrono::{DateTime, Utc};
 use pingwaf_proto::control_plane::{
-    BlockIpCommand, PurgeCacheCommand, RestartAgentCommand, ServerCommand,
+    BlockIpCommand, FlushLogsCommand, PurgeCacheCommand, RestartAgentCommand,
+    ServerCommand,
 };
 use sea_orm::{
     ColumnTrait, Condition, EntityTrait, PaginatorTrait, QueryFilter,
@@ -41,6 +42,7 @@ pub mod command_type {
     pub const PURGE_CACHE: i32 = 5;
     pub const UPDATE_SITE: i32 = 6;
     pub const RESTART_AGENT: i32 = 7;
+    pub const FLUSH_LOGS: i32 = 8;
 }
 
 /// Upper bound on the `block_ip` duration a dashboard command may carry, in
@@ -194,6 +196,7 @@ pub fn routes() -> Router<AppState> {
         .route("/agents/{agent_id}", get(show).delete(remove))
         .route("/agents/{agent_id}/samples", get(samples))
         .route("/agents/{agent_id}/commands", post(send_command))
+        .route("/agents/flush-logs", post(flush_logs))
 }
 
 /// `POST /api/v1/agents/enroll` — mints an agent key and returns the command
@@ -472,6 +475,52 @@ async fn send_command(
         .into_response())
 }
 
+/// `POST /api/v1/agents/flush-logs`
+///
+/// Asks every connected agent to flush its in-memory log buffer now. Offline
+/// agents are counted but not queued: replaying "flush" after a reconnect has
+/// no value and would only occupy a pending-command slot.
+async fn flush_logs(
+    State(state): State<AppState>,
+    current: AuthUser,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require_write(&current)?;
+
+    let payload = CommandRequest {
+        command: "flush_logs".to_string(),
+        site_id: None,
+        ip_addresses: Vec::new(),
+        urls: Vec::new(),
+        tags: Vec::new(),
+        duration_seconds: None,
+        reason: Some("requested from the log page".to_string()),
+        graceful: true,
+    };
+
+    let connected = state.agents.snapshot().await;
+    let mut delivered = 0usize;
+    for agent in &connected {
+        let command = build_command(&payload, None)?;
+        if state.agents.send_command_now(&agent.id, command).await {
+            delivered += 1;
+        }
+    }
+
+    let registered = agent::Entity::find().count(&state.db).await? as usize;
+    let offline = registered.saturating_sub(connected.len());
+    tracing::info!(
+        delivered,
+        offline,
+        requested_by = %current.email,
+        "log flush broadcast"
+    );
+
+    Ok(Json(serde_json::json!({
+        "delivered": delivered,
+        "offline": offline,
+    })))
+}
+
 /// Loads an agent and checks that `current` may see it.
 pub async fn load_agent(
     state: &AppState,
@@ -636,6 +685,15 @@ pub fn build_command(
             })),
         ),
         "reload" => (command_type::CONFIG_RELOAD, None),
+        "flush_logs" => (
+            command_type::FLUSH_LOGS,
+            Some(server_command_payload::FlushLogs(FlushLogsCommand {
+                reason: payload
+                    .reason
+                    .clone()
+                    .unwrap_or_else(|| "requested from dashboard".to_string()),
+            })),
+        ),
         "purge_cache" => {
             let (urls, tags) =
                 validate_purge_selectors(&payload.urls, &payload.tags)?;
@@ -710,8 +768,8 @@ pub fn build_command(
         }
         other => {
             return Err(ApiError::BadRequest(format!(
-                "unknown command '{other}'; expected restart, reload, purge_cache, block_ip \
-                 or unblock_ip"
+                "unknown command '{other}'; expected restart, reload, purge_cache, block_ip, \
+                 unblock_ip or flush_logs"
             )))
         }
     };
@@ -727,7 +785,7 @@ pub fn build_command(
 /// The generated `oneof payload` module of `ServerCommand`.
 mod server_command_payload {
     pub use pingwaf_proto::control_plane::server_command::Payload::{
-        BlockIp, PurgeCache, RestartAgent, UnblockIp,
+        BlockIp, FlushLogs, PurgeCache, RestartAgent, UnblockIp,
     };
 }
 

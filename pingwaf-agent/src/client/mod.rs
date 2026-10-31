@@ -126,6 +126,10 @@ pub struct ControlPlaneClient {
     command_handlers: Arc<tokio::sync::RwLock<CommandHandlers>>,
     /// Buffered host probe samples, shipped with each heartbeat
     probe: Arc<ProbeBuffer>,
+    /// Wakes the log shipper when the server sends a `flush_logs` command,
+    /// so queued entries reach the control plane immediately instead of
+    /// waiting out the batch interval.
+    flush_notify: Arc<tokio::sync::Notify>,
     /// Current reconnect backoff in milliseconds, shared between the
     /// connection loop and the registration path so a successful register
     /// can retire stale backoff immediately.
@@ -187,6 +191,7 @@ impl ControlPlaneClient {
             log_receiver: Arc::new(tokio::sync::Mutex::new(log_rx)),
             command_handlers: Arc::new(tokio::sync::RwLock::new(handlers)),
             probe: Arc::new(ProbeBuffer::new()),
+            flush_notify: Arc::new(tokio::sync::Notify::new()),
             retry_delay_ms,
         }
     }
@@ -755,7 +760,9 @@ impl ControlPlaneClient {
                                 &command,
                                 &rule_cache,
                                 &command_handlers,
-                            ).await;
+                                &self.flush_notify,
+                            )
+                            .await;
                         }
                         Ok(None) => {
                             info!("Server closed heartbeat stream");
@@ -782,6 +789,7 @@ impl ControlPlaneClient {
         command: &proto::ServerCommand,
         rule_cache: &Arc<RuleCache>,
         command_handlers: &Arc<tokio::sync::RwLock<CommandHandlers>>,
+        flush_notify: &tokio::sync::Notify,
     ) {
         let command_type = proto::CommandType::try_from(command.r#type)
             .unwrap_or(proto::CommandType::CommandUnknown);
@@ -867,6 +875,16 @@ impl ControlPlaneClient {
                     cb(restart.graceful);
                 }
             },
+            Some(proto::server_command::Payload::FlushLogs(flush)) => {
+                info!(
+                    reason = %flush.reason,
+                    "Server requested log flush"
+                );
+                // One-way command: the shipper flushes its current batch and
+                // drains what arrived since, the effect shows up in the next
+                // heartbeat's pending-log counters.
+                flush_notify.notify_one();
+            },
             None => {
                 debug!("Received server command with no payload");
             },
@@ -898,8 +916,13 @@ impl ControlPlaneClient {
             if self.shutdown_signal.load(Ordering::Relaxed) {
                 // Flush remaining logs before shutdown
                 if !batch.is_empty() {
-                    Self::flush_logs(&mut client, &mut batch, &agent_token)
-                        .await;
+                    Self::flush_logs(
+                        &mut client,
+                        &mut batch,
+                        &agent_token,
+                        self.config.log_batch_size,
+                    )
+                    .await;
                 }
                 break;
             }
@@ -918,6 +941,7 @@ impl ControlPlaneClient {
                                     &mut client,
                                     &mut batch,
                                     &agent_token,
+                                    self.config.log_batch_size,
                                 )
                                 .await;
                             }
@@ -932,14 +956,68 @@ impl ControlPlaneClient {
                 _ = interval.tick() => {
                     // Periodic flush
                     if !batch.is_empty() {
-                        Self::flush_logs(&mut client, &mut batch, &agent_token)
-                            .await;
+                        Self::flush_logs(
+                            &mut client,
+                            &mut batch,
+                            &agent_token,
+                            self.config.log_batch_size,
+                        )
+                        .await;
                     }
+                }
+                _ = self.flush_notify.notified() => {
+                    // A server-initiated flush: ship the current batch now,
+                    // then drain whatever arrived while the RPC was in
+                    // flight — up to one batch, so a flood cannot turn a
+                    // single command into an unbounded send loop.
+                    if !batch.is_empty() {
+                        Self::flush_logs(
+                            &mut client,
+                            &mut batch,
+                            &agent_token,
+                            self.config.log_batch_size,
+                        )
+                        .await;
+                    }
+                    let mut drained = 0usize;
+                    while drained < self.config.log_batch_size {
+                        match receiver.try_recv() {
+                            Ok(entry) => {
+                                batch.push(Self::convert_log_entry(
+                                    agent_id,
+                                    &entry,
+                                ));
+                                drained += 1;
+                            },
+                            Err(mpsc::error::TryRecvError::Empty) => break,
+                            Err(mpsc::error::TryRecvError::Disconnected) => {
+                                debug!("Log channel closed");
+                                break;
+                            },
+                        }
+                    }
+                    if !batch.is_empty() {
+                        Self::flush_logs(
+                            &mut client,
+                            &mut batch,
+                            &agent_token,
+                            self.config.log_batch_size,
+                        )
+                        .await;
+                    }
+                    // The next periodic flush measures from now, not from
+                    // the tick that was interrupted mid-cycle.
+                    interval.reset();
                 }
                 _ = self.wait_for_shutdown() => {
                     if !batch.is_empty() {
-                        Self::flush_logs(&mut client, &mut batch, &agent_token)
-                            .await;
+                        Self::flush_logs(
+                            &mut client,
+                            &mut batch,
+                            &agent_token,
+                            self.config.log_batch_size,
+                        )
+                        .await;
                     }
                     break;
                 }
@@ -954,6 +1032,7 @@ impl ControlPlaneClient {
         client: &mut ProtoClient<Channel>,
         batch: &mut Vec<proto::LogEntry>,
         agent_token: &Option<Arc<String>>,
+        batch_cap: usize,
     ) {
         if batch.is_empty() {
             return;
@@ -962,8 +1041,13 @@ impl ControlPlaneClient {
         let entries = std::mem::take(batch);
         let count = entries.len();
 
-        // Use client-streaming RPC for log shipping
-        let mut request = tonic::Request::new(tokio_stream::iter(entries));
+        // Use client-streaming RPC for log shipping. The batch keeps a copy
+        // until the server has accepted it: a transport failure must not
+        // silently drop the whole batch, so the unsent entries go back to
+        // the (now empty) batch. Only the wire copy is cloned — the
+        // original moves into the stream.
+        let mut request =
+            tonic::Request::new(tokio_stream::iter(entries.clone()));
         attach_agent_token(&mut request, agent_token);
         match client.ship_logs(request).await {
             Ok(response) => {
@@ -983,6 +1067,7 @@ impl ControlPlaneClient {
             },
             Err(e) => {
                 error!(error = %e, count, "Failed to ship logs");
+                restore_failed_batch(batch, entries, batch_cap);
             },
         }
     }
@@ -1765,9 +1850,98 @@ fn get_total_memory() -> u64 {
     }
 }
 
+/// Puts the entries of a failed log shipment back into the shipper's batch.
+///
+/// The batch is empty at this point (`flush_logs` took it), so the failed
+/// entries become the batch again. A control plane that is unreachable
+/// never drains them, so the replay is capped at `batch_cap`: the oldest
+/// entries beyond the cap are dropped, keeping the newest — the backlog may
+/// not grow without bound while the server is down.
+fn restore_failed_batch(
+    batch: &mut Vec<proto::LogEntry>,
+    failed: Vec<proto::LogEntry>,
+    batch_cap: usize,
+) {
+    if failed.len() <= batch_cap {
+        *batch = failed;
+    } else {
+        let skipped = failed.len() - batch_cap;
+        *batch = failed.into_iter().skip(skipped).collect();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_log_batch_is_restored_and_capped() {
+        let entry = |i: usize| proto::LogEntry {
+            request_id: i.to_string(),
+            ..Default::default()
+        };
+        // Under the cap: everything comes back, in order.
+        let failed: Vec<_> = (0..3).map(entry).collect();
+        let mut batch = Vec::new();
+        restore_failed_batch(&mut batch, failed, 8);
+        assert_eq!(batch.len(), 3);
+        assert_eq!(batch[0].request_id, "0");
+        // Over the cap: the oldest entries are dropped, the newest kept —
+        // the backlog cannot grow without bound while the server is down.
+        let failed: Vec<_> = (0..10).map(entry).collect();
+        let mut batch = Vec::new();
+        restore_failed_batch(&mut batch, failed, 4);
+        assert_eq!(batch.len(), 4);
+        assert_eq!(batch[0].request_id, "6");
+        assert_eq!(batch[3].request_id, "9");
+    }
+
+    #[tokio::test]
+    async fn flush_logs_command_wakes_the_log_shipper() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = AgentConfig {
+            cache_dir: dir.path().to_string_lossy().to_string(),
+            ..Default::default()
+        };
+        let rule_cache = Arc::new(
+            RuleCache::new(dir.path().to_path_buf(), "test".to_string())
+                .unwrap(),
+        );
+        let client = ControlPlaneClient::new(
+            config,
+            Arc::clone(&rule_cache),
+            Arc::new(MetricsCollector::new()),
+        );
+        let notify = Arc::clone(&client.flush_notify);
+        let waiter = tokio::spawn(async move {
+            notify.notified().await;
+        });
+        let command = proto::ServerCommand {
+            command_id: "cmd-1".to_string(),
+            r#type: proto::CommandType::CommandFlushLogs as i32,
+            issued_at: None,
+            payload: Some(proto::server_command::Payload::FlushLogs(
+                proto::FlushLogsCommand {
+                    reason: "operator request".to_string(),
+                },
+            )),
+        };
+        let handlers =
+            Arc::new(tokio::sync::RwLock::new(CommandHandlers::default()));
+        ControlPlaneClient::handle_server_command(
+            &command,
+            &rule_cache,
+            &handlers,
+            &client.flush_notify,
+        )
+        .await;
+        // The command must wake the shipper; a timeout means the branch
+        // never fired.
+        tokio::time::timeout(Duration::from_secs(5), waiter)
+            .await
+            .expect("flush command must signal the shipper")
+            .unwrap();
+    }
 
     #[test]
     fn attach_agent_token_sets_the_metadata() {

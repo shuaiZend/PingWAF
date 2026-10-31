@@ -1014,6 +1014,18 @@ impl Plugin for ChallengePlugin {
             return self.handle_verify(session, ctx).await;
         }
 
+        // A path exception that skips the challenge layer exempts this
+        // request from the standalone challenge gate too. The WAF plugin
+        // (which runs first) resolved the exception against the site's
+        // rules and stamped the verdict on the pending-access entry; this
+        // plugin has no site-rule context of its own. No entry (or a
+        // request the WAF skipped) reads as false: fail-closed.
+        if let Some(request_id) = ctx.state.request_id.as_deref()
+            && super::waf::pending_path_bypasses_challenge(request_id)
+        {
+            return Ok(RequestPluginResult::Continue);
+        }
+
         let host = get_host(session.req_header())
             .unwrap_or_default()
             .to_string();

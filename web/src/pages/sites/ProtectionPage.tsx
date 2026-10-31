@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Navigate, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Cloud, Gauge, Lightning, ShieldCheck, Sliders, Timer, Warning } from '@phosphor-icons/react'
+import { Cloud, Gauge, Lightning, Path as PathIcon, ShieldCheck, Sliders, Timer, Warning } from '@phosphor-icons/react'
 import { PageHeader } from '@/components/PageHeader'
 import { Tabs } from '@/components/ui/Tabs'
 import { Switch } from '@/components/ui/Switch'
@@ -13,6 +13,7 @@ import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { useToast } from '@/components/ui/Toast'
 import { challengeApi, challengeKeys } from '@/api/challenge'
 import { wafSettingsApi, wafSettingsKeys } from '@/api/wafSettings'
+import { ruleKeys, rulesApi } from '@/api/rules'
 import { RULE_MODES, type RuleMode, type WafSettings } from '@/api/types'
 import { useCanWrite, useWafSettingsMutation } from '@/hooks'
 import { cn } from '@/lib/utils'
@@ -20,6 +21,7 @@ import { PostureOverview, type PostureTarget } from './PostureOverview'
 import { ManagedRulesPanel } from './ManagedRulesPanel'
 import { CustomRulesPanel } from './CustomRulesPanel'
 import { MitigationPanel } from './MitigationPanel'
+import { PathExceptionsPanel } from './PathExceptionsPanel'
 import {
   BODY_STAGE_TIMEOUT_DEFAULT,
   BODY_STAGE_TIMEOUT_MAX,
@@ -27,7 +29,7 @@ import {
   normaliseBodyStageTimeout,
 } from '@/lib/bodyStageTimeout'
 
-type ProtectionTab = 'managed' | 'custom' | 'cc'
+type ProtectionTab = 'managed' | 'custom' | 'cc' | 'paths'
 
 /** Body-stage inspection budget — constants come from `@/lib/bodyStageTimeout`. */
 
@@ -379,12 +381,18 @@ export function ProtectionPage() {
               label: t('pages.protection.tabCc'),
               icon: <Cloud weight="duotone" className="h-4 w-4" />,
             },
+            {
+              value: 'paths',
+              label: t('pages.protection.tabPaths'),
+              icon: <PathIcon weight="duotone" className="h-4 w-4" />,
+            },
           ]}
         />
 
         {tab === 'managed' && <ManagedRulesPanel />}
         {tab === 'custom' && <CustomRulesPanel />}
         {tab === 'cc' && <MitigationPanel />}
+        {tab === 'paths' && <PathExceptionsPanel />}
       </section>
 
       <ConfirmDialog
@@ -424,9 +432,21 @@ function EnforcementModeCard() {
     queryFn: () => wafSettingsApi.get(siteId),
     enabled: Boolean(siteId),
   })
+  // Allow rules are rejected in block mode — a legacy allow+block pair stops
+  // blocking the moment the site does. Warn before switching to block.
+  const rulesQuery = useQuery({
+    queryKey: ruleKeys.list(siteId),
+    queryFn: () => rulesApi.list(siteId, { page_size: 200 }),
+    enabled: Boolean(siteId),
+  })
+  const allowRuleCount = useMemo(
+    () => (rulesQuery.data?.items ?? []).filter((r) => r.action === 'allow').length,
+    [rulesQuery.data],
+  )
   const loading = settingsQuery.isPending
   // The stored value is authoritative; legacy rows without it read as off.
   const mode = settingsQuery.data?.mode ?? 'off'
+  const [confirmBlockWithAllow, setConfirmBlockWithAllow] = useState(false)
 
   const applyMode = useMutation({
     mutationFn: async (next: RuleMode) => {
@@ -449,6 +469,19 @@ function EnforcementModeCard() {
       )
     },
   })
+
+  const requestMode = (next: RuleMode) => {
+    if (
+      next === 'block' &&
+      mode !== 'block' &&
+      allowRuleCount > 0
+    ) {
+      // Advisory only: the operator may proceed.
+      setConfirmBlockWithAllow(true)
+      return
+    }
+    applyMode.mutate(next)
+  }
 
   return (
     <Card className="mb-5 max-w-2xl">
@@ -474,7 +507,7 @@ function EnforcementModeCard() {
                 key={m}
                 type="button"
                 disabled={!canWrite || applyMode.isPending || loading}
-                onClick={() => applyMode.mutate(m as RuleMode)}
+                onClick={() => requestMode(m as RuleMode)}
                 className={cn(
                   'flex items-center justify-between gap-3 rounded-lg border px-3 py-2.5 text-left transition-all disabled:cursor-not-allowed disabled:opacity-60',
                   active
@@ -506,6 +539,20 @@ function EnforcementModeCard() {
           </p>
         </div>
       </CardBody>
+
+      <ConfirmDialog
+        open={confirmBlockWithAllow}
+        onClose={() => setConfirmBlockWithAllow(false)}
+        onConfirm={() => {
+          setConfirmBlockWithAllow(false)
+          applyMode.mutate('block')
+        }}
+        tone="danger"
+        title={t('pages.waf.blockWithAllowTitle', { count: allowRuleCount })}
+        description={t('pages.waf.blockWithAllowDescription', { count: allowRuleCount })}
+        confirmLabel={t('pages.waf.mode_block')}
+        loading={applyMode.isPending}
+      />
     </Card>
   )
 }

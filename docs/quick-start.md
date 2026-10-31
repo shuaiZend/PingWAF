@@ -473,11 +473,23 @@ Stop with `Ctrl-C` in the foreground, or `kill <pid>` when backgrounded.
 Full details live in [`docs/deployment.md`](./deployment.md); the repository
 also ships a hardened unit file, [`pingwaf.service`](../pingwaf.service).
 
-> **Note:** the one-command installer (`install.sh` /
-> `curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh | bash`) downloads a prebuilt
-> `pingwaf-linux-{amd64,arm64}.tar.gz` asset from
+> **Note:** the installer (`install.sh`) downloads a prebuilt
+> `pingwaf-linux-{amd64,arm64}` archive from
 > [GitHub Releases](https://github.com/shuaiZend/PingWAF/releases) and works on
-> Linux. On macOS there are no release binaries — build via
+> Linux. It runs in two modes:
+>
+> - **Interactive** — download the script and run `bash install.sh` on a
+>   terminal: it asks for the deployment mode, the admin credentials (e-mail
+>   and password twice; empty keeps the default, forced to change at first
+>   login), the PostgreSQL URL, the dashboard certificate SANs and the
+>   version, shows an installation plan, and asks for confirmation.
+> - **One line, unattended** —
+>   `curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh | sudo bash -s -- --mode all-in-one`
+>   installs with the given values and defaults and never prompts (piping
+>   means there is no terminal to prompt on; flags go after `-s --`).
+>   `--dry-run` prints the resolved plan without changing anything.
+>
+> On macOS there are no release binaries — build via
 > [Path 2](#path-2-build-from-source), then follow the steps below.
 
 ```bash
@@ -526,9 +538,14 @@ sudo journalctl -u pingwaf -f
 
 Before exposing this to the internet, override every default credential:
 `PINGWAF_JWT_SECRET` (≥ 16 chars), `PINGWAF_ADMIN_PASSWORD`,
-`PINGWAF_ADMIN_EMAIL`, and set `PINGWAF_ALLOW_REGISTRATION=false`. Bind `80`
-and `443` through a reverse proxy or grant `CAP_NET_BIND_SERVICE`, since the
-unit runs as an unprivileged user.
+`PINGWAF_ADMIN_EMAIL`, and set `PINGWAF_ALLOW_REGISTRATION=false`. The
+shipped unit (`pingwaf.service`) and the unit `install.sh` writes grant
+`CAP_NET_BIND_SERVICE` via `AmbientCapabilities`, so the unprivileged
+`pingwaf` user binds `80` and `443` directly — no root, no reverse proxy
+required for the binding itself. Verify with
+`systemctl show pingwaf -p AmbientCapabilities`; an empty value means the
+unit predates the capability (an older `install.sh` run) — see the
+[upgrade notes](./deployment.md#binary) for the drop-in fix.
 
 ---
 

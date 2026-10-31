@@ -30,6 +30,7 @@ import { deriveWafConfig, ruleKeys, rulesApi } from '@/api/rules'
 import { wafSettingsApi, wafSettingsKeys } from '@/api/wafSettings'
 import { siteKeys } from '@/api/sites'
 import { useCanWrite, useDebouncedValue } from '@/hooks'
+import { isAllowBlockConflict } from '@/lib/ruleActionMode'
 import { cn } from '@/lib/utils'
 import { type Rule, type RuleGroup } from '@/api/types'
 
@@ -255,6 +256,11 @@ export function CustomRulesPanel() {
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <p className="truncate text-[13px] font-medium text-fg-strong">{r.name}</p>
+            {isAllowBlockConflict(r.action, r.mode) && (
+              <Badge tone="warning" size="sm" dot>
+                {t('pages.waf.allowBlockConflictBadge')}
+              </Badge>
+            )}
             {r.group_id && (
               <span className="shrink-0 rounded border border-line px-1.5 py-px text-[10px] text-fg-subtle">
                 {groups.find((g) => g.id === r.group_id)?.name ?? t('pages.waf.noGroup')}

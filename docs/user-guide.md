@@ -189,6 +189,15 @@ security event shows both sides — `action: monitor` with `waf_details` ending 
 own `rule_action=block`. If the event has no `downgraded=true`, the rule itself
 was configured to observe.
 
+One combination is always rejected: an **allow** rule cannot use mode
+**block**. An allow rule passes the request before any block rule can run, so
+"block" would never apply — the console refuses the save with
+`action 'allow' cannot use mode 'block': an allow rule always passes the
+request, so the block mode would never apply; use 'monitor' or 'off'`. Choose
+**Detection** (`monitor`) to watch an allow rule, or **Off** to disable it.
+This applies to editing an existing rule too, even when you only change one of
+the two fields.
+
 ### Rule Groups
 
 Rules are organized into groups that execute in order:
@@ -243,6 +252,42 @@ Sites → [site] → Web Protection (top banner)
 
 A site-wide emergency switch: every visitor is challenged with a JavaScript check, and CC protection is switched on automatically. Enable it only while the site is under an active flood attack and disable it once the attack subsides.
 
+### Path Exceptions (observation mode)
+
+A per-site list of request paths that skip selected protection layers — for
+widening a rule that is too aggressive while you watch what a change actually
+affects:
+
+```
+Sites → [site] → Web Protection → Path exceptions
+```
+
+| Field | Meaning |
+|-------|---------|
+| Path | Must start with `/`, at most 512 characters, no whitespace or control characters |
+| Match type | `prefix` (default; matches by path segment — `/api` covers `/api/x`, never `/apix`), `exact`, or `wildcard` (a single trailing `*`, e.g. `/api/*`) |
+| Skip layers | `*` (every layer), or any of `waf`, `bot`, `access`, `basic_auth`, `mtls`, `ai_bot`, `rate_limit`, `challenge` — the hit skips exactly these checks |
+| Note | Free text, at most 200 characters; used as the label when a hit is logged |
+| Log hits | When on, every hit is recorded as a `path_bypass` security event (action `log`) |
+| Enabled | Disabled exceptions are not evaluated |
+
+**Why the observation-mode gate:** a bypass that silently skips enforcement on
+a blocking site is exactly the kind of change that never gets removed again.
+The site must be in **Detection** (`monitor`) to save a path exception —
+otherwise the save fails with
+`path exceptions require the site to be in observation mode; current WAF mode is '<mode>' (set it to 'monitor' first)`. The edge enforces the same rule:
+on a site that is not observing, exceptions are ignored entirely, so a stale
+configuration can never weaken active blocking.
+
+**What an exception cannot bypass**, no matter which layers it names: a paused
+site (maintenance page), a fail-closed edge, and an active dynamic IP ban —
+those checks run before the exception and always enforce.
+
+Other failures you may see when saving: a duplicate path on the same site
+(`a path exception for '<path>' already exists on this site`), a site at the
+64-exception limit, an unknown skip-layer token, or a wildcard path that does
+not end in exactly one `*`.
+
 ## Rate Limiting
 
 Configure per-site rate limits:
@@ -255,7 +300,7 @@ Sites → [site] → Rate Limiting → Add Rule
 |-------|-------------|
 | Name | Rule label |
 | Threshold | Max requests allowed in the period |
-| Period (seconds) | Time window for counting (1–86400) |
+| Period (seconds) | Time window for counting, one number in seconds (1–86400, default 60). The input is a single seconds field with a live preview ("100 requests per 60 s") instead of separate unit pickers — one source of truth, no way to save "5 minutes" that is actually 5 seconds |
 | Action | `block`, `log`, `challenge`, `js_challenge`, or `allow` |
 | Characteristics | How to group traffic: `ip`, `ip_nat`, `host`, `path`, `asn`, `country`, plus parameterized forms `header:<name>`, `cookie:<name>`, `query:<name>` |
 | Filter expression | Optional match condition (empty = all requests) |
@@ -359,11 +404,50 @@ Provide:
 Sites → [site] → SSL Settings
 ```
 
+- Certificate selection — pick a certificate the site **owns or one shared
+  with it** (marked *linked* in the picker); see
+  [Sharing certificates between sites](#sharing-certificates-between-sites).
+  Choosing a certificate the site neither owns nor has linked fails with
+  `does not belong to this site and is not linked to it`.
 - Minimum TLS version (1.2 or 1.3)
 - Force HTTPS redirect
 - HSTS configuration
 - OCSP stapling
 - Origin certificate check — whether this site validates HTTPS origin certificates. This is the site default each origin pool's **Verify origin certificate** inherits (see [Origin Pools](#origin-pools)); the Basic page shows it as a read-only card with a link here, so the SSL page is the only place to edit it
+
+> **Upgrading from an older release?** The first time you save the TLS settings
+> after the upgrade, the legacy certificate/key copy stored directly on the
+> site's SSL row is cleared when a managed certificate is selected — the
+> selected certificate is now always what the edge serves. If you may need to
+> roll back, back up the `site_ssl` table first (see the
+> [deployment guide](deployment.md#upgrade-procedure)).
+
+### Sharing certificates between sites
+
+One wildcard or multi-hostname certificate can serve several sites. The
+certificate keeps a single **owner** (the site it was created under); other
+sites *link* to it to serve it:
+
+Managed from the site's **SSL Settings** page (certificate picker): the
+"link a certificate" option lists what is available, and linked certificates
+appear in the same picker marked as shared.
+
+- **Linking** lists the certificates owned by sites you can read that this
+  site does not own or use yet. Linking fails with
+  `certificate already belongs to this site` if the site already owns it, or
+  `certificate already linked to this site` if the link exists.
+- **Selecting** a linked certificate works exactly like an owned one — the
+  SSL settings picker shows both, with the shared ones labelled.
+- **Unlinking** is refused while the certificate is the site's current TLS
+  certificate (`certificate is the site's current TLS certificate; clear or
+  replace it first`) — otherwise the site would silently lose HTTPS. Clear the
+  certificate selection (or pick another one) first.
+
+**Why the owner model matters:** renewals, ACME bookkeeping and configuration
+backups are tied to the owning site, so a certificate is renewed once and
+every linked site picks up the new material. **Share deliberately**: a linked
+site serves the same hostnames, so only link a certificate to sites that are
+legitimate bearers of those hostnames.
 
 ### Certificate Status and Events
 
@@ -495,6 +579,22 @@ global log views — so they remain traceable:
   `site:none`) to list only these requests.
 - Search `type:` in Security Events narrows by event type (`managed`, `waf`,
   `ip_geo`, `bot`, `rate_limit`, `challenge`).
+
+#### Flushing agent logs
+
+Agents batch their logs and ship them periodically. When you are watching for
+an event that just happened (an incident drill, a live test), the
+**Flush logs** action on the log page — `POST /api/v1/agents/flush-logs` —
+tells every connected agent to ship its in-memory buffer immediately instead
+of waiting out the batch interval.
+
+- The command goes to **connected agents only** and is never queued for
+  offline ones; the response `{ "delivered": N, "offline": M }` splits the
+  fleet for you. `delivered` means the command reached the agent — it does not
+  guarantee the entries are stored yet.
+- Logs dropped while an agent was offline are unrecoverable: the agent's log
+  buffer holds at most 2048 entries and older entries are discarded under
+  pressure. Flush does not resurrect them.
 
 ### Elasticsearch Integration
 

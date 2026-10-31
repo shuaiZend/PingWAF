@@ -51,7 +51,7 @@ const STATUS_DOT: Record<AgentStatus, string> = {
 /** 30s — matches the heartbeat cadence the agents report on. */
 const REFRESH_MS = 30_000
 
-const COMMANDS: AgentCommand[] = ['reload', 'restart', 'purge_cache']
+const COMMANDS: AgentCommand[] = ['flush_logs', 'reload', 'restart', 'purge_cache']
 
 export function AgentsPage() {
   const { t } = useTranslation()
@@ -169,6 +169,27 @@ export function AgentsPage() {
       )
       setPendingCommand(null)
       invalidate()
+    },
+  })
+
+  // flush_logs is fleet-wide (`POST /agents/flush-logs`), not per-agent —
+  // the detail-dialog button routes here instead of the command queue.
+  const flushLogs = useMutation({
+    mutationFn: () => agentsApi.flushLogs(),
+    onSuccess: (result) => {
+      toast.success(
+        t('pages.agents.command_flush_logs'),
+        t('pages.agents.flushResult', { delivered: result.delivered, offline: result.offline }),
+      )
+      setPendingCommand(null)
+      invalidate()
+    },
+    onError: (error) => {
+      toast.error(
+        t('pages.agents.flushFailed'),
+        error instanceof Error ? error.message : undefined,
+      )
+      setPendingCommand(null)
     },
   })
 
@@ -660,7 +681,11 @@ export function AgentsPage() {
       <ConfirmDialog
         open={pendingCommand !== null}
         onClose={() => setPendingCommand(null)}
-        onConfirm={() => pendingCommand && sendCommand.mutate(pendingCommand)}
+        onConfirm={() => {
+          if (!pendingCommand) return
+          if (pendingCommand.command === 'flush_logs') flushLogs.mutate()
+          else sendCommand.mutate(pendingCommand)
+        }}
         tone="primary"
         title={
           pendingCommand

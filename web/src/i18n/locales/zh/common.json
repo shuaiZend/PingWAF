@@ -619,7 +619,13 @@
       "restoreNothing": "内置规则已完整",
       "restoreNothingHint": "该站点已包含全部内置规则。",
       "restoreDone": "已恢复 {{count}} 条内置规则",
-      "restoreDoneHint": "内置规则默认以监控模式运行，可以先观察拦截效果再切换为拦截。"
+      "restoreDoneHint": "内置规则默认以监控模式运行，可以先观察拦截效果再切换为拦截。",
+      "allowBlockConflict": "动作「放行」不能使用模式「拦截」。请先把模式切换为观察或关闭再保存。",
+      "allowBlockFallback": "放行规则不能在拦截模式下运行——模式已自动切换为观察。",
+      "allowModeHint": "放行规则不会拦截请求，仅可选观察或关闭模式。",
+      "allowBlockConflictBadge": "组合无效",
+      "blockWithAllowTitle": "存在 {count} 条放行规则，仍切换到拦截模式？",
+      "blockWithAllowDescription": "放行规则不会拦截。存量「放行 + 拦截模式」的组合规则将不再拦截。确定继续？"
     },
     "rateLimiting": {
       "title": "速率限制",
@@ -665,7 +671,10 @@
       "threshold": "阈值",
       "thresholdHint": "时间窗口内允许的最大请求数",
       "thresholdInvalid": "阈值必须介于 1 到 10,000,000 之间",
-      "untilReset": "直到窗口重置"
+      "untilReset": "直到窗口重置",
+      "unitSecond": "秒",
+      "unitMinute": "分",
+      "unitHour": "小时"
     },
     "bot": {
       "title": "Bot 防护",
@@ -849,7 +858,8 @@
         "ruleCount": "{{enabled}}/{{total}} 条启用中"
       },
       "paranoiaTitle": "检测灵敏度",
-      "paranoiaCardHint": "1（宽松）到 4（严格）。档位越高，越敏感的内置检测规则越活跃。"
+      "paranoiaCardHint": "1（宽松）到 4（严格）。档位越高，越敏感的内置检测规则越活跃。",
+      "tabPaths": "路径例外"
     },
     "ipRules": {
       "title": "IP 访问规则",
@@ -1219,7 +1229,32 @@
       "openGlobalSsl": "打开 SSL/TLS",
       "protocols": {
         "atLeastOne": "至少保留一个协议。"
-      }
+      },
+      "groupOwner": "本站证书",
+      "groupLinked": "共享自其它站点",
+      "sharedCertificates": "共享证书",
+      "sharedCertificatesHint": "其它站点拥有的、本站可关联并启用的证书。",
+      "sharedBadge": "共享",
+      "sharedEmpty": "暂无可关联的证书",
+      "sharedEmptyHint": "目前没有其它站点提供本站可使用的证书。",
+      "alreadyLinked": "已关联",
+      "link": "关联",
+      "linkCreated": "证书已关联",
+      "linkFailed": "关联证书失败",
+      "removeShare": "取消共享",
+      "removeShareTitle": "移除共享证书",
+      "removeShareDescription": "该证书由其它站点共享而来，移除后本站将不再使用它。",
+      "linkRemoved": "已取消共享",
+      "unlinkFailed": "取消共享失败",
+      "unbind": "解绑",
+      "unbindTitle": "解绑当前证书",
+      "unbindDescription": "本站将停止使用当前选中的证书（按 HTTPS 设置回落），证书本身不会被删除。",
+      "certificateCleared": "证书已解绑",
+      "clearFailed": "解绑证书失败",
+      "relation": "关系",
+      "shareOut": "共享给其它站点",
+      "shareOutTitle": "共享给其它站点",
+      "shareOutHint": "任何可服务该证书域名的站点都可以关联它。打开目标站点的 SSL 页，在「共享证书」中关联本证书——共享按目标站点逐一授权。"
     },
     "traffic": {
       "aiBots": {
@@ -1469,7 +1504,12 @@
         "choose": "选择 IP 组…",
         "confirm": "加入",
         "empty": "暂无 IP 组，请先在「IP 组」页面创建。"
-      }
+      },
+      "flush": "实时同步",
+      "flushHint": "通知所有 agent 立即推送缓冲中的日志。仅同步已进入 agent 缓冲的日志——通道满时丢弃的日志无法恢复。",
+      "flushDone": "已通知 {delivered} 个 agent，{offline} 个离线",
+      "flushDoneHint": "缓冲中的日志正在上传。",
+      "flushFailed": "通知 agent 失败"
     },
     "agents": {
       "title": "节点",
@@ -1557,7 +1597,10 @@
         "tx": "发送"
       },
       "allSitesHint": "未单独绑定站点，自动同步属主账号全部站点的配置",
-      "hostMemory": "主机内存容量"
+      "hostMemory": "主机内存容量",
+      "command_flush_logs": "刷新日志",
+      "flushResult": "已通知 {delivered}，离线 {offline}",
+      "flushFailed": "刷新日志失败"
     },
     "notifications": {
       "title": "通知",
@@ -2256,7 +2299,8 @@
       "eventDetails": "详情",
       "dnsConfigLabel": "DNS 服务商凭据",
       "dnsConfigHint": "以键值对形式传给服务商 API（如 token、access_key_id、access_key_secret）；填写 `endpoint` 可覆盖默认 API 地址。",
-      "dnsConfigRegionRequired": "华为云需要填写 `region`（如 cn-north-4），将生成 dns.<region>.myhuaweicloud.com 端点。"
+      "dnsConfigRegionRequired": "华为云需要填写 `region`（如 cn-north-4），将生成 dns.<region>.myhuaweicloud.com 端点。",
+      "multiSiteNote": "证书创建时必须绑定一个站点（后端要求）。其它站点可在各自 SSL 页通过「共享证书」复用该证书，并可随时解绑。"
     },
     "blockedIps": {
       "title": "IP 黑名单",
@@ -2815,6 +2859,56 @@
       "title": "页面不存在",
       "description": "您访问的页面不存在或已被移动。",
       "backToDashboard": "返回概览"
+    },
+    "pathExceptions": {
+      "title": "路径例外",
+      "description": "对匹配的请求路径跳过选定的防护层。",
+      "add": "新增例外",
+      "edit": "编辑例外",
+      "dialogDescription": "匹配的请求将跳过所选防护层。",
+      "path": "路径",
+      "pathHint": "必须以「/」开头。",
+      "matchType": "匹配方式",
+      "match_prefix": "前缀",
+      "match_exact": "精确",
+      "match_wildcard": "通配",
+      "wildcardHint": "通配路径必须以「*」结尾。",
+      "skipLayers": "绕过层",
+      "bypassLayers": "绕过防护层",
+      "bypassAllNote": "已选择「全部」——这些路径将绕过所有防护层。",
+      "advancedLayers": "高级层",
+      "advancedLayersHint": "较少使用的可绕过层。",
+      "layerAll": "全部",
+      "layerAllHint": "绕过所有防护层",
+      "layer_waf": "WAF",
+      "layer_bot": "Bot 防护",
+      "layer_access": "访问限制",
+      "layer_basic_auth": "Basic Auth",
+      "layer_mtls": "mTLS",
+      "layer_ai_bot": "AI 爬虫",
+      "layer_rate_limit": "限速",
+      "layer_challenge": "质询",
+      "layerHint_waf": "这些路径跳过 WAF 检查。",
+      "layerHint_bot": "这些路径跳过 Bot 识别。",
+      "layerHint_access": "这些路径跳过 IP/地理访问规则。",
+      "logHits": "记录日志",
+      "logHitsHint": "该例外命中时记录一条日志。",
+      "note": "备注",
+      "notePlaceholder": "为什么需要这个例外",
+      "empty": "暂无路径例外",
+      "emptyDescription": "所有请求都会被检查。仅为确实需要的路径添加例外。",
+      "observationGate": "仅当站点 WAF 模式为观察（monitor）时才能修改路径例外。",
+      "switchToMonitor": "切换到观察模式",
+      "monitorApplied": "WAF 模式已切换为观察",
+      "created": "例外已创建",
+      "updated": "例外已更新",
+      "deleted": "例外已删除",
+      "deleteFailed": "删除例外失败",
+      "deleteTitle": "删除路径例外",
+      "deleteDescription": "该路径的请求将重新接受检查。",
+      "errorPathRequired": "请填写路径。",
+      "errorPathRooted": "路径必须以「/」开头。",
+      "errorPathWildcardSuffix": "通配路径必须以「*」结尾。"
     }
   },
   "challengeLevels": {

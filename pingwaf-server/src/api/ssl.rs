@@ -30,7 +30,8 @@ use crate::api::validation::{validate_certificate_and_key, validate_pem_pair};
 use crate::auth::AuthUser;
 use crate::grpc::notify_config_changed;
 use crate::models::{
-    acme_challenge, certificate_events, site, site_certificates,
+    acme_challenge, certificate_events, certificate_links, site,
+    site_certificates, site_ssl,
 };
 
 /// Certificate status values.
@@ -60,6 +61,10 @@ pub struct CertificateResponse {
     pub acme_dns_provider: Option<String>,
     pub acme_dns_config: Option<serde_json::Value>,
     pub status: String,
+    /// `owner` when this site owns the certificate row, `linked` when it uses
+    /// one shared by another site. Lets the console group the picker.
+    #[serde(default = "owner_relation")]
+    pub relation: String,
     /// Why the last ACME issuance attempt was given up on; null while an
     /// order is healthy or after it succeeded.
     pub failure_reason: Option<String>,
@@ -80,6 +85,10 @@ pub struct CertificateResponse {
     pub updated_at: DateTime<Utc>,
 }
 
+fn owner_relation() -> String {
+    "owner".to_string()
+}
+
 impl From<site_certificates::Model> for CertificateResponse {
     fn from(m: site_certificates::Model) -> Self {
         Self {
@@ -95,6 +104,7 @@ impl From<site_certificates::Model> for CertificateResponse {
             acme_dns_provider: m.acme_dns_provider,
             acme_dns_config: m.acme_dns_config,
             status: m.status,
+            relation: owner_relation(),
             failure_reason: m.failure_reason,
             has_certificate: m.cert_pem.is_some(),
             has_private_key: m.key_pem.is_some(),
@@ -555,6 +565,20 @@ pub fn routes() -> Router<AppState> {
             "/sites/{site_id}/ssl-settings",
             get(get_ssl_settings).put(update_ssl_settings),
         )
+        // Certificate sharing: list/link/unlink a certificate another site
+        // owns, plus the set this site may still link.
+        .route(
+            "/sites/{site_id}/certificate-links",
+            get(list_certificate_links).post(link_certificate),
+        )
+        .route(
+            "/sites/{site_id}/certificate-links/{cert_id}",
+            axum::routing::delete(unlink_certificate),
+        )
+        .route(
+            "/sites/{site_id}/certificates/available",
+            get(list_available_certificates),
+        )
         // Global aliases. The dashboard's SSL/TLS page spans sites: it lists
         // every application, uploads or renews a certificate for a chosen site,
         // and summarises what is about to lapse.
@@ -591,8 +615,25 @@ async fn list_certificates(
     load_site_read(&state.db, id, &current).await?;
     let pagination = query.pagination.normalise();
 
+    // Own certificates plus the ones shared with this site. A site can only
+    // *select* what is visible here, so the link table has to be part of the
+    // listing — otherwise sharing a certificate would not make it pickable.
+    let linked_ids: Vec<Uuid> = certificate_links::Entity::find()
+        .filter(certificate_links::Column::SiteId.eq(id))
+        .all(&state.db)
+        .await?
+        .into_iter()
+        .map(|link| link.certificate_id)
+        .collect();
+    let mut condition =
+        Condition::any().add(site_certificates::Column::SiteId.eq(id));
+    if !linked_ids.is_empty() {
+        condition =
+            condition.add(site_certificates::Column::Id.is_in(linked_ids));
+    }
+
     let paginator = site_certificates::Entity::find()
-        .filter(site_certificates::Column::SiteId.eq(id))
+        .filter(condition)
         .order_by_desc(site_certificates::Column::CreatedAt)
         .paginate(&state.db, pagination.limit());
 
@@ -607,7 +648,180 @@ async fn list_certificates(
     let items: Vec<CertificateResponse> = rows
         .into_iter()
         .map(|row| {
+            let owner = row.site_id;
             let mut response = CertificateResponse::from(row);
+            if owner != id {
+                response.relation = "linked".to_string();
+            }
+            response.warnings = Some(certificate_warnings_for(
+                &served,
+                response.site_id,
+                &response.domain,
+            ));
+            response
+        })
+        .collect();
+    Ok(Json(Page::new(items, total, pagination)))
+}
+
+/// `GET /api/v1/sites/{site_id}/certificate-links`
+///
+/// Same page as the certificate list: a link is not a separate resource from
+/// the console's point of view, it only changes where a row came from.
+async fn list_certificate_links(
+    state: State<AppState>,
+    current: AuthUser,
+    Path(site_id): Path<String>,
+    Query(query): Query<ListQuery>,
+) -> Result<Json<Page<CertificateResponse>>, ApiError> {
+    list_certificates(state, current, Path(site_id), Query(query)).await
+}
+
+#[derive(Debug, Deserialize)]
+struct LinkCertificateRequest {
+    certificate_id: Uuid,
+}
+
+/// `POST /api/v1/sites/{site_id}/certificate-links`
+async fn link_certificate(
+    State(state): State<AppState>,
+    current: AuthUser,
+    Path(site_id): Path<String>,
+    Json(payload): Json<LinkCertificateRequest>,
+) -> Result<Response, ApiError> {
+    let id = parse_uuid(&site_id, "site id")?;
+    let site = load_site_write(&state.db, id, &current).await?;
+
+    let certificate =
+        site_certificates::Entity::find_by_id(payload.certificate_id)
+            .one(&state.db)
+            .await?
+            .ok_or_else(|| {
+                ApiError::NotFound(format!(
+                    "certificate {} not found",
+                    payload.certificate_id
+                ))
+            })?;
+    if certificate.site_id == site.id {
+        return Err(ApiError::Conflict(
+            "certificate already belongs to this site".to_string(),
+        ));
+    }
+    // Linking grants the right to serve another site's certificate, so the
+    // caller must be able to read the owning site as well.
+    load_site_read(&state.db, certificate.site_id, &current).await?;
+
+    let exists = certificate_links::Entity::find()
+        .filter(certificate_links::Column::SiteId.eq(site.id))
+        .filter(certificate_links::Column::CertificateId.eq(certificate.id))
+        .one(&state.db)
+        .await?
+        .is_some();
+    if exists {
+        return Err(ApiError::Conflict(
+            "certificate already linked to this site".to_string(),
+        ));
+    }
+
+    certificate_links::ActiveModel {
+        site_id: Set(site.id),
+        certificate_id: Set(certificate.id),
+        linked_at: Set(Utc::now()),
+    }
+    .insert(&state.db)
+    .await?;
+
+    let mut response = CertificateResponse::from(certificate);
+    response.relation = "linked".to_string();
+    Ok((StatusCode::CREATED, Json(response)).into_response())
+}
+
+/// `DELETE /api/v1/sites/{site_id}/certificate-links/{cert_id}`
+async fn unlink_certificate(
+    State(state): State<AppState>,
+    current: AuthUser,
+    Path((site_id, cert_id)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    let id = parse_uuid(&site_id, "site id")?;
+    let cert_id = parse_uuid(&cert_id, "certificate id")?;
+    let site = load_site_write(&state.db, id, &current).await?;
+
+    // Unlinking the selected certificate would silently drop TLS; require the
+    // operator to clear or replace it first.
+    let posture = site_ssl::Entity::find()
+        .filter(site_ssl::Column::SiteId.eq(site.id))
+        .one(&state.db)
+        .await?;
+    if posture.and_then(|row| row.certificate_id) == Some(cert_id) {
+        return Err(ApiError::Conflict(
+            "certificate is the site's current TLS certificate; clear or replace it first"
+                .to_string(),
+        ));
+    }
+
+    let result = certificate_links::Entity::delete_many()
+        .filter(certificate_links::Column::SiteId.eq(site.id))
+        .filter(certificate_links::Column::CertificateId.eq(cert_id))
+        .exec(&state.db)
+        .await?;
+    if result.rows_affected == 0 {
+        return Err(ApiError::NotFound(format!(
+            "certificate link {cert_id} not found"
+        )));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET /api/v1/sites/{site_id}/certificates/available`
+///
+/// Certificates this site may link: owned by a site the caller can read, not
+/// owned by this site and not linked yet.
+async fn list_available_certificates(
+    State(state): State<AppState>,
+    current: AuthUser,
+    Path(site_id): Path<String>,
+    Query(query): Query<ListQuery>,
+) -> Result<Json<Page<CertificateResponse>>, ApiError> {
+    let id = parse_uuid(&site_id, "site id")?;
+    load_site_read(&state.db, id, &current).await?;
+    let sites = visible_sites(&state, &current).await?;
+    let pagination = query.pagination.normalise();
+
+    let linked_ids: Vec<Uuid> = certificate_links::Entity::find()
+        .filter(certificate_links::Column::SiteId.eq(id))
+        .all(&state.db)
+        .await?
+        .into_iter()
+        .map(|link| link.certificate_id)
+        .collect();
+
+    let visible_ids: Vec<Uuid> = sites.keys().copied().collect();
+    let mut condition = Condition::all()
+        .add(site_certificates::Column::SiteId.ne(id))
+        .add(site_certificates::Column::SiteId.is_in(visible_ids));
+    if !linked_ids.is_empty() {
+        condition =
+            condition.add(site_certificates::Column::Id.is_not_in(linked_ids));
+    }
+
+    let paginator = site_certificates::Entity::find()
+        .filter(condition)
+        .order_by_desc(site_certificates::Column::CreatedAt)
+        .paginate(&state.db, pagination.limit());
+    let total = paginator.num_items().await?;
+    let rows = paginator.fetch_page(pagination.index()).await?;
+    let served = site_hostname_index(
+        &state,
+        rows.iter()
+            .map(|row| row.site_id)
+            .chain(std::iter::once(id)),
+    )
+    .await;
+    let items: Vec<CertificateResponse> = rows
+        .into_iter()
+        .map(|row| {
+            let mut response = CertificateResponse::from(row);
+            response.relation = "available".to_string();
             response.warnings = Some(certificate_warnings_for(
                 &served,
                 response.site_id,
@@ -951,7 +1165,39 @@ async fn delete_certificate(
     load_site_write(&state.db, id, &current).await?;
     find_certificate(&state, id, target).await?;
 
+    // A certificate still selected by a site must be detached first: deleting
+    // it would leave `site_ssl.certificate_id` dangling, and the data plane
+    // would silently serve no certificate for that site.
+    let in_use: Vec<Uuid> = site_ssl::Entity::find()
+        .filter(site_ssl::Column::CertificateId.eq(target))
+        .all(&state.db)
+        .await?
+        .into_iter()
+        .map(|row| row.site_id)
+        .collect();
+    if !in_use.is_empty() {
+        return Err(ApiError::Conflict(format!(
+            "certificate is selected by site(s) {}; clear or replace it there first",
+            in_use
+                .iter()
+                .map(Uuid::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
+
     site_certificates::Entity::delete_by_id(target)
+        .exec(&state.db)
+        .await?;
+
+    // Shared uses must not outlive the certificate. `site_certificate_links`
+    // has no FK on `certificate_id` (site-scoped restore requires that), so the
+    // cleanup is explicit. `site_ssl.certificate_id` is left as-is on purpose:
+    // the data plane falls back to the legacy PEM/self-signed path, and a
+    // dangling id is rejected on the next save rather than silently changing
+    // TLS behaviour here.
+    certificate_links::Entity::delete_many()
+        .filter(certificate_links::Column::CertificateId.eq(target))
         .exec(&state.db)
         .await?;
 

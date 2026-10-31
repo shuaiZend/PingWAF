@@ -15,17 +15,17 @@ use pingwaf_proto::control_plane::{
     BotProtectionConfig, CacheRule, CacheTypeCategory, CacheTypePolicy,
     ChallengeConfig, CustomErrorPage, FailoverMode, GeoConfig,
     GlobalCacheSettings, HealthCheckConfig, IpAccessRule, LogSettings,
-    OidcAccessRule,
-    OidcConfig, OidcHeaderClaim, RateLimitRule, ResponseReplaceConfig,
-    ResponseReplaceRule, RewriteOperation, RewriteRule, RouteConfig,
-    RuleBundle, RuleOverride, Site, SiteCacheSettings, SiteConfig, SitePolicy,
-    SslConfig, UpstreamConfig, UpstreamPeer, WafConfig, WafRule,
+    OidcAccessRule, OidcConfig, OidcHeaderClaim, PathException, PathMatchType,
+    RateLimitRule, ResponseReplaceConfig, ResponseReplaceRule,
+    RewriteOperation, RewriteRule, RouteConfig, RuleBundle, RuleOverride, Site,
+    SiteCacheSettings, SiteConfig, SitePolicy, SslConfig, UpstreamConfig,
+    UpstreamPeer, WafConfig, WafRule,
 };
 use prost::Message;
 use prost_types::Timestamp;
 use sea_orm::{
-    ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter,
-    QueryOrder, QuerySelect, QueryTrait,
+    ColumnTrait, Condition, DatabaseConnection, DbErr, EntityTrait,
+    QueryFilter, QueryOrder, QuerySelect, QueryTrait,
 };
 use uuid::Uuid;
 
@@ -38,13 +38,13 @@ use crate::api::waf_settings::{
     MAX_BODY_STAGE_TIMEOUT_SECS,
 };
 use crate::models::{
-    acme_challenge, action, bot_protection, cache_rules, challenge_settings,
-    characteristic, client_cert_status, defense_settings, error_pages,
-    geo_rules, ip_access_rules, ip_group_sites, ip_groups, mode,
-    mtls_client_certificate, oidc_provider, rate_limit_rules, rewrite_rules,
-    rule, rule_groups, site, site_basic_auth, site_certificates, site_oidc,
-    site_oidc as site_oidc_model, site_routes, site_ssl, site_status,
-    site_upstream_pools, site_upstreams, waf_settings,
+    acme_challenge, action, bot_protection, cache_rules, certificate_links,
+    challenge_settings, characteristic, client_cert_status, defense_settings,
+    error_pages, geo_rules, ip_access_rules, ip_group_sites, ip_groups, mode,
+    mtls_client_certificate, oidc_provider, path_exceptions, rate_limit_rules,
+    rewrite_rules, rule, rule_groups, site, site_basic_auth, site_certificates,
+    site_oidc, site_oidc as site_oidc_model, site_routes, site_ssl,
+    site_status, site_upstream_pools, site_upstreams, waf_settings,
 };
 use crate::pki::mtls::normalise_fingerprint;
 
@@ -226,6 +226,45 @@ async fn load_routes(
         .await
 }
 
+/// Enabled path exceptions for a site, in a stable order so the pushed bundle
+/// hash only changes when the rules do.
+async fn load_path_exceptions(
+    db: &DatabaseConnection,
+    site_id: Uuid,
+) -> Result<Vec<path_exceptions::Model>, sea_orm::DbErr> {
+    path_exceptions::Entity::find()
+        .filter(path_exceptions::Column::SiteId.eq(site_id))
+        .filter(path_exceptions::Column::Enabled.eq(true))
+        .order_by_asc(path_exceptions::Column::Path)
+        .order_by_asc(path_exceptions::Column::Id)
+        .all(db)
+        .await
+}
+
+fn path_match_type(raw: &str) -> i32 {
+    match raw {
+        "exact" => PathMatchType::PathMatchExact as i32,
+        "wildcard" => PathMatchType::PathMatchWildcard as i32,
+        _ => PathMatchType::PathMatchPrefix as i32,
+    }
+}
+
+fn path_exceptions_to_proto(
+    rows: &[path_exceptions::Model],
+) -> Vec<PathException> {
+    rows.iter()
+        .map(|row| PathException {
+            id: row.id.to_string(),
+            path: row.path.clone(),
+            match_type: path_match_type(&row.match_type),
+            skip_layers: row.skip_layers.clone(),
+            enabled: row.enabled,
+            log_hits: row.log_hits,
+            note: row.note.clone().unwrap_or_default(),
+        })
+        .collect()
+}
+
 async fn load_ssl(
     db: &DatabaseConnection,
     site_id: Uuid,
@@ -240,8 +279,23 @@ async fn load_certificates(
     db: &DatabaseConnection,
     site_id: Uuid,
 ) -> Result<Vec<site_certificates::Model>, sea_orm::DbErr> {
+    // Own certificates plus the ones shared through `site_certificate_links`;
+    // the posture row may select either.
+    let linked_ids: Vec<Uuid> = certificate_links::Entity::find()
+        .filter(certificate_links::Column::SiteId.eq(site_id))
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|link| link.certificate_id)
+        .collect();
+    let mut condition =
+        Condition::any().add(site_certificates::Column::SiteId.eq(site_id));
+    if !linked_ids.is_empty() {
+        condition =
+            condition.add(site_certificates::Column::Id.is_in(linked_ids));
+    }
     site_certificates::Entity::find()
-        .filter(site_certificates::Column::SiteId.eq(site_id))
+        .filter(condition)
         .order_by_desc(site_certificates::Column::UpdatedAt)
         .all(db)
         .await
@@ -562,22 +616,18 @@ fn ssl_to_proto(
     let selected = row
         .certificate_id
         .and_then(|id| certs.iter().find(|cert| cert.id == id));
-    let uploaded_pem = row.cert_pem.as_deref().is_some_and(|p| !p.is_empty());
-    let cert_pem = if uploaded_pem {
-        row.cert_pem.clone().unwrap_or_default()
-    } else {
-        selected
-            .and_then(|cert| cert.cert_pem.clone())
-            .unwrap_or_default()
-    };
-    let uploaded_key = row.key_pem.as_deref().is_some_and(|p| !p.is_empty());
-    let key_pem = if uploaded_key {
-        row.key_pem.clone().unwrap_or_default()
-    } else {
-        selected
-            .and_then(|cert| cert.key_pem.clone())
-            .unwrap_or_default()
-    };
+    // A selected certificate row wins over the legacy inline copy on
+    // `site_ssl`. Preferring the inline PEM made a switch look ignored on
+    // installations that predate the certificate table (their `site_ssl` row
+    // still carries the old material).
+    let cert_pem = selected
+        .and_then(|cert| cert.cert_pem.clone())
+        .or_else(|| row.cert_pem.clone())
+        .unwrap_or_default();
+    let key_pem = selected
+        .and_then(|cert| cert.key_pem.clone())
+        .or_else(|| row.key_pem.clone())
+        .unwrap_or_default();
     let acme_email = row
         .acme_email
         .clone()
@@ -1432,6 +1482,7 @@ pub async fn build_rule_bundle(
     let rewrites = load_rewrite_rules(db, site_row.id).await?;
     let err_pages = load_error_pages(db).await?;
     let certificates = load_certificates(db, site_row.id).await?;
+    let path_exceptions = load_path_exceptions(db, site_row.id).await?;
     let bot = load_bot_protection(db, site_row.id).await?;
     let verified_bot_ranges =
         load_verified_bot_ranges(db, bot.as_ref()).await?;
@@ -1474,12 +1525,14 @@ pub async fn build_rule_bundle(
     // Deployment-wide access-log filtering. A read failure leaves the field
     // unset, which the agent reads as "never skip logging" (fail-open), the
     // same degradation an old server without the field produces.
-    let log_settings = crate::api::log_retention::load(db).await.ok().map(
-        |row| LogSettings {
-            skip_static_access_logs: Some(row.skip_static_access_logs),
-            static_suffixes: row.static_suffixes,
-        },
-    );
+    let log_settings =
+        crate::api::log_retention::load(db)
+            .await
+            .ok()
+            .map(|row| LogSettings {
+                skip_static_access_logs: Some(row.skip_static_access_logs),
+                static_suffixes: row.static_suffixes,
+            });
 
     let custom_rules: Vec<WafRule> =
         rules_rows.iter().map(rule_to_proto).collect();
@@ -1532,6 +1585,7 @@ pub async fn build_rule_bundle(
         ai_crawl,
         oidc: oidc_to_proto(oidc.as_ref(), oidc_provider_row.as_ref()),
         log_settings,
+        path_exceptions: path_exceptions_to_proto(&path_exceptions),
     };
 
     bundle.config_hash = fingerprint(&bundle);

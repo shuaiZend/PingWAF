@@ -185,7 +185,9 @@ enum BodyOperation {
         /// Replace every match (`true`) or only the first occurrence.
         greedy: bool,
     },
-    Set { content: String },
+    Set {
+        content: String,
+    },
 }
 
 /// A compiled `replace_body` search: literal bytes or a precompiled regular
@@ -1204,8 +1206,8 @@ fn compile_rule(rule: &RewriteRule) -> Result<CompiledRewriteRule> {
                 // drops the whole rule with a warning — the same fate any
                 // other invalid operation gets.
                 let search = if *is_regex {
-                    let regex = regex::bytes::Regex::new(search)
-                        .map_err(|e| {
+                    let regex =
+                        regex::bytes::Regex::new(search).map_err(|e| {
                             invalid(format!(
                                 "invalid body regex '{search}': {e}"
                             ))
@@ -2013,28 +2015,27 @@ rules = '[{"id":"h","direction":"response","operations":[{"type":"set_header","n
             is_regex: true,
             greedy: false,
         });
-        assert_eq!(
-            "v1 and ver 2",
-            run_body(&s, ops, "ver 1 and ver 2").await
-        );
+        assert_eq!("v1 and ver 2", run_body(&s, ops, "ver 1 and ver 2").await);
 
         // A broken regular expression fails compilation, which drops the
         // whole rule instead of half-applying it.
-        assert!(compile_rule(&RewriteRule {
-            id: "t".to_string(),
-            name: "t".to_string(),
-            condition: None,
-            direction: RewriteDirection::Response,
-            operations: vec![RewriteOperation::ReplaceBody {
-                search: "ver(".to_string(),
-                replacement: "v".to_string(),
-                is_regex: true,
-                greedy: true,
-            }],
-            priority: 0,
-            enabled: true,
-        })
-        .is_err());
+        assert!(
+            compile_rule(&RewriteRule {
+                id: "t".to_string(),
+                name: "t".to_string(),
+                condition: None,
+                direction: RewriteDirection::Response,
+                operations: vec![RewriteOperation::ReplaceBody {
+                    search: "ver(".to_string(),
+                    replacement: "v".to_string(),
+                    is_regex: true,
+                    greedy: true,
+                }],
+                priority: 0,
+                enabled: true,
+            })
+            .is_err()
+        );
     }
 
     #[tokio::test]

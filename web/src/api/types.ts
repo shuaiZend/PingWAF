@@ -938,6 +938,16 @@ export interface RangeQuery {
   limit?: number
 }
 
+/**
+ * `api::analytics::RangeQuery` + `blocked_only` — `GET /analytics/top-ips`
+ * only. `true` filters to IPs with at least one blocked request (server sorts
+ * by `blocked DESC`); omitted/false keeps the plain "top client IPs" behavior.
+ * Kept separate from `RangeQuery` on purpose: no other endpoint accepts it.
+ */
+export interface TopIpsQuery extends RangeQuery {
+  blocked_only?: boolean
+}
+
 /** `api::analytics::ActiveVisitorsResponse` */
 export interface ActiveVisitorsResponse {
   active_visitors: number
@@ -1154,6 +1164,8 @@ export type AgentCommand =
   | 'block_ip'
   | 'unblock_ip'
   | 'reload'
+  /** Not a per-agent command: routed to `POST /agents/flush-logs` by the console. */
+  | 'flush_logs'
 
 /** `api::agents::CommandRequest` */
 export interface AgentCommandRequest {
@@ -1500,6 +1512,13 @@ export interface SslCertificate {
    * Saving is never rejected because of these.
    */
   warnings?: string[]
+  /**
+   * How this row relates to the requesting site, reported by
+   * `GET /sites/{siteId}/certificates`: `owner` = installed here, `linked` =
+   * shared in from another site, `available` = listed by the share picker.
+   * Optional so older responses without the field still satisfy the type.
+   */
+  relation?: 'owner' | 'linked' | 'available'
   created_at: string
   updated_at: string
 }
@@ -1584,7 +1603,104 @@ export interface UpdateSslSettingsRequest {
   always_use_https?: boolean
   http1_enabled?: boolean
   http2_enabled?: boolean
+  /**
+   * Unbinds the currently selected certificate in the same request; mutually
+   * exclusive with `certificate_id` (the server answers 400 when both are set).
+   */
+  clear_certificate?: boolean
 }
+
+/* ── Certificate sharing (site ↔ site) ─────────────────────────────── */
+
+/** `api::ssl::CreateCertificateLinkRequest`. */
+export interface CreateCertificateLinkRequest {
+  certificate_id: string
+}
+
+/**
+ * `POST /sites/{id}/certificate-links` returns the full certificate row (the
+ * same shape as the site certificate list), not a link record.
+ */
+export type CertificateLink = SslCertificate
+
+/** `api::agents::FlushLogsResponse` — `POST /agents/flush-logs`. */
+export interface FlushLogsResult {
+  /** Agents the flush command reached over a live stream. */
+  delivered: number
+  /** Agents it was queued for; offline at the moment of the call. */
+  offline: number
+}
+
+/* ── Path exceptions ──────────────────────────────────────────────── */
+
+/** How a path exception matches a request path. */
+export type PathMatchType = 'prefix' | 'exact' | 'wildcard'
+
+export const PATH_MATCH_TYPES: PathMatchType[] = ['prefix', 'exact', 'wildcard']
+
+/**
+ * Protection layers a path exception can bypass. `*` bypasses everything;
+ * the rest name the data-plane layers (`pingwaf-agent` enforcement stages).
+ */
+export type PathSkipLayer =
+  | '*'
+  | 'waf'
+  | 'bot'
+  | 'access'
+  | 'basic_auth'
+  | 'mtls'
+  | 'ai_bot'
+  | 'rate_limit'
+  | 'challenge'
+
+export const PATH_SKIP_LAYERS: PathSkipLayer[] = [
+  '*',
+  'waf',
+  'bot',
+  'access',
+  'basic_auth',
+  'mtls',
+  'ai_bot',
+  'rate_limit',
+  'challenge',
+]
+
+/** Layers toggled by the three simple switches of the editor form. */
+export const PATH_PRIMARY_LAYERS: PathSkipLayer[] = ['bot', 'waf', 'access']
+
+/** Layers grouped under "advanced" in the editor form. */
+export const PATH_ADVANCED_LAYERS: PathSkipLayer[] = [
+  'basic_auth',
+  'mtls',
+  'ai_bot',
+  'rate_limit',
+  'challenge',
+]
+
+/** `models::path_exceptions::Model` */
+export interface PathException {
+  id: string
+  site_id: string
+  path: string
+  match_type: PathMatchType | string
+  skip_layers: string[]
+  note: string | null
+  log_hits: boolean
+  enabled: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface CreatePathExceptionRequest {
+  path: string
+  match_type: PathMatchType | string
+  skip_layers: string[]
+  note?: string | null
+  log_hits?: boolean
+  enabled?: boolean
+}
+
+export type UpdatePathExceptionRequest = Partial<CreatePathExceptionRequest>
 
 /* ── Managed mTLS material ─────────────────────────────────────────── */
 

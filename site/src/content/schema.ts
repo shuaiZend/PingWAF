@@ -12,6 +12,7 @@ export const ROUTES = {
   home: "/",
   features: "/features/",
   quickstart: "/quickstart/",
+  install: "/install/",
   docs: "/docs/",
 } as const;
 
@@ -36,6 +37,9 @@ export const SCREENSHOT_KEYS = [
   "logs",
   "agents",
   "configVersions",
+  "installInteractive",
+  "installSuccess",
+  "installCompose",
 ] as const;
 export type ScreenshotKey = (typeof SCREENSHOT_KEYS)[number];
 
@@ -219,6 +223,143 @@ export interface QuickStartContent {
   cta: CtaContent;
 }
 
+/* --------------------------------------------------------------- install */
+
+export type InstallMode = "all-in-one" | "server" | "agent";
+
+/** Which deployment path the install page tab switch shows. */
+export type DeployTarget = "compose" | "script";
+
+export interface InstallModeOption {
+  id: InstallMode;
+  label: string;
+  body: string;
+  /** Flags the generated command needs for this mode. */
+  flags: string[];
+}
+
+/** A field of the command builder; `modes` decides when it is shown. */
+export interface InstallField {
+  key:
+    | "version"
+    | "dbUrl"
+    | "serverUrl"
+    | "apiKey"
+    | "adminEmail"
+    | "adminPassword"
+    | "tlsSans";
+  label: string;
+  placeholder: string;
+  hint: string;
+  modes: InstallMode[];
+  optional?: boolean;
+  /** Rendered as a password input and never echoed in the summary. */
+  secret?: boolean;
+}
+
+/* --------------------------------------------------- install / compose tab */
+
+/** One field of the Docker Compose `.env` generator. */
+export interface ComposeField {
+  key:
+    | "tag"
+    | "adminEmail"
+    | "adminPassword"
+    | "tlsSans"
+    | "httpPort"
+    | "httpsPort"
+    | "adminPort";
+  label: string;
+  placeholder: string;
+  hint: string;
+  /** Pre-filled value; the generator only emits lines that deviate. */
+  defaultValue: string;
+  /** Rendered as a password input. */
+  secret?: boolean;
+}
+
+/** The Docker Compose deployment panel content. */
+export interface ComposeContent {
+  /** Eyebrow inside the compose panel (the tab itself uses `tabs.compose`). */
+  tabLabel: string;
+  /** Badge rendered on the compose tab, e.g. "Recommended". */
+  recommendedBadge: string;
+  title: string;
+  lead: string;
+  steps: Array<{ title: string; body: string }>;
+  fields: ComposeField[];
+  envTitle: string;
+  commandTitle: string;
+  /** Shown under the start command: first-login URL + credentials note. */
+  note: string;
+  upgradeTitle: string;
+  upgradeBody: string;
+  upgradeCommand: string;
+  requirements: string[];
+  screenshot?: { key: ScreenshotKey; alt: string; caption: string };
+}
+
+export interface InstallContent {
+  meta: PageMeta;
+  hero: {
+    eyebrow: string;
+    title: string;
+    lead: string;
+    badges: Array<{ icon: IconName; label: string; value: string }>;
+    toc: Array<{ id: string; label: string }>;
+    /** Default one-liner shown in the hero terminal card. */
+    oneLiner: string;
+  };
+  builder: {
+    id: string;
+    eyebrow: string;
+    title: string;
+    lead: string;
+    modes: InstallModeOption[];
+    fields: InstallField[];
+    optionalLabel: string;
+    defaultsLabel: string;
+    resetLabel: string;
+    commandTitle: string;
+    note: string;
+    secretWarning: string;
+    copy: string;
+    copied: string;
+    emptyHint: string;
+    scriptUrl: string;
+  };
+  /** Tab switch above the builder: Docker Compose (recommended) vs script. */
+  deployment: {
+    tabs: { compose: string; script: string };
+    compose: ComposeContent;
+  };
+  interactive: {
+    id: string;
+    eyebrow: string;
+    title: string;
+    lead: string;
+    steps: Array<{ title: string; body: string }>;
+    terminalNote: string;
+    shots: Array<{ key: ScreenshotKey; alt: string; caption: string }>;
+  };
+  reference: {
+    id: string;
+    eyebrow: string;
+    title: string;
+    lead: string;
+    rows: Array<{ flag: string; description: string }>;
+    link: LinkRef;
+  };
+  troubleshooting: {
+    id: string;
+    eyebrow: string;
+    title: string;
+    lead: string;
+    items: Array<{ q: string; a: string }>;
+  };
+  cta: CtaContent;
+}
+
 /* ----------------------------------------------------------------- docs */
 
 export interface DocsContent {
@@ -253,5 +394,6 @@ export interface LocaleBundle {
   intro: IntroContent;
   features: FeaturesContent;
   quickstart: QuickStartContent;
+  install: InstallContent;
   docs: DocsContent;
 }

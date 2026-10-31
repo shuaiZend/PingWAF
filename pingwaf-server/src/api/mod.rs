@@ -35,6 +35,7 @@ pub mod notifications;
 pub mod oidc_providers;
 pub mod origin_settings;
 pub mod passkeys;
+pub mod path_exceptions;
 pub mod rate_limit;
 pub mod rate_limiting;
 pub mod rewrite;
@@ -143,6 +144,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(log_retention::routes())
         .merge(ssl::routes())
         .merge(mtls::routes())
+        .merge(path_exceptions::routes())
         .merge(passkeys::routes())
         .merge(ip_rules::routes())
         .merge(ip_groups::routes())

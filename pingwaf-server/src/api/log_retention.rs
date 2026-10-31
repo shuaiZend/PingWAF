@@ -153,12 +153,10 @@ pub async fn load(
             log_retention::DEFAULT_RETENTION_DAYS,
         ),
         skip_static_access_logs: Set(true),
-        static_suffixes: Set(
-            log_retention::DEFAULT_STATIC_SUFFIXES
-                .iter()
-                .map(ToString::to_string)
-                .collect(),
-        ),
+        static_suffixes: Set(log_retention::DEFAULT_STATIC_SUFFIXES
+            .iter()
+            .map(ToString::to_string)
+            .collect()),
         updated_at: Set(Utc::now()),
     };
     let ignore_conflict = OnConflict::column(log_retention::Column::Id)

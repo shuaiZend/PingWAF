@@ -223,6 +223,7 @@ mod tests {
             cache_items: 4,
             cache_evictions: 1,
             cache_quota_bytes: quota,
+            certificate_id: String::new(),
         }
     }
 

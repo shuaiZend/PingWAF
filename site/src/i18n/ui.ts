@@ -9,6 +9,7 @@ export interface UiStrings {
     readonly overview: string;
     readonly features: string;
     readonly quickstart: string;
+    readonly install: string;
     readonly docs: string;
   };
   readonly cta: {
@@ -50,7 +51,13 @@ export interface UiStrings {
 }
 
 const en: UiStrings = {
-  nav: { overview: "Overview", features: "Features", quickstart: "Quick start", docs: "Docs" },
+  nav: {
+    overview: "Overview",
+    features: "Features",
+    quickstart: "Quick start",
+    install: "Install",
+    docs: "Docs",
+  },
   cta: {
     getStarted: "Get started",
     readDocs: "Read the docs",
@@ -91,7 +98,13 @@ const en: UiStrings = {
 };
 
 const zh: UiStrings = {
-  nav: { overview: "概览", features: "核心特性", quickstart: "快速上手", docs: "文档" },
+  nav: {
+    overview: "概览",
+    features: "核心特性",
+    quickstart: "快速上手",
+    install: "安装部署",
+    docs: "文档",
+  },
   cta: {
     getStarted: "立即开始",
     readDocs: "阅读文档",
@@ -135,6 +148,7 @@ const es: UiStrings = {
     overview: "Resumen",
     features: "Funciones",
     quickstart: "Inicio rápido",
+    install: "Instalación",
     docs: "Documentación",
   },
   cta: {
@@ -181,6 +195,7 @@ const fr: UiStrings = {
     overview: "Aperçu",
     features: "Fonctionnalités",
     quickstart: "Démarrage",
+    install: "Installation",
     docs: "Documentation",
   },
   cta: {
@@ -223,7 +238,13 @@ const fr: UiStrings = {
 };
 
 const ja: UiStrings = {
-  nav: { overview: "概要", features: "機能", quickstart: "クイックスタート", docs: "ドキュメント" },
+  nav: {
+    overview: "概要",
+    features: "機能",
+    quickstart: "クイックスタート",
+    install: "インストール",
+    docs: "ドキュメント",
+  },
   cta: {
     getStarted: "はじめる",
     readDocs: "ドキュメントを読む",

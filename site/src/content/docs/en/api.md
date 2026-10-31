@@ -33,6 +33,33 @@ A login returns `access_token`, `refresh_token`, `token_type: Bearer`, `expires_
 
 Site-scoped calls read and write through the tenant boundary (`load_site_read` / `load_site_write`), so a token only sees the sites it is allowed to manage. The complete reference, including every query parameter and response shape, is `docs/api.md` in the repository.
 
+## Certificate sharing
+
+One certificate (e.g. a wildcard) can serve several sites. A site sees its owned certificates plus the ones shared with it — each with a `relation` field (`owner`, `linked`, or `available`). The certificate's owning site keeps driving renewals and ACME bookkeeping.
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /sites/{id}/certificate-links` | Certificates shared with this site (same shape as the certificate list) |
+| `POST /sites/{id}/certificate-links` | Link a certificate: `{ "certificate_id": "uuid" }` → `201`; `409` if the site already owns or uses it; `404` if the owning site is not readable |
+| `DELETE /sites/{id}/certificate-links/{cert_id}` | Unlink → `204`; `409` while the certificate is the site's current TLS selection |
+| `GET /sites/{id}/certificates/available` | Certificates this site may still link |
+
+`PUT /sites/{id}/ssl-settings` accepts a `certificate_id` the site owns or has linked (otherwise `400 does not belong to this site and is not linked to it`) and `clear_certificate: true` to detach the current one. Selecting a certificate clears the legacy inline PEM copy on `site_ssl` — the selected certificate is always what the edge serves.
+
+## Path exceptions
+
+A site in observation mode (`waf_settings.mode = monitor`) can whitelist request paths that skip selected protection layers (`waf`, `bot`, `access`, `basic_auth`, `mtls`, `ai_bot`, `rate_limit`, `challenge`, or `*`). Saving in any other mode fails with `409`; the data plane also ignores exceptions on non-observing sites. Paused sites, fail-closed edges and dynamic IP bans are never bypassed. With `log_hits: true` each hit is recorded as a `path_bypass` security event.
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /sites/{id}/path-exceptions` | List exceptions (≤64 per site, unique `path`) |
+| `POST /sites/{id}/path-exceptions` | Create: `path` (starts with `/`, ≤512), `match_type` (`prefix`/`exact`/`wildcard`), `skip_layers`, `note`, `log_hits`, `enabled` |
+| `GET|PUT|DELETE /sites/{id}/path-exceptions/{id}` | Read / partial update / delete (`204`) |
+
+## Flush logs
+
+`POST /agents/flush-logs` (administrators) asks every connected agent to ship its in-memory log buffer immediately instead of waiting out the batch interval. Returns `{ "delivered": N, "offline": M }`; offline agents are counted but not queued, and `delivered` means the command was handed over — not that the entries are stored yet.
+
 ## gRPC
 
 Agents use the `ControlPlane` service on port `9090`, defined in `pingwaf-proto/proto/control_plane.proto`. It carries `RegisterAgent`, `Heartbeat`, `SyncRules`, `ShipLogs`, `ShipCertEvents`, `ShipMetrics` and `GetSiteConfig`, plus the visitor session RPCs used by the challenge flow. TLS is the default; `grpc_tls_mode = "off"` is a deliberate downgrade for trusted networks only.

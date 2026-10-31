@@ -203,6 +203,11 @@ message SiteStatus {
   uint64 cache_items = 10;        // Tracked cache entries
   uint64 cache_evictions = 11;    // Entries evicted to stay under quota
   uint64 cache_quota_bytes = 12;  // Configured ceiling, 0 = unlimited
+
+  // `site_certificates.id` the site's TLS posture selected, empty when the
+  // site is self-signed or has no certificate. Lets the control plane update
+  // the right ACME row when one certificate is shared by several sites.
+  string certificate_id = 13;
 }
 
 // One host probe sample, taken every few seconds by the agent's probe thread.
@@ -242,6 +247,7 @@ message ServerCommand {
     PurgeCacheCommand purge_cache = 14;
     UpdateSiteCommand update_site = 15;
     RestartAgentCommand restart_agent = 16;
+    FlushLogsCommand flush_logs = 17;
   }
 }
 
@@ -254,6 +260,7 @@ enum CommandType {
   COMMAND_PURGE_CACHE = 5;
   COMMAND_UPDATE_SITE = 6;
   COMMAND_RESTART_AGENT = 7;
+  COMMAND_FLUSH_LOGS = 8;
 }
 
 message RuleUpdateCommand {
@@ -290,6 +297,13 @@ message UpdateSiteCommand {
 message RestartAgentCommand {
   string reason = 1;
   bool graceful = 2;
+}
+
+// Ask the agent to flush its in-memory log buffer now instead of waiting for
+// the batch/interval trigger. One-way: the command channel has no ack frame,
+// the effect shows up in the next heartbeat's pending-log counters.
+message FlushLogsCommand {
+  string reason = 1;
 }
 
 // ============================================================
@@ -400,6 +414,32 @@ message RuleBundle {
   // triggered no security rule are skipped from `access_logs`. Absent = old
   // server: the agent never skips logging (fail-open).
   optional LogSettings log_settings = 32;
+
+  // Path exceptions: request paths that skip selected protection layers. Only
+  // honoured while the site is in observation mode. Absent = no exceptions
+  // (old servers never send them).
+  repeated PathException path_exceptions = 33;
+}
+
+// One whitelisted request path and the protection layers it skips.
+message PathException {
+  string id = 1;
+  string path = 2;
+  PathMatchType match_type = 3;
+  // `*` collapses the list; empty means every layer (old-server shape).
+  repeated string skip_layers = 4;
+  bool enabled = 5;
+  // Write a `security_events` row on every hit. Off by default: a health
+  // probe would otherwise flood the event table.
+  bool log_hits = 6;
+  // Operator-facing label (`rule_name` in the event log).
+  string note = 7;
+}
+
+enum PathMatchType {
+  PATH_MATCH_PREFIX = 0;    // `path` or `path/…`, never `/apix`
+  PATH_MATCH_EXACT = 1;     // request path equals `path`
+  PATH_MATCH_WILDCARD = 2;  // single trailing `*`, otherwise a prefix match
 }
 
 // Global access-log filtering configuration. Carried on every `RuleBundle`

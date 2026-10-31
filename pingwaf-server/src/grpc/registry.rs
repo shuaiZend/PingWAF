@@ -271,6 +271,26 @@ impl AgentRegistry {
         false
     }
 
+    /// Sends a command only when the agent is connected and has room for it.
+    ///
+    /// Unlike [`Self::send_command`] nothing is queued: a stale command that
+    /// makes no sense after reconnecting (flush the log buffer) must not be
+    /// replayed later. Returns `true` when it entered the live stream.
+    pub async fn send_command_now(
+        &self,
+        agent_id: &Uuid,
+        command: ServerCommand,
+    ) -> bool {
+        let sender = {
+            let inner = self.inner.read().await;
+            inner.connected.get(agent_id).map(|c| c.sender.clone())
+        };
+        match sender {
+            Some(sender) => sender.try_send(command).is_ok(),
+            None => false,
+        }
+    }
+
     /// Pushes a command to every connected agent, queueing for the offline ones.
     ///
     /// Returns how many agents received it live.

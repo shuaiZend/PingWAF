@@ -1,0 +1,163 @@
+---
+import Icon from "../Icon.astro";
+import type { InstallContent } from "../../content/schema";
+
+interface Props {
+  deployment: InstallContent["deployment"];
+}
+
+const { deployment } = Astro.props;
+---
+<div class="deploy" data-deploy-tabs data-active="compose">
+  <div class="deploy__tabs" role="tablist" aria-label={deployment.compose.tabLabel}>
+    <button
+      type="button"
+      role="tab"
+      id="deploy-tab-compose"
+      class="deploy__tab"
+      data-deploy-tab="compose"
+      aria-selected="true"
+      aria-controls="deploy-panel-compose"
+    >
+      <span class="deploy__tab-label">{deployment.tabs.compose}</span>
+      <span class="deploy__badge">{deployment.compose.recommendedBadge}</span>
+    </button>
+    <button
+      type="button"
+      role="tab"
+      id="deploy-tab-script"
+      class="deploy__tab"
+      data-deploy-tab="script"
+      aria-selected="false"
+      aria-controls="deploy-panel-script"
+    >
+      <span class="deploy__tab-label">{deployment.tabs.script}</span>
+    </button>
+  </div>
+
+  <!-- Both panels are server-rendered; JS only toggles `hidden`, so without
+       JavaScript the full content of both deployment paths stays readable. -->
+  <div
+    class="deploy__panel"
+    id="deploy-panel-compose"
+    role="tabpanel"
+    aria-labelledby="deploy-tab-compose"
+    data-deploy-panel="compose"
+  >
+    <slot name="compose" />
+  </div>
+  <div
+    class="deploy__panel"
+    id="deploy-panel-script"
+    role="tabpanel"
+    aria-labelledby="deploy-tab-script"
+    data-deploy-panel="script"
+  >
+    <slot name="script" />
+  </div>
+</div>
+
+<script>
+  const root = document.querySelector<HTMLElement>("[data-deploy-tabs]");
+  if (root) {
+    const tabs = Array.from(root.querySelectorAll<HTMLElement>("[data-deploy-tab]"));
+    const panels = Array.from(root.querySelectorAll<HTMLElement>("[data-deploy-panel]"));
+
+    const apply = (target: string) => {
+      root.dataset.active = target;
+      tabs.forEach((tab) => {
+        const active = tab.dataset.deployTab === target;
+        tab.setAttribute("aria-selected", active ? "true" : "false");
+      });
+      panels.forEach((panel) => {
+        const active = panel.dataset.deployPanel === target;
+        panel.hidden = !active;
+        if (active) {
+          // Restart the fade-in animation on every switch.
+          panel.classList.remove("deploy__panel--in");
+          void panel.offsetWidth;
+          panel.classList.add("deploy__panel--in");
+        }
+      });
+    };
+
+    tabs.forEach((tab) => {
+      tab.addEventListener("click", () => apply(tab.dataset.deployTab ?? "compose"));
+    });
+    apply(root.dataset.active ?? "compose");
+  }
+</script>
+
+<style>
+  .deploy__tabs {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+    padding: 5px;
+    border: 1px solid var(--color-border-line);
+    border-radius: var(--radius-lg);
+    background: var(--site-surface-inset);
+    max-width: 460px;
+  }
+
+  .deploy__tab {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 9px 14px;
+    border: 1px solid transparent;
+    border-radius: var(--radius-md);
+    background: transparent;
+    color: var(--color-text-strong);
+    font-size: 13.5px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 140ms var(--site-ease), border-color 140ms var(--site-ease);
+  }
+
+  .deploy__tab[aria-selected="true"] {
+    background: var(--color-bg-elevated);
+    border-color: var(--color-border-fill);
+  }
+
+  .deploy__tab:not([aria-selected="true"]):hover {
+    border-color: var(--color-border-line);
+  }
+
+  .deploy__badge {
+    padding: 2px 7px;
+    border-radius: 999px;
+    background: var(--site-brand-soft);
+    color: var(--color-text-strong);
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+  }
+
+  .deploy__panel[hidden] {
+    display: none;
+  }
+
+  .deploy__panel--in {
+    animation: deploy-fade 240ms var(--site-ease);
+  }
+
+  @keyframes deploy-fade {
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .deploy__panel--in {
+      animation: none;
+    }
+  }
+</style>

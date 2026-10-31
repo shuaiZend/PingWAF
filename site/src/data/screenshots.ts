@@ -8,6 +8,9 @@ import caching from "../assets/screenshots/caching.png";
 import cc from "../assets/screenshots/cc.png";
 import configVersions from "../assets/screenshots/configVersions.png";
 import dashboard from "../assets/screenshots/dashboard.png";
+import installInteractive from "../assets/screenshots/install-interactive.png";
+import installSuccess from "../assets/screenshots/install-success.png";
+import installCompose from "../assets/screenshots/install-compose.png";
 import login from "../assets/screenshots/login.png";
 import logs from "../assets/screenshots/logs.png";
 import sites from "../assets/screenshots/sites.png";
@@ -34,4 +37,7 @@ export const SCREENSHOT_IMAGES: Record<ScreenshotKey, ImageMetadata> = {
   logs,
   agents,
   configVersions,
+  installInteractive,
+  installSuccess,
+  installCompose,
 };

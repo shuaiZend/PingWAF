@@ -26,6 +26,7 @@ import { PillMultiSelect } from '@/components/ui/MultiSelect'
 import { useToast } from '@/components/ui/Toast'
 import { ErrorState } from '@/components/ErrorState'
 import { rateLimitApi, rateLimitKeys } from '@/api/rateLimiting'
+import { formatPeriodSeconds } from '@/lib/rateLimitPeriod'
 import { siteKeys } from '@/api/sites'
 import { useCanWrite } from '@/hooks'
 import { formatNumber } from '@/lib/format'
@@ -46,8 +47,13 @@ const ACTION_TONE: Record<string, 'danger' | 'warning' | 'info' | 'success' | 'n
   allow: 'success',
 }
 
-/** Windows the backend accepts (1..86400 seconds), presented as friendly presets. */
-const PERIODS = [10, 30, 60, 300, 600, 3600, 86400]
+/**
+ * Server-side window bounds (1..86400 seconds); the editor is a single
+ * numeric field plus a live human-readable preview — no presets that would
+ * fall back to a default when a stored value misses them.
+ */
+const PERIOD_MIN = 1
+const PERIOD_MAX = 86_400
 
 interface FormState {
   name: string
@@ -135,8 +141,10 @@ export function RateLimitingPage() {
     }
   }
 
-  // Re-seed the dialog form every time it opens (render-phase reset), so the
-  // first paint already shows the right rule instead of the previous one.
+  // Re-seed the dialog form only when it opens or the edited rule changes
+  // (render-phase reset keyed on [dialogOpen, editing?.id]). Unrelated
+  // renders — background refetches, timer-driven state — never touch the
+  // form, so a manually typed period cannot jump back to a default.
   const seedKey = dialogOpen ? (editing?.id ?? 'new') : ''
   const [lastSeedKey, setLastSeedKey] = useState<string | null>(null)
   if (seedKey !== lastSeedKey) {
@@ -582,33 +590,43 @@ export function RateLimitingPage() {
               hint={t('pages.rateLimiting.thresholdHint')}
               onChange={(e) => setForm((f) => ({ ...f, threshold: Number(e.target.value) }))}
             />
-            <div>
-              <Select
-                label={t('pages.rateLimiting.period')}
-                value={String(form.period_seconds)}
-                options={PERIODS.map((p) => ({
-                  value: String(p),
-                  label:
-                    p >= 3600
-                      ? t('pages.rateLimiting.hours', { hours: p / 3600 })
-                      : t('pages.rateLimiting.seconds', { seconds: p }),
-                }))}
-                onChange={(e) =>
-                  setForm((f) => ({ ...f, period_seconds: Number(e.target.value) }))
-                }
-              />
-              <Input
-                type="number"
-                className="mt-2 h-8 text-xs"
-                aria-label={t('pages.rateLimiting.periodSeconds')}
-                value={form.period_seconds}
-                min={1}
-                max={86400}
-                hint={t('pages.rateLimiting.periodSecondsHint')}
-                onChange={(e) =>
-                  setForm((f) => ({ ...f, period_seconds: Number(e.target.value) }))
-                }
-              />
+            <div className="flex flex-col gap-1">
+              <div className="flex items-end gap-2">
+                <Input
+                  type="number"
+                  label={t('pages.rateLimiting.periodSeconds')}
+                  value={Number.isNaN(form.period_seconds) ? '' : form.period_seconds}
+                  min={PERIOD_MIN}
+                  max={PERIOD_MAX}
+                  step={1}
+                  containerClassName="w-40"
+                  hint={t('pages.rateLimiting.periodSecondsHint')}
+                  onChange={(e) =>
+                    setForm((f) => ({
+                      ...f,
+                      period_seconds: e.target.value === '' ? NaN : Number(e.target.value),
+                    }))
+                  }
+                />
+                <span className="pb-2.5 text-[13px] text-fg-subtle">
+                  {t('pages.rateLimiting.unitSecond')}
+                </span>
+              </div>
+              {/* Live human-readable preview of the window; hidden while the
+                  value is out of range (validation shows the error instead). */}
+              {formatPeriodSeconds(form.period_seconds, {
+                second: t('pages.rateLimiting.unitSecond'),
+                minute: t('pages.rateLimiting.unitMinute'),
+                hour: t('pages.rateLimiting.unitHour'),
+              }) && (
+                <p className="text-xs text-fg-subtle">
+                  {formatPeriodSeconds(form.period_seconds, {
+                    second: t('pages.rateLimiting.unitSecond'),
+                    minute: t('pages.rateLimiting.unitMinute'),
+                    hour: t('pages.rateLimiting.unitHour'),
+                  })}
+                </p>
+              )}
             </div>
           </div>
 

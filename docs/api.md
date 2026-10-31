@@ -879,6 +879,7 @@ role.
 **Request:**
 ```json
 {
+  "certificate_id": "uuid",
   "hsts_enabled": true,
   "hsts_max_age": 15552000,
   "always_use_https": true,
@@ -891,6 +892,8 @@ role.
 
 | Field | Behaviour at the edge |
 |-------|-----------------------|
+| `certificate_id` | Selects the certificate the site serves. The site may select a certificate it **owns or one shared with it** through a certificate link (see [Certificate sharing](#certificate-sharing)); anything else is a `400` with `certificate {id} does not belong to this site and is not linked to it`. |
+| `clear_certificate` | `true` detaches the current certificate (`certificate_id` returns to `null`). Mutually exclusive with `certificate_id`: sending both is a `400` (`certificate_id and clear_certificate are mutually exclusive`). |
 | `hsts_enabled` / `hsts_max_age` | Adds `Strict-Transport-Security: max-age=<n>` to HTTPS responses. `max-age` is 0-63072000 seconds (two years); `hsts_max_age: 0` is what browsers read as "stop pinning", so the console defaults to `15552000` (180 days) when HSTS is switched on. |
 | `always_use_https` | Plain HTTP requests are answered `301` with the `https://` equivalent before any rule runs. The two listeners share one location, so this is safe to enable with traffic on both ports. **Browsers cache HSTS**: when testing, keep `hsts_max_age` low or use a throwaway domain, or a redirect will haunt the browser for months. |
 | `mtls_enabled` / `mtls_require_client_cert` / `mtls_organization` | Requires a client certificate; see [mTLS](#mtls). |
@@ -903,7 +906,78 @@ role.
 
 ### GET /sites/{site_id}/certificates
 
-List certificates for a site.
+List certificates for a site. Returns the certificates the site **owns plus the
+ones shared with it** through a certificate link, newest first (paginated) — a
+site can only select what is visible here, so the link table is part of the
+listing.
+
+### Certificate `relation`
+
+Every certificate response carries a `relation` field telling the caller where
+the row came from:
+
+| Value | Meaning |
+|-------|---------|
+| `owner` | The site owns the certificate row (`site_certificates.site_id` is this site). |
+| `linked` | The certificate is owned by another site and shared with this one via a link row. |
+| `available` | Returned only by [GET /sites/{site_id}/certificates/available](#get-sitessite_idcertificatesavailable): the certificate is owned by a site the caller can read and may still be linked. |
+
+`site_certificates.site_id` remains the **owner** — it drives config-version
+scoping, backup/restore layering and ACME bookkeeping; a link is only the
+authorisation to serve the certificate on another site.
+
+### Certificate sharing
+
+A certificate row can serve more than one site: one wildcard or multi-SAN
+certificate, several edges. The owner stays in `site_certificates.site_id`; the
+`site_certificate_links` table records which other sites may serve it. The
+endpoints below manage those links.
+
+### GET /sites/{site_id}/certificate-links
+
+The certificates linked **to** this site (i.e. shared with it). Same page and
+shape as the certificate list above — a link is not a separate resource, it
+only changes where a row came from — so every item carries
+[`relation: linked`](#certificate-relation) plus `warnings`.
+
+### POST /sites/{site_id}/certificate-links
+
+Share another site's certificate with this site. Requires write access to this
+site **and read access to the owning site** (linking grants the right to serve
+someone else's certificate).
+
+**Request:**
+```json
+{ "certificate_id": "uuid" }
+```
+
+**Response (201):** the certificate, with `relation: "linked"`.
+
+**Errors:**
+
+| Status | When |
+|--------|------|
+| `404` | The certificate does not exist (`certificate {id} not found`), or the caller cannot read the owning site. |
+| `409` | The certificate is already owned by this site (`certificate already belongs to this site`), or already linked (`certificate already linked to this site`). |
+
+### DELETE /sites/{site_id}/certificate-links/{cert_id}
+
+Remove a certificate link. Requires write access to the site.
+
+**Response:** `204`.
+
+**Errors:**
+
+| Status | When |
+|--------|------|
+| `409` | The certificate is the site's current TLS certificate (`certificate is the site's current TLS certificate; clear or replace it first`) — unlinking it would silently drop TLS, so clear or replace the selection first (`clear_certificate: true` on [PUT /sites/{site_id}/ssl-settings](#put-sitessite_idssl-settings)). |
+| `404` | No such link for this site (`certificate link {cert_id} not found`). |
+
+### GET /sites/{site_id}/certificates/available
+
+The certificates this site may still link: owned by a site the caller can read,
+not owned by this site and not linked yet (paginated). Each item carries
+`relation: "available"` plus `warnings`.
 
 ### Certificate `warnings`
 
@@ -969,7 +1043,14 @@ post-update hostnames.
 
 ### DELETE /sites/{site_id}/certificates/{cert_id}
 
-Remove certificate.
+Remove certificate. **409 `certificate is selected by site(s) …; clear or
+replace it there first`** while any site still has it selected: deleting it
+would leave `site_ssl.certificate_id` dangling and the site would silently stop
+serving a certificate. Clear the selection (`clear_certificate`) or pick another
+certificate first.
+
+Shares (`site_certificate_links`) are removed together with the certificate;
+other sites that only linked it lose the ability to select it.
 
 ### GET /certificates
 
@@ -1410,6 +1491,35 @@ Send a command to an agent.
 | `purge_cache` | `{"pattern": "..."}` |
 | `update_site` | `{"site_id": "..."}` |
 | `restart_agent` | `{}` |
+| `flush_logs` | `{}` — per-agent form of the broadcast below |
+
+### POST /agents/flush-logs
+
+Ask every connected agent to flush its in-memory log buffer to the control
+plane immediately, instead of waiting out the batch interval. Requires an
+administrator account (viewers and auditors get `403`).
+
+**Request:** empty body.
+
+**Response (200):**
+```json
+{ "delivered": 2, "offline": 1 }
+```
+
+Semantics worth knowing before you reach for it:
+
+- Only **connected** agents receive the command — it is never queued for
+  offline ones (replaying "flush" after a reconnect has no value and would
+  only occupy a pending-command slot). `offline` counts registered agents
+  that were not connected.
+- `delivered` means the command was handed to the agent, **not** that the
+  logs are stored yet: the agent flushes its current batch (and up to one
+  more batch drained while the RPC was in flight) asynchronously.
+- The agent's in-memory log channel holds at most 2048 entries; anything
+  dropped while the control plane was unreachable is gone for good.
+- A batch whose transport failed is kept by the agent and retried, capped at
+  one `log_batch_size` batch — the flush never turns into an unbounded send
+  loop.
 
 ---
 
@@ -1591,6 +1701,20 @@ re-adds come back in `monitor`, so repairing an existing site never starts
 blocking traffic that site was serving unfiltered. Seeding is matched on the
 rule name and never edits an existing row.
 
+### Action / mode combination check
+
+An `action: "allow"` rule always passes the request, so pairing it with
+`mode: "block"` promises enforcement that can never happen. The combination is
+rejected on create **and** on update — including an update that changes only
+one side, where the stored value of the other completes the pair — with:
+
+```
+400 action 'allow' cannot use mode 'block': an allow rule always passes the
+request, so the block mode would never apply; use 'monitor' or 'off'
+```
+
+`allow` is accepted with `mode: "monitor"` or `mode: "off"` only.
+
 ### GET /sites/{site_id}/rule-groups
 
 List rule groups.
@@ -1666,6 +1790,121 @@ Update a rule.
 ### DELETE /sites/{site_id}/rules/{rule_id}
 
 Delete a rule.
+
+---
+
+## Path Exceptions
+
+Per-site request paths that skip selected protection layers (WAF, bot
+protection, access rules, …) while the site observes traffic. This is an
+operator-curated hole in the site's own defences, so it is guarded twice:
+
+- **Control plane**: the site's `waf_settings.mode` must be `monitor`
+  (observation mode) to create or update an exception; otherwise the API
+  returns `409` with
+  `path exceptions require the site to be in observation mode; current WAF mode is '<mode>' (set it to 'monitor' first)`.
+  A missing `waf_settings` row counts as `monitor` (that is what the data
+  plane falls back to). Deleting an exception is allowed in any mode.
+- **Data plane**: a site that is not in observation mode ignores its exception
+  list entirely, so a stale bundle can never punch a hole after the site
+  returns to `block`.
+
+What an exception can **never** bypass, because those checks run before the
+exception is consulted: a paused site (maintenance page), a fail-closed edge
+(`fail_open = false` with no synced rules) and an active dynamic IP ban.
+
+### GET /sites/{site_id}/path-exceptions
+
+List the site's path exceptions, ordered by `path`.
+
+**Response (200):**
+```json
+[
+  {
+    "id": "uuid",
+    "site_id": "uuid",
+    "path": "/api/health",
+    "match_type": "prefix",
+    "skip_layers": ["waf", "bot"],
+    "note": "health probes",
+    "log_hits": true,
+    "enabled": true,
+    "created_at": "2024-01-01T00:00:00Z",
+    "updated_at": "2024-01-01T00:00:00Z"
+  }
+]
+```
+
+### POST /sites/{site_id}/path-exceptions
+
+Create an exception. Requires write access and observation mode (see above).
+
+**Request:**
+```json
+{
+  "path": "/api/health",
+  "match_type": "prefix",
+  "skip_layers": ["waf", "bot"],
+  "note": "health probes",
+  "log_hits": true,
+  "enabled": true
+}
+```
+
+All fields except `path` are optional. `match_type` defaults to `prefix`,
+`skip_layers` defaults to `["*"]`, `log_hits` to `false`, `enabled` to `true`.
+
+| Field | Validation (violations are `400` unless stated) |
+|-------|--------------------------------------------------|
+| `path` | Required on create. 1–512 characters, must start with `/`, no whitespace or control characters. `*` is only allowed with `match_type: "wildcard"`, and there only as a single trailing `*` (`/api/*`); a bare `*` is rejected (`use path '/' with match_type prefix instead of '*'`). |
+| `match_type` | `prefix` (default) / `exact` / `wildcard`; anything else → `unknown match_type '<x>'; expected one of prefix, exact, wildcard`. |
+| `skip_layers` | Array of tokens: `*`, `waf`, `bot`, `access`, `basic_auth`, `mtls`, `ai_bot`, `rate_limit`, `challenge`. Empty array → `skip_layers must not be empty; use ["*"] to skip every layer`; unknown token → named in the error; `*` collapses the list to every layer. |
+| `note` | At most 200 characters. |
+| `log_hits` | Default `false`. When `true`, every hit is recorded (see [Hit behaviour](#path-exception-hit-behaviour)). |
+| `enabled` | Default `true`; disabled exceptions are neither compiled nor matched. |
+
+Limits: a site accepts at most **64** exceptions
+(`a site accepts at most 64 path exceptions`); `(site_id, path)` is unique — a
+duplicate is a `409` (`a path exception for '<path>' already exists on this site`).
+
+**Response (200):** the created exception (same shape as the list items).
+
+### GET /sites/{site_id}/path-exceptions/{id}
+
+Get one exception. `404` (`path exception {id} not found`) when it does not
+belong to this site.
+
+### PUT /sites/{site_id}/path-exceptions/{id}
+
+Partial update: omitted fields keep their value. The observation-mode gate and
+the same validation apply. Switching `match_type` re-validates the stored
+`path` against the new type (e.g. changing to `wildcard` without a trailing
+`*` on the path is rejected). Changing `path` to a value another exception
+already uses is a `409`.
+
+### DELETE /sites/{site_id}/path-exceptions/{id}
+
+Delete an exception. `204` on success; `404` when the id does not belong to
+this site.
+
+### Path exception hit behaviour
+
+Matching runs on the request path only (query strings ignored), `exact` before
+`prefix` before `wildcard`. `prefix` matches by **path segment**: `/api`
+matches `/api` and `/api/x`, never `/apix`; `wildcard` covers anything below
+the pattern with the `*` removed (`/api/*` matches `/api/x`, not `/api`).
+
+A hit skips exactly the layers the exception names for that one request. When
+`log_hits` is `true`, the hit is written to `security_events` so the bypass is
+visible in the dashboard:
+
+| Field | Value |
+|-------|-------|
+| `event_type` | `path_bypass` |
+| `action` | `log` (kept out of block/challenge accounting) |
+| `rule_id` | The exception's id |
+| `rule_name` | The exception's `note`, or its `path` when the note is empty |
+| `waf_details` | `bypassed: <layers>` — the token list, or `bypassed: *` |
 
 ---
 
@@ -2199,6 +2438,19 @@ Most triggered rules.
 ### GET /analytics/top-ips
 
 Top client IPs by request count.
+
+**Query Parameters:** `site_id`, `from`, `to`, `interval`, `limit`, and:
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `blocked_only` | boolean | `false` | `true` restricts the ranking to IPs with at least one blocked request (HTTP 403 or 429) and orders by `blocked DESC, requests DESC, client_ip ASC`. Absent or `false` keeps the historical "top client IPs" behavior: no filter, ordered by request count only. |
+
+Accepted values for `blocked_only`: `true`, `false`, `1`, `0`, `yes`, `no`
+(any casing). Anything else is rejected with **400 `invalid_blocked_only`**
+rather than silently falling back to `false`, so a typo cannot quietly change
+the ranking. A present-but-empty value (`?blocked_only=`) is rejected too; omit
+the parameter for the default. `blocked_only=false` is byte-for-byte the statement the endpoint
+served before the parameter existed.
 
 ### GET /analytics/top-paths
 

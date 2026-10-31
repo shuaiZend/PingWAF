@@ -619,7 +619,13 @@
       "restoreNothing": "Built-in rules are complete",
       "restoreNothingHint": "Every built-in rule already exists for this site.",
       "restoreDone": "Restored {{count}} built-in rules",
-      "restoreDoneHint": "They ship in monitor mode so you can see what they catch before blocking anything."
+      "restoreDoneHint": "They ship in monitor mode so you can see what they catch before blocking anything.",
+      "allowBlockConflict": "Action 'allow' cannot use mode 'block'. Switch the mode to monitor or off before saving.",
+      "allowBlockFallback": "Allow rules cannot run in block mode — the mode was switched to monitor.",
+      "allowModeHint": "Allow rules skip blocking; only monitor or off is available.",
+      "allowBlockConflictBadge": "Invalid combo",
+      "blockWithAllowTitle": "Switch to block mode with {count} allow rule(s)?",
+      "blockWithAllowDescription": "Allow rules cannot block. Legacy rules combining 'allow' with mode 'block' will silently stop blocking. Continue?"
     },
     "rateLimiting": {
       "title": "Rate Limiting",
@@ -665,7 +671,10 @@
       "threshold": "Threshold",
       "thresholdHint": "Maximum requests allowed in the period",
       "thresholdInvalid": "Threshold must be between 1 and 10,000,000",
-      "untilReset": "Until window reset"
+      "untilReset": "Until window reset",
+      "unitSecond": "seconds",
+      "unitMinute": "min",
+      "unitHour": "h"
     },
     "bot": {
       "title": "Bot Protection",
@@ -849,7 +858,8 @@
         "ruleCount": "{{enabled}} of {{total}} rules enabled"
       },
       "paranoiaTitle": "Detection sensitivity",
-      "paranoiaCardHint": "1 (loose) to 4 (strict). Higher levels activate the more sensitive built-in detections."
+      "paranoiaCardHint": "1 (loose) to 4 (strict). Higher levels activate the more sensitive built-in detections.",
+      "tabPaths": "Path exceptions"
     },
     "ipRules": {
       "title": "IP Access Rules",
@@ -1219,7 +1229,32 @@
       "openGlobalSsl": "Open SSL/TLS",
       "protocols": {
         "atLeastOne": "At least one protocol must stay enabled."
-      }
+      },
+      "groupOwner": "This site’s certificates",
+      "groupLinked": "Shared in from other sites",
+      "sharedCertificates": "Shared certificates",
+      "sharedCertificatesHint": "Certificates owned by other sites that this site may link and serve.",
+      "sharedBadge": "Shared",
+      "sharedEmpty": "Nothing to link yet",
+      "sharedEmptyHint": "No other site currently offers a certificate this site may use.",
+      "alreadyLinked": "Linked",
+      "link": "Link",
+      "linkCreated": "Certificate linked",
+      "linkFailed": "Failed to link certificate",
+      "removeShare": "Remove share",
+      "removeShareTitle": "Remove shared certificate",
+      "removeShareDescription": "This certificate is shared in from another site. Removing it stops this site from serving it.",
+      "linkRemoved": "Share removed",
+      "unlinkFailed": "Failed to remove the share",
+      "unbind": "Unbind",
+      "unbindTitle": "Unbind current certificate",
+      "unbindDescription": "This site will stop serving the selected certificate (falling back per its HTTPS settings). The certificate itself is not deleted.",
+      "certificateCleared": "Certificate unbound",
+      "clearFailed": "Failed to unbind the certificate",
+      "relation": "Relation",
+      "shareOut": "Share with other sites",
+      "shareOutTitle": "Share with other sites",
+      "shareOutHint": "A certificate can be linked by any site that can serve its domain. Open the target site’s SSL page and use “Shared certificates” to link this certificate — sharing is granted per target site."
     },
     "traffic": {
       "aiBots": {
@@ -1469,7 +1504,12 @@
         "choose": "Choose a group…",
         "confirm": "Add",
         "empty": "No IP groups yet — create one on the IP Groups page first."
-      }
+      },
+      "flush": "Sync now",
+      "flushHint": "Ask all agents to push their buffered logs now. Only logs already in an agent’s buffer are synced — entries dropped when a channel was full cannot be recovered.",
+      "flushDone": "Notified {delivered} agent(s), {offline} offline",
+      "flushDoneHint": "Buffered logs are on their way.",
+      "flushFailed": "Failed to notify agents"
     },
     "agents": {
       "title": "Agents",
@@ -1557,7 +1597,10 @@
         "tx": "Transmit"
       },
       "allSitesHint": "Not bound to a single site; automatically serves every site of its owner",
-      "hostMemory": "Host memory capacity"
+      "hostMemory": "Host memory capacity",
+      "command_flush_logs": "Flush logs",
+      "flushResult": "Notified {delivered}, offline {offline}",
+      "flushFailed": "Failed to flush logs"
     },
     "notifications": {
       "title": "Notifications",
@@ -2256,7 +2299,8 @@
       "eventDetails": "Details",
       "dnsConfigLabel": "DNS provider credentials",
       "dnsConfigHint": "Key–value pairs passed to the provider API (e.g. token, access_key_id, access_key_secret). An `endpoint` entry overrides the API host.",
-      "dnsConfigRegionRequired": "Huawei Cloud needs a `region` entry (e.g. cn-north-4); it builds the dns.<region>.myhuaweicloud.com endpoint."
+      "dnsConfigRegionRequired": "Huawei Cloud needs a `region` entry (e.g. cn-north-4); it builds the dns.<region>.myhuaweicloud.com endpoint.",
+      "multiSiteNote": "A certificate is created bound to one site. Other sites can reuse it from their SSL page via “Shared certificates”, and can unbind it at any time."
     },
     "blockedIps": {
       "title": "IP Blacklist",
@@ -2815,6 +2859,56 @@
       "title": "Page not found",
       "description": "The page you are looking for doesn't exist or has been moved.",
       "backToDashboard": "Back to dashboard"
+    },
+    "pathExceptions": {
+      "title": "Path exceptions",
+      "description": "Request paths that bypass selected protection layers.",
+      "add": "Add exception",
+      "edit": "Edit exception",
+      "dialogDescription": "Matched requests skip the selected layers.",
+      "path": "Path",
+      "pathHint": "Must start with “/”.",
+      "matchType": "Match type",
+      "match_prefix": "Prefix",
+      "match_exact": "Exact",
+      "match_wildcard": "Wildcard",
+      "wildcardHint": "Wildcard paths must end with “*”.",
+      "skipLayers": "Bypassed layers",
+      "bypassLayers": "Bypass layers",
+      "bypassAllNote": "“All” is selected — every protection layer is bypassed for these paths.",
+      "advancedLayers": "Advanced layers",
+      "advancedLayersHint": "Less common layers this path may bypass.",
+      "layerAll": "All",
+      "layerAllHint": "Bypass every protection layer",
+      "layer_waf": "WAF",
+      "layer_bot": "Bot protection",
+      "layer_access": "Access control",
+      "layer_basic_auth": "Basic Auth",
+      "layer_mtls": "mTLS",
+      "layer_ai_bot": "AI crawlers",
+      "layer_rate_limit": "Rate limiting",
+      "layer_challenge": "Challenge",
+      "layerHint_waf": "Skip WAF inspection for these paths.",
+      "layerHint_bot": "Skip bot detection for these paths.",
+      "layerHint_access": "Skip IP/geo access rules for these paths.",
+      "logHits": "Log hits",
+      "logHitsHint": "Record a log entry when this exception matches.",
+      "note": "Note",
+      "notePlaceholder": "Why this exception exists",
+      "empty": "No path exceptions",
+      "emptyDescription": "Everything is inspected. Add an exception only for paths that genuinely need it.",
+      "observationGate": "Path exceptions can only be changed while the site’s WAF mode is monitor (observation mode).",
+      "switchToMonitor": "Switch to monitor",
+      "monitorApplied": "WAF mode switched to monitor",
+      "created": "Exception created",
+      "updated": "Exception updated",
+      "deleted": "Exception deleted",
+      "deleteFailed": "Failed to delete the exception",
+      "deleteTitle": "Delete path exception",
+      "deleteDescription": "Requests on this path will be inspected again.",
+      "errorPathRequired": "Path is required.",
+      "errorPathRooted": "The path must start with “/”.",
+      "errorPathWildcardSuffix": "Wildcard paths must end with “*”."
     }
   },
   "challengeLevels": {

@@ -55,13 +55,53 @@ Default credentials: `admin@pingwaf.local` / value of `$ADMIN_PASSWORD`
 
 ### 1. Install the Binary
 
-```bash
-# Automatic (downloads latest release)
-curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh | bash
+The installer runs in two modes:
 
-# Or specify version and mode
-./install.sh --version 0.25.0 --mode all-in-one
+- **Interactive install** — download the script and run it on a terminal. With
+  no arguments it asks, in order: deployment mode (all-in-one / server /
+  agent), then for agent mode the control-plane gRPC URL and enrollment API
+  key, or for server/all-in-one the administrator e-mail, the administrator
+  password twice (leaving it empty keeps the default, which the dashboard
+  forces to change at first login), the PostgreSQL URL, the certificate SAN
+  list of the dashboard, and the version to install. It then prints an
+  **Installation plan** summary and asks `Continue? [Y/n]` before touching
+  anything.
+- **One-line unattended install** — any argument switches the script to
+  fully non-interactive: it installs with the given values and defaults and
+  never prompts. Because `curl | bash` has no terminal on stdin, piping the
+  script installs non-interactively automatically; pass options through the
+  pipe with `bash -s --`.
+
+```bash
+# Interactive: answer the questions, defaults in brackets
+curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh -o install.sh
+bash install.sh
+
+# One line, unattended (add sudo when the user cannot write /usr/local/bin)
+curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh | sudo bash -s -- --mode all-in-one
+
+# Agent enrolled against a remote control plane
+curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh | sudo bash -s -- \
+  --mode agent --server-url https://10.0.0.1:9090 --api-key pwk_xxx
 ```
+
+Options beyond `--version`, `--mode`, `--server-url`, `--api-key`, `--db-url`
+and `--no-systemd`:
+
+| Option | Environment variable | Purpose |
+| --- | --- | --- |
+| `--admin-email` | `PINGWAF_ADMIN_EMAIL` | Seed administrator e-mail (server / all-in-one) |
+| `--admin-password` | `PINGWAF_ADMIN_PASSWORD` | Seed administrator password (server / all-in-one) |
+| `--tls-sans` | `PINGWAF_TLS_SANS` | Comma-separated SANs of the dashboard certificate |
+| `--interactive` | — | Prompt even when options were given |
+| `--non-interactive`, `--yes` | — | Never prompt; use the given values and defaults |
+| `--dry-run` | — | Print the resolved plan, then exit without installing |
+
+`curl | bash` cannot show interactive prompts, so secrets should be handed
+over as environment variables (`PINGWAF_ADMIN_EMAIL` /
+`PINGWAF_ADMIN_PASSWORD` / `PINGWAF_TLS_SANS`) or as flags — not typed into a
+prompt that will never appear. Run with `--dry-run` first to check the plan
+the script resolved from your options.
 
 > Prebuilt release assets are published for **Linux** (amd64/arm64) only; on
 > macOS, [build from source](./quick-start.md#path-2-build-from-source).
@@ -99,7 +139,11 @@ file, `PINGWAF_*` environment variables, and command-line flags.
 1. **A TOML file** — `--config /etc/pingwaf/pingwaf.toml` (or
    `PINGWAF_CONFIG`). `install.sh` writes one and points the unit at it; its
    `[server]` and `[agent]` tables hold the settings listed in the
-   [Configuration Reference](#configuration-reference).
+   [Configuration Reference](#configuration-reference). The installer also
+   bakes `admin_email`, `admin_password` and `tls_sans` (from the matching
+   install options) into the file, and creates it owned by `pingwaf:pingwaf`
+   with mode `640` — the seeded admin password and the JWT secret it contains
+   are not world-readable.
 2. **Environment variables** — set as `Environment=` lines in the systemd unit
    (a drop-in override with `sudo systemctl edit pingwaf` survives package
    upgrades).
@@ -705,6 +749,11 @@ Run `pingwaf <command> --help` for the exact options of any of them — plain
 `pingwaf --help` answers with the `pingap`-compatible options of the shared
 binary, not with this subcommand tree.
 
+> **Complete reference:** every maintenance command, its options, the danger
+> notes (`--force`, CLI rollback semantics) and incident runbooks live in the
+> [CLI handbook](./cli.md) ([中文](./zh/cli.md)). The table below is only a
+> summary — keep that page as the source of truth for details.
+
 | Command | Purpose |
 | --- | --- |
 | `pingwaf user list` · `add-admin --email <addr> [--name <name>] [--password <pw>]` · `reset-password --email <addr> [--password <pw>]` | Dashboard accounts. An omitted password is generated and printed once; `reset-password` also revokes that account's sessions. |
@@ -747,13 +796,43 @@ docker compose up -d
 
 ```bash
 # Download and install new version
-./install.sh --version NEW_VERSION --no-systemd
+./install.sh --version NEW_VERSION
 
 # Restart service
 sudo systemctl restart pingwaf
 ```
 
 Database migrations run automatically on startup.
+
+> ⚠️ **Do not upgrade with `--no-systemd` on an older unit.** Older versions of
+> this document suggested `./install.sh --version NEW_VERSION --no-systemd` to
+> skip touching the unit file. That skips the rewrite, so a unit installed
+> before the `CAP_NET_BIND_SERVICE` change keeps running without it — and the
+> unprivileged `pingwaf` user then fails to bind 80/443 with
+> `Permission denied` (`bind() failed on 0.0.0.0:443`). Two fixes:
+>
+> 1. Preferred: upgrade **without** `--no-systemd` so the script refreshes the
+>    unit file with the capability included. This **rewrites**
+>    `/etc/systemd/system/pingwaf.service`, so local edits made directly in that
+>    file are lost. Keep customisations in a drop-in
+>    (`sudo systemctl edit pingwaf`) instead — the rewrite leaves
+>    `pingwaf.service.d/*.conf` alone.
+> 2. If you must keep `--no-systemd`, the script detects the outdated unit (it
+>    reads both the unit file and its drop-ins) and prints a drop-in; apply it
+>    with `sudo systemctl edit pingwaf`:
+>
+>    ```ini
+>    [Service]
+>    AmbientCapabilities=CAP_NET_BIND_SERVICE
+>    CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+>    ```
+>
+> Either way, verify afterwards:
+>
+> ```bash
+> systemctl show pingwaf -p AmbientCapabilities
+> # AmbientCapabilities=CAP_NET_BIND_SERVICE
+> ```
 
 Upgrading to the release that adds the origin certificate switch (migration
 52) resets `verify_cert` on every origin pool that had it stored as `false` to
@@ -813,6 +892,40 @@ overview cards and pills already carry RSS / peak / available / usage, so the
 per-field breakdown was a second copy of the same numbers. The underlying
 endpoints (`GET /api/v1/system/metrics`, `GET /api/v1/system/profile`) are
 unchanged.
+
+**Certificate sharing (migrations 85–86) and the legacy inline certificate
+cleanup.** Migration 85 creates `site_certificate_links` and backfills a link
+row for every certificate a site has already selected (from
+`site_ssl.certificate_id`); migration 86 creates `site_path_exceptions`. Both
+are additive — no existing column changes shape and no row is deleted.
+
+The behavioural change needs one decision before you upgrade. Sites that
+predate the certificate table still carry their certificate material directly
+on the `site_ssl` row (`cert_pem` / `key_pem`). With this release:
+
+- Saving a site's TLS settings **with a selected certificate clears that
+  inline copy** — the selected certificate is now unambiguously what the edge
+  serves. The old behaviour preferred the inline PEM, which made "switch
+  certificate" look like it did nothing.
+- Until the settings are saved once, the inline copy keeps serving (fail-open
+  on upgrade), so simply upgrading changes nothing.
+- ACME write-backs now target the certificate row the site reports
+  (`SiteStatus.certificate_id`) instead of whichever pending row belonged to
+  the site, so shared certificates are no longer updated on the wrong row;
+  agents that report no certificate id keep the old matching behaviour.
+
+> ⚠️ **If you may need to roll back**, back up the `site_ssl` table before
+> upgrading (or before the first TLS settings save afterwards):
+> `pg_dump -t site_ssl <database> > site_ssl_backup.sql`. Once the inline PEM
+> copy is cleared and you downgrade, the old server would again prefer the
+> inline copy — which is then empty.
+
+**Sharing certificates between sites** is the point of migration 85: link a
+certificate owned by one site to another site (console: the site's SSL
+settings certificate picker; API: `POST /sites/{id}/certificate-links`). Share
+only to sites you trust — a linked site serves the same hostnames. Unlinking
+is refused while the certificate is the site's current TLS selection; clear or
+replace the selection first.
 
 ### Rolling Upgrade (Distributed)
 

@@ -54,7 +54,17 @@ cargo build --release --bin pingwaf --features full
   --db-url "postgres://pingwaf:pingwaf@localhost:5432/pingwaf"
 ```
 
-Sur Linux, `install.sh` télécharge l'archive, installe dans `/usr/local/bin`, écrit `/etc/pingwaf/pingwaf.toml` et l'unité systemd, puis démarre l'agent (`--no-systemd` pour l'éviter).
+Sur Linux, `install.sh` télécharge l'archive, installe dans `/usr/local/bin`, écrit `/etc/pingwaf/pingwaf.toml` et l'unité systemd, puis démarre le service. Lancez-le dans un terminal sans argument pour l'assistant interactif (mode, identifiants administrateur, URL PostgreSQL, SANs du certificat, version), ou via un pipe pour une installation non interactive en une ligne.
+
+```bash
+# assistant interactif, avec plan d'installation et confirmation
+curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh -o install.sh && bash install.sh
+
+# une ligne, non interactive (aucune question — un pipe n'a pas de terminal)
+curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh | bash -s -- --mode all-in-one
+```
+
+Options : `--mode all-in-one|server|agent`, `--no-systemd` pour éviter l'unité, `--admin-email` / `--admin-password` / `--tls-sans` (ou les variables `PINGWAF_*` correspondantes) pour définir les valeurs sans questions, et `--dry-run` pour prévisualiser le plan sans installer.
 
 ## Précédence de configuration
 

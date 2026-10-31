@@ -766,6 +766,13 @@ export function GlobalSslPage() {
             />
           </div>
 
+          {/* site_id stays required (server contract); other sites can still
+              reuse the certificate through the per-site share picker. */}
+          <p className="-mt-2 flex items-start gap-1.5 text-xs leading-relaxed text-fg-subtle">
+            <Info weight="duotone" className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            {t('pages.sslGlobal.multiSiteNote')}
+          </p>
+
           {form.mode === 'acme' ? (
             <>
               <div className="grid gap-4 sm:grid-cols-2">

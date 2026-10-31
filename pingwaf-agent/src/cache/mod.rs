@@ -153,6 +153,34 @@ pub struct SiteRules {
     /// family actions. `None` for sites (and snapshots) without it.
     #[serde(default)]
     pub ai_crawl: Option<AiCrawlConfig>,
+    /// Operator-curated paths that skip selected protection layers. Only
+    /// honoured while the site observes (see the WAF plugin); absent — and
+    /// empty for every snapshot written before the field existed — means the
+    /// site has no exceptions. A local mirror: the proto type carries no
+    /// serde derives, and the cache snapshot must stay serializable.
+    #[serde(default)]
+    pub path_exceptions: Vec<PathExceptionConfig>,
+}
+
+/// Serializable mirror of the proto `PathException`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PathExceptionConfig {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub path: String,
+    /// `prefix` / `exact` / `wildcard`; unknown values degrade to `prefix`.
+    #[serde(default)]
+    pub match_type: String,
+    /// `*` collapses the list; empty means every layer (old-server shape).
+    #[serde(default)]
+    pub skip_layers: Vec<String>,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub log_hits: bool,
+    #[serde(default)]
+    pub note: String,
 }
 
 /// AI crawler control for one site.
@@ -1467,6 +1495,13 @@ impl RuleCache {
                 cache_items: items,
                 cache_evictions: evictions,
                 cache_quota_bytes: quota_mb.saturating_mul(quota::BYTES_PER_MB),
+                // The ACME task locates its site's certificate row through
+                // this id; empty when the site has none configured.
+                certificate_id: site
+                    .ssl_config
+                    .as_ref()
+                    .map(|ssl| ssl.certificate_id.clone())
+                    .unwrap_or_default(),
             });
         }
         out
@@ -2669,6 +2704,32 @@ impl RuleCache {
                 .map(Self::convert_response_replace),
             ai_crawl: bundle.ai_crawl.as_ref().map(Self::convert_ai_crawl),
             oidc: bundle.oidc.as_ref().map(Self::convert_oidc),
+            // Carried as a mirror: the WAF plugin matches against the exact
+            // paths the operator configured, there is no local reshaping.
+            path_exceptions: bundle
+                .path_exceptions
+                .iter()
+                .map(Self::convert_path_exception)
+                .collect(),
+        }
+    }
+
+    fn convert_path_exception(e: &proto::PathException) -> PathExceptionConfig {
+        let match_type = proto::PathMatchType::try_from(e.match_type)
+            .map(|mt| match mt {
+                proto::PathMatchType::PathMatchExact => "exact",
+                proto::PathMatchType::PathMatchWildcard => "wildcard",
+                _ => "prefix",
+            })
+            .unwrap_or("prefix");
+        PathExceptionConfig {
+            id: e.id.clone(),
+            path: e.path.clone(),
+            match_type: match_type.to_string(),
+            skip_layers: e.skip_layers.clone(),
+            enabled: e.enabled,
+            log_hits: e.log_hits,
+            note: e.note.clone(),
         }
     }
 
@@ -3807,6 +3868,7 @@ mod tests {
                     proxy_trust: ProxyTrustConfig::default(),
                     cache_settings: None,
                     ssl_config: None,
+                    path_exceptions: Vec::new(),
                     upstreams: vec![UpstreamConfig {
                         name: "default".to_string(),
                         peers: Vec::new(),
@@ -3981,6 +4043,7 @@ mod tests {
                 rewrite_rules: Vec::new(),
                 error_pages: Vec::new(),
                 ssl_config: None,
+                path_exceptions: Vec::new(),
                 upstreams: Vec::new(),
                 routes: Vec::new(),
                 bot_protection: None,

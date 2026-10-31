@@ -2,11 +2,14 @@ import { apiClient } from './client'
 import type {
   CertificateEvent,
   CertificateEventListQuery,
+
   CertificateListQuery,
   CertificateSummary,
   CertificateWithSite,
+  CreateCertificateLinkRequest,
   CreateSslRequest,
   Page,
+  PaginationQuery,
   SslCertificate,
   SslSettings,
   UpdateSslRequest,
@@ -56,6 +59,26 @@ export const sslApi = {
 
   updateSettings: (siteId: string, data: UpdateSslSettingsRequest) =>
     apiClient.put<SslSettings>(`/sites/${siteId}/ssl-settings`, data),
+
+  /* ── Certificate sharing ─────────────────────────────────────────── */
+
+  /**
+   * Certificates this site may link but does not own yet —
+   * `GET /sites/{id}/certificates/available`, paginated, rows carry
+   * `relation: "available"` and possibly `warnings`.
+   */
+  listAvailable: (siteId: string, query: PaginationQuery = {}) =>
+    apiClient.get<Page<SslCertificate>>(`/sites/${siteId}/certificates/available`, {
+      query: { page_size: 100, ...query },
+    }),
+
+  /** Links an existing certificate to this site; 409 when already owned/linked. */
+  createLink: (siteId: string, data: CreateCertificateLinkRequest) =>
+    apiClient.post<SslCertificate>(`/sites/${siteId}/certificate-links`, data),
+
+  /** Removes a share; 409 when the certificate is the site's currently selected one. */
+  deleteLink: (siteId: string, certId: string) =>
+    apiClient.delete<void>(`/sites/${siteId}/certificate-links/${certId}`),
 
   /* ── Global ──────────────────────────────────────────────────────── */
   listAll: (query: CertificateListQuery = {}) =>
@@ -110,12 +133,15 @@ export function expiryTone(
   return 'success'
 }
 
+export { groupCertsByRelation, type GroupedCertificates } from '@/lib/certRelation'
+
 export const sslKeys = {
   all: ['ssl'] as const,
   site: (siteId: string) => [...sslKeys.all, 'site', siteId] as const,
   list: (siteId: string) => [...sslKeys.site(siteId), 'list'] as const,
   detail: (siteId: string, id: string) => [...sslKeys.site(siteId), 'detail', id] as const,
   settings: (siteId: string) => [...sslKeys.site(siteId), 'settings'] as const,
+  available: (siteId: string) => [...sslKeys.site(siteId), 'available'] as const,
   global: (query?: CertificateListQuery) => [...sslKeys.all, 'global', query ?? {}] as const,
   summary: () => [...sslKeys.all, 'summary'] as const,
   events: (query?: CertificateEventListQuery) =>

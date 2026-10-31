@@ -54,10 +54,11 @@ use pingwaf_agent::cache::{
     AiCrawlConfig as CacheAiCrawlConfig,
     BasicAuthConfig as CacheBasicAuthConfig,
     BotProtectionConfig as CacheBotProtection, GeoConfig as CacheGeoConfig,
-    IpAccessAction as CacheIpAccessAction, RateLimitRule as CacheRateLimitRule,
-    SiteRules as CacheSiteRules, SslConfig as CacheSslConfig,
-    WafAction as CacheWafAction, WafConfig as CacheWafConfig,
-    WafMode as CacheWafMode,
+    IpAccessAction as CacheIpAccessAction,
+    PathExceptionConfig as CachePathException,
+    RateLimitRule as CacheRateLimitRule, SiteRules as CacheSiteRules,
+    SslConfig as CacheSslConfig, WafAction as CacheWafAction,
+    WafConfig as CacheWafConfig, WafMode as CacheWafMode,
 };
 use pingwaf_agent::{AccessLogEntry, PingWafAgent, SecurityEvent};
 use pingwaf_challenge::{
@@ -297,6 +298,157 @@ fn access_rules_require_basic_auth(site_rules: &CacheSiteRules) -> bool {
     ip_rule || geo_rule
 }
 
+/// The protection layers an operator-curated path exception skips. An empty
+/// `skip_layers` list (or one containing `*`) collapses to "every layer".
+#[derive(Debug, Clone, PartialEq)]
+struct BypassLayers {
+    all: bool,
+    named: Vec<String>,
+}
+
+impl BypassLayers {
+    /// Compiles the wire list. Unknown layer names are kept (the control
+    /// plane defines the vocabulary) but can never match a check below.
+    fn build(raw: &[String]) -> Self {
+        // `*` is the explicit "skip every layer" spelling. An empty list is a
+        // malformed rule (the control plane rejects it), and compiling it to
+        // "skip everything" would turn a corrupt row into a total bypass.
+        if raw.iter().any(|layer| layer == "*") {
+            return Self {
+                all: true,
+                named: Vec::new(),
+            };
+        }
+        Self {
+            all: false,
+            named: raw.to_vec(),
+        }
+    }
+
+    /// Whether the named protection layer is skipped for this request.
+    fn skips(&self, layer: &str) -> bool {
+        self.all || self.named.iter().any(|name| name == layer)
+    }
+
+    /// Whether every challenge flavour is skipped, including the standalone
+    /// challenge plugin's gate (which consults the pending-access registry).
+    fn skips_challenge(&self) -> bool {
+        self.skips("challenge")
+    }
+
+    fn describe(&self) -> String {
+        if self.all {
+            "*".to_string()
+        } else {
+            self.named.join(",")
+        }
+    }
+}
+
+/// One compiled path exception: which layers it bypasses and how the hit is
+/// labelled in the event log.
+#[derive(Debug, Clone)]
+struct PathBypass {
+    id: String,
+    /// The operator's note, falling back to the path itself.
+    name: String,
+    layers: BypassLayers,
+    log_hits: bool,
+}
+
+/// The site's enabled path exceptions, precompiled per config fingerprint
+/// into the three match groups. Only honoured while the site observes —
+/// a block-mode site (or one not in observation mode) ignores them
+/// entirely, so an exception can never weaken active enforcement.
+#[derive(Debug, Default)]
+struct PathExceptions {
+    exact: Vec<(String, PathBypass)>,
+    /// `path` itself or anything below it (`/api` matches `/api/x` but
+    /// never `/apix`).
+    prefix: Vec<(String, PathBypass)>,
+    /// Single trailing `*`: a segment prefix of the pattern with the `*`
+    /// removed (`/api/*` matches `/api/x`, not `/api`).
+    wildcard: Vec<(String, PathBypass)>,
+}
+
+impl PathExceptions {
+    /// Compiles the site's exception list; `None` when nothing is enabled.
+    fn build(rules: &[CachePathException]) -> Option<Self> {
+        let mut compiled = Self::default();
+        for rule in rules {
+            if !rule.enabled || rule.path.is_empty() {
+                continue;
+            }
+            let bypass = PathBypass {
+                id: rule.id.clone(),
+                name: if rule.note.is_empty() {
+                    rule.path.clone()
+                } else {
+                    rule.note.clone()
+                },
+                layers: BypassLayers::build(&rule.skip_layers),
+                log_hits: rule.log_hits,
+            };
+            // Query strings are ignored by construction (only `path` is
+            // matched) and no further normalisation is applied.
+            match rule.match_type.as_str() {
+                "exact" => compiled.exact.push((rule.path.clone(), bypass)),
+                "wildcard" => compiled.wildcard.push((
+                    rule.path.trim_end_matches('*').to_string(),
+                    bypass,
+                )),
+                // `prefix` and any unknown match type: the proto default is
+                // PATH_MATCH_PREFIX, so unknown degrades to the same
+                // semantics rather than to something broader.
+                _ => compiled.prefix.push((rule.path.clone(), bypass)),
+            }
+        }
+        if compiled.exact.is_empty()
+            && compiled.prefix.is_empty()
+            && compiled.wildcard.is_empty()
+        {
+            None
+        } else {
+            Some(compiled)
+        }
+    }
+
+    /// First exception matching the request path, exact before prefix
+    /// before wildcard.
+    fn match_path(&self, path: &str) -> Option<&PathBypass> {
+        self.exact
+            .iter()
+            .find(|(pattern, _)| pattern == path)
+            .map(|(_, bypass)| bypass)
+            .or_else(|| {
+                self.prefix
+                    .iter()
+                    .find(|(pattern, _)| {
+                        path == pattern
+                            || path
+                                .strip_prefix(pattern.as_str())
+                                .is_some_and(|rest| rest.starts_with('/'))
+                    })
+                    .map(|(_, bypass)| bypass)
+            })
+            .or_else(|| {
+                self.wildcard
+                    .iter()
+                    .find(|(pattern, _)| path.starts_with(pattern.as_str()))
+                    .map(|(_, bypass)| bypass)
+            })
+    }
+}
+
+/// Resolves the path exception in force for a request, if any. Fail-safe by
+/// construction: a site that is not in observation mode never matches.
+fn resolve_path_bypass(site: &SiteContext, path: &str) -> Option<PathBypass> {
+    if !site.observation_mode {
+        return None;
+    }
+    site.path_exceptions.as_ref()?.match_path(path).cloned()
+}
+
 /// Site data resolved from the agent cache, compiled once per config
 /// fingerprint: the WAF engine, the access restrictions and the custom rule
 /// names used to label security events.
@@ -339,6 +491,9 @@ struct SiteContext {
     /// header instead of the TCP peer; IP rules, rate limits and logs all
     /// key on the resolved address.
     proxy_trust: ProxyTrust,
+    /// Operator-curated path exceptions, compiled; `None` when the site has
+    /// none enabled. Only consulted while `observation_mode` is on.
+    path_exceptions: Option<Arc<PathExceptions>>,
 }
 
 impl SiteContext {
@@ -400,6 +555,8 @@ impl SiteContext {
                 site_rules.proxy_trust.last_hop_only,
                 &site_rules.proxy_trust.trusted_ranges,
             ),
+            path_exceptions: PathExceptions::build(&site_rules.path_exceptions)
+                .map(Arc::new),
         }
     }
 
@@ -1567,6 +1724,8 @@ struct PendingAccess {
     /// body-inspection event, …). Such requests are always access-logged,
     /// even when the static-asset filter would skip the path.
     waf_triggered: bool,
+    /// A path exception skipped the challenge layer for this request.
+    path_bypasses_challenge: bool,
     start: Instant,
 }
 
@@ -1816,6 +1975,17 @@ fn mark_waf_triggered(request_id: &str) {
     if let Some(mut entry) = PENDING_ACCESS.get_mut(request_id) {
         entry.waf_triggered = true;
     }
+}
+
+/// Whether a path exception in force for this request skips the challenge
+/// layer. The challenge plugin consults this instead of re-deriving the
+/// site's exception list: it runs as its own plugin with no site-rule
+/// context, and the WAF has already stamped the request id and resolved the
+/// exception by the time it runs. A no-op when the entry is gone.
+pub fn pending_path_bypasses_challenge(request_id: &str) -> bool {
+    PENDING_ACCESS
+        .get(request_id)
+        .is_some_and(|entry| entry.path_bypasses_challenge)
 }
 
 /// Backfills the request-body facts of a pending access entry once the
@@ -2213,7 +2383,10 @@ fn is_static_path(path: &str, suffixes: &[String]) -> bool {
 /// the request produced no security event. Everything else — the filter off,
 /// an unknown suffix list, a WAF event, or an old control plane that never
 /// sent `log_settings` — logs as before (fail-open).
-fn should_skip_access_log(agent: &PingWafAgent, pending: &PendingAccess) -> bool {
+fn should_skip_access_log(
+    agent: &PingWafAgent,
+    pending: &PendingAccess,
+) -> bool {
     let Some(settings) = agent.log_settings() else {
         return false;
     };
@@ -2343,6 +2516,9 @@ pub(crate) fn emit_challenge_access(
         body_limit: log_body_limit(),
         response: None,
         waf_triggered: false,
+        // This entry is built for a response the plugin generated itself —
+        // the request-phase exception evaluation never ran for it.
+        path_bypasses_challenge: false,
         start: Instant::now(),
     };
     PENDING_ACCESS.insert(request_id.clone(), pending);
@@ -2955,6 +3131,54 @@ impl WafPlugin {
             // named the caller yet: an event raised here is anonymous by
             // construction. The access log, written on the response, is
             // where the identity appears.
+            user_identity: String::new(),
+        });
+    }
+
+    /// Records a hit of a path exception that skipped protection layers.
+    /// Written directly rather than through the verdict pipeline: nothing
+    /// was detected or enforced — an operator-configured bypass is being
+    /// applied. `action = "log"` keeps the event out of the block/challenge
+    /// accounting on the server (`waf_action = log`, score NULL) while
+    /// still landing in `security_events`.
+    fn log_path_bypass(
+        agent: &PingWafAgent,
+        site_id: &str,
+        request_id: &str,
+        host: &str,
+        request_data: &RequestData,
+        bypass: &PathBypass,
+    ) {
+        // The request produced a security event: its access entry must
+        // survive the static-asset filter even if the path looks static.
+        mark_waf_triggered(request_id);
+        agent.record_request(false);
+        agent.log_security_event(SecurityEvent {
+            site_id: site_id.to_string(),
+            request_id: request_id.to_string(),
+            client_ip: request_data.client_ip.clone(),
+            method: request_data.method.clone(),
+            scheme: request_data.scheme.clone(),
+            protocol: request_data.protocol.clone(),
+            host: host.to_string(),
+            path: request_data.path.clone(),
+            query_string: request_data.query.clone(),
+            rule_id: bypass.id.clone(),
+            enforced_rule_id: String::new(),
+            rule_name: bypass.name.clone(),
+            event_type: "path_bypass".to_string(),
+            action: "log".to_string(),
+            score: 0,
+            details: format!("bypassed: {}", bypass.layers.describe()),
+            response_status: 0,
+            user_agent: request_data
+                .headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("user-agent"))
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default(),
+            country_code: request_data.country_code.clone().unwrap_or_default(),
+            matched_tags: Vec::new(),
             user_identity: String::new(),
         });
     }
@@ -3684,6 +3908,16 @@ impl Plugin for WafPlugin {
 
         // Track the request for access logging until the response phase —
         // including WAF-disabled sites, so traffic data stays complete.
+        // The path exception is resolved here so the challenge plugin can
+        // consult the flag through the pending-access registry: it runs in
+        // its own plugin, after the WAF has stamped the request id, and has
+        // no site-rule context of its own.
+        let path_bypass = context
+            .as_ref()
+            .and_then(|site| resolve_path_bypass(site, &path));
+        let path_bypasses_challenge = path_bypass
+            .as_ref()
+            .is_some_and(|bypass| bypass.layers.skips_challenge());
         if agent.is_some() {
             // Only the access log needs this capped copy. Building it before
             // the `agent.is_some()` gate made a standalone deployment clone
@@ -3728,6 +3962,10 @@ impl Plugin for WafPlugin {
                     body_limit,
                     response: None,
                     waf_triggered: false,
+                    // Set when a path exception skips the challenge layer
+                    // for this request; the challenge plugin reads it back
+                    // through `pending_path_bypasses_challenge`.
+                    path_bypasses_challenge,
                     start: Instant::now(),
                 },
             );
@@ -3819,12 +4057,47 @@ impl Plugin for WafPlugin {
             }
         }
 
+        // ── Path exceptions: an operator-curated path skips the protection
+        // layers it names. Evaluated only after the three branches above —
+        // a paused site, a fail-closed agent and an active IP ban are
+        // enforced decisions no exception may bypass. The exception itself
+        // is honoured only while the site observes (`resolve_path_bypass`
+        // already gates on observation mode), so it can never weaken a
+        // block-mode site. The access-log entry has been registered above,
+        // so bypassed requests remain visible. ──
+        if let Some(bypass) = &path_bypass {
+            if bypass.log_hits
+                && let Some(agent) = &agent
+            {
+                Self::log_path_bypass(
+                    agent,
+                    &site_id,
+                    &request_id,
+                    &host,
+                    &request_data,
+                    bypass,
+                );
+            }
+            tracing::info!(
+                site_id = %site_id,
+                request_id = %request_id,
+                exception = %bypass.id,
+                layers = %bypass.layers.describe(),
+                "path exception active"
+            );
+        }
+        let bypasses = |layer: &str| {
+            path_bypass.as_ref().is_some_and(|b| b.layers.skips(layer))
+        };
+
         // ── mTLS: a site that requires a client certificate refuses the
         // request before any other rule runs. Revoked certificates and
         // organization mismatches are refused here too, since the TLS layer
         // only proves the chain is trusted, not which site it was issued for.
         // The denial is logged as access only - it is not a WAF verdict. ──
-        if let Some(mtls) = context.as_ref().and_then(|site| site.mtls.as_ref())
+        if !bypasses("mtls")
+            && let Some(mtls) =
+                context.as_ref().and_then(|site| site.mtls.as_ref())
             && let Some(reason) = mtls.denial(ctx)
         {
             let response = block_page(&request_id, reason);
@@ -3837,7 +4110,9 @@ impl Plugin for WafPlugin {
         // whose action is `basic_auth` is not an outright denial: it feeds
         // the gate below so the request continues once authenticated ──
         let mut access = PolicyOutcome::NoMatch;
-        if let Some(site) = &context {
+        if let Some(site) = &context
+            && !bypasses("access")
+        {
             access = site.policy.evaluate(
                 &request_data.client_ip,
                 client_addr,
@@ -3895,6 +4170,7 @@ impl Plugin for WafPlugin {
             PolicyOutcome::Denied(denial) => denial.basic_auth,
             PolicyOutcome::NoMatch => gate.is_some_and(|gate| gate.site_wide),
         };
+        let gate_required = gate_required && !bypasses("basic_auth");
         if gate_required {
             let authenticated =
                 gate.is_some_and(|gate| gate.verify(&request_data.headers));
@@ -3932,6 +4208,7 @@ impl Plugin for WafPlugin {
         // traditional bot whitelist ──
         if let Some(rules) =
             context.as_ref().map(|site| site.ai_bots.as_slice())
+            && !bypasses("ai_bot")
             && let Some(rule) =
                 rules.iter().find(|rule| rule.matches(&user_agent))
         {
@@ -3988,7 +4265,9 @@ impl Plugin for WafPlugin {
             }
         }
 
-        if let Some(bot) = context.as_ref().and_then(|ctx| ctx.bot.as_ref()) {
+        if !bypasses("bot")
+            && let Some(bot) = context.as_ref().and_then(|ctx| ctx.bot.as_ref())
+        {
             match bot.evaluate(client_addr, &user_agent).await {
                 BotDecision::Pass => {},
                 BotDecision::Deny(denial) => {
@@ -4052,8 +4331,9 @@ impl Plugin for WafPlugin {
         // ── Rate limiting: fixed-window counters run after IP/geo/bot and
         // before the engine, applying whether or not the WAF engine is
         // enabled ──
-        if let Some(rate) =
-            context.as_ref().and_then(|c| c.rate_limits.as_ref())
+        if !bypasses("rate_limit")
+            && let Some(rate) =
+                context.as_ref().and_then(|c| c.rate_limits.as_ref())
         {
             let cleared =
                 rate.rules.iter().any(|r| r.action == RateAction::Challenge)
@@ -4184,19 +4464,30 @@ impl Plugin for WafPlugin {
         // The request phase sees headers only: the body has not arrived
         // yet — it streams through `handle_request_body`, which re-runs
         // this verdict with the full body once the client is done.
-        let outcome = self.enforce_verdict(
-            agent.as_ref(),
-            &site_id,
-            &request_id,
-            &host,
-            &request_data,
-            &choice,
-            context.as_ref(),
-            observe,
-        );
-        if let VerdictOutcome::Respond(response) = outcome {
-            return Ok(RequestPluginResult::Respond(response));
-        }
+        // A `waf` bypass keeps the request-phase accounting (every other
+        // path through here records via the verdict pipeline) but skips the
+        // engine verdict entirely.
+        let outcome = if bypasses("waf") {
+            if let Some(agent) = &agent {
+                agent.record_request(false);
+            }
+            VerdictOutcome::Continue
+        } else {
+            let outcome = self.enforce_verdict(
+                agent.as_ref(),
+                &site_id,
+                &request_id,
+                &host,
+                &request_data,
+                &choice,
+                context.as_ref(),
+                observe,
+            );
+            if let VerdictOutcome::Respond(response) = outcome {
+                return Ok(RequestPluginResult::Respond(response));
+            }
+            outcome
+        };
 
         // The request is on its way to the upstream: register the body
         // stage so the request-body filter can withhold and inspect the
@@ -4991,6 +5282,7 @@ ml_threshold = 0.75
             response_replace: None,
             ai_crawl: None,
             oidc: None,
+            path_exceptions: Vec::new(),
         }
     }
 
@@ -8638,10 +8930,7 @@ inspect_body = true"###,
     }
 
     fn static_suffixes() -> Vec<String> {
-        ["css", "js", "png"]
-            .into_iter()
-            .map(String::from)
-            .collect()
+        ["css", "js", "png"].into_iter().map(String::from).collect()
     }
 
     #[test]
@@ -8690,6 +8979,7 @@ inspect_body = true"###,
             body_limit: 0,
             response: None,
             waf_triggered,
+            path_bypasses_challenge: false,
             start: Instant::now(),
         }
     }
@@ -8702,8 +8992,7 @@ inspect_body = true"###,
             fail_open: true,
             ..Default::default()
         };
-        let (_guard, _agent, _dir) =
-            install_test_agent_with(config, dir).await;
+        let (_guard, _agent, _dir) = install_test_agent_with(config, dir).await;
         let agent = PingWafAgent::instance().unwrap();
 
         // No log_settings at all: nothing is skipped (old control plane).
@@ -8774,5 +9063,175 @@ inspect_body = true"###,
             &agent,
             &skip_pending("/assets/logo.png", false)
         ));
+    }
+
+    fn path_exception(
+        id: &str,
+        path: &str,
+        match_type: &str,
+        skip_layers: &[&str],
+    ) -> CachePathException {
+        CachePathException {
+            id: id.to_string(),
+            path: path.to_string(),
+            match_type: match_type.to_string(),
+            skip_layers: skip_layers.iter().map(|l| l.to_string()).collect(),
+            enabled: true,
+            log_hits: false,
+            note: String::new(),
+        }
+    }
+
+    #[test]
+    fn path_exception_match_semantics() {
+        let compiled = PathExceptions::build(&[
+            path_exception("e1", "/health", "exact", &["waf"]),
+            path_exception("e2", "/api", "prefix", &["waf"]),
+            path_exception("e3", "/static/*", "wildcard", &["waf"]),
+        ])
+        .unwrap();
+
+        // Exact: strict equality, no prefix spillover.
+        assert_eq!(
+            compiled.match_path("/health").unwrap().id,
+            "e1",
+            "exact matches the path itself"
+        );
+        assert!(
+            compiled.match_path("/health/x").is_none(),
+            "exact must not match a subpath"
+        );
+        assert!(
+            compiled.match_path("/healthy").is_none(),
+            "exact must not match a shared prefix"
+        );
+
+        // Prefix: the path itself or anything below it — never a sibling
+        // that merely shares characters.
+        assert_eq!(compiled.match_path("/api").unwrap().id, "e2");
+        assert_eq!(compiled.match_path("/api/x").unwrap().id, "e2");
+        assert!(
+            compiled.match_path("/apix").is_none(),
+            "/api must not match /apix"
+        );
+        assert!(compiled.match_path("/api/x/y").is_some());
+
+        // Wildcard: a single trailing `*`, segment prefix of the stripped
+        // pattern.
+        assert_eq!(compiled.match_path("/static/x").unwrap().id, "e3");
+        assert_eq!(compiled.match_path("/static/x/y").unwrap().id, "e3");
+        assert!(
+            compiled.match_path("/static").is_none(),
+            "/static/* must not match the bare segment"
+        );
+
+        // Query strings are ignored by construction; unknown match types
+        // degrade to prefix, disabled entries are dropped.
+        let degraded = PathExceptions::build(&[
+            path_exception("d1", "/legacy", "fuzzy", &["waf"]),
+            path_exception("d2", "/off", "prefix", &["waf"]),
+        ])
+        .unwrap();
+        let mut off = path_exception("d2", "/off", "prefix", &["waf"]);
+        off.enabled = false;
+        let with_disabled = PathExceptions::build(&[
+            off,
+            path_exception("d1", "/legacy", "fuzzy", &["waf"]),
+        ])
+        .unwrap();
+        assert_eq!(degraded.match_path("/legacy").unwrap().id, "d1");
+        assert!(with_disabled.match_path("/off").is_none());
+        assert_eq!(with_disabled.match_path("/legacy").unwrap().id, "d1");
+    }
+
+    #[test]
+    fn path_exception_only_applies_in_observation_mode() {
+        let mut rules = site_rules(None);
+        rules.observation_mode = false;
+        rules.path_exceptions =
+            vec![path_exception("e1", "/api", "prefix", &["waf"])];
+        let block_site = SiteContext::build(&rules);
+        assert!(
+            resolve_path_bypass(&block_site, "/api/x").is_none(),
+            "a site outside observation mode must ignore exceptions (fail-safe)"
+        );
+
+        rules.observation_mode = true;
+        let monitor_site = SiteContext::build(&rules);
+        let bypass = resolve_path_bypass(&monitor_site, "/api/x")
+            .expect("observation mode honours the exception");
+        assert_eq!(bypass.id, "e1");
+    }
+
+    #[test]
+    fn path_exception_skip_layers_are_selective() {
+        // A subset skips only the named layers.
+        let compiled = PathExceptions::build(&[path_exception(
+            "e1",
+            "/api",
+            "prefix",
+            &["bot", "rate_limit"],
+        )])
+        .unwrap();
+        let bypass = compiled.match_path("/api/x").unwrap();
+        assert!(bypass.layers.skips("bot"));
+        assert!(bypass.layers.skips("rate_limit"));
+        assert!(!bypass.layers.skips("waf"));
+        assert!(!bypass.layers.skips("mtls"));
+        assert!(!bypass.layers.skips("basic_auth"));
+        assert!(
+            !bypass.layers.skips_challenge(),
+            "challenge is a distinct layer, not implied by bot"
+        );
+
+        // `*` collapses to every layer.
+        let compiled =
+            PathExceptions::build(&[path_exception("e2", "/api", "prefix", &["*"])])
+                .unwrap();
+        let bypass = compiled.match_path("/api").unwrap();
+        for layer in ["mtls", "access", "basic_auth", "bot", "waf"] {
+            assert!(bypass.layers.skips(layer));
+        }
+        assert!(bypass.layers.skips_challenge());
+
+        // An empty list is malformed (the API rejects it). Compiling it must
+        // not turn a corrupt row into a total bypass.
+        let empty =
+            PathExceptions::build(&[path_exception("e4", "/api", "prefix", &[])])
+                .unwrap();
+        let inert = empty.match_path("/api").unwrap();
+        for layer in ["mtls", "access", "basic_auth", "bot", "waf"] {
+            assert!(!inert.layers.skips(layer));
+        }
+        assert!(!inert.layers.skips_challenge());
+
+        // A site with no enabled exceptions compiles to None.
+        assert!(PathExceptions::build(&[]).is_none());
+        let mut disabled = path_exception("e3", "/api", "prefix", &["waf"]);
+        disabled.enabled = false;
+        assert!(PathExceptions::build(&[disabled]).is_none());
+    }
+
+    #[test]
+    fn path_exception_carries_the_log_label() {
+        let mut rule = path_exception("e1", "/internal", "exact", &["waf"]);
+        rule.log_hits = true;
+        rule.note = "internal probe path".to_string();
+        let compiled = PathExceptions::build(&[rule]).unwrap();
+        let bypass = compiled.match_path("/internal").unwrap();
+        assert!(bypass.log_hits);
+        // The event label prefers the operator's note, falling back to the
+        // path — this is what lands in `rule_name` of the `path_bypass`
+        // security event.
+        assert_eq!(bypass.name, "internal probe path");
+
+        let compiled = PathExceptions::build(&[path_exception(
+            "e2",
+            "/anon",
+            "exact",
+            &["waf"],
+        )])
+        .unwrap();
+        assert_eq!(compiled.match_path("/anon").unwrap().name, "/anon");
     }
 }

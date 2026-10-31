@@ -182,8 +182,8 @@ export function DashboardPage() {
   })
 
   const topIps = useQuery({
-    queryKey: analyticsKeys.topIps(range),
-    queryFn: () => analyticsApi.topIps({ ...range, limit: 8 }),
+    queryKey: analyticsKeys.topIps({ ...range, blocked_only: true }),
+    queryFn: () => analyticsApi.topIps({ ...range, limit: 8, blocked_only: true }),
     refetchInterval: REFRESH_MS,
     staleTime: REFRESH_STALE_MS,
   })

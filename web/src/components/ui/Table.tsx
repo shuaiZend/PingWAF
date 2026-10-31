@@ -2,6 +2,7 @@ import { useMemo, useState, type ReactNode } from 'react'
 import { CaretUp, CaretDown, CaretLeft, CaretRight } from '@phosphor-icons/react'
 import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
+import { shouldIgnoreRowClick } from '@/lib/rowClick'
 import { Button } from './Button'
 
 export interface Column<T> {
@@ -165,7 +166,17 @@ export function Table<T>({
               pageData.map((row, i) => (
                 <tr
                   key={rowKey(row, i)}
-                  onClick={onRowClick ? () => onRowClick(row) : undefined}
+                  onClick={
+                    onRowClick
+                      ? (event) => {
+                          // A delete/edit/switch button inside the row owns its
+                          // own click: bubbling into the row used to navigate
+                          // away and unmount the confirmation dialog.
+                          if (shouldIgnoreRowClick(event.target)) return
+                          onRowClick(row)
+                        }
+                      : undefined
+                  }
                   className={cn(
                     'border-b border-line last:border-0 transition-colors',
                     onRowClick && 'cursor-pointer hover:bg-recessed',

@@ -2,6 +2,7 @@ import { DEFAULT_LOCALE, isLocale, LOCALES, type Locale } from "../i18n/config";
 import type {
   DocsContent,
   FeaturesContent,
+  InstallContent,
   IntroContent,
   LocaleBundle,
   QuickStartContent,
@@ -25,6 +26,10 @@ const quickstartModules = import.meta.glob<{ default: QuickStartContent }>(
 const docsModules = import.meta.glob<{ default: DocsContent }>("./*/docs.ts", {
   eager: true,
 });
+const installModules = import.meta.glob<{ default: InstallContent }>(
+  "./*/install.ts",
+  { eager: true },
+);
 
 function indexByLocale<T>(modules: Record<string, { default: T }>): Map<Locale, T> {
   const map = new Map<Locale, T>();
@@ -39,6 +44,7 @@ const intros = indexByLocale(introModules);
 const features = indexByLocale(featureModules);
 const quickstarts = indexByLocale(quickstartModules);
 const docs = indexByLocale(docsModules);
+const installs = indexByLocale(installModules);
 
 function requireModule<T>(map: Map<Locale, T>, name: string): T {
   const value = map.get(DEFAULT_LOCALE);
@@ -54,6 +60,7 @@ const enIntro = requireModule(intros, "intro");
 const enFeatures = requireModule(features, "features");
 const enQuickstart = requireModule(quickstarts, "quickstart");
 const enDocs = requireModule(docs, "docs");
+const enInstall = requireModule(installs, "install");
 
 const bundles = new Map<Locale, LocaleBundle>(
   LOCALES.map((locale) => [
@@ -62,6 +69,7 @@ const bundles = new Map<Locale, LocaleBundle>(
       intro: intros.get(locale) ?? enIntro,
       features: features.get(locale) ?? enFeatures,
       quickstart: quickstarts.get(locale) ?? enQuickstart,
+      install: installs.get(locale) ?? enInstall,
       docs: docs.get(locale) ?? enDocs,
     },
   ]),
@@ -76,6 +84,10 @@ export function getContent(locale: Locale): LocaleBundle {
 export function translatedLocales(): Locale[] {
   return LOCALES.filter(
     (locale) =>
-      intros.has(locale) && features.has(locale) && quickstarts.has(locale) && docs.has(locale),
+      intros.has(locale) &&
+      features.has(locale) &&
+      quickstarts.has(locale) &&
+      installs.has(locale) &&
+      docs.has(locale),
   );
 }

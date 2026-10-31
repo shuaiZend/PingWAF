@@ -11,6 +11,11 @@ import { Textarea } from '@/components/ui/Textarea'
 import { TagInput } from '@/components/ui/MultiSelect'
 import { useToast } from '@/components/ui/Toast'
 import { cn } from '@/lib/utils'
+import {
+  ALLOW_FALLBACK_MODE,
+  isAllowBlockConflict,
+  isModeAllowedForAction,
+} from '@/lib/ruleActionMode'
 import { rulesApi, ruleKeys } from '@/api/rules'
 import { siteKeys } from '@/api/sites'
 import {
@@ -115,6 +120,8 @@ export function RuleDialog({
   const [combinator, setCombinator] = useState<ExpressionCombinator>('and')
   const [raw, setRaw] = useState('')
   const [error, setError] = useState<string | null>(null)
+  /** Why the mode dropdown auto-changed (allow + block fallback). */
+  const [modeHint, setModeHint] = useState<string | null>(null)
 
   // Re-seed the form every time the dialog opens so stale state never leaks
   // between "create", "edit rule A" and "edit rule B". This runs during render
@@ -128,6 +135,7 @@ export function RuleDialog({
     setLastSeedKey(seedKey)
     if (open) {
       setError(null)
+      setModeHint(null)
       if (rule) {
         setForm(formFromRule(rule))
         const parsed = parseExpression(rule.expression)
@@ -200,6 +208,12 @@ export function RuleDialog({
     }
     if (editor === 'builder' && conditions.length === 0) {
       setError(t('pages.waf.expressionRequired'))
+      return
+    }
+    // Mirror the server-side rejection before the request goes out, so legacy
+    // allow+block rules cannot be saved without first fixing the mode.
+    if (isAllowBlockConflict(form.action, form.mode)) {
+      setError(t('pages.waf.allowBlockConflict'))
       return
     }
     save.mutate({
@@ -422,13 +436,35 @@ export function RuleDialog({
             label={t('pages.waf.action')}
             value={form.action}
             options={RULE_ACTIONS.map((a) => ({ value: a, label: t(`actions.${a}`, a) }))}
-            onChange={(e) => setForm((f) => ({ ...f, action: e.target.value }))}
+            onChange={(e) => {
+              const action = e.target.value
+              setForm((f) => {
+                // allow cannot run in block mode — fall back to monitor and
+                // explain why, mirroring the server-side 400.
+                const mode =
+                  isAllowBlockConflict(action, f.mode) ? ALLOW_FALLBACK_MODE : f.mode
+                return { ...f, action, mode }
+              })
+              setModeHint(
+                isAllowBlockConflict(action, form.mode)
+                  ? t('pages.waf.allowBlockFallback')
+                  : null,
+              )
+            }}
           />
           <Select
             label={t('pages.waf.mode')}
             value={form.mode}
-            hint={t('pages.waf.ruleModeHint')}
-            options={RULE_MODES.map((m) => ({ value: m, label: t(`pages.waf.mode_${m}`) }))}
+            hint={
+              form.action === 'allow'
+                ? t('pages.waf.allowModeHint')
+                : t('pages.waf.ruleModeHint')
+            }
+            options={RULE_MODES.map((m) => ({
+              value: m,
+              label: t(`pages.waf.mode_${m}`),
+              disabled: !isModeAllowedForAction(form.action, m),
+            }))}
             onChange={(e) => setForm((f) => ({ ...f, mode: e.target.value }))}
           />
           <Input
@@ -486,6 +522,12 @@ export function RuleDialog({
           label={t('common.enabled')}
           description={t('pages.waf.enabledHint')}
         />
+
+        {modeHint && (
+          <p className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-[13px] text-fg-warning">
+            {modeHint}
+          </p>
+        )}
 
         {error && (
           <p role="alert" className="rounded-md border border-danger/40 bg-danger/8 px-3 py-2 text-[13px] text-fg-danger">

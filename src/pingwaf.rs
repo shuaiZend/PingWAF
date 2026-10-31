@@ -2234,6 +2234,7 @@ mod tests {
             response_replace: None,
             ai_crawl: None,
             oidc: None,
+            path_exceptions: Vec::new(),
         }
     }
 

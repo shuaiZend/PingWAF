@@ -619,7 +619,13 @@
       "restoreNothing": "組み込みルールは揃っています",
       "restoreNothingHint": "このサイトにはすべての組み込みルールが存在します。",
       "restoreDone": "組み込みルールを {{count}} 件復元しました",
-      "restoreDoneHint": "組み込みルールは監視モードで動作するため、まず検出内容を確認できます。"
+      "restoreDoneHint": "組み込みルールは監視モードで動作するため、まず検出内容を確認できます。",
+      "allowBlockConflict": "アクション「許可」はモード「ブロック」を使用できません。保存前にモードを監視またはオフにしてください。",
+      "allowBlockFallback": "許可ルールはブロック モードで動作できません — モードを監視に切り替えました。",
+      "allowModeHint": "許可ルールはブロックしません。監視またはオフのみ選択できます。",
+      "allowBlockConflictBadge": "無効な組み合わせ",
+      "blockWithAllowTitle": "許可ルールが {count} 件ありますが、ブロック モードに切り替えますか？",
+      "blockWithAllowDescription": "許可ルールはブロックしません。「許可＋ブロック モード」の既存ルールはブロックしなくなります。続行しますか？"
     },
     "rateLimiting": {
       "title": "レート制限",
@@ -665,7 +671,10 @@
       "threshold": "しきい値",
       "thresholdHint": "期間内に許可される最大リクエスト数",
       "thresholdInvalid": "しきい値は 1～10,000,000 の間である必要があります",
-      "untilReset": "ウィンドウリセットまで"
+      "untilReset": "ウィンドウリセットまで",
+      "unitSecond": "秒",
+      "unitMinute": "分",
+      "unitHour": "時間"
     },
     "bot": {
       "title": "Bot 防御",
@@ -849,7 +858,8 @@
         "ruleCount": "{{total}} 件中 {{enabled}} 件が有効"
       },
       "paranoiaTitle": "検知感度",
-      "paranoiaCardHint": "1（緩い）から4（厳格）。高いレベルほど敏感な内蔵検知が有効になります。"
+      "paranoiaCardHint": "1（緩い）から4（厳格）。高いレベルほど敏感な内蔵検知が有効になります。",
+      "tabPaths": "パス例外"
     },
     "ipRules": {
       "title": "IP アクセスルール",
@@ -1219,7 +1229,32 @@
       "openGlobalSsl": "SSL/TLS を開く",
       "protocols": {
         "atLeastOne": "少なくとも1つのプロトコルを有効のままにしてください。"
-      }
+      },
+      "groupOwner": "このサイトの証明書",
+      "groupLinked": "他サイトから共有",
+      "sharedCertificates": "共有証明書",
+      "sharedCertificatesHint": "他サイトが所有し、このサイトがリンクして使用できる証明書。",
+      "sharedBadge": "共有",
+      "sharedEmpty": "リンク可能な証明書はありません",
+      "sharedEmptyHint": "現在他のサイトから利用可能な証明書はありません。",
+      "alreadyLinked": "リンク済み",
+      "link": "リンク",
+      "linkCreated": "証明書をリンクしました",
+      "linkFailed": "証明書のリンクに失敗しました",
+      "removeShare": "共有を解除",
+      "removeShareTitle": "共有証明書を削除",
+      "removeShareDescription": "この証明書は他サイトから共有されたものです。削除するとこのサイトは使用できなくなります。",
+      "linkRemoved": "共有を解除しました",
+      "unlinkFailed": "共有の解除に失敗しました",
+      "unbind": "解除",
+      "unbindTitle": "現在の証明書を解除",
+      "unbindDescription": "このサイトは選択中の証明書の使用をやめます（HTTPS 設定に従いフォールバック）。証明書自体は削除されません。",
+      "certificateCleared": "証明書を解除しました",
+      "clearFailed": "証明書の解除に失敗しました",
+      "relation": "関係",
+      "shareOut": "他サイトへ共有",
+      "shareOutTitle": "他サイトへ共有",
+      "shareOutHint": "証明書のドメインを提供できるサイトであればリンクできます。対象サイトの SSL ページを開き、「共有証明書」からこの証明書をリンクしてください。共有は対象サイトごとに許可します。"
     },
     "traffic": {
       "aiBots": {
@@ -1469,7 +1504,12 @@
         "choose": "グループを選択…",
         "confirm": "追加",
         "empty": "IP グループがありません。先に「IP グループ」ページで作成してください。"
-      }
+      },
+      "flush": "今すぐ同期",
+      "flushHint": "すべてのエージェントにバッファ内のログの即時送信を依頼します。同期されるのはエージェントのバッファに入っているログのみです。チャンネル満杯で破棄されたログは復元できません。",
+      "flushDone": "{delivered} エージェントに通知、{offline} はオフライン",
+      "flushDoneHint": "バッファ内のログを送信しています。",
+      "flushFailed": "エージェントへの通知に失敗しました"
     },
     "agents": {
       "title": "エージェント",
@@ -1557,7 +1597,10 @@
         "tx": "送信"
       },
       "allSitesHint": "単一サイトにバインドされておらず、オーナーの全サイトに自動同期します",
-      "hostMemory": "ホストメモリ容量"
+      "hostMemory": "ホストメモリ容量",
+      "command_flush_logs": "ログをフラッシュ",
+      "flushResult": "通知 {delivered}、オフライン {offline}",
+      "flushFailed": "ログのフラッシュに失敗しました"
     },
     "notifications": {
       "title": "通知",
@@ -2256,7 +2299,8 @@
       "eventDetails": "詳細",
       "dnsConfigLabel": "DNS プロバイダー認証情報",
       "dnsConfigHint": "プロバイダー API に渡すキーと値のペア（例: token、access_key_id、access_key_secret）。`endpoint` を指定すると API ホストを上書きします。",
-      "dnsConfigRegionRequired": "Huawei Cloud は `region`（例: cn-north-4）が必要です。dns.<region>.myhuaweicloud.com エンドポイントを生成します。"
+      "dnsConfigRegionRequired": "Huawei Cloud は `region`（例: cn-north-4）が必要です。dns.<region>.myhuaweicloud.com エンドポイントを生成します。",
+      "multiSiteNote": "証明書は作成時に 1 つのサイトに紐付ける必要があります（サーバー仕様）。他のサイトは各 SSL ページの「共有証明書」からこの証明書を再利用でき、いつでも解除できます。"
     },
     "blockedIps": {
       "title": "IP ブラックリスト",
@@ -2806,6 +2850,56 @@
       "title": "ページが見つかりません",
       "description": "お探しのページは存在しないか、移動されました。",
       "backToDashboard": "ダッシュボードへ戻る"
+    },
+    "pathExceptions": {
+      "title": "パス例外",
+      "description": "選択した保護レイヤーをバイパスするリクエスト パス。",
+      "add": "例外を追加",
+      "edit": "例外を編集",
+      "dialogDescription": "一致したリクエストは選択したレイヤーをスキップします。",
+      "path": "パス",
+      "pathHint": "「/」で始まる必要があります。",
+      "matchType": "一致方式",
+      "match_prefix": "前方一致",
+      "match_exact": "完全一致",
+      "match_wildcard": "ワイルドカード",
+      "wildcardHint": "ワイルドカード パスは「*」で終わる必要があります。",
+      "skipLayers": "バイパス レイヤー",
+      "bypassLayers": "バイパスするレイヤー",
+      "bypassAllNote": "「すべて」が選択されています — これらのパスはすべての保護レイヤーをバイパスします。",
+      "advancedLayers": "高度なレイヤー",
+      "advancedLayersHint": "あまり使わないバイパス対象レイヤー。",
+      "layerAll": "すべて",
+      "layerAllHint": "すべての保護レイヤーをバイパス",
+      "layer_waf": "WAF",
+      "layer_bot": "Bot 対策",
+      "layer_access": "アクセス制限",
+      "layer_basic_auth": "Basic Auth",
+      "layer_mtls": "mTLS",
+      "layer_ai_bot": "AI クローラー",
+      "layer_rate_limit": "レート制限",
+      "layer_challenge": "チャレンジ",
+      "layerHint_waf": "これらのパスは WAF 検査をスキップします。",
+      "layerHint_bot": "これらのパスは Bot 検出をスキップします。",
+      "layerHint_access": "これらのパスは IP/地理アクセス ルールをスキップします。",
+      "logHits": "ログに記録",
+      "logHitsHint": "この例外が一致したときにログを記録します。",
+      "note": "メモ",
+      "notePlaceholder": "この例外が必要な理由",
+      "empty": "パス例外はありません",
+      "emptyDescription": "すべてのリクエストが検査されます。本当に必要なパスにのみ追加してください。",
+      "observationGate": "パス例外を変更できるのは、サイトの WAF モードが監視（モニター）のときだけです。",
+      "switchToMonitor": "監視モードへ切り替え",
+      "monitorApplied": "WAF モードを監視に切り替えました",
+      "created": "例外を作成しました",
+      "updated": "例外を更新しました",
+      "deleted": "例外を削除しました",
+      "deleteFailed": "例外の削除に失敗しました",
+      "deleteTitle": "パス例外を削除",
+      "deleteDescription": "このパスのリクエストは再び検査されます。",
+      "errorPathRequired": "パスは必須です。",
+      "errorPathRooted": "パスは「/」で始まる必要があります。",
+      "errorPathWildcardSuffix": "ワイルドカード パスは「*」で終わる必要があります。"
     }
   },
   "challengeLevels": {
