@@ -95,7 +95,9 @@
   },
   "sidebar": {
     "collapse": "Collapse",
-    "expand": "Expand"
+    "expand": "Expand",
+    "website": "Website",
+    "github": "GitHub"
   },
   "palette": {
     "sites": "Sites",

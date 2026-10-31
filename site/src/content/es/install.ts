@@ -4,12 +4,12 @@ const install = {
   meta: {
     title: "Instalación y despliegue — PingWAF",
     description:
-      "Instala PingWAF en cualquier servidor Linux con un solo comando: elige el modo all-in-one, server o agent, pasa flags o responde al instalador interactivo y obtén un servicio systemd endurecido.",
+      "Un comando instala PingWAF con Docker Compose: plano de control, agente integrado y PostgreSQL, con datos y certificados en volúmenes.",
   },
   hero: {
     eyebrow: "Instalación",
     title: "De cero a un nodo en marcha con un solo comando",
-    lead: "El instalador oficial detecta tu plataforma, descarga el binario correspondiente, escribe /etc/pingwaf/pingwaf.toml y registra una unidad systemd endurecida. Compón el comando aquí abajo o deja que el instalador interactivo te guíe.",
+    lead: "Docker Compose es la vía recomendada: un comando inicia el plano de control, el agente integrado y PostgreSQL. La instalación por script sigue disponible para hosts con systemd.",
     badges: [
       { icon: "terminal", label: "Ejecución", value: "Un comando" },
       { icon: "box", label: "Modos", value: "all-in-one · server · agent" },
@@ -23,13 +23,13 @@ const install = {
       { id: "troubleshooting", label: "Solución de problemas" },
     ],
     oneLiner:
-      "curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh | bash",
+      "curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/deploy/compose/install.sh | bash",
   },
   builder: {
     id: "builder",
     eyebrow: "Generador de comandos",
     title: "Compón tu comando de instalación",
-    lead: "Elige Docker Compose — la vía recomendada — o el script de instalación de una línea. Los campos vienen precargados con los valores documentados por defecto, así que solo editas lo que quieras cambiar; todo se genera localmente y no se envía a ningún otro sitio.",
+    lead: "Docker Compose está preseleccionado: un comando, base de datos incluida. Los campos ya traen los valores por defecto; cambia solo lo necesario. El script sigue en la segunda pestaña.",
     modes: [
       {
         id: "all-in-one",
@@ -127,21 +127,27 @@ const install = {
     compose: {
       tabLabel: "Docker Compose",
       recommendedBadge: "Recomendado",
+      installerUrl: "https://raw.githubusercontent.com/shuaiZend/PingWAF/main/deploy/compose/install.sh",
+      oneLiner: "curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/deploy/compose/install.sh | bash",
+      oneLinerTitle: "Instalación en una línea",
+      oneLinerNote: "Ejecútalo en un directorio vacío: el instalador descarga docker-compose.yml, escribe un .env privado, descarga la imagen e inicia el stack. Un .env existente nunca se sobrescribe: vuelve a ejecutar el mismo comando para actualizar.",
+      customizeTitle: "¿Necesitas personalizar? Genera un comando con opciones",
+      customizeHint: "Cambia solo lo necesario; el comando añade únicamente las opciones que difieren de los valores por defecto. La contraseña del administrador nunca se escribe en el comando.",
       title: "Despliega con Docker Compose",
-      lead: "Un único archivo compose levanta PingWAF (all-in-one) y su propia base de datos PostgreSQL, con volúmenes con nombre para datos y certificados. Guarda el .env generado junto a docker-compose.yml y arranca la pila.",
+      lead: "Docker Compose es la vía recomendada: un comando inicia el plano de control, su agente integrado y PostgreSQL, con datos y certificados en volúmenes. Actualizar solo cambia la etiqueta de la imagen.",
       steps: [
         {
-          title: "Prepara los archivos",
-          body: "Coloca docker-compose.yml en un directorio vacío y guarda el .env generado a su lado. Todo funciona con los valores por defecto — solo fija lo que necesites cambiar.",
+          title: "Ejecuta el comando",
+          body: "Ejecuta el comando anterior en un directorio vacío. El instalador crea ./pingwaf, descarga el compose y escribe un .env privado.",
         },
         {
-          title: "Arranca la pila",
-          body: "Ejecuta docker compose up -d. Compose descarga la imagen fijada, arranca PostgreSQL, espera a que esté healthy y luego inicia PingWAF con las credenciales y puertos de tu .env.",
+          title: "Espera al stack",
+          body: "Compose descarga la imagen, inicia PostgreSQL, espera su health check y arranca PingWAF. El primer arranque tarda uno o dos minutos.",
         },
         {
-          title: "Inicia sesión y añade un sitio",
-          body: "Abre el panel en el puerto de administración (:9080 por defecto) y entra con ADMIN_EMAIL / ADMIN_PASSWORD. La consola obliga a cambiar la contraseña en el primer inicio de sesión si conservaste la predeterminada.",
-        },
+          title: "Inicia sesión",
+          body: "Abre https://<host>:9080 y usa ADMIN_EMAIL / ADMIN_PASSWORD (la contraseña por defecto debe cambiarse al entrar). Después añade un sitio.",
+        }
       ],
       fields: [
         {
@@ -157,13 +163,6 @@ const install = {
           placeholder: "admin@pingwaf.local",
           hint: "Cuenta de administrador sembrada. Por defecto: admin@pingwaf.local.",
           defaultValue: "admin@pingwaf.local",
-        },
-        {
-          key: "adminPassword",
-          label: "Contraseña del administrador",
-          placeholder: "pingwaf123",
-          hint: "Aterriza en tu archivo .env — nunca en el historial del shell. La contraseña documentada es pingwaf123; la consola obliga a cambiarla en el primer inicio de sesión.",
-          defaultValue: "pingwaf123",
         },
         {
           key: "tlsSans",

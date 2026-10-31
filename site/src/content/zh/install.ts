@@ -4,12 +4,12 @@ const install = {
   meta: {
     title: "安装部署 — PingWAF",
     description:
-      "一条命令在任意 Linux 服务器上安装 PingWAF：选择 all-in-one、server 或 agent 模式，传参或使用交互式引导，自动注册加固过的 systemd 服务。",
+      "用 Docker Compose 一条命令安装 PingWAF：控制面、内嵌 Agent 与 PostgreSQL，数据与证书保存在命名卷中。",
   },
   hero: {
     eyebrow: "安装部署",
     title: "一条命令，从零到一个运行中的节点",
-    lead: "官方安装脚本自动识别平台、下载对应二进制、写入 /etc/pingwaf/pingwaf.toml 并注册加固过的 systemd 服务。在下方拼装命令，或直接使用交互式引导。",
+    lead: "推荐使用 Docker Compose：一条命令启动控制面、内嵌 Agent 与 PostgreSQL。需要 systemd 托管二进制的场景，可继续使用脚本安装。",
     badges: [
       { icon: "terminal", label: "运行", value: "一条命令" },
       { icon: "box", label: "模式", value: "all-in-one · server · agent" },
@@ -23,13 +23,13 @@ const install = {
       { id: "troubleshooting", label: "故障排查" },
     ],
     oneLiner:
-      "curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh | bash",
+      "curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/deploy/compose/install.sh | bash",
   },
   builder: {
     id: "builder",
     eyebrow: "命令生成器",
     title: "拼装你的安装命令",
-    lead: "选择推荐的 Docker Compose 部署，或一键脚本安装。各字段已预填文档默认值，只需修改需要自定义的部分；所有内容均在本地生成，不会发送到任何其他地方。",
+    lead: "默认推荐 Docker Compose——一条命令，自带数据库。字段已预填文档默认值，只需修改需要自定义的部分；脚本安装保留在第二个页签。",
     modes: [
       {
         id: "all-in-one",
@@ -126,21 +126,27 @@ const install = {
     compose: {
       tabLabel: "Docker Compose",
       recommendedBadge: "推荐",
+      installerUrl: "https://raw.githubusercontent.com/shuaiZend/PingWAF/main/deploy/compose/install.sh",
+      oneLiner: "curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/deploy/compose/install.sh | bash",
+      oneLinerTitle: "一键安装命令",
+      oneLinerNote: "在空目录执行即可：安装器会下载 docker-compose.yml、写入仅本人可读的 .env、拉取镜像并启动。已有 .env 不会被覆盖——升级时重跑同一条命令即可。",
+      customizeTitle: "需要自定义？生成带参数的命令",
+      customizeHint: "只填写需要改动的项；命令只会追加与默认值不同的参数。管理员密码不会写入命令，首次登录时控制台会强制修改。",
       title: "使用 Docker Compose 部署",
-      lead: "一份 compose 文件即可拉起 PingWAF（all-in-one）及其自带的 PostgreSQL 数据库，数据与证书均使用命名卷持久化。把生成的 .env 保存到 docker-compose.yml 旁边，然后启动即可。",
+      lead: "Docker Compose 是官方推荐方式：一条命令启动控制面、内嵌 Agent 与 PostgreSQL，数据与证书保存在命名卷里；升级只需更换镜像标签。",
       steps: [
         {
-          title: "准备文件",
-          body: "将 docker-compose.yml 放入一个空目录，并把生成的 .env 保存到旁边。默认值即可直接使用——只设置需要自定义的项。",
+          title: "执行一键命令",
+          body: "在空目录运行上面的命令。安装器会创建 ./pingwaf、下载 compose 文件并写入仅本人可读的 .env。",
         },
         {
-          title: "启动",
-          body: "执行 docker compose up -d。Compose 会拉取指定镜像、启动 PostgreSQL 并等待其健康检查通过，然后按 .env 中的账号与端口启动 PingWAF。",
+          title: "等待服务就绪",
+          body: "Compose 拉取镜像后启动 PostgreSQL，健康检查通过再启动 PingWAF；首次启动约需 1–2 分钟。",
         },
         {
-          title: "登录并添加站点",
-          body: "在管理端口（默认 :9080）打开控制台，用 ADMIN_EMAIL / ADMIN_PASSWORD 登录。若沿用默认密码，控制台会在首次登录时强制修改。",
-        },
+          title: "登录控制台",
+          body: "打开 https://<主机>:9080，用 ADMIN_EMAIL / ADMIN_PASSWORD 登录（默认密码会在首次登录时强制修改），然后添加站点。",
+        }
       ],
       fields: [
         {
@@ -156,13 +162,6 @@ const install = {
           placeholder: "admin@pingwaf.local",
           hint: "初始化的管理员账号。默认 admin@pingwaf.local。",
           defaultValue: "admin@pingwaf.local",
-        },
-        {
-          key: "adminPassword",
-          label: "管理员密码",
-          placeholder: "pingwaf123",
-          hint: "写入 .env 文件——不会进入 shell 历史。文档默认密码为 pingwaf123，控制台会在首次登录时强制修改。",
-          defaultValue: "pingwaf123",
         },
         {
           key: "tlsSans",

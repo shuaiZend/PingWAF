@@ -166,12 +166,15 @@ graph TB
 仓库内置的 [`docker-compose.yml`](./docker-compose.yml) 会以 `all-in-one` 模式连同 PostgreSQL 一起启动 PingWAF，默认拉取 GHCR 预构建镜像（`ghcr.io/shuaizend/pingwaf:latest`）：
 
 ```bash
-git clone https://github.com/shuaiZend/PingWAF.git
-cd PingWAF
-
-# 启动控制面 + 数据面 + PostgreSQL
-docker compose up -d
+curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/deploy/compose/install.sh | bash
 ```
+
+安装器会创建 `./pingwaf`，下载官方 compose 文件、写入仅本人可读的 `.env`，并启动
+PingWAF 与 PostgreSQL（数据与证书保存在命名卷中，无需 root，也无需克隆仓库）。
+需要固定版本、修改管理员或端口时追加参数，例如
+`--tag 0.32.3 --admin-email you@example.com --admin-port 9443`；也可以在
+**[安装页](https://www.pingwaf.com/zh/install/)** 生成命令。想先检查文件内容，可克隆仓库后执行
+`docker compose up -d`，使用的是同一份 compose 文件。
 
 随后打开控制台：
 

@@ -12,10 +12,22 @@
 
 ## Quick Start (Docker Compose)
 
-The fastest way to get PingWAF running:
+The fastest way to get PingWAF running — one command, no clone, no root:
 
 ```bash
-# Clone the repository
+curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/deploy/compose/install.sh | bash
+```
+
+It creates `./pingwaf`, downloads [`docker-compose.yml`](../docker-compose.yml),
+writes a private `.env` and starts the stack. Re-run it to upgrade (an existing
+`.env` is never overwritten). Add `--tag`, `--admin-email`, `--tls-sans` or the
+port flags to customise, or use the generator at
+<https://www.pingwaf.com/install/> (Chinese: <https://www.pingwaf.com/zh/install/>).
+
+Prefer to inspect the files first? Clone the repository and run the same compose
+file manually:
+
+```bash
 git clone https://github.com/shuaiZend/PingWAF.git
 cd PingWAF
 
@@ -24,7 +36,6 @@ export JWT_SECRET=$(openssl rand -hex 32)
 export ADMIN_PASSWORD=$(openssl rand -hex 16)
 export POSTGRES_PASSWORD=$(openssl rand -hex 16)
 
-# Start all services
 docker compose up -d
 
 # Verify (the health endpoint answers on HTTP and HTTPS alike)
@@ -41,6 +52,11 @@ Default credentials: `admin@pingwaf.local` / value of `$ADMIN_PASSWORD`
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `PINGWAF_TAG` | `latest` | PingWAF image tag — pin a release in production |
+| `PINGWAF_HTTP_PORT` / `PINGWAF_HTTPS_PORT` | `80` / `443` | Host ports for proxied traffic |
+| `PINGWAF_ADMIN_PORT` / `PINGWAF_GRPC_PORT` | `9080` / `9090` | Host ports for the console/API and the agent gRPC endpoint |
+| `PINGWAF_TLS_SANS` | empty | Comma-separated SANs for the self-signed console certificate |
+| `TLS_ENABLED` | `true` | Serve the console over HTTPS |
 | `POSTGRES_PASSWORD` | `pingwaf` | PostgreSQL password |
 | `POSTGRES_BIND` | `127.0.0.1` | Host address the PostgreSQL port publishes on (`0.0.0.0` exposes it to the network) |
 | `POSTGRES_PORT` | `5432` | Host port for PostgreSQL |

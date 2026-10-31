@@ -95,7 +95,9 @@
   },
   "sidebar": {
     "collapse": "收起",
-    "expand": "展开"
+    "expand": "展开",
+    "website": "官网",
+    "github": "GitHub"
   },
   "palette": {
     "sites": "站点",

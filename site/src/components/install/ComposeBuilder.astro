@@ -15,28 +15,19 @@ interface Props {
 
 const { compose, locale, copyLabel, copiedLabel } = Astro.props;
 
-// Same shape as the client-side builder: the server-rendered preview matches
+// Same shape as the client-side builder: the server-rendered command matches
 // the defaults, so there is no flash before the script runs.
 const composeDefaults = Object.fromEntries(
   compose.fields.map((field) => [field.key, field.defaultValue]),
 );
-const SAFE_ENV = /^[A-Za-z0-9_.@:/=+~-]+$/;
-const envValue = (raw: string): string => {
-  const value = raw.replace(/[\r\n]+/g, " ").trim();
-  if (!value) return "";
-  if (SAFE_ENV.test(value)) return value;
-  // Compose .env quoting: double quotes with escaped backslash, double quote
-  // and dollar sign — no newline ever reaches the file.
-  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\$/g, "\\$")}"`;
-};
-const envLines = [
-  `PINGWAF_TAG=${envValue(composeDefaults.tag)}`,
-  `ADMIN_EMAIL=${envValue(composeDefaults.adminEmail)}`,
-  composeDefaults.adminPassword ? `ADMIN_PASSWORD=${envValue(composeDefaults.adminPassword)}` : "",
-].filter(Boolean);
 const composeDefaultsJson = JSON.stringify(composeDefaults);
 ---
-<div class="compose" data-compose-builder data-compose-defaults={composeDefaultsJson}>
+<div
+  class="compose"
+  data-compose-builder
+  data-compose-defaults={composeDefaultsJson}
+  data-installer-url={compose.installerUrl}
+>
   <p class="compose__eyebrow">{compose.tabLabel}</p>
   <h3 class="compose__title">{compose.title}</h3>
   <p class="compose__lead">{compose.lead}</p>
@@ -52,6 +43,18 @@ const composeDefaultsJson = JSON.stringify(composeDefaults);
     }
   </ul>
 
+  <div class="compose__panel compose__panel--hero">
+    <div class="compose__panel-head">
+      <span>{compose.oneLinerTitle}</span>
+      <button type="button" class="compose__copy" data-copy="compose-oneliner">
+        <Icon name="copy" />
+        <span data-copy-label data-copied={copiedLabel}>{copyLabel}</span>
+      </button>
+    </div>
+    <pre class="compose__code mono" id="compose-oneliner" data-oneliner>{compose.oneLiner}</pre>
+    <p class="compose__note">{compose.oneLinerNote}</p>
+  </div>
+
   <ol class="compose__steps">
     {
       compose.steps.map((step, index) => (
@@ -66,34 +69,27 @@ const composeDefaultsJson = JSON.stringify(composeDefaults);
     }
   </ol>
 
-  <div class="compose__fields">
-    {
-      compose.fields.map((field) => (
-        <label class="compose__field">
-          <span class="compose__field-label">{field.label}</span>
-          <input
-            type={field.secret ? "password" : "text"}
-            data-env-field={field.key}
-            value={field.defaultValue}
-            placeholder={field.placeholder}
-            autocomplete="off"
-            spellcheck="false"
-          />
-          <span class="compose__field-hint">{field.hint}</span>
-        </label>
-      ))
-    }
-  </div>
-
-  <div class="compose__panel">
-    <div class="compose__panel-head">
-      <span>{compose.envTitle}</span>
-      <button type="button" class="compose__copy" data-copy="compose-env">
-        <Icon name="copy" />
-        <span data-copy-label data-copied={copiedLabel}>{copyLabel}</span>
-      </button>
+  <div class="compose__customize">
+    <h4 class="compose__upgrade-title">{compose.customizeTitle}</h4>
+    <p class="compose__upgrade-body">{compose.customizeHint}</p>
+    <div class="compose__fields">
+      {
+        compose.fields.map((field) => (
+          <label class="compose__field">
+            <span class="compose__field-label">{field.label}</span>
+            <input
+              type="text"
+              data-field={field.key}
+              value={field.defaultValue}
+              placeholder={field.placeholder}
+              autocomplete="off"
+              spellcheck="false"
+            />
+            <span class="compose__field-hint">{field.hint}</span>
+          </label>
+        ))
+      }
     </div>
-    <pre class="compose__code mono" id="compose-env" data-env>{envLines.join("\n")}</pre>
   </div>
 
   <div class="compose__panel">
@@ -104,7 +100,7 @@ const composeDefaultsJson = JSON.stringify(composeDefaults);
         <span data-copy-label data-copied={copiedLabel}>{copyLabel}</span>
       </button>
     </div>
-    <pre class="compose__code mono" id="compose-command">docker compose up -d</pre>
+    <pre class="compose__code mono" id="compose-command" data-command>{compose.oneLiner}</pre>
     <p class="compose__note">{compose.note}</p>
   </div>
 
@@ -128,56 +124,56 @@ const composeDefaultsJson = JSON.stringify(composeDefaults);
 <script>
   const root = document.querySelector<HTMLElement>("[data-compose-builder]");
   if (root) {
-    const envEl = root.querySelector<HTMLElement>("[data-env]");
-    const inputs = Array.from(root.querySelectorAll<HTMLInputElement>("[data-env-field]"));
-    let composeDefaults: Record<string, string> = {};
+    const commandEl = root.querySelector<HTMLElement>("[data-command]");
+    const inputs = Array.from(root.querySelectorAll<HTMLInputElement>("[data-field]"));
+    const installerUrl = root.dataset.installerUrl ?? "";
+    let defaults: Record<string, string> = {};
     try {
-      composeDefaults = JSON.parse(root.getAttribute("data-compose-defaults") ?? "{}") as Record<
+      defaults = JSON.parse(root.getAttribute("data-compose-defaults") ?? "{}") as Record<
         string,
         string
       >;
     } catch {
-      composeDefaults = {};
+      defaults = {};
     }
 
-    const SAFE = /^[A-Za-z0-9_.@:/=+~-]+$/;
-    /** Quote a value for a compose `.env` file: no newlines, no broken quotes. */
-    const envValue = (raw: string) => {
+    /** Single-quote for bash only when the shell could interpret the value. */
+    const SAFE = /^[A-Za-z0-9%_@.:/=+~-]+$/;
+    const shellQuote = (raw: string) => {
       const value = raw.replace(/[\r\n]+/g, " ").trim();
       if (!value) return "";
       if (SAFE.test(value)) return value;
-      return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\$/g, "\\$")}"`;
+      return `'${value.replace(/'/g, "'\\''")}'`;
     };
+
+    const FLAGS: Array<[string, string]> = [
+      ["tag", "--tag"],
+      ["adminEmail", "--admin-email"],
+      ["tlsSans", "--tls-sans"],
+      ["httpPort", "--http-port"],
+      ["httpsPort", "--https-port"],
+      ["adminPort", "--admin-port"],
+    ];
 
     const build = () => {
-      if (!envEl) return;
+      if (!commandEl) return;
       const values: Record<string, string> = {};
       inputs.forEach((input) => {
-        values[input.dataset.envField ?? ""] = input.value;
+        values[input.dataset.field ?? ""] = input.value;
       });
-      const line = (key: string, env: string, always = false) => {
-        const value = envValue(values[key] ?? "");
-        if (!value) return "";
-        if (!always && value === envValue(composeDefaults[key] ?? "")) return "";
-        return `${env}=${value}`;
-      };
-      // Identity lines are always present so the .env stays self-describing;
-      // everything else only appears when it deviates from the default.
-      const lines = [
-        line("tag", "PINGWAF_TAG", true),
-        line("adminEmail", "ADMIN_EMAIL", true),
-        line("adminPassword", "ADMIN_PASSWORD", true),
-        line("tlsSans", "PINGWAF_TLS_SANS"),
-        line("httpPort", "PINGWAF_HTTP_PORT"),
-        line("httpsPort", "PINGWAF_HTTPS_PORT"),
-        line("adminPort", "PINGWAF_ADMIN_PORT"),
-      ].filter(Boolean);
-      envEl.textContent = lines.join("\n");
+      const args = FLAGS.flatMap(([key, flag]) => {
+        const raw = values[key] ?? "";
+        if (!raw.trim()) return [];
+        if (raw.trim() === (defaults[key] ?? "").trim()) return [];
+        return [[flag, shellQuote(raw)].join(" ")];
+      });
+      const base = `curl -fsSL ${installerUrl} | bash`;
+      commandEl.textContent = args.length
+        ? `${base} -s -- ${args.join(" ")}`
+        : base;
     };
 
-    inputs.forEach((input) => {
-      input.addEventListener("input", build);
-    });
+    inputs.forEach((input) => input.addEventListener("input", build));
     build();
   }
 </script>
@@ -399,5 +395,18 @@ const composeDefaultsJson = JSON.stringify(composeDefaults);
     .compose__fields {
       grid-template-columns: minmax(0, 1fr);
     }
+  }
+
+  .compose__panel--hero {
+    border-color: var(--color-bg-brand);
+    box-shadow: 0 0 0 1px var(--color-bg-brand) inset;
+  }
+
+  .compose__customize {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding-top: 4px;
+    border-top: 1px dashed var(--color-border-line);
   }
 </style>

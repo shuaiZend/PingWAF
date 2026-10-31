@@ -4,12 +4,12 @@ const install = {
   meta: {
     title: "インストールとデプロイ — PingWAF",
     description:
-      "1 つのコマンドで任意の Linux サーバーに PingWAF を導入：all-in-one・server・agent の各モードを選び、フラグを渡すか対話式インストーラーに答えるだけで、強化済みの systemd サービスが手に入ります。",
+      "Docker Compose で PingWAF を 1 コマンドインストール。コントロールプレーン、内蔵エージェント、PostgreSQL を起動し、データと証明書は名前付きボリュームに保存します。",
   },
   hero: {
     eyebrow: "インストール",
     title: "1 コマンドでゼロから稼働ノードまで",
-    lead: "公式インストーラーはプラットフォームを検出し、対応するバイナリをダウンロードし、/etc/pingwaf/pingwaf.toml を書き出して、強化済みの systemd ユニットを登録します。以下でコマンドを組み立てるか、対話式の質問に答えて進めてください。",
+    lead: "Docker Compose を推奨します。1 コマンドでコントロールプレーン、内蔵エージェント、PostgreSQL を起動します。systemd 管理のバイナリが必要な場合はスクリプトインストールを利用できます。",
     badges: [
       { icon: "terminal", label: "実行", value: "1 コマンド" },
       { icon: "box", label: "モード", value: "all-in-one · server · agent" },
@@ -23,13 +23,13 @@ const install = {
       { id: "troubleshooting", label: "トラブルシューティング" },
     ],
     oneLiner:
-      "curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh | bash",
+      "curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/deploy/compose/install.sh | bash",
   },
   builder: {
     id: "builder",
     eyebrow: "コマンドビルダー",
     title: "インストールコマンドを組み立てる",
-    lead: "推奨の Docker Compose デプロイか、ワンラインのインストールスクリプトを選べます。各フィールドにはドキュメント既定値が事前入力されているので、変更したい部分だけ編集してください。すべてローカルで生成され、他のどこにも送信されません。",
+    lead: "Docker Compose を既定で選択しています。1 コマンドでデータベース込みで起動します。項目は既定値が入っているので、変更が必要な箇所だけ編集してください。スクリプトインストールは 2 つ目のタブにあります。",
     modes: [
       {
         id: "all-in-one",
@@ -127,21 +127,27 @@ const install = {
     compose: {
       tabLabel: "Docker Compose",
       recommendedBadge: "推奨",
+      installerUrl: "https://raw.githubusercontent.com/shuaiZend/PingWAF/main/deploy/compose/install.sh",
+      oneLiner: "curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/deploy/compose/install.sh | bash",
+      oneLinerTitle: "ワンコマンドインストール",
+      oneLinerNote: "空のディレクトリで実行してください。インストーラは docker-compose.yml を取得し、本人のみ読み取り可能な .env を書き込み、イメージを取得して起動します。既存の .env は上書きしません（アップグレードは同じコマンドを再実行）。",
+      customizeTitle: "カスタマイズする場合：オプション付きコマンドを生成",
+      customizeHint: "変更が必要な項目だけ入力してください。既定値と異なるオプションだけが追加されます。管理者パスワードはコマンドに含めません。",
       title: "Docker Compose でデプロイ",
-      lead: "1 つの compose ファイルで PingWAF（all-in-one）と専用の PostgreSQL データベースを起動します。データと証明書は名前付きボリュームに永続化されます。生成された .env を docker-compose.yml の隣に保存して起動してください。",
+      lead: "Docker Compose が公式推奨です。1 コマンドでコントロールプレーン、内蔵エージェント、PostgreSQL を起動し、データと証明書は名前付きボリュームに保存します。更新はイメージタグの変更だけです。",
       steps: [
         {
-          title: "ファイルを準備する",
-          body: "空のディレクトリに docker-compose.yml を置き、生成された .env を隣に保存します。既定値のままで動作します — 変更したい項目だけ設定してください。",
+          title: "ワンコマンドを実行",
+          body: "空のディレクトリで上のコマンドを実行します。インストーラが ./pingwaf を作成し、compose ファイルを取得して私有 .env を書き込みます。",
         },
         {
-          title: "スタックを起動する",
-          body: "docker compose up -d を実行します。Compose が指定イメージを取得し、PostgreSQL を起動して healthy になるまで待ち、その後 .env の認証情報とポートで PingWAF を起動します。",
+          title: "起動を待つ",
+          body: "Compose がイメージを取得し、PostgreSQL を起動してヘルスチェック後に PingWAF を起動します。初回は 1〜2 分かかります。",
         },
         {
-          title: "ログインしてサイトを追加する",
-          body: "管理ポート（既定 :9080）でダッシュボードを開き、ADMIN_EMAIL / ADMIN_PASSWORD でサインインします。既定のパスワードをそのまま使った場合、コンソールが初回ログイン時に変更を要求します。",
-        },
+          title: "コンソールにログイン",
+          body: "https://<ホスト>:9080 を開き、ADMIN_EMAIL / ADMIN_PASSWORD でログインします（既定パスワードは初回ログイン時に変更が必須）。その後サイトを追加します。",
+        }
       ],
       fields: [
         {
@@ -157,13 +163,6 @@ const install = {
           placeholder: "admin@pingwaf.local",
           hint: "初期投入される管理者アカウント。既定は admin@pingwaf.local です。",
           defaultValue: "admin@pingwaf.local",
-        },
-        {
-          key: "adminPassword",
-          label: "管理者パスワード",
-          placeholder: "pingwaf123",
-          hint: ".env ファイルに書かれます — シェル履歴には残りません。ドキュメント既定は pingwaf123 で、コンソールが初回ログイン時に変更を要求します。",
-          defaultValue: "pingwaf123",
         },
         {
           key: "tlsSans",

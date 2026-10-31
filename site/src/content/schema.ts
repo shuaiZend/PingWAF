@@ -264,7 +264,6 @@ export interface ComposeField {
   key:
     | "tag"
     | "adminEmail"
-    | "adminPassword"
     | "tlsSans"
     | "httpPort"
     | "httpsPort"
@@ -287,6 +286,14 @@ export interface ComposeContent {
   title: string;
   lead: string;
   steps: Array<{ title: string; body: string }>;
+  /** Base command without options; the customiser appends `-s -- …`. */
+  installerUrl: string;
+  /** One command that installs the stack; shown before any customisation. */
+  oneLiner: string;
+  oneLinerTitle: string;
+  oneLinerNote: string;
+  customizeTitle: string;
+  customizeHint: string;
   fields: ComposeField[];
   envTitle: string;
   commandTitle: string;

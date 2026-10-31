@@ -95,7 +95,9 @@
   },
   "sidebar": {
     "collapse": "折りたたむ",
-    "expand": "展開"
+    "expand": "展開",
+    "website": "公式サイト",
+    "github": "GitHub"
   },
   "palette": {
     "sites": "サイト",

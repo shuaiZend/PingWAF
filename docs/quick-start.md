@@ -137,6 +137,16 @@ postgres://pingwaf:pingwaf@localhost:5432/pingwaf
 
 ## Path 1: Docker Compose (recommended)
 
+> **Shortest path:** the official installer wraps the same compose file — it
+> downloads it, writes a private `.env` and starts the stack:
+>
+> ```bash
+> curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/deploy/compose/install.sh | bash
+> ```
+>
+> Use the steps below when you want to inspect or edit the compose file first.
+> The command generator on the [install page](https://www.pingwaf.com/install/) writes the same flags.
+
 The repository ships a [`docker-compose.yml`](../docker-compose.yml) with two
 services: `pingwaf` (all-in-one) and `postgres` (`postgres:16-alpine`).
 

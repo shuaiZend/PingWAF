@@ -8,6 +8,30 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [Unreleased]
+
+### Added
+
+- **Docker Compose is the first thing the install page shows.** `/install/`
+  now opens on a one-command Compose install (`deploy/compose/install.sh`)
+  instead of the systemd script: the installer downloads the official compose
+  file, writes a private `.env`, starts PingWAF with PostgreSQL and never
+  overwrites an existing `.env` (re-running it is the upgrade path). The
+  generator below it appends only the flags that differ from the defaults.
+- **Website and GitHub links in the console.** The sidebar footer (and the
+  mobile drawer) links to `www.pingwaf.com` and the GitHub repository, so the
+  project pages are reachable from any screen.
+- **Compose environment variables documented.** The deployment guide now lists
+  `PINGWAF_TAG`, the four host-port variables, `PINGWAF_TLS_SANS` and
+  `TLS_ENABLED`, matching `docker-compose.yml`.
+
+### Changed
+
+- **Installation guidance points at the official site.** README, `README_zh`,
+  `docs/deployment.md` and `docs/quick-start.md` lead with the one-command
+  Compose install and link to <https://www.pingwaf.com/install/>; the binary
+  script install stays as the alternative for systemd-managed hosts.
+
 ## [PingWAF 0.32.3] — 2026-10-31
 
 Installer and operations release: the install script learns an interactive

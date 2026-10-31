@@ -163,15 +163,18 @@ The control plane and the data plane talk over the `ControlPlane` gRPC service (
 
 ### Option A — Docker Compose (recommended)
 
-The bundled [`docker-compose.yml`](./docker-compose.yml) starts PingWAF in `all-in-one` mode together with PostgreSQL, pulling the pre-built image from GHCR (`ghcr.io/shuaizend/pingwaf:latest`):
+The official installer downloads the bundled [`docker-compose.yml`](./docker-compose.yml),
+writes a private `.env` and starts PingWAF in `all-in-one` mode with PostgreSQL
+(GHCR image, named volumes for data and certificates). No clone and no root:
 
 ```bash
-git clone https://github.com/shuaiZend/PingWAF.git
-cd PingWAF
-
-# Start the control plane + data plane + PostgreSQL
-docker compose up -d
+curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/deploy/compose/install.sh | bash
 ```
+
+It creates `./pingwaf`; customise the image tag, admin account or ports with
+flags (`--tag 0.32.3 --admin-email you@example.com --admin-port 9443`), or use
+the generator on the **[install page](https://www.pingwaf.com/install/)**. To inspect the files first,
+clone and run `docker compose up -d` instead — the same compose file is used.
 
 Then open the dashboard:
 

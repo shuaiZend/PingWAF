@@ -362,6 +362,26 @@ export function LoginPage() {
               ))}
             </div>
           </div>
+
+          <div className="mt-4 flex items-center justify-center gap-3 text-xs text-fg-subtle">
+            <a
+              href="https://www.pingwaf.com"
+              target="_blank"
+              rel="noreferrer noopener"
+              className="hover:text-fg hover:underline"
+            >
+              {t('sidebar.website')}
+            </a>
+            <span aria-hidden="true">·</span>
+            <a
+              href="https://github.com/shuaiZend/PingWAF"
+              target="_blank"
+              rel="noreferrer noopener"
+              className="hover:text-fg hover:underline"
+            >
+              {t('sidebar.github')}
+            </a>
+          </div>
         </div>
       </div>
     </div>

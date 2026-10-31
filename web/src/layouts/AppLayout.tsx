@@ -13,6 +13,8 @@ import {
   ShieldCheck,
   Sparkle,
   Pulse,
+  Globe,
+  GithubLogo,
 } from '@phosphor-icons/react'
 import { cn } from '@/lib/utils'
 import { Sidebar } from '@/components/ui/Sidebar'
@@ -211,6 +213,9 @@ export function AppLayout() {
           <aside className="absolute left-0 top-0 flex h-full w-60 flex-col border-r border-line bg-elevated shadow-lg">
             <SidebarHeader collapsed={false} />
             <Sidebar collapsed={false} onNavigate={() => setMobileOpen(false)} />
+            <div className="mt-auto">
+              <SidebarExternalLinks collapsed={false} />
+            </div>
           </aside>
         </div>
       )}
@@ -441,6 +446,7 @@ function SidebarFooter({
   const { t } = useTranslation()
   return (
     <div className="shrink-0 border-t border-line p-2">
+      <SidebarExternalLinks collapsed={collapsed} />
       <button
         onClick={onToggle}
         className={cn(
@@ -458,6 +464,44 @@ function SidebarFooter({
         />
         {!collapsed && <span>{t('sidebar.collapse')}</span>}
       </button>
+    </div>
+  )
+}
+
+/**
+ * Links to the two places a stuck operator needs outside the console. Kept in
+ * the sidebar footer so they are reachable from every page (and from the mobile
+ * drawer), instead of being buried in a settings tab.
+ */
+function SidebarExternalLinks({ collapsed }: { collapsed: boolean }) {
+  const { t } = useTranslation()
+  const links = [
+    { href: 'https://www.pingwaf.com', label: t('sidebar.website'), icon: Globe },
+    {
+      href: 'https://github.com/shuaiZend/PingWAF',
+      label: t('sidebar.github'),
+      icon: GithubLogo,
+    },
+  ]
+
+  return (
+    <div className="flex flex-col gap-0.5 px-1 pb-1">
+      {links.map(({ href, label, icon: Icon }) => (
+        <a
+          key={href}
+          href={href}
+          target="_blank"
+          rel="noreferrer noopener"
+          title={label}
+          className={cn(
+            'flex items-center gap-3 rounded-md px-3 py-2 text-sm text-fg-subtle transition-colors hover:bg-recessed hover:text-fg',
+            collapsed && 'justify-center px-0',
+          )}
+        >
+          <Icon className="h-4 w-4 shrink-0" />
+          {!collapsed && <span>{label}</span>}
+        </a>
+      ))}
     </div>
   )
 }
