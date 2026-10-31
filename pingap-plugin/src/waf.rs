@@ -9185,9 +9185,13 @@ inspect_body = true"###,
         );
 
         // `*` collapses to every layer.
-        let compiled =
-            PathExceptions::build(&[path_exception("e2", "/api", "prefix", &["*"])])
-                .unwrap();
+        let compiled = PathExceptions::build(&[path_exception(
+            "e2",
+            "/api",
+            "prefix",
+            &["*"],
+        )])
+        .unwrap();
         let bypass = compiled.match_path("/api").unwrap();
         for layer in ["mtls", "access", "basic_auth", "bot", "waf"] {
             assert!(bypass.layers.skips(layer));
@@ -9196,9 +9200,13 @@ inspect_body = true"###,
 
         // An empty list is malformed (the API rejects it). Compiling it must
         // not turn a corrupt row into a total bypass.
-        let empty =
-            PathExceptions::build(&[path_exception("e4", "/api", "prefix", &[])])
-                .unwrap();
+        let empty = PathExceptions::build(&[path_exception(
+            "e4",
+            "/api",
+            "prefix",
+            &[],
+        )])
+        .unwrap();
         let inert = empty.match_path("/api").unwrap();
         for layer in ["mtls", "access", "basic_auth", "bot", "waf"] {
             assert!(!inert.layers.skips(layer));
