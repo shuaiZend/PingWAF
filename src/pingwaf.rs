@@ -1202,11 +1202,18 @@ fn cached_rules_to_pingap_config(
              fail until one is issued or uploaded"
         );
     }
+    // Analysis-only override: a non-root macOS run cannot bind 80/443.
+    // These variables are intentionally read only in the dhat analysis branch;
+    // production continues to use the fixed public listener addresses.
+    let analysis_http_addr = std::env::var("PINGWAF_ANALYSIS_HTTP_ADDR")
+        .unwrap_or_else(|_| "0.0.0.0:80".to_string());
+    let analysis_https_addr = std::env::var("PINGWAF_ANALYSIS_HTTPS_ADDR")
+        .unwrap_or_else(|_| "0.0.0.0:443".to_string());
     let mut servers: HashMap<String, PingapServerConf> = HashMap::new();
     servers.insert(
         "pingwaf".to_string(),
         PingapServerConf {
-            addr: "0.0.0.0:80".to_string(),
+            addr: analysis_http_addr,
             locations: Some(location_names.clone()),
             global_certificates: Some(false),
             ..Default::default()
@@ -1215,7 +1222,7 @@ fn cached_rules_to_pingap_config(
     servers.insert(
         "pingwaf_tls".to_string(),
         PingapServerConf {
-            addr: "0.0.0.0:443".to_string(),
+            addr: analysis_https_addr,
             locations: Some(location_names),
             global_certificates: Some(true),
             client_ca_pem: (!mtls_ca_bundle.is_empty())
@@ -2059,6 +2066,8 @@ pub fn main() {
 
     // Allocator retention policy (adaptive by memory ceiling, overridable
     // via env). This entry point bypasses main.rs, so apply it here too.
+    // dhat owns the allocator in analysis builds; mimalloc FFI is invalid.
+    #[cfg(not(feature = "dhat"))]
     crate::allocator_tune::apply();
 
     // Initialize tracing
