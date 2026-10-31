@@ -1304,29 +1304,17 @@ export function CachingPage() {
                   description={t('pages.caching.emptyDescription')}
                   action={
                     canWrite ? (
-                      <div className="flex flex-wrap items-center justify-center gap-2">
-                        <Button
-                          variant="primary"
-                          icon={<Plus weight="bold" className="h-4 w-4" />}
-                          onClick={() => {
-                            setEditing(null)
-                            setDialogOpen(true)
-                          }}
-                        >
-                          {t('pages.caching.addRule')}
-                        </Button>
-                        <Button
-                          variant="secondary"
-                          loading={restore.isPending}
-                          disabled={activationBusy}
-                          onClick={() => restore.mutate()}
-                          icon={
-                            <ArrowCounterClockwise weight="duotone" className="h-4 w-4" />
-                          }
-                        >
-                          {t('pages.caching.restoreButton')}
-                        </Button>
-                      </div>
+                      <Button
+                        variant="secondary"
+                        loading={restore.isPending}
+                        disabled={activationBusy}
+                        onClick={() => restore.mutate()}
+                        icon={
+                          <ArrowCounterClockwise weight="duotone" className="h-4 w-4" />
+                        }
+                      >
+                        {t('pages.caching.restoreButton')}
+                      </Button>
                     ) : undefined
                   }
                 />

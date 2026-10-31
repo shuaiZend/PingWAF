@@ -14,7 +14,7 @@ test.describe('cache and compression', () => {
     })
     try {
       await app.page.goto(app.adminUrl(`/sites/${siteId}/caching`))
-      await app.page.getByRole('button', { name: 'Add rule' }).click()
+      await app.page.getByRole('button', { name: 'Add rule' }).first().click()
       const dialog = app.page.getByRole('dialog', { name: 'Add rule' })
       await dialog.getByRole('textbox', { name: /Name/ }).fill('E2E cache')
       await dialog
