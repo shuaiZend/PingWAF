@@ -87,9 +87,9 @@ test.describe('delete actions open confirmations, not the edit view', () => {
       await app.page.getByRole('button', { name: 'Add rule' }).first().click()
       const ipDialog = app.page.getByRole('dialog')
       await ipDialog.getByRole('textbox', { name: 'Name' }).fill(`del-ip-${run}`)
-      await ipDialog.getByRole('button', { name: 'Manual' }).click()
+      await ipDialog.getByRole('tab', { name: 'Manual list' }).click()
       await ipDialog
-        .getByRole('textbox', { name: /IP addresses|Ranges|IP ranges/ })
+        .getByRole('textbox', { name: /IP \/ CIDR list/ })
         .fill('203.0.113.10')
       await ipDialog.getByRole('button', { name: 'Create', exact: true }).click()
       await expect(ipDialog).toHaveCount(0)
@@ -99,7 +99,9 @@ test.describe('delete actions open confirmations, not the edit view', () => {
       await ipRow.getByRole('button', { name: 'Delete' }).click()
       const ipConfirm = app.page.getByRole('dialog')
       await expect(ipConfirm).toBeVisible()
-      expect(app.page.url()).toContain('/security/ip-rules')
+      // `/security/ip-rules` redirects to the access-control tab; the point is
+      // that we stayed on the rules screen instead of opening an editor.
+      expect(app.page.url()).toContain(`/sites/${siteId}/security/`)
       await ipConfirm.getByRole('button', { name: 'Delete', exact: true }).click()
       await expect(ipRow).toHaveCount(0)
     } finally {
