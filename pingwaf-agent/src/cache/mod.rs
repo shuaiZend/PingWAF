@@ -1014,6 +1014,14 @@ pub struct CustomErrorPage {
     pub body_template: String,
     pub name: String,
     pub enabled: bool,
+    /// `site` (default) or `unmatched_host`. Caches written before the scope
+    /// existed default to `site`, keeping the historic behaviour.
+    #[serde(default = "default_error_page_scope")]
+    pub scope: String,
+}
+
+fn default_error_page_scope() -> String {
+    "site".to_string()
 }
 
 // ─── SSL ────────────────────────────────────────────────────
@@ -3004,6 +3012,12 @@ impl RuleCache {
             body_template: e.body_template.clone(),
             name: e.name.clone(),
             enabled: e.enabled,
+            // An empty (pre-scope server) or missing value means "site".
+            scope: if e.scope.is_empty() {
+                default_error_page_scope()
+            } else {
+                e.scope.clone()
+            },
         }
     }
 

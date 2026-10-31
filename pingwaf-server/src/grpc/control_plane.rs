@@ -121,6 +121,10 @@ static LAST_AGENT_SWEEP: AtomicI64 = AtomicI64::new(0);
 /// Epoch seconds of the last metric-retention sweep, throttled the same way.
 static LAST_METRIC_SWEEP: AtomicI64 = AtomicI64::new(0);
 
+/// Epoch seconds of the last stale-pending certificate sweep, throttled the
+/// same way.
+static LAST_CERT_SWEEP: AtomicI64 = AtomicI64::new(0);
+
 /// The gRPC control plane service.
 pub struct ControlPlaneService {
     /// `pub(crate)` so the visitor-auth RPCs in `grpc/visitor_auth.rs` can
@@ -1239,7 +1243,22 @@ async fn persist_heartbeat(
 
     persist_site_certificates(db, &message.site_statuses).await;
 
-    sweep_stale_pending_certificates(db).await;
+    // This sweep scans for stale pending rows; it is not part of liveness and
+    // must not run on every agent heartbeat. One attempt per hour is enough.
+    let now = Utc::now().timestamp();
+    let previous = LAST_CERT_SWEEP.load(Ordering::Relaxed);
+    if now.saturating_sub(previous) >= 3600
+        && LAST_CERT_SWEEP
+            .compare_exchange(
+                previous,
+                now,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            )
+            .is_ok()
+    {
+        sweep_stale_pending_certificates(db).await;
+    }
 
     sweep_offline_agents(db, registry).await;
 }
@@ -1969,6 +1988,20 @@ async fn persist_blocked_ips(
 ) {
     use std::collections::HashSet;
 
+    // Empty is the common steady state. It means "no blocks": clear the
+    // mirror with one DELETE instead of SELECTing every row and then deleting
+    // the stale set on every heartbeat.
+    if blocked_ips.is_empty() {
+        if let Err(err) = agent_blocked_ip::Entity::delete_many()
+            .filter(agent_blocked_ip::Column::AgentId.eq(agent_id))
+            .exec(db)
+            .await
+        {
+            tracing::warn!(%agent_id, error = %err, "could not clear blocked IPs");
+        }
+        return;
+    }
+
     let now = Utc::now();
     let mut reported: HashSet<(Uuid, String)> = HashSet::new();
     let mut rows: Vec<agent_blocked_ip::ActiveModel> = Vec::new();
@@ -2221,23 +2254,22 @@ fn sample_i64(value: u64) -> Option<i64> {
 /// Flips an agent to `offline` when its stream ends, unless a newer heartbeat has
 /// already arrived (which happens when the agent reconnects quickly).
 async fn mark_offline(db: &DatabaseConnection, agent_id: Uuid) {
-    let row = match agent::Entity::find_by_id(agent_id).one(db).await {
-        Ok(Some(row)) => row,
-        Ok(None) => return,
-        Err(err) => {
-            tracing::warn!(%agent_id, error = %err, "could not load agent to mark offline");
-            return;
-        },
-    };
-    if row
-        .last_heartbeat
-        .is_some_and(|ts| ts > Utc::now() - chrono::Duration::seconds(2))
+    // Keep the freshness guard in the WHERE clause. Reading the row first and
+    // writing it back as a full ActiveModel races a new heartbeat and can
+    // resurrect old status/config values.
+    let threshold = Utc::now() - chrono::Duration::seconds(2);
+    if let Err(err) = agent::Entity::update_many()
+        .col_expr(agent::Column::Status, Expr::value(agent_status::OFFLINE))
+        .filter(agent::Column::Id.eq(agent_id))
+        .filter(
+            agent::Column::LastHeartbeat
+                .is_null()
+                .or(agent::Column::LastHeartbeat.lt(threshold)),
+        )
+        .filter(agent::Column::Status.ne(agent_status::OFFLINE))
+        .exec(db)
+        .await
     {
-        return;
-    }
-    let mut active: agent::ActiveModel = row.into();
-    active.status = Set(agent_status::OFFLINE.to_string());
-    if let Err(err) = active.update(db).await {
         tracing::warn!(%agent_id, error = %err, "could not mark agent offline");
     }
 }
@@ -3210,5 +3242,41 @@ mod tests {
         for leak in ["SELECT", "relation", "site_certificates", "\""] {
             assert!(!status.message().contains(leak), "{leak}");
         }
+    }
+
+    /// The stale-pending certificate sweep must run at most once per hour
+    /// even when several agents heartbeat concurrently: the CAS in
+    /// `persist_heartbeat` must admit exactly one winner per window (the old
+    /// `swap`-based throttle could double-run after a clock-step backwards).
+    #[test]
+    fn concurrent_heartbeats_admit_one_sweep_per_window() {
+        use std::sync::atomic::AtomicUsize;
+
+        let sweep = AtomicI64::new(0);
+        let winners = AtomicUsize::new(0);
+        let now: i64 = 10_000;
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    let previous = sweep.load(Ordering::Relaxed);
+                    if now.saturating_sub(previous) >= 3600
+                        && sweep
+                            .compare_exchange(
+                                previous,
+                                now,
+                                Ordering::Relaxed,
+                                Ordering::Relaxed,
+                            )
+                            .is_ok()
+                    {
+                        winners.fetch_add(1, Ordering::Relaxed);
+                    }
+                });
+            }
+        });
+        assert_eq!(winners.load(Ordering::Relaxed), 1);
+        // Within the window nobody sweeps again — not even concurrently.
+        let previous = sweep.load(Ordering::Relaxed);
+        assert!(now.saturating_sub(previous) < 3600);
     }
 }

@@ -479,7 +479,10 @@
       },
       "cloneDomainConflict": "This domain is already in use by another site.",
       "cloneNameSuffix": "copy",
-      "cloneFrom": "Clone from: {{domain}}"
+      "cloneFrom": "Clone from: {{domain}}",
+      "cloneSensitiveTitle": "Sensitive configuration will be copied",
+      "cloneSensitiveBody": "Certificates with their private keys, Basic Auth credentials, the OIDC cookie secret and visitor authorizations are copied to the clone in full. The OIDC callback still points at the source domain and must be re-registered for the new one.",
+      "cloneSensitiveAck": "I understand that cloning copies sensitive configuration."
     },
     "siteDetail": {
       "title": "Site",
@@ -1047,8 +1050,18 @@
       "typeLimitInvalid": "{{type}} cap must be a whole number of MiB between 1 and {{max}}.",
       "notEligible": "Not eligible",
       "purgeResult": "{{delivered}} edges notified now · {{queued}} queued for the next heartbeat",
-      "policyTitle": "Cache type policy",
-      "policyHint": "Five extension-based families with a per-family toggle, TTLs and extension list. Custom rules take precedence over the policy.",
+      "policyTitle": "Category cache presets",
+      "policyHint": "Five extension-based families with a per-family toggle, TTLs and extension list. Custom rules take precedence over the presets.",
+      "policyEditorShow": "Edit presets",
+      "policyEditorHide": "Hide presets",
+      "presetBadge": "Preset",
+      "presetNoExtensions": "No extensions",
+      "presetToRule": "Convert to rule",
+      "presetName": "{{category}} (preset)",
+      "presetConverted": "Converted to an explicit rule",
+      "presetConvertedDescription": "{{category}} is now an explicit rule; the original preset has been disabled.",
+      "presetConvertDisabled": "This category has no valid extensions to convert.",
+      "mergedOrderHint": "Explicit rules match first and category presets fall back. Presets only cover requests with a matching extension — API calls and extension-less paths need an explicit rule.",
       "policyEdgeTtl": "Edge TTL (s)",
       "policyBrowserTtl": "Browser TTL (s)",
       "policyExtensions": "File extensions (comma-separated)",
@@ -1386,7 +1399,14 @@
       "resetDescription": "This replaces the template with the built-in default.",
       "delete": "Delete page",
       "deleteTitle": "Delete error page",
-      "deleteDescription": "The site will fall back to the default page for this status code."
+      "deleteDescription": "The site will fall back to the default page for this status code.",
+      "scopeLabel": "Scope",
+      "scopeSite": "Site error pages (site)",
+      "scopeUnmatched": "Unmatched Host (unmatched_host)",
+      "scopeUnmatchedHint": "Unmatched Host means the request reached the gateway by bare IP + port, or its Host header matches no configured site.",
+      "scopeUnmatchedFallback": "If no page is configured here, the gateway keeps its default 404 response.",
+      "scopeUnmatchedVars": "These pages can use the variables below (host is HTML-escaped).",
+      "statusCode": "Status code"
     },
     "siteSettings": {
       "title": "Site Settings",

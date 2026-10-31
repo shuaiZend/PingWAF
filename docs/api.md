@@ -562,31 +562,79 @@ use answers `400 bad_request` (the message contains `"already in use"`).
 
 `domain` is required; `alternate_domains` and `name` are optional (the name
 defaults to `"<source name> copy"`). The copy is created inside one
-transaction: site SSL (certificate and protocol switches travel with the
-clone), the upstream pools and their nodes (with pool ids remapped to the
-new site), routes, the AI crawler policy, and the WAF / challenge / geo /
-bot-protection / rewrite / ip-access / cache / rate-limit configuration —
-the WAF part includes the site's **custom rules and their rule-group
-assignments**, copied rule-for-rule into the clone's own groups (a
-previously missing piece). The new site's status is **`paused`** — a
-clone that started serving immediately would silently double the source
-site's traffic.
+transaction and the clone starts **`paused`** — a clone that started serving
+immediately would silently double the source site's traffic.
 
-Two things are deliberately **not** carried over. The forwarded-header
-trust (`trust_proxy_headers`, `trusted_proxy_ranges`,
-`trusted_proxy_group_ids`, `trust_last_hop`) is reset to the defaults: it
-describes where the site sits, and inheriting it would let the clone read an
-`X-Forwarded-For` its own proxy path does not supply. Site basic-auth
-credentials are not copied at all — re-entering them keeps a password that
-has already circulated from becoming the clone's gate. Site OIDC is not
-copied either, for three reasons: the `redirect_url` (or the callback
-derived from the request's `Host`) is bound to the source hostname, so the
-provider would keep sending logins back to the source instead of the clone;
-two sites sharing `cookie_secret` and `cookie_name` across sibling
-subdomains covered by a wildcard `Domain` would share sessions (a login on
-one authenticates the other); and one client registered against two callback
-hosts is rejected outright by most identity providers. Register a fresh
-client per site instead.
+**What is copied** (each row re-keyed to the new site id):
+
+- Site settings, SSL protocol switches (`https_enabled`, TLS version bounds,
+  HSTS, mTLS switches) and the ACME contact settings on `site_ssl`.
+- Upstream pools (ids remapped), nodes and routes, path exceptions.
+- WAF / challenge / geo / bot-protection / rewrite / ip-access / cache /
+  rate-limit configuration and the AI crawler policy — including the site's
+  **custom rules and their rule-group assignments**, copied rule-for-rule into
+  the clone's own groups.
+- IP-group bindings (`ip_group_sites`): without them the clone would silently
+  lose group-based access rules and proxy-trust ranges.
+- mTLS material: the site's trust CAs and its issued client certificates
+  (client certificates are remapped to the clone's own CA rows; one that
+  references a CA outside the source site is skipped with a warning).
+- Certificates: every `site_certificates` row — including its `cert_pem` /
+  `key_pem` (the private key), its ACME configuration and its status — is
+  copied with a fresh id and belongs to the clone (reusing the source rows
+  would couple the two sites: deleting one would revoke the other's TLS).
+  The clone's `site_ssl.certificate_id` is remapped to the clone's own copy,
+  and the legacy inline PEM (`cert_pem`, `key_pem`, `issuer`, `expires_at`)
+  stays cleared so the managed row remains authoritative. If the source
+  selected a certificate it only had shared access to, the clone starts with
+  no selection and logs a warning; pick or link a certificate before enabling
+  it.
+- Certificate sharing: only the source site's **own** `site_certificate_links`
+  are copied, with the certificate id remapped to the clone's copy. A link
+  some *other* site holds on a source certificate is that site's
+  authorisation and never extends to the clone; a grant on a certificate
+  shared *into* the source from elsewhere is skipped with a warning — the
+  clone can use that certificate only after its owner links it explicitly.
+- Basic-auth credentials (`site_basic_auth`; the row stores them as
+  plaintext at rest).
+- OIDC single sign-on (`site_oidc`), including `cookie_secret` /
+  `cookie_name` and the `redirect_url`. The copied row is **disabled**: the
+  redirect URL still names the source host, so update the provider
+  registration (and the URL) before enabling it on the clone.
+- Visitor authorizations (`visitor_site_grants`).
+
+**Security note — sensitive data travels with the clone.** The clone carries
+everything above verbatim: certificate private keys, Basic Auth passwords,
+the OIDC cookie secret and visitor grants all become readable on the new
+site. ACME settings (account e-mail, DNS provider credentials) are copied too,
+so a clone that renews its certificate can update the **source's** DNS zone
+when both share the same provider credentials; review or clear them before
+enabling the clone. Treat the clone API like a secret-duplication operation. The console's
+clone dialog shows a warning and requires an explicit acknowledgement
+checkbox before it will send the request; API callers should apply the same
+care (the clone is created **paused**, so nothing serves until it is enabled
+deliberately). Two things still do not survive the copy unchanged:
+
+- Forwarded-header trust (`trust_proxy_headers`, `trusted_proxy_ranges`,
+  `trusted_proxy_group_ids`, `trust_last_hop`) is reset to the defaults: it
+  describes where the site sits, and inheriting it would let the clone read an
+  `X-Forwarded-For` its own proxy path does not supply.
+- The OIDC callback still names the source domain (`redirect_url`, or the
+  callback derived from the request `Host`), so the identity provider keeps
+  sending logins back to the source until the provider registration is
+  updated for the new hostname. If the two domains are sibling subdomains
+  under one wildcard `Domain`, the copied `cookie_secret` would also make
+  them share sessions — rotate the secret for the clone.
+
+**Pool references never survive as-is.** Nodes and routes point at pools by
+id, and the clone gets its own pool rows. A reference the mapping cannot
+resolve — legacy rows that predate pools, or a pool deleted from the source —
+is repointed at the clone's **default pool** (creating one if the source had
+none), never left pointing at a pool owned by the source site: that would
+render the row under a pool the clone does not own, and deleting the source
+site would cascade into the clone. The same rule applies to WAF rule groups
+(a rule referencing a group outside the source site drops the reference) and
+to client certificates (skipped rather than left on a foreign CA).
 
 **Response:** `201 Created` with the new `SiteResponse`.
 
@@ -1947,6 +1995,29 @@ Delete a rate limit rule.
 
 ## Cache
 
+Caching for a site is expressed two ways, and the REST API keeps them
+separate (the console merges them into one list — that is presentation only,
+the endpoints below are unchanged):
+
+- **Explicit cache rules** — `GET|POST /sites/{site_id}/cache-rules` and the
+  `PUT|DELETE /sites/{site_id}/cache-rules/{rule_id}` variants, matched by
+  `match_expression`. Explicit rules are evaluated **before** the category
+  presets below; first match wins.
+- **Category presets** — the extension-based policy on
+  `GET|PUT /sites/{site_id}/cache-settings` (`cache_type_policy`: five fixed
+  families `web_assets`, `image`, `media`, `other`, `html`, each with
+  `enabled`, TTLs and an `extensions` list). Presets compile into rules
+  behind the site's explicit rules on the data plane and match **only by
+  extension** — API endpoints and extension-less paths need an explicit rule.
+
+A site with only presets (no enabled explicit rule) still caches: the cache
+plugin is generated when an explicit rule is enabled *or* a preset family is
+enabled with a non-empty extension list. A "convert preset to rule" action in
+the console turns a preset into an explicit rule with the same extensions and
+TTLs — the generated expression looks like
+`http.request.uri.path matches "(?i)\.(?:png|jpg)$"` — and disables the
+preset so the same requests are not matched twice.
+
 ### GET /sites/{site_id}/cache-rules
 
 List cache rules for a site.
@@ -3241,15 +3312,46 @@ Delete a rewrite rule.
 A custom error page replaces the body of any response with a matching status
 code — including responses the edge itself produces (a WAF block, a rate limit,
 a paused site), not only ones that came from the origin. At most one page per
-status code, and the pages are global: every site is served the same templates.
-Administrators only, and edited from Settings in the dashboard.
+`(scope, status_code)` combination, and the pages are global: every site is
+served the same templates. Administrators only, and edited from Settings in
+the dashboard.
 
 A write pushes the new templates to every registered agent's next configuration
 update, so no per-site publish is involved.
 
+### Scopes
+
+Every error page carries a `scope`:
+
+| Scope | Serves | Status codes |
+|-------|--------|--------------|
+| `site` (default) | Error responses of **matched** sites — WAF blocks, rate limits, paused sites, origin errors | 400–599 |
+| `unmatched_host` | Requests whose `Host` header matches **no** configured site, e.g. someone reaching the gateway by bare IP + port, or an unknown/expired hostname | 404, 421, 503 only (the dashboard defaults to 404) |
+
+The two scopes serve disjoint request paths, so a `site` 404 page and an
+`unmatched_host` 404 page can coexist; creating a second page with the same
+`(scope, status_code)` answers `409 conflict`.
+
+`site` pages render with `request_id`, `error_code`, `error_message`,
+`site_name`, `client_ip`, `timestamp`, `method`, `path` (aliased as
+`request_path`), `host` (aliased as `request_host`) and `user_agent`.
+`unmatched_host` pages render with only `{{ host }}` (HTML-escaped before it
+enters the template, so it is always safe to interpolate) and
+`{{ request_id }}` — no request header is ever reflected into the template.
+A template that fails to render (or renders past 256 KiB) falls back to a
+plain-text body, so a typo cannot turn an error page into a `500`. Fallback
+responses carry `Cache-Control: no-store`.
+
+The `unmatched_host` fallback is generated on the edge only when at least one
+**enabled** page of that scope exists: it is a host-less, `weight: 0`
+catch-all location appended after every site location, so a host that does
+match a site still resolves to that site's location and is never affected.
+With no `unmatched_host` page configured the edge keeps its plain default 404.
+
 ### GET /error-pages
 
-List custom error pages (paginated), ordered by status code.
+List custom error pages (paginated), ordered by scope, then status code.
+Optional `?scope=site|unmatched_host` filters by scope.
 
 ### POST /error-pages
 
@@ -3259,6 +3361,7 @@ Create a custom error page.
 ```json
 {
   "status_code": 403,
+  "scope": "site",
   "name": "Access denied",
   "content_type": "text/html",
   "body_template": "<html><body><h1>Access Denied</h1><p>{{ request_id }}</p></body></html>",
@@ -3268,21 +3371,22 @@ Create a custom error page.
 
 | Field | Description |
 |-------|-------------|
-| `status_code` | 400-599, unique |
+| `status_code` | 400-599; for `unmatched_host` only 404, 421, 503 (otherwise `400 bad_request`) |
+| `scope` | `site` (default) or `unmatched_host`; anything else answers `400` |
 | `name` | 1-200 characters |
 | `content_type` | Defaults to `text/html` |
 | `body_template` | Tera template, must not be empty |
 | `enabled` | Defaults to `true`; a disabled page is skipped |
 
-`body_template` renders with `request_id`, `error_code`, `error_message`,
-`site_name`, `client_ip`, `timestamp`, `method`, `path` (aliased as
-`request_path`), `host` (aliased as `request_host`) and `user_agent`. A template
-that fails to render falls back to a plain-text body, so a typo cannot turn a
-`403` into a `500`.
+Duplicate `(scope, status_code)` answers `409 conflict` (message:
+`an error page for scope '<scope>' and status <code> already exists`).
 
 ### PUT /error-pages/{page_id}
 
-Update an error page; omitted fields keep their value.
+Update an error page; omitted fields keep their value. If `scope` or
+`status_code` changes, the new combination is validated as on create (an
+`unmatched_host` page keeps the 404/421/503 restriction), and a duplicate
+combination answers `409`.
 
 ### DELETE /error-pages/{page_id}
 

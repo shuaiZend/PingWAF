@@ -17,7 +17,7 @@
 //! Handles the three operating modes: Server (control plane only),
 //! Agent (data plane only), and AllInOne (both in a single process).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -50,8 +50,8 @@ use pingora::server;
 use pingora::server::configuration::Opt;
 use pingora::services::background::background_service;
 use pingwaf_agent::cache::{
-    CachedRules, HealthCheckConfig, OidcConfig, ResponseReplaceConfig,
-    RuleCache, SslConfig,
+    CachedRules, CustomErrorPage, HealthCheckConfig, OidcConfig,
+    ResponseReplaceConfig, RuleCache, SslConfig,
 };
 use pingwaf_agent::config::AgentConfig;
 use pingwaf_server::ServerConfig;
@@ -295,6 +295,13 @@ const REWRITE_PLUGIN_NAME: &str = "pingwaf:rewrite";
 /// the built-in PingWAF pages); plugin-generated responses such as WAF blocks
 /// answer early and never reach its response phase.
 const ERROR_PAGE_PLUGIN_NAME: &str = "pingwaf:error_page";
+
+/// Name of the generated location that answers hosts no site matches, and
+/// of the plugin behind it. It only exists when at least one enabled error
+/// page carries the `unmatched_host` scope; without one, unmatched hosts
+/// keep hitting pingap's plain 404 (`pingap-core/src/http_response.rs`).
+const UNMATCHED_HOST_LOCATION_NAME: &str = "pingwaf_unmatched_host";
+const FALLBACK_PLUGIN_NAME: &str = "pingwaf:fallback_page";
 
 /// Build a `PingapConfig` from the agent's cached site rules.
 ///
@@ -744,6 +751,24 @@ fn waf_body_stage_timeout_secs(site_read_timeout: Option<Duration>) -> i64 {
         .clamp(1, WAF_BODY_STAGE_MAX_SECS) as i64
 }
 
+/// Whether a site carries any cache policy at all: an enabled explicit rule,
+/// or an enabled extension-based category. The category alone must enable the
+/// plugin — it compiles into rules of its own, and the old check ignored it, so
+/// a site configured only through the classification presets never cached.
+fn site_has_cache_policy(site: &pingwaf_agent::cache::SiteRules) -> bool {
+    if site.cache_rules.iter().any(|rule| rule.enabled) {
+        return true;
+    }
+    site.cache_settings
+        .as_ref()
+        .and_then(|settings| settings.type_policy.as_ref())
+        .is_some_and(|policy| {
+            policy.iter().any(|category| {
+                category.enabled && !category.extensions.is_empty()
+            })
+        })
+}
+
 fn cached_rules_to_pingap_config(
     cached: &CachedRules,
     cache_dir: &Path,
@@ -759,7 +784,7 @@ fn cached_rules_to_pingap_config(
     let has_cache_rules = cached
         .sites
         .values()
-        .any(|site| site.cache_rules.iter().any(|rule| rule.enabled));
+        .any(|site| site_has_cache_policy(site));
 
     let mut upstreams: HashMap<String, UpstreamConf> = HashMap::new();
     let mut locations: HashMap<String, LocationConf> = HashMap::new();
@@ -1176,6 +1201,78 @@ fn cached_rules_to_pingap_config(
         }
     }
 
+    // Host fallback pages: only when at least one enabled error page carries
+    // the `unmatched_host` scope does the edge serve a branded page for hosts
+    // no site matches. The generated location is host-less, matches `/`,
+    // weighs 0 and has no upstream — the plugin short-circuits in the request
+    // phase, so no upstream is ever contacted. It is appended last, after
+    // every site location, and the weight ordering is stable
+    // (`try_init_server_locations` uses `sort_by_key`), so a host that does
+    // match a site still resolves to that site's location.
+    let mut unmatched_pages: BTreeMap<u16, &CustomErrorPage> = BTreeMap::new();
+    for site in cached.sites.values() {
+        for page in &site.error_pages {
+            if page.scope == "unmatched_host" && page.enabled {
+                // Every site bundle carries the same global list and the
+                // control plane enforces `(scope, status_code)` uniqueness,
+                // so the first page per status is the only one.
+                unmatched_pages
+                    .entry(page.status_code.min(u16::MAX as u32) as u16)
+                    .or_insert(page);
+            }
+        }
+    }
+    if !unmatched_pages.is_empty() {
+        let pages: Vec<toml::Value> = unmatched_pages
+            .values()
+            .map(|page| {
+                let mut item = toml::Table::new();
+                item.insert(
+                    "status_code".to_string(),
+                    toml::Value::Integer(i64::from(page.status_code)),
+                );
+                item.insert(
+                    "content_type".to_string(),
+                    toml::Value::String(page.content_type.clone()),
+                );
+                item.insert(
+                    "template".to_string(),
+                    toml::Value::String(page.body_template.clone()),
+                );
+                item.insert(
+                    "name".to_string(),
+                    toml::Value::String(page.name.clone()),
+                );
+                toml::Value::Table(item)
+            })
+            .collect();
+        let mut fallback_conf = PluginConf::new();
+        fallback_conf.insert(
+            "category".to_string(),
+            toml::Value::String("fallback_page".to_string()),
+        );
+        fallback_conf.insert("pages".to_string(), toml::Value::Array(pages));
+        plugins.insert(FALLBACK_PLUGIN_NAME.to_string(), fallback_conf);
+        locations.insert(
+            UNMATCHED_HOST_LOCATION_NAME.to_string(),
+            LocationConf {
+                // No upstream: the fallback_page plugin answers in the
+                // request phase, before any upstream selection.
+                upstream: None,
+                // No host restriction — this is the catch-all for hosts that
+                // matched no site.
+                host: None,
+                path: Some("/".to_string()),
+                plugins: Some(vec![FALLBACK_PLUGIN_NAME.to_string()]),
+                // Below every route and tied with (behind, by stable sort)
+                // the site `/` fallbacks.
+                weight: Some(0),
+                ..Default::default()
+            },
+        );
+        location_names.push(UNMATCHED_HOST_LOCATION_NAME.to_string());
+    }
+
     // A site with an ACME certificate but no usable upstream has no location
     // to proxy to, yet the certificate and its HTTP-01 challenge are still
     // valid work. Keep the certificate-only config so the challenge handler
@@ -1241,19 +1338,21 @@ fn cached_rules_to_pingap_config(
         },
     );
 
+    // A generated site must not accept an unbounded request body by default.
+    // Explicit per-location caps from the control plane still win.
+    for location in locations.values_mut() {
+        if location.client_max_body_size.is_none() {
+            location.client_max_body_size = "16MB".parse().ok();
+        }
+    }
+
     Some(PingapConfig {
         basic: BasicConf {
-            // Always a concrete value, never `None`: the pools that do not
-            // state their own `verify_cert` (anything created before the
-            // global switch existed, and anything that explicitly opted into
-            // "follow the default") resolve against it, and a `None` here
-            // would fall through to pingora's strict default and 502 every
-            // self-signed origin. An agent that has not synced yet keeps the
-            // historical lenient behaviour, which is also the control
-            // plane's default.
-            origin_verify_cert: Some(
-                cached.origin_verify_cert.unwrap_or(false),
-            ),
+            // Always a concrete value, never `None`: pools that do not state
+            // their own `verify_cert` resolve against it. The default is
+            // strict; a self-signed origin must be explicitly allowed by the
+            // control plane rather than silently trusted.
+            origin_verify_cert: Some(cached.origin_verify_cert.unwrap_or(true)),
             ..Default::default()
         },
         upstreams,
@@ -2300,6 +2399,152 @@ mod tests {
         cached
     }
 
+    fn error_page(
+        id: &str,
+        status_code: u32,
+        scope: &str,
+        enabled: bool,
+    ) -> CustomErrorPage {
+        CustomErrorPage {
+            id: id.to_string(),
+            status_code,
+            content_type: "text/html".to_string(),
+            body_template: format!(
+                "<p>{{{{ host }}}} {{{{ request_id }}}} {status_code}</p>"
+            ),
+            name: format!("page-{id}"),
+            enabled,
+            scope: scope.to_string(),
+        }
+    }
+
+    #[test]
+    fn no_unmatched_pages_means_no_fallback_location() {
+        let mut site = site_rules("site1", "a.example.com");
+        site.upstreams = vec![pool("", vec![peer("10.0.0.1:8080")])];
+        site.error_pages = vec![error_page("g1", 404, "site", true)];
+        let cached = one_site_cache(site);
+        let dir = tempfile::tempdir().unwrap();
+        let config =
+            cached_rules_to_pingap_config(&cached, dir.path()).unwrap();
+        assert!(
+            !config.locations.contains_key("pingwaf_unmatched_host")
+                && !config.plugins.contains_key("pingwaf:fallback_page"),
+            "without an unmatched_host page neither the location nor the \
+             plugin may exist"
+        );
+    }
+
+    #[test]
+    fn unmatched_pages_generate_weight_zero_fallback_location() {
+        let mut site = site_rules("site1", "a.example.com");
+        site.upstreams = vec![pool("", vec![peer("10.0.0.1:8080")])];
+        site.error_pages = vec![
+            error_page("u1", 503, "unmatched_host", true),
+            // Disabled pages must not reach the generated config.
+            error_page("u2", 421, "unmatched_host", false),
+        ];
+        let cached = one_site_cache(site);
+        let dir = tempfile::tempdir().unwrap();
+        let config =
+            cached_rules_to_pingap_config(&cached, dir.path()).unwrap();
+        let loc = config
+            .locations
+            .get("pingwaf_unmatched_host")
+            .expect("fallback location");
+        assert!(loc.upstream.is_none());
+        assert!(loc.host.is_none());
+        assert_eq!(Some(0), loc.weight);
+        assert_eq!(
+            Some(vec!["pingwaf:fallback_page".to_string()]),
+            loc.plugins
+        );
+        let conf = config.plugins.get("pingwaf:fallback_page").unwrap();
+        // Only the enabled page is carried, with its template intact.
+        let pages = conf.get("pages").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(1, pages.len());
+        assert_eq!(
+            503,
+            pages[0]
+                .get("status_code")
+                .and_then(|v| v.as_integer())
+                .unwrap()
+        );
+        assert!(
+            pages[0]
+                .get("template")
+                .and_then(|v| v.as_str())
+                .unwrap()
+                .contains("{{ host }}"),
+            "the control-plane template must pass through untouched"
+        );
+    }
+
+    #[test]
+    fn site_locations_outrank_the_unmatched_fallback() {
+        let mut site = site_rules("site1", "a.example.com");
+        site.upstreams = vec![pool("", vec![peer("10.0.0.1:8080")])];
+        site.error_pages = vec![error_page("u1", 404, "unmatched_host", true)];
+        let cached = one_site_cache(site);
+        let dir = tempfile::tempdir().unwrap();
+        let config =
+            cached_rules_to_pingap_config(&cached, dir.path()).unwrap();
+
+        // The fallback is registered on the servers and is ordered after the
+        // site's host-specific location. `try_init_server_locations` sorts
+        // by weight with a stable sort, so this order is the match order:
+        // a host that belongs to a site never reaches the fallback.
+        let http = config.servers.get("pingwaf").unwrap();
+        let names = http.locations.as_deref().unwrap();
+        let site_pos = names
+            .iter()
+            .position(|n| n == "site1_loc")
+            .expect("site location");
+        let fallback_pos = names
+            .iter()
+            .position(|n| n == "pingwaf_unmatched_host")
+            .expect("fallback location");
+        assert!(
+            site_pos < fallback_pos,
+            "site location must come before the fallback: {names:?}"
+        );
+        // The site location keeps its host restriction and its upstream.
+        let site_loc = config.locations.get("site1_loc").unwrap();
+        assert_eq!(Some("a.example.com".to_string()), site_loc.host);
+        assert!(site_loc.upstream.is_some());
+    }
+
+    #[test]
+    fn grpc_tls_and_other_settings_unaffected_by_fallback() {
+        // With and without an unmatched page, the unrelated knobs (TLS mode
+        // plumbing, cache absence, certificate handling) stay identical.
+        let mut site = site_rules("site1", "a.example.com");
+        site.upstreams = vec![pool("", vec![peer("10.0.0.1:8080")])];
+        let cached = one_site_cache(site);
+        let dir = tempfile::tempdir().unwrap();
+        let without =
+            cached_rules_to_pingap_config(&cached, dir.path()).unwrap();
+
+        let mut site2 = site_rules("site1", "a.example.com");
+        site2.upstreams = vec![pool("", vec![peer("10.0.0.1:8080")])];
+        site2.error_pages = vec![error_page("u1", 404, "unmatched_host", true)];
+        let mut cached2 = CachedRules::default();
+        cached2.sites.insert("site1".to_string(), Arc::new(site2));
+        let with = cached_rules_to_pingap_config(&cached2, dir.path()).unwrap();
+
+        // The only differences are the fallback location and its plugin.
+        assert!(
+            with.locations.len() == without.locations.len() + 1
+                && with.plugins.len() == without.plugins.len() + 1
+        );
+        for (name, server) in &without.servers {
+            let other = &with.servers[name];
+            assert_eq!(server.addr, other.addr);
+            assert_eq!(server.global_certificates, other.global_certificates);
+        }
+        assert!(with.locations.contains_key("pingwaf_unmatched_host"));
+    }
+
     fn enabled_cache_rule(disk_quota_mb: u32) -> AgentCacheRule {
         AgentCacheRule {
             id: "rule-1".to_string(),
@@ -3077,7 +3322,8 @@ mod tests {
         site.upstreams = vec![tls_pool];
 
         // A cache restored from the persisted snapshot carries `null`: the
-        // default must be lenient, not pingora's strict.
+        // default is now strict, so a self-signed origin must opt out
+        // explicitly in the control plane.
         let mut snapshot_pool =
             pool("pool-c", vec![peer("https://10.0.0.3:8443")]);
         snapshot_pool.sni = "origin.example.com".to_string();
@@ -3123,8 +3369,8 @@ mod tests {
 
         // A pool with no opinion of its own passes `null` through and is
         // resolved against the deployment default, which the generator
-        // states explicitly; `None` here would mean "let pingora decide",
-        // i.e. strict, and every self-signed origin would 502.
+        // states explicitly. The default is strict so a self-signed
+        // origin must opt out explicitly.
         assert_eq!(
             config.upstreams.get("pool-c").unwrap().verify_cert,
             None,
@@ -3132,8 +3378,8 @@ mod tests {
         );
         assert_eq!(
             config.basic.origin_verify_cert,
-            Some(false),
-            "the deployment default is always stated and defaults to lenient"
+            Some(true),
+            "the deployment default is always stated and defaults to strict"
         );
         assert_eq!(
             config.upstreams.get("pool-d").unwrap().verify_cert,
@@ -3971,5 +4217,55 @@ tls_key = \"NEWKEY\"
                 .and_then(|v| v.as_str()),
             Some("/tmp/acme")
         );
+    }
+    #[test]
+    fn cache_plugin_is_wired_by_the_type_policy_alone() {
+        let mut site = site_rules("site1", "a.example.com");
+        site.upstreams = vec![pool("", vec![peer("10.0.0.1:8080")])];
+        site.cache_settings = Some(pingwaf_agent::cache::SiteCacheSettings {
+            type_policy: Some(pingwaf_agent::cache::CacheTypePolicy {
+                web_assets: Some(pingwaf_agent::cache::CacheTypeCategory {
+                    enabled: true,
+                    edge_ttl_seconds: 3600,
+                    browser_ttl_seconds: 60,
+                    extensions: vec!["css".to_string()],
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let config = cached_rules_to_pingap_config(
+            &one_site_cache(site),
+            Path::new("/tmp/pingwaf-test-cache"),
+        )
+        .expect("config should build");
+        assert!(
+            config.plugins.contains_key(CACHE_PLUGIN_NAME),
+            "an enabled classification preset must enable the cache plugin"
+        );
+    }
+
+    #[test]
+    fn cache_plugin_is_absent_when_every_policy_category_is_disabled() {
+        let mut site = site_rules("site1", "a.example.com");
+        site.upstreams = vec![pool("", vec![peer("10.0.0.1:8080")])];
+        site.cache_settings = Some(pingwaf_agent::cache::SiteCacheSettings {
+            type_policy: Some(pingwaf_agent::cache::CacheTypePolicy {
+                web_assets: Some(pingwaf_agent::cache::CacheTypeCategory {
+                    enabled: false,
+                    edge_ttl_seconds: 3600,
+                    browser_ttl_seconds: 60,
+                    extensions: vec!["css".to_string()],
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let config = cached_rules_to_pingap_config(
+            &one_site_cache(site),
+            Path::new("/tmp/pingwaf-test-cache"),
+        )
+        .expect("config should build");
+        assert!(!config.plugins.contains_key(CACHE_PLUGIN_NAME));
     }
 }

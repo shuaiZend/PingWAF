@@ -887,6 +887,10 @@ message CustomErrorPage {
   string body_template = 4;       // Tera template
   string name = 5;
   bool enabled = 6;
+  // "site" (default, replaces error responses for matched sites) or
+  // "unmatched_host" (served when no location matches the Host). Empty on
+  // the wire means "site" — old agents keep the old behaviour.
+  string scope = 7;
 }
 
 message SslConfig {

@@ -256,6 +256,7 @@ mod cors;
 mod csrf;
 mod directory;
 mod error_page;
+mod fallback_page;
 mod forward_auth;
 #[cfg(feature = "geo")]
 mod geo_restriction;

@@ -2,6 +2,7 @@ import { apiClient } from './client'
 import type {
   ErrorPage,
   ErrorPageContentType,
+  ErrorPageScope,
   Page,
   UpsertErrorPageRequest,
 } from './types'
@@ -15,7 +16,10 @@ import type {
  * returned to the client, so operators can brand 403/429/5xx responses.
  */
 export const errorPagesApi = {
-  list: () => apiClient.get<Page<ErrorPage>>('/error-pages'),
+  list: (scope?: ErrorPageScope) =>
+    apiClient.get<Page<ErrorPage>>('/error-pages', {
+      query: scope ? { scope } : undefined,
+    }),
 
   upsert: (data: UpsertErrorPageRequest) =>
     apiClient.post<ErrorPage>('/error-pages', data),
@@ -56,6 +60,9 @@ export const ERROR_PAGE_SAMPLE: Record<string, string> = {
   request_path: '/admin/settings',
   request_host: 'example.com',
   client_ip: '203.0.113.44',
+  /** Short alias for `request_host`; the gateway HTML-escapes it on
+   * `unmatched_host` pages. Sampled as a bare-IP hit. */
+  host: '203.0.113.10',
   timestamp: new Date().toISOString(),
   site_name: 'Example Site',
   upstream_name: '',
@@ -191,6 +198,8 @@ export function defaultErrorPageTemplate(
 
 /** Friendly reason phrases for the default status codes. */
 export const ERROR_PAGE_MESSAGES: Record<number, string> = {
+  404: 'Not Found',
+  421: 'Misdirected Request',
   403: 'Forbidden',
   429: 'Too Many Requests',
   502: 'Bad Gateway',
@@ -213,7 +222,7 @@ export function renderErrorPageTemplate(
 
 export const errorPageKeys = {
   all: ['error-pages'] as const,
-  list: () => ['error-pages', 'list'] as const,
+  list: (scope?: ErrorPageScope) => ['error-pages', 'list', scope ?? 'all'] as const,
 }
 
 export default errorPagesApi

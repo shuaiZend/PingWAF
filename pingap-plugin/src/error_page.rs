@@ -486,7 +486,10 @@ fn build_site_pages(pages: &[CustomErrorPage]) -> Result<CompiledSitePages> {
         })?;
     let mut map: HashMap<u16, CompiledErrorPage> = HashMap::new();
     for (i, page) in pages.iter().enumerate() {
-        if !page.enabled {
+        // `unmatched_host` pages are served by the fallback location, not by a
+        // matched site. Both lists travel in the same bundle, so a site
+        // location must not pick the fallback template for the same status.
+        if !page.enabled || (!page.scope.is_empty() && page.scope != "site") {
             continue;
         }
         let Ok(status_code) = u16::try_from(page.status_code) else {
@@ -902,6 +905,7 @@ template = '{"error":"rate_limit_exceeded","request_id":"{{ request_id }}"}'
                                 .to_string(),
                                 name: "custom 503".to_string(),
                                 enabled: true,
+                                scope: "site".to_string(),
                             }],
                             ..Default::default()
                         }),
@@ -968,6 +972,7 @@ template = '{"error":"rate_limit_exceeded","request_id":"{{ request_id }}"}'
                                 body_template: "custom".to_string(),
                                 name: "custom 403".to_string(),
                                 enabled: true,
+                                scope: "site".to_string(),
                             }],
                             ..Default::default()
                         }),
@@ -1015,5 +1020,30 @@ template = '{"error":"rate_limit_exceeded","request_id":"{{ request_id }}"}'
                 .unwrap();
             assert_eq!(ResponsePluginResult::Unchanged, result);
         }
+    }
+    #[test]
+    fn site_pages_ignore_unmatched_host_scope() {
+        let page = |scope: &str, name: &str| CustomErrorPage {
+            id: name.to_string(),
+            status_code: 503,
+            content_type: "text/html".to_string(),
+            body_template: format!("<p>{name}</p>"),
+            name: name.to_string(),
+            enabled: true,
+            scope: scope.to_string(),
+        };
+        let (_, map) = build_site_pages(&[
+            page("unmatched_host", "fallback"),
+            page("site", "site-page"),
+        ])
+        .unwrap();
+        assert_eq!(map.get(&503).unwrap().name, "site-page");
+
+        let (_, only_fallback) =
+            build_site_pages(&[page("unmatched_host", "fallback")]).unwrap();
+        assert!(
+            only_fallback.is_empty(),
+            "a site location must not serve the unmatched-host template"
+        );
     }
 }

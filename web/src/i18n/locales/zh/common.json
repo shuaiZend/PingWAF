@@ -479,7 +479,10 @@
       },
       "cloneDomainConflict": "该域名已被其他站点使用。",
       "cloneNameSuffix": "副本",
-      "cloneFrom": "克隆自：{{domain}}"
+      "cloneFrom": "克隆自：{{domain}}",
+      "cloneSensitiveTitle": "敏感配置将被复制",
+      "cloneSensitiveBody": "证书与私钥、Basic Auth 凭据、OIDC cookie secret 及访客授权将被完整复制到克隆站点；OIDC 回调仍指向源域名，需为新域名重新登记。",
+      "cloneSensitiveAck": "我了解克隆会复制敏感配置。"
     },
     "siteDetail": {
       "title": "站点",
@@ -1047,8 +1050,18 @@
       "typeLimitInvalid": "{{type}} 上限必须是 1 到 {{max}} 之间的整数 MiB。",
       "notEligible": "不参与缓存",
       "purgeResult": "已实时通知 {{delivered}} 个边缘节点 · {{queued}} 个待下次心跳下发",
-      "policyTitle": "分类缓存策略",
-      "policyHint": "按文件扩展名分五类配置缓存（自定义每类的开关、时长与扩展名）。自定义规则优先于分类策略。",
+      "policyTitle": "分类缓存预设",
+      "policyHint": "按文件扩展名分五类配置缓存（自定义每类的开关、时长与扩展名）。显式规则优先于分类预设。",
+      "policyEditorShow": "编辑预设",
+      "policyEditorHide": "收起预设",
+      "presetBadge": "预设",
+      "presetNoExtensions": "无扩展名",
+      "presetToRule": "转为规则",
+      "presetName": "{{category}}（预设）",
+      "presetConverted": "已转为显式规则",
+      "presetConvertedDescription": "{{category}} 已转为显式规则，原分类预设已禁用。",
+      "presetConvertDisabled": "该分类没有有效扩展名，无法转换。",
+      "mergedOrderHint": "显式规则优先匹配，分类预设兜底；预设只覆盖带扩展名的请求——API 及无扩展名路径需显式规则。",
       "policyEdgeTtl": "边缘 TTL（秒）",
       "policyBrowserTtl": "浏览器 TTL（秒）",
       "policyExtensions": "文件扩展名（逗号分隔）",
@@ -1386,7 +1399,14 @@
       "resetDescription": "这将用内置默认模板替换当前模板。",
       "delete": "删除页面",
       "deleteTitle": "删除错误页",
-      "deleteDescription": "该状态码将回退到默认页面。"
+      "deleteDescription": "该状态码将回退到默认页面。",
+      "scopeLabel": "作用域",
+      "scopeSite": "站点错误页（site）",
+      "scopeUnmatched": "未匹配 Host（unmatched_host）",
+      "scopeUnmatchedHint": "未匹配 Host 指直接以 IP+端口访问网关，或请求的 Host 不对应任何已配置站点。",
+      "scopeUnmatchedFallback": "此处未配置页面时，网关保持默认 404 响应。",
+      "scopeUnmatchedVars": "此类页面可使用下方变量（host 已做 HTML 转义）。",
+      "statusCode": "状态码"
     },
     "siteSettings": {
       "title": "站点设置",

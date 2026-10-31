@@ -11,6 +11,7 @@ import {
   Play,
   Trash,
   X,
+  Warning,
   CopySimple,
 } from '@phosphor-icons/react'
 import { PageHeader } from '@/components/PageHeader'
@@ -117,6 +118,8 @@ export function SitesListPage() {
   const [cloneErrors, setCloneErrors] = useState<SiteFormErrors>({})
   /** Backend message for a domain conflict, shown as detail under the field. */
   const [cloneConflictDetail, setCloneConflictDetail] = useState<string | null>(null)
+  /** Cloning copies secrets, so the operator must acknowledge it explicitly. */
+  const [cloneSensitiveAck, setCloneSensitiveAck] = useState(false)
 
   const sitesQuery = useQuery({
     queryKey: siteKeys.list({ search: debouncedQuery || undefined }),
@@ -290,6 +293,7 @@ export function SitesListPage() {
     })
     setCloneErrors({})
     setCloneConflictDetail(null)
+    setCloneSensitiveAck(false)
     setCloneOpen(true)
   }
 
@@ -299,6 +303,7 @@ export function SitesListPage() {
     setCloneForm(emptyForm)
     setCloneErrors({})
     setCloneConflictDetail(null)
+    setCloneSensitiveAck(false)
   }
 
   const cloneSite = useMutation({
@@ -891,7 +896,12 @@ export function SitesListPage() {
             <Button variant="ghost" onClick={closeCloneDialog} disabled={clonePending}>
               {t('common.cancel')}
             </Button>
-            <Button variant="primary" onClick={submitClone} loading={clonePending}>
+            <Button
+              variant="primary"
+              onClick={submitClone}
+              loading={clonePending}
+              disabled={!cloneSensitiveAck}
+            >
               {t('pages.sites.clone')}
             </Button>
           </>
@@ -906,6 +916,22 @@ export function SitesListPage() {
               </span>
             </p>
           )}
+          <div className="flex items-start gap-2 rounded-md border border-warning/40 bg-warning/10 px-3 py-2.5">
+            <Warning weight="duotone" className="mt-px h-4 w-4 shrink-0 text-fg-warning" />
+            <div className="min-w-0 text-[13px] leading-relaxed text-fg">
+              <p className="font-medium">{t('pages.sites.cloneSensitiveTitle')}</p>
+              <p className="mt-1">{t('pages.sites.cloneSensitiveBody')}</p>
+            </div>
+          </div>
+          <label className="flex items-start gap-2.5 text-[13px]">
+            <input
+              type="checkbox"
+              className="mt-0.5 rounded border-border accent-brand"
+              checked={cloneSensitiveAck}
+              onChange={(e) => setCloneSensitiveAck(e.target.checked)}
+            />
+            <span>{t('pages.sites.cloneSensitiveAck')}</span>
+          </label>
           {cloneErrors.top && (
             <p
               role="alert"

@@ -303,11 +303,18 @@ fn decompress(headers: &[(String, String)], body: &[u8]) -> Option<Vec<u8>> {
         .find(|(name, _)| name.eq_ignore_ascii_case("content-encoding"))
         .map(|(_, value)| value.as_str())?;
 
-    let mut layers: Vec<&str> = raw
+    let layers: Vec<&str> = raw
         .split(',')
         .map(str::trim)
         .filter(|token| !token.is_empty())
         .collect();
+    // A legitimate request uses at most one or two encodings. More layers
+    // turn a tiny wire body into repeated megabyte decodes; reject rather
+    // than expanding.
+    if layers.len() > 4 {
+        return None;
+    }
+    let mut layers = layers;
     // Applied last on the wire, undone first.
     layers.reverse();
 

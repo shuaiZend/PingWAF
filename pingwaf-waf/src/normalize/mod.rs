@@ -253,7 +253,7 @@ pub fn normalize_request<'a>(
             // `field: false` blob and a single SQLi/XSS hit only scored 2.
             if let Some(boundary) = multipart_boundary(content_type) {
                 let delimiter = format!("--{boundary}");
-                for part in text.split(&delimiter) {
+                for part in text.split(&delimiter).take(MAX_MULTIPART_PARTS) {
                     let part = part.strip_prefix("\r\n").unwrap_or(part);
                     if part.is_empty() || part.starts_with("--") {
                         continue;
@@ -280,6 +280,19 @@ pub fn normalize_request<'a>(
                     let content =
                         content.strip_suffix("\r\n").unwrap_or(content);
                     let content = content.strip_suffix('\n').unwrap_or(content);
+                    // Bound the decode work per part as well: the global
+                    // truncation below caps the scan surface, but decoding a
+                    // 100 MB textual part first would already have cost the
+                    // memory. A long tail is a binary upload, not form input.
+                    let content = if content.len() > MAX_DECODED_VALUE_LEN {
+                        let mut end = MAX_DECODED_VALUE_LEN;
+                        while end > 0 && !content.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        &content[..end]
+                    } else {
+                        content
+                    };
                     decoded_values.push(DecodedValue {
                         source: ValueSource::Body,
                         name: multipart_part_name(head),
@@ -359,6 +372,20 @@ pub fn normalize_request<'a>(
 
     expand_base64(&mut decoded_values, max_decode_layers, decode_escapes);
     expand_b64_substrings(&mut decoded_values, decode_escapes);
+
+    // Bound the total scan surface, not just individual parser inputs. A
+    // 64 KiB query or a base64-expanded form can otherwise create thousands of
+    // values (and thousands of AC/regex passes) from one small request.
+    decoded_values.truncate(MAX_DECODED_VALUES);
+    for value in &mut decoded_values {
+        if value.decoded.len() > MAX_DECODED_VALUE_LEN {
+            let mut end = MAX_DECODED_VALUE_LEN;
+            while end > 0 && !value.decoded.is_char_boundary(end) {
+                end -= 1;
+            }
+            value.decoded = Cow::Owned(value.decoded[..end].to_string());
+        }
+    }
 
     NormalizedRequest {
         method,
@@ -497,7 +524,7 @@ fn parse_query<'a>(
     // cut classic command-injection payloads (`cmd=;cat /etc/passwd`) into an
     // empty value plus a name-only fragment, hiding the attack from the
     // detectors.
-    for pair in query.split('&') {
+    for pair in query.split('&').take(MAX_QUERY_PARAMS) {
         if pair.is_empty() {
             continue;
         }
@@ -654,6 +681,14 @@ fn parse_form_body(
 const JSON_MAX_DEPTH: usize = 6;
 const JSON_MAX_VALUE_LEN: usize = 4096;
 const JSON_MAX_VALUES: usize = 64;
+
+/// Hard caps for the query/decoded scan surface. These are deliberately
+/// independent of the wire body cap: one 64 KiB query can otherwise expand
+/// into thousands of independently scanned values.
+const MAX_QUERY_PARAMS: usize = 256;
+const MAX_DECODED_VALUES: usize = 2048;
+const MAX_DECODED_VALUE_LEN: usize = 8 * 1024;
+const MAX_MULTIPART_PARTS: usize = 64;
 
 /// A JSON-looking body: JSON content type or an object/array opening brace
 /// after leading whitespace. The sniff only *enables* the parse — a parse
@@ -1468,6 +1503,55 @@ mod tests {
             .decoded_values
             .iter()
             .any(|value| value.field && value.name == "upload"));
+    }
+
+    #[test]
+    fn multipart_parts_are_bounded() {
+        // More parts than the cap must not create more than the cap of typed
+        // fields; the excess is covered by the blob scan only.
+        let mut body = String::new();
+        for i in 0..(MAX_MULTIPART_PARTS + 16) {
+            body.push_str(&format!(
+                "--X\r\nContent-Disposition: form-data; name=\"f{i}\"\r\n\r\nv{i}\r\n"
+            ));
+        }
+        body.push_str("--X--\r\n");
+        let headers = vec![(
+            "content-type".to_string(),
+            "multipart/form-data; boundary=X".to_string(),
+        )];
+        let req = normalize_request(
+            "POST",
+            "/upload",
+            "",
+            &headers,
+            Some(body.as_bytes()),
+            3,
+            false,
+        );
+        let fields = req
+            .decoded_values
+            .iter()
+            .filter(|value| value.field && value.name.starts_with('f'))
+            .count();
+        assert!(fields <= MAX_MULTIPART_PARTS);
+        assert!(fields > 0);
+    }
+
+    #[test]
+    fn decoded_values_and_lengths_are_bounded() {
+        // A huge query must not explode into unbounded scan values; every
+        // surviving value is capped at MAX_DECODED_VALUE_LEN.
+        let query = (0..MAX_QUERY_PARAMS * 4)
+            .map(|i| format!("k{i}={}", "a".repeat(200)))
+            .collect::<Vec<_>>()
+            .join("&");
+        let req = normalize_request("GET", "/", &query, &[], None, 3, false);
+        assert!(req.decoded_values.len() <= MAX_DECODED_VALUES);
+        assert!(req
+            .decoded_values
+            .iter()
+            .all(|v| v.decoded.len() <= MAX_DECODED_VALUE_LEN));
     }
 
     #[test]

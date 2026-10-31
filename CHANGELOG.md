@@ -8,7 +8,7 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
-## [Unreleased]
+## [PingWAF 0.32.4] — 2026-11-01
 
 ### Added
 
@@ -25,12 +25,135 @@ verbatim for reference and attribution, and is not maintained here.
   `PINGWAF_TAG`, the four host-port variables, `PINGWAF_TLS_SANS` and
   `TLS_ENABLED`, matching `docker-compose.yml`.
 
+- **Unmatched-Host fallback error pages.** Error pages gain a `scope`
+  (`site`, the historic default, or `unmatched_host`; migration 87 moves the
+  unique key to `(scope, status_code)`). A page in the `unmatched_host` scope
+  answers requests whose `Host` header matches no configured site — probes at
+  the bare IP + port, stale DNS, unknown hostnames — instead of the gateway's
+  plain default 404. API: `GET /error-pages?scope=` filters by scope,
+  `POST/PUT` accept `scope`, `unmatched_host` is restricted to 404/421/503
+  (other codes `400`) and a duplicate `(scope, status_code)` answers `409`.
+  Data plane: only when at least one enabled `unmatched_host` page exists
+  does the edge generate a host-less, `weight: 0` catch-all location with a
+  `fallback_page` plugin, appended after every site location — so matched
+  sites are never affected, and with no page configured the default 404
+  stays. These templates render only `{{ host }}` (HTML-escaped before it
+  enters the template) and `{{ request_id }}`, and responses carry
+  `Cache-Control: no-store`; a template that fails to render falls back to a
+  plain-text body. The console Settings → Error pages gains a
+  "Site error pages / Unmatched Host" scope toggle with per-scope editing.
+
 ### Changed
+
+- **Site clones are now complete.** The clone endpoint previously dropped
+  several site-scoped tables silently: path exceptions, IP-group bindings
+  (`ip_group_sites` — losing them also lost group-based access rules and
+  proxy-trust ranges) and mTLS trust anchors plus their client certificates
+  now travel with the clone (client certificates are remapped to the clone's
+  own CA rows). A node or route that referenced a pool missing from the
+  source (legacy data, deleted pool) kept a dangling reference; it is now
+  repointed at the clone's default pool (created if needed) instead of
+  keeping a pool id owned by the source site — same rule for WAF rule groups
+  and client certificates referencing a foreign CA.
+  **The clone now copies the sensitive tables too** — every site-scoped
+  table travels with it, including `site_certificates` (with `cert_pem` /
+  `key_pem`, ACME configuration and status; every row gets a fresh id owned
+  by the clone, and `site_ssl.certificate_id` is remapped to the clone's
+  copy while the legacy inline PEM stays cleared), the source site's own
+  `site_certificate_links` (remapped; certificates shared *into* the source
+  keep their original id and are not cloned), `site_basic_auth` (plaintext
+  at rest), `site_oidc` (including `cookie_secret` — the callback still
+  names the source domain, so the identity-provider registration must be
+  updated before the clone is enabled; rotate the secret when the two
+  domains are sibling subdomains under one wildcard) and
+  `visitor_site_grants`. Cloning is a secret-duplication decision: the
+  console's clone dialog warns and requires an explicit acknowledgement
+  checkbox, the clone is still created **paused**, and forwarded-header
+  trust (`trust_proxy_headers`, trusted proxy ranges/groups, trust-last-hop)
+  is still reset to the defaults. A coverage test
+  (`CLONE_COPIED_TABLES` vs `config_catalog::SITE_TABLES`) fails the build
+  when a new site-scoped table is added without a copy/skip decision — the
+  intentionally-skipped list is now empty. See `docs/api.md` for the
+  security notes.
+- **Dependency and tooling housekeeping.** `maxminddb` (login geolocation)
+  bumped to 0.32; CI's `dorny/paths-filter` bumped to v4; a new analysis-only
+  `dhat` cargo feature (optional dependency, off by default) swaps mimalloc
+  for dhat's instrumented allocator to emit `dhat-heap.json` for heap
+  profiling — never enable it in a shipped binary. Note: the hardening work
+  from the stalled `fix/robustness-wave1` branch was **hand-ported onto
+  `main`** (behavior changes, see the next entry); the further tokio bump on
+  `dependabot/cargo/cargo-minor-patch-3a28fe187f` remains unmerged and
+  `main` still pins tokio to exactly 1.53.3 (1.54.0 is incompatible, see the
+  pin comment in `Cargo.toml`).
+- **Robustness wave 1, hand-ported (deliberate behavior changes).**
+  - **WAF.** Configuration-controlled expressions are bounded before
+    parsing: 16 KiB source, 512 tokens, 64 nesting levels
+    (`pingwaf-waf/src/rules/expression.rs`). The normalizer caps query
+    parameters at 256, decoded values at 2,048 (each at most 8 KiB) and
+    multipart parts at 64. A request body with more than four
+    `Content-Encoding` layers is rejected instead of being decompressed. The
+    ACME HTTP-01 exemption now requires a plausible token shape — a
+    non-empty, ≤128-character alphanumeric/`-`/`_` token under
+    `/.well-known/acme-challenge/` — so a bare prefix no longer releases
+    traversal paths like `/.well-known/acme-challenge/../../admin` from rule
+    evaluation. Out-of-range stored values are clamped instead of trusted:
+    `anomaly_threshold` (0 or above 10,000 falls back to the 40 default) and
+    `max_body_size` (clamped to 1 B – 8 MiB).
+  - **Proxy.** Generated public listeners (`:80`/`:443`) without explicit
+    settings get 60s downstream read/write timeouts, a 120s HTTP/2 idle
+    timeout and a 1000-request keep-alive limit (internal listeners keep
+    Pingora's defaults). The retry budget is an explicit **3** (Pingora's
+    built-in default was 16) and **non-idempotent requests are never
+    retried** — only `GET`/`HEAD`/`OPTIONS`/`TRACE` consume a retry. The
+    generated configuration states `origin_verify_cert = true` (strict)
+    when the deployment does not state a value — deployments with
+    self-signed origins and no saved global switch will see `502`s until
+    verification is turned off explicitly (see `docs/deployment.md` upgrade
+    notes). Generated locations default to `client_max_body_size = 16MB`
+    unless the control plane sets an explicit cap. (The admin-route
+    large-upload exemption already existed on `main`; it was not re-ported.)
+  - **Control plane.** The auth middleware reuses the `AuthUser` already
+    resolved into the request extensions instead of resolving the token
+    again per handler. The heartbeat-side sweeps (samples, offline agents,
+    metrics, stale-pending certificates) are throttled with a
+    compare-and-swap on the last-run timestamp — the old `swap`-based
+    throttle could double-run after a clock step backwards. `mark_offline`
+    keeps its freshness guard in the `WHERE` clause, so a stream ending
+    after a fast reconnect can no longer resurrect status values a newer
+    heartbeat has already written.
+- **Cache presets enable caching on their own; one cache list in the
+  console.** The data plane's cache-plugin gate only looked at explicit
+  cache rules, so a site configured solely through the extension-based
+  category presets never cached; the gate now also fires when a preset
+  family is enabled with a non-empty extension list
+  (`src/pingwaf.rs`, `site_has_cache_policy`). Explicit rules still evaluate
+  before the presets (first match wins). The console's site cache page
+  merges explicit rules and the five category presets into one list —
+  explicit rules first, presets after with a read-only badge and a collapsed
+  edit area — and presets offer **Convert to rule**: it creates an explicit
+  `http.request.uri.path matches "(?i)\.(?:ext|…)$"` rule with the preset's
+  extensions and TTLs and disables the preset so the same requests are not
+  matched twice. The REST API is unchanged (`cache-rules` +
+  `cache-settings`); the merged list is presentation only. Presets still
+  match by extension only — API endpoints and extension-less paths need an
+  explicit rule.
 
 - **Installation guidance points at the official site.** README, `README_zh`,
   `docs/deployment.md` and `docs/quick-start.md` lead with the one-command
   Compose install and link to <https://www.pingwaf.com/install/>; the binary
   script install stays as the alternative for systemd-managed hosts.
+
+### Fixed
+
+- **Migration 87 is registered; migration 88 adds heartbeat indexes.**
+  `m20240101_000087_error_page_scope` (the error-page `scope` migration)
+  existed as a file but was never listed in the migration runner, so
+  installations that predate it — including fresh installs — never ran it.
+  It is registered now, and the new
+  `m20240101_000088_heartbeat_indexes` adds the indexes the heartbeat
+  retention sweeps and liveness queries (including the stale-pending
+  certificate sweep) need. Both run automatically on the next startup and
+  are additive — no existing column changes shape and no row is deleted.
 
 ## [PingWAF 0.32.3] — 2026-10-31
 

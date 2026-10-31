@@ -106,5 +106,6 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+pretty_assertions = { workspace = true }
 # Drives `ServiceExt::oneshot` requests through middleware in unit tests.
 tower = { workspace = true }

@@ -363,10 +363,13 @@ that opens a connection, completes the handshake and then goes quiet holds a
 worker connection for as long as the read timeout (or forever, if read timeout
 is unset).
 
-Generated public listeners default to 60s read/write. The proxy also applies a
-60s request-phase fallback when a generic listener leaves these keys unset;
-the initial request-line/header read still follows the listener setting, so
-configure these keys explicitly for untrusted traffic. A site can override the
+Generated public listeners (`:80` / `:443`) default to 60s read/write, a
+120s HTTP/2 idle timeout and a 1000-request keep-alive limit when the
+configuration leaves these keys unset — an explicit value always wins, and
+internal/generic listeners keep Pingora's own "unset" behaviour. The proxy
+also applies a 60s request-phase fallback when a generic listener leaves
+these keys unset; the initial request-line/header read still follows the
+listener setting, so configure these keys explicitly for untrusted traffic. A site can override the
 post-routing body/response budget under **Site → Basic → Downstream timeout**
 (1–3600 seconds, default 60). The override applies after the site's Location
 matches, so the request line/header phase still uses the listener value; on an
@@ -541,16 +544,22 @@ three-level cascade — the first level that is set wins:
    pool of the site; `null` (no site preference) falls through to the global
    default.
 3. **Global default** — **Settings → Origin TLS verification** in the
-   dashboard, or `PUT /api/v1/settings/origin`. The console writes
-   `verify_cert: false` so that self-signed and internal-PKI origins keep
-   working; set it to `true` when every origin presents a publicly trusted
-   certificate. The value reaches the agents through the next rule bundle, so
-   no restart is needed.
+   dashboard, or `PUT /api/v1/settings/origin`. When neither the pool nor the
+   site sets a value, the data plane treats the origin certificate as **must
+   verify** (strict): self-signed and internal-PKI origins need `false` here
+   (or at site/pool level) to keep working. The value reaches the agents
+   through the next rule bundle, so no restart is needed.
 
 Accepting an unvalidated origin certificate means an attacker who can
 intercept the connection to the origin can impersonate it. Prefer issuing the
 origin a certificate from a CA the proxy trusts (a private CA works: upload it
 as the pool's `ca` file) and enabling verification, rather than disabling it.
+
+When the deployment does not state a value at any of the three levels, the
+agent's generated configuration now states **strict verification**
+(`origin_verify_cert = true`) instead of leaving the setting unset — see the
+[upgrade notes](#upgrade-procedure) for the 502 this can produce on
+self-signed-origin deployments.
 
 ### Control-Plane Certificate (dashboard)
 
@@ -737,6 +746,13 @@ pg_dump -U pingwaf -d pingwaf -F c -f pingwaf_backup_$(date +%Y%m%d).dump
 # Restore
 pg_restore -U pingwaf -d pingwaf --clean pingwaf_backup_20240101.dump
 ```
+
+> **The database is a secret store.** `site_certificates` holds certificate
+> **private keys**, `site_basic_auth` holds credentials in plaintext,
+> `site_oidc` holds cookie secrets, and clones copy all of that material to
+> every site they were created from — one compromised backup exposes the
+> secrets of an entire site family. Encrypt backups at rest and restrict
+> read access like any other secret store.
 
 ### Configuration Backup
 
@@ -942,6 +958,41 @@ settings certificate picker; API: `POST /sites/{id}/certificate-links`). Share
 only to sites you trust — a linked site serves the same hostnames. Unlinking
 is refused while the certificate is the site's current TLS selection; clear or
 replace the selection first.
+
+**Migrations 87/88: error-page scope registration and heartbeat indexes.**
+Migration 88 (`m20240101_000088_heartbeat_indexes`) adds the indexes the
+heartbeat retention sweeps and liveness queries need. It also fixes a
+packaging miss: migration 87 (`m20240101_000087_error_page_scope`, the
+error-page `scope` migration) existed but was never registered in the
+migration runner, so it now runs on the next startup of installations that
+never received it. Both are additive; migrations run automatically on
+startup.
+
+**Origin verification defaults to strict when unset — self-signed origins
+return 502.** The agent's generated configuration now states
+`origin_verify_cert = true` (verify) when the deployment does not state a
+value, instead of leaving it unset (which the proxy read as "do not
+verify"). A deployment whose origins present self-signed or private-CA
+certificates **and** whose global origin-verification switch was never saved
+will see HTTPS-origin requests fail with `502` after upgrading. Fix it at
+whichever level fits: the deployment-wide switch
+(**Settings → Origin TLS verification**, or
+`PUT /api/v1/settings/origin`), the site's `origin_verify_cert` (site SSL
+page, origin certificate check card), or the per-pool `verify_cert` — an
+explicit value at any level wins over the new default.
+
+**Retries changed.** The proxy's retry ceiling is now an explicit **3**
+(Pingora's built-in default was 16), and **non-idempotent requests are never
+retried**: only `GET`, `HEAD`, `OPTIONS` and `TRACE` consume a retry, so a
+failed connection on a `POST`/`PUT`/`PATCH`/`DELETE` fails immediately
+instead of being replayed and possibly duplicating a side effect.
+
+**Cloning copies sensitive configuration.** Site clones now copy
+certificates (with private keys), Basic Auth credentials, the OIDC cookie
+secret and visitor grants — see [docs/api.md](./api.md) for the exact list
+and the console's acknowledgement flow. Anyone who can call the clone API
+(or use the console's Clone action) can duplicate that material onto a site
+they can create; review write access before upgrading.
 
 ### Rolling Upgrade (Distributed)
 

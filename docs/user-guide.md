@@ -64,6 +64,52 @@ Point your domain's DNS to the PingWAF server:
 
 See [SSL Certificate Management](#ssl-certificate-management) below.
 
+### Cloning a Site
+
+Duplicate an existing site's whole configuration onto a new domain with the
+**Clone** action on the site's row in **Sites** (API:
+`POST /api/v1/sites/{id}/clone`). The clone is created **paused**, so enabling
+it is always an explicit decision — it can never silently start doubling the
+source site's traffic.
+
+The clone receives a full copy of the source's configuration: origin pools,
+nodes and routes, WAF / challenge / geo / bot / IP-access / cache / rate-limit
+settings, custom rules with their rule groups, path exceptions, AI crawler
+policy, IP-group bindings and mTLS trust anchors plus client certificates —
+and, unlike earlier releases, **certificates (with their private keys),
+certificate-sharing links, Basic Auth credentials, the OIDC login
+configuration (including its cookie secret) and visitor authorizations**.
+TLS protocol switches and ACME contact settings carry over too.
+
+> ⚠️ **Cloning copies sensitive configuration.** Certificate private keys,
+> Basic Auth passwords, the OIDC cookie secret and visitor grants all become
+> readable on the new site. The console's clone dialog warns about this and
+> requires an explicit acknowledgement checkbox before it will send the
+> request — treat the Clone action as a secret-duplication decision. The
+> clone is created **paused**, so nothing serves until you enable it
+> deliberately.
+
+Two things need attention before enabling the clone:
+
+- **OIDC must be re-registered.** The callback (`redirect_url`, or the one
+  derived from the request `Host`) still points at the source domain, so the
+  identity provider keeps redirecting logins there. Register the new callback
+  with the provider first. If the two domains are sibling subdomains under
+  one wildcard `Domain`, also rotate `cookie_secret` — a shared secret would
+  make the two sites share sessions.
+- **Forwarded-header trust is reset** (`trust_proxy_headers`, trusted proxy
+  ranges, trusted header, last-hop trust): it describes where the site sits,
+  and the clone may sit somewhere else. Re-enable it if the clone is behind
+  the same proxy path.
+
+One detail to know when auditing a clone: any node or route whose upstream
+pool no longer exists on the source (or predates pools) is repointed at the
+clone's **default pool** instead of keeping a dangling reference. The clone's
+certificate selection points at the clone's own certificate copy; a
+certificate the source had *shared in* from another site is not cloned, so
+such a selection is dropped until you link the certificate and choose it
+again.
+
 ## Origin Pools & Routes
 
 Open **Sites → [your site] → Basic** to manage origin pools, load balancing,
@@ -345,6 +391,29 @@ Sites → [site] → Cache Rules
 | Browser TTL | `Cache-Control: max-age` sent to clients |
 | Status | `enabled` or `disabled` |
 
+### Rule priority and presets
+
+The cache page shows **one list** with two layers:
+
+- **Explicit rules** (plain rows) are evaluated first, in list order.
+- **Category presets** — rows with a *Preset* badge — are the five fixed
+  families (`web_assets`, `image`, `media`, `other`, `html`) edited under
+  *Edit presets* (collapsed by default). They are read-only in the list,
+  evaluated after every explicit rule, and match **only by file extension**.
+  First match wins.
+
+Presets alone are enough: a site with no explicit rule still caches as long
+as a preset family is enabled and lists extensions. But presets never match
+API endpoints or extension-less paths — cover those with an explicit rule.
+The whole layer also requires the deployment-wide cache master switch
+(**Settings → Cache**, administrators) to be on.
+
+**Convert to rule.** A preset row offers *Convert to rule*: it creates an
+explicit rule with the same extensions and TTLs — the generated expression
+looks like `http.request.uri.path matches "(?i)\.(?:png|jpg)$"` — and
+disables the preset so the same requests are not matched twice. Use it when
+a preset is almost right but needs conditions the preset cannot express.
+
 ### Cache Purging
 
 Purge cached content immediately:
@@ -552,6 +621,34 @@ Sites → [site] → Error Pages → Add
 | Status code | HTTP status to customize (e.g., 403, 429, 502) |
 | Content type | `html`, `json`, or `text` |
 | Body | Custom response content |
+
+### Unmatched Host error pages
+
+```
+Settings → Error pages → Unmatched Host (unmatched_host)
+```
+
+Error pages carry a **scope**. `site` (the default) pages replace error
+responses of sites that matched; `unmatched_host` pages answer requests that
+reached the gateway but whose `Host` header matched **no** configured site —
+someone poking at the bare IP + port, or a hostname that was never configured
+(or has since been removed).
+
+When to use one: to give scanners, stale DNS entries and direct-IP probes a
+branded answer instead of the gateway's plain default 404.
+
+- **Status codes**: an `unmatched_host` page may only use `404`, `421` or
+  `503` (the dashboard defaults to 404); other codes are rejected. One page
+  per status, per scope.
+- **Template variables**: only `{{ host }}` (the requested Host, HTML-escaped
+  before it reaches the template) and `{{ request_id }}`. No request header is
+  ever reflected into the template. Responses are sent with
+  `Cache-Control: no-store`.
+- **Default behavior**: with no enabled `unmatched_host` page configured, the
+  gateway keeps its plain default 404 — configuring one is opt-in.
+- **Matched sites are never affected**: the fallback location sits below
+  every site's own locations, so a request for a configured hostname resolves
+  to that site as usual.
 
 ## Log Management
 

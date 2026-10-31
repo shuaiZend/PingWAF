@@ -2198,6 +2198,14 @@ export const ERROR_PAGE_CONTENT_TYPE_LABELS: Record<string, string> = {
 /** Status codes the console offers a custom page for out of the box. */
 export const ERROR_PAGE_STATUS_CODES = [403, 429, 502, 503, 504] as const
 
+/**
+ * Page scope: `site` pages serve errors for configured sites (default);
+ * `unmatched_host` pages are the fallback when the Host header matches no
+ * site or a client reaches the gateway by bare IP. Upsert is keyed on
+ * `(scope, status_code)`.
+ */
+export type ErrorPageScope = 'site' | 'unmatched_host'
+
 export interface ErrorPage {
   id: string
   status_code: number
@@ -2205,6 +2213,7 @@ export interface ErrorPage {
   content_type: ErrorPageContentType | string
   body_template: string
   enabled: boolean
+  scope?: ErrorPageScope
   created_at: string
   updated_at: string
 }
@@ -2215,6 +2224,7 @@ export interface UpsertErrorPageRequest {
   content_type?: ErrorPageContentType | string
   body_template?: string
   enabled?: boolean
+  scope?: ErrorPageScope
 }
 
 /* ── Bot protection ───────────────────────────────────────────────── */

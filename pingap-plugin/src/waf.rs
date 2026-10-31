@@ -2091,6 +2091,20 @@ struct DeferredBody {
 pub(crate) const ACME_HTTP_01_PATH_PREFIX: &str =
     "/.well-known/acme-challenge/";
 
+/// Returns true only for a syntactically plausible ACME HTTP-01 token.
+/// A prefix-only exemption would release traversal and arbitrary payloads;
+/// the CA token is base64url-ish and never contains `/`, `.` or `%`.
+fn is_acme_challenge_path(path: &str) -> bool {
+    let Some(token) = path.strip_prefix(ACME_HTTP_01_PATH_PREFIX) else {
+        return false;
+    };
+    !token.is_empty()
+        && token.len() <= 128
+        && token
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 /// Hard ceiling for the withheld-body stage, applied on top of the
 /// configured stage timeout: a slow-drip client must not pin an upstream
 /// connection longer than this even with a generous read timeout.
@@ -3611,8 +3625,12 @@ impl TryFrom<&PluginConf> for WafPlugin {
         let paranoia_level =
             (get_int_conf_or_default(value, "paranoia_level", 2) as u8)
                 .clamp(1, 4);
-        let anomaly_threshold =
-            get_int_conf_or_default(value, "anomaly_threshold", 40) as u32;
+        let threshold = get_int_conf_or_default(value, "anomaly_threshold", 40);
+        let anomaly_threshold = if threshold > 0 {
+            threshold.min(10_000) as u32
+        } else {
+            40
+        };
         let detections = get_str_slice_conf(value, "detections");
         let monitor_categories = parse_monitor_categories(&get_str_slice_conf(
             value,
@@ -3630,8 +3648,11 @@ impl TryFrom<&PluginConf> for WafPlugin {
             .unwrap_or(0.5);
         let inspect_body =
             advanced_mode || get_bool_conf(value, "inspect_body");
+        // `get_int_conf_or_default` is i64: a negative value cast to usize
+        // would otherwise become ~1.8e19 and disable the staging cap.
         let max_body_size =
-            get_int_conf_or_default(value, "max_body_size", 64 * 1024) as usize;
+            get_int_conf_or_default(value, "max_body_size", 64 * 1024)
+                .clamp(1, 8 * 1024 * 1024) as usize;
         let pow_difficulty =
             get_int_conf_or_default(value, "pow_difficulty", 20) as u32;
         // Mirrors the site's `downstream_read_timeout`: withheld bodies are
@@ -3731,13 +3752,10 @@ impl Plugin for WafPlugin {
         // ACME http-01 validation requests are answered by the proxy before
         // the plugin chain runs; skip them here too, as a second line of
         // defense: no rule evaluation, no challenge, no block page — a CA
-        // validation request must never see a 403.
-        if session
-            .req_header()
-            .uri
-            .path()
-            .starts_with(ACME_HTTP_01_PATH_PREFIX)
-        {
+        // validation request must never see a 403. Restrict the exemption to
+        // a real token shape: a bare prefix would also release
+        // `/.well-known/acme-challenge/../../admin` from every rule.
+        if is_acme_challenge_path(session.req_header().uri.path()) {
             return Ok(RequestPluginResult::Skipped);
         }
         // The visitor-auth endpoints are the site's own front door, and they run
@@ -5117,6 +5135,19 @@ pub(crate) mod tests {
         assert_eq!(deferred_body_max_entries(8 * 1024 * 1024), 8);
         assert_eq!(deferred_body_max_entries(0), 1024);
         assert_eq!(deferred_body_max_entries(usize::MAX), 1);
+    }
+
+    #[test]
+    fn acme_exemption_requires_a_token_shape() {
+        assert!(is_acme_challenge_path(
+            "/.well-known/acme-challenge/LoqXcYV8-q"
+        ));
+        assert!(!is_acme_challenge_path("/.well-known/acme-challenge/"));
+        assert!(!is_acme_challenge_path(
+            "/.well-known/acme-challenge/../../admin"
+        ));
+        assert!(!is_acme_challenge_path("/.well-known/acme-challenge/x%2Fy"));
+        assert!(!is_acme_challenge_path("/other"));
     }
 
     #[test]

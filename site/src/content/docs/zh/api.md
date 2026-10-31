@@ -56,6 +56,21 @@ curl -s https://localhost:9080/api/v1/sites -H "Authorization: Bearer $TOKEN"
 | `POST /sites/{id}/path-exceptions` | 创建：`path`（以 `/` 开头，≤512）、`match_type`（`prefix`/`exact`/`wildcard`）、`skip_layers`、`note`、`log_hits`、`enabled` |
 | `GET|PUT|DELETE /sites/{id}/path-exceptions/{id}` | 读取 / 部分更新 / 删除（`204`） |
 
+## 错误页作用域
+
+自定义错误页（`GET|POST /error-pages`，管理员）带有 `scope` 作用域：
+
+- **`site`**（默认）—— 替换已匹配站点的错误响应；状态码 400–599；模板可用完整上下文（`request_id`、`error_code`、`site_name`、`client_ip` 等）。
+- **`unmatched_host`** —— 边缘对 `Host` 不匹配任何已配置站点请求的兜底（裸 IP + 端口、未知主机名）。仅接受 404、421、503；同 `(scope, status_code)` 重复返回 `409`。只有存在至少一条启用的该作用域页面时边缘才会生成兜底 Location——否则网关保持默认 404——且它永远不会覆盖已匹配站点自身的 Location。模板只能使用 `{{ host }}`（已 HTML 转义）与 `{{ request_id }}`；响应带 `Cache-Control: no-store`。
+
+## 站点克隆完整复制
+
+`POST /sites/{id}/clone` 现在复制**全部**站点级数据，包括敏感数据：证书**及其私钥**（每行以新 id 归属克隆，`site_ssl.certificate_id` 重映射到克隆自己的证书副本）、源站点自身的证书共享关联、Basic Auth 凭据（明文存储）、OIDC 配置（含 `cookie_secret`）与访客授权。请把克隆 API 视为一次秘密复制操作——控制台在发送请求前要求显式勾选确认。克隆仍以 `paused` 状态创建，转发头信任（`trust_proxy_headers`、可信代理范围/分组）仍会重置，OIDC 回调仍指向源域名——启用克隆前需在身份提供方重新登记。无法重映射的引用（已删除的池、外部规则组）会回退到克隆自己的默认池而不是悬挂引用。
+
+## 缓存规则优先级与预设
+
+缓存分两层：显式规则（`cache-rules` 端点，按表达式匹配）与 `cache-settings` 上的五个按扩展名分类的预设（`web_assets`、`image`、`media`、`other`、`html`）。显式规则**先**匹配、预设兜底（first-match-wins）；预设只按扩展名匹配，API 端点与无扩展名路径仍需显式规则。只有预设的站点也能正常缓存；REST API 不变（仍是 `cache-rules` + `cache-settings`），控制台的合并列表只是展示层。控制台的「转为规则」会把预设转成 `http.request.uri.path matches "(?i)\.(?:ext|…)$"` 形式的显式规则（沿用预设的扩展名与 TTL）并禁用原预设。
+
 ## 日志实时同步
 
 `POST /agents/flush-logs`（管理员）要求所有在线 agent 立即上报内存中的日志缓冲，而不是等待批次间隔。返回 `{ "delivered": N, "offline": M }`；离线 agent 只计数、不入队，且 `delivered` 表示命令已下发——不等于日志已入库。

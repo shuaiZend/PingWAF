@@ -30,11 +30,12 @@ use crate::auth::AuthUser;
 use crate::grpc::notify_config_changed;
 use crate::models::{
     acme_challenge, bot_protection, cache_rules, certificate_links,
-    challenge_settings, geo_rules, ip_access_rules, ip_groups,
-    rate_limit_rules, rewrite_rules, route_match_type, rule, rule_groups, site,
-    site_ai_bot_policies, site_ai_crawl_settings, site_certificates,
-    site_routes, site_ssl, site_status, site_upstream_pools, site_upstreams,
-    tls_version, trusted_header, waf_settings, ResponseReplaceConfig,
+    challenge_settings, geo_rules, ip_access_rules, ip_group_sites, ip_groups,
+    mtls, path_exceptions, rate_limit_rules, rewrite_rules, route_match_type,
+    rule, rule_groups, site, site_ai_bot_policies, site_ai_crawl_settings,
+    site_basic_auth, site_certificates, site_oidc, site_routes, site_ssl,
+    site_status, site_upstream_pools, site_upstreams, tls_version,
+    trusted_header, visitor_site_grant, waf_settings, ResponseReplaceConfig,
     ResponseReplaceRule,
 };
 
@@ -1313,6 +1314,45 @@ macro_rules! clone_site_rows {
     }};
 }
 
+/// Site-scoped tables the clone copies. Kept next to the implementation so the
+/// coverage test can fail the moment a new site-scoped table is added without a
+/// deliberate decision.
+#[cfg(test)]
+pub(crate) const CLONE_COPIED_TABLES: &[&str] = &[
+    "sites",
+    "rule_groups",
+    "rules",
+    "rate_limit_rules",
+    "cache_rules",
+    "site_upstream_pools",
+    "site_upstreams",
+    "site_routes",
+    "site_ssl",
+    "site_path_exceptions",
+    "ip_access_rules",
+    "ip_group_sites",
+    "waf_settings",
+    "challenge_settings",
+    "bot_protection",
+    "geo_rules",
+    "rewrite_rules",
+    "site_ai_crawl_settings",
+    "site_ai_bot_policies",
+    "mtls_cas",
+    "mtls_client_certificates",
+    "site_certificates",
+    "site_certificate_links",
+    "site_basic_auth",
+    "site_oidc",
+    "visitor_site_grants",
+];
+
+/// Nothing site-scoped is skipped any more. The list stays so a future
+/// decision to exclude a table has one obvious place to record it, and the
+/// coverage test keeps both lists in sync with `config_catalog::SITE_TABLES`.
+#[cfg(test)]
+pub(crate) const CLONE_INTENTIONALLY_SKIPPED: &[&str] = &[];
+
 /// Copies the source site's WAF rule groups and custom rules onto the clone
 /// inside the caller's transaction (C4/L2-001). Groups are inserted first so
 /// each rule's `group_id` can be remapped to the clone's own group rows,
@@ -1398,6 +1438,20 @@ fn clone_rule_row(
     node
 }
 
+/// Resolves a source pool id to the clone's own pool. A missing mapping means
+/// the source row pointed outside its site (legacy data, deleted pool); the
+/// clone adopts its default pool instead of keeping a foreign id.
+fn clone_pool(
+    pool_ids: &HashMap<Uuid, Uuid>,
+    source_pool: Uuid,
+    fallback: Uuid,
+) -> (Uuid, bool) {
+    match pool_ids.get(&source_pool).copied() {
+        Some(mapped) => (mapped, true),
+        None => (fallback, false),
+    }
+}
+
 async fn clone_site(
     State(state): State<AppState>,
     current: AuthUser,
@@ -1459,19 +1513,58 @@ async fn clone_site(
     // Upstream pools first: nodes and routes reference them by id, so the
     // clone needs its own pool ids and a mapping from the source's.
     let mut pool_ids: HashMap<Uuid, Uuid> = HashMap::new();
+    let mut default_pool_id: Option<Uuid> = None;
     let pools = site_upstream_pools::Entity::find()
         .filter(site_upstream_pools::Column::SiteId.eq(source_id))
         .all(&txn)
         .await?;
     for row in pools {
         let old_id = row.id;
+        let was_default = row.is_default;
         let mut node: site_upstream_pools::ActiveModel = row.into();
         node.id = Set(Uuid::new_v4());
         node.site_id = Set(new_id);
         node.created_at = Set(timestamp);
         let inserted = node.insert(&txn).await?;
         pool_ids.insert(old_id, inserted.id);
+        if was_default {
+            default_pool_id = Some(inserted.id);
+        }
     }
+
+    // A node or route whose pool was deleted from the source (or predates the
+    // pool table) must never keep pointing at the source site's pool: the
+    // clone would render it under a pool it does not own, and deleting the
+    // source site would cascade into the clone. Give the clone a default pool
+    // to adopt those rows instead.
+    let fallback_pool_id = match default_pool_id {
+        Some(id) => id,
+        None => {
+            let defaults = PoolHealthCheck::default_values();
+            let created = site_upstream_pools::ActiveModel {
+                id: Set(Uuid::new_v4()),
+                site_id: Set(new_id),
+                name: Set("default".to_string()),
+                lb_algorithm: Set(default_lb_algorithm()),
+                sni: Set(None),
+                verify_cert: Set(None),
+                health_check_enabled: Set(defaults.enabled),
+                health_check_path: Set(defaults.path.clone()),
+                health_check_interval_seconds: Set(defaults.interval_seconds),
+                health_check_timeout_ms: Set(defaults.timeout_ms),
+                health_check_unhealthy_threshold: Set(
+                    defaults.unhealthy_threshold
+                ),
+                health_check_healthy_threshold: Set(defaults.healthy_threshold),
+                address_family: Set(ADDRESS_FAMILY_AUTO.to_string()),
+                is_default: Set(true),
+                created_at: Set(timestamp),
+            }
+            .insert(&txn)
+            .await?;
+            created.id
+        },
+    };
 
     let upstreams = site_upstreams::Entity::find()
         .filter(site_upstreams::Column::SiteId.eq(source_id))
@@ -1482,8 +1575,15 @@ async fn clone_site(
         let mut node: site_upstreams::ActiveModel = row.into();
         node.id = Set(Uuid::new_v4());
         node.site_id = Set(new_id);
-        node.pool_id =
-            Set(pool_ids.get(&old_pool).copied().unwrap_or(old_pool));
+        let (pool_id, mapped) =
+            clone_pool(&pool_ids, old_pool, fallback_pool_id);
+        if !mapped {
+            tracing::warn!(
+                source_pool = %old_pool,
+                "clone: upstream references a pool outside the source site; adopting the clone default pool"
+            );
+        }
+        node.pool_id = Set(pool_id);
         node.created_at = Set(timestamp);
         node.insert(&txn).await?;
     }
@@ -1497,28 +1597,89 @@ async fn clone_site(
         let mut node: site_routes::ActiveModel = row.into();
         node.id = Set(Uuid::new_v4());
         node.site_id = Set(new_id);
-        node.pool_id =
-            Set(pool_ids.get(&old_pool).copied().unwrap_or(old_pool));
+        let (pool_id, mapped) =
+            clone_pool(&pool_ids, old_pool, fallback_pool_id);
+        if !mapped {
+            tracing::warn!(
+                source_pool = %old_pool,
+                "clone: route references a pool outside the source site; adopting the clone default pool"
+            );
+        }
+        node.pool_id = Set(pool_id);
         node.created_at = Set(timestamp);
         node.insert(&txn).await?;
     }
 
+    // Certificates and the grants that share them are copied too. Every row
+    // gets a new id and belongs to the clone: reusing the source rows would
+    // couple the two sites (deleting one would revoke the other's TLS).
+    let mut cert_ids: HashMap<Uuid, Uuid> = HashMap::new();
+    let certificates = site_certificates::Entity::find()
+        .filter(site_certificates::Column::SiteId.eq(source_id))
+        .all(&txn)
+        .await?;
+    for row in certificates {
+        let old_id = row.id;
+        let mut node: site_certificates::ActiveModel = row.into();
+        node.id = Set(Uuid::new_v4());
+        node.site_id = Set(new_id);
+        node.created_at = Set(timestamp);
+        node.updated_at = Set(timestamp);
+        let inserted = node.insert(&txn).await?;
+        cert_ids.insert(old_id, inserted.id);
+    }
+
+    // Only grants on certificates the source site owns are cloned. A grant
+    // that merely shared another site's certificate is that owner's
+    // authorisation; extending it to the clone would give the new site access
+    // no owner approved.
+    let links = certificate_links::Entity::find()
+        .filter(certificate_links::Column::SiteId.eq(source_id))
+        .all(&txn)
+        .await?;
+    for link in links {
+        let Some(certificate_id) = cert_ids.get(&link.certificate_id).copied()
+        else {
+            tracing::warn!(
+                certificate_id = %link.certificate_id,
+                "clone: skipping a shared certificate grant the source site does not own"
+            );
+            continue;
+        };
+        certificate_links::ActiveModel {
+            site_id: Set(new_id),
+            certificate_id: Set(certificate_id),
+            linked_at: Set(timestamp),
+        }
+        .insert(&txn)
+        .await?;
+    }
+
     // TLS material travels with the site: the clone serves the same
     // certificate and protocol switches until an operator changes them. The
-    // certificate *selection* does not: `certificate_id` points at a
-    // specific `site_certificates` row owned by (or granted to) the source,
-    // and carrying it over would silently bind the clone to a certificate
-    // it has no grant for. The operator picks one for the new domain.
+    // selected certificate id is remapped to the clone-owned copy above; the
+    // legacy inline PEM is cleared so the managed row stays authoritative.
     if let Some(row) = site_ssl::Entity::find()
         .filter(site_ssl::Column::SiteId.eq(source_id))
         .one(&txn)
         .await?
     {
+        let selected =
+            row.certificate_id.and_then(|id| cert_ids.get(&id).copied());
+        if row.certificate_id.is_some() && selected.is_none() {
+            tracing::warn!(
+                "clone: the source site selected a certificate it does not own; the clone starts without a certificate and must pick one"
+            );
+        }
         let mut node: site_ssl::ActiveModel = row.into();
         node.id = Set(Uuid::new_v4());
         node.site_id = Set(new_id);
         node.domain = Set(domain.clone());
-        node.certificate_id = Set(None);
+        node.certificate_id = Set(selected);
+        node.cert_pem = Set(None);
+        node.key_pem = Set(None);
+        node.issuer = Set(None);
+        node.expires_at = Set(None);
         node.created_at = Set(timestamp);
         node.insert(&txn).await?;
     }
@@ -1527,29 +1688,98 @@ async fn clone_site(
     clone_site_rows!(&txn, challenge_settings, source_id, new_id);
     clone_site_rows!(&txn, geo_rules, source_id, new_id);
     clone_site_rows!(&txn, bot_protection, source_id, new_id);
-    // `site_oidc` is deliberately not cloned (and needs this even more than
-    // basic auth):
-    // 1. `redirect_url` — or the callback derived from the Host header — is
-    //    bound to the source hostname. Copied to the new site, the IdP's
-    //    registered callback still points at the source domain, so the
-    //    provider redirects logins back to the source, not the clone.
-    // 2. Two sites sharing the same `cookie_secret` + `cookie_name` across
-    //    sibling subdomains covered by a wildcard `Domain` would share
-    //    sessions: a login on one site authenticates the other (session
-    //    cross-contamination).
-    // 3. One client registered against two callback hosts is rejected outright
-    //    by most identity providers.
-    // The operator registers a fresh client per site instead.
-    // `site_basic_auth` is deliberately not cloned: the row stores credentials
-    // (masked in the API, plaintext at rest) and reusing them on a new host
-    // would turn "a and b share a password" into a way to reach the clone with
-    // a credential that has already circulated. The operator re-enters it.
+    // `site_basic_auth` is copied on explicit request: the row stores
+    // credentials (masked in the API, plaintext at rest) and the operator is
+    // warned that the clone can be reached with the same passwords.
     clone_site_rows!(&txn, rewrite_rules, source_id, new_id);
     clone_site_rows!(&txn, ip_access_rules, source_id, new_id);
     clone_site_rows!(&txn, cache_rules, source_id, new_id);
     clone_site_rows!(&txn, rate_limit_rules, source_id, new_id);
     clone_site_rows!(&txn, site_ai_crawl_settings, source_id, new_id);
     clone_site_rows!(&txn, site_ai_bot_policies, source_id, new_id);
+    clone_site_rows!(&txn, path_exceptions, source_id, new_id);
+    // Credentials and identity configuration are copied on request: the clone
+    // is paused, and the operator is warned in the UI/docs that Basic Auth
+    // passwords, the OIDC cookie secret and visitor grants travel with it.
+    // OIDC is copied disabled because its redirect URL still names the source
+    // host; enabling it unchanged would send logins to the wrong site.
+    clone_site_rows!(&txn, site_basic_auth, source_id, new_id);
+    if let Some(row) = site_oidc::Entity::find()
+        .filter(site_oidc::Column::SiteId.eq(source_id))
+        .one(&txn)
+        .await?
+    {
+        let mut node: site_oidc::ActiveModel = row.into();
+        node.id = Set(Uuid::new_v4());
+        node.site_id = Set(new_id);
+        node.enabled = Set(false);
+        node.created_at = Set(timestamp);
+        node.updated_at = Set(timestamp);
+        node.insert(&txn).await?;
+        tracing::warn!(
+            site = %new_id,
+            "clone: OIDC configuration copied disabled; update the redirect URL at the provider before enabling it"
+        );
+    }
+    clone_site_rows!(&txn, visitor_site_grant, source_id, new_id);
+
+    // IP groups are deployment-wide rows bound to a site through a join table
+    // with no id column. `ip_access_rules` and `trusted_proxy_group_ids` point
+    // at those groups, so a clone that skips the binding silently loses access
+    // rules and proxy-trust ranges.
+    let group_links = ip_group_sites::Entity::find()
+        .filter(ip_group_sites::Column::SiteId.eq(source_id))
+        .all(&txn)
+        .await?;
+    for link in group_links {
+        ip_group_sites::ActiveModel {
+            ip_group_id: Set(link.ip_group_id),
+            site_id: Set(new_id),
+            created_at: Set(timestamp),
+        }
+        .insert(&txn)
+        .await?;
+    }
+
+    // mTLS material: `site_ssl.mtls_enabled` is copied above, so the trust
+    // anchors and issued client certificates must travel too or every client
+    // is rejected. Client certificates reference a CA row, hence the remap.
+    let mut ca_ids: HashMap<Uuid, Uuid> = HashMap::new();
+    let cas = mtls::mtls_cas::Entity::find()
+        .filter(mtls::mtls_cas::Column::SiteId.eq(source_id))
+        .all(&txn)
+        .await?;
+    for row in cas {
+        let old_id = row.id;
+        let mut node: mtls::mtls_cas::ActiveModel = row.into();
+        node.id = Set(Uuid::new_v4());
+        node.site_id = Set(new_id);
+        node.created_at = Set(timestamp);
+        let inserted = node.insert(&txn).await?;
+        ca_ids.insert(old_id, inserted.id);
+    }
+    let client_certs = mtls::mtls_client_certificates::Entity::find()
+        .filter(mtls::mtls_client_certificates::Column::SiteId.eq(source_id))
+        .all(&txn)
+        .await?;
+    for row in client_certs {
+        let old_ca = row.ca_id;
+        let mut node: mtls::mtls_client_certificates::ActiveModel = row.into();
+        node.id = Set(Uuid::new_v4());
+        node.site_id = Set(new_id);
+        node.ca_id = Set(match ca_ids.get(&old_ca).copied() {
+            Some(mapped) => mapped,
+            None => {
+                tracing::warn!(
+                    source_ca = %old_ca,
+                    "clone: client certificate references a CA outside the source site; skipping it"
+                );
+                continue;
+            },
+        });
+        node.created_at = Set(timestamp);
+        node.insert(&txn).await?;
+    }
 
     // WAF custom rules travel with the clone (C4/L2-001): without them the
     // clone runs with a weaker policy than the source and nothing in the API
@@ -4681,5 +4911,39 @@ mod tests {
             crate::defaults::normalize_site_downstream_timeout_secs(4000),
             3600
         );
+    }
+    #[test]
+    fn clone_covers_every_site_scoped_table() {
+        use std::collections::BTreeSet;
+
+        let declared: BTreeSet<&str> = CLONE_COPIED_TABLES
+            .iter()
+            .chain(CLONE_INTENTIONALLY_SKIPPED.iter())
+            .copied()
+            .collect();
+        let catalog: BTreeSet<&str> = crate::config_catalog::SITE_TABLES
+            .iter()
+            .map(|table| table.name)
+            .collect();
+        let missing: Vec<&&str> = catalog.difference(&declared).collect();
+        assert!(
+            missing.is_empty(),
+            "site-scoped tables missing from the clone coverage list: {missing:?}"
+        );
+        let unknown: Vec<&&str> = declared.difference(&catalog).collect();
+        assert!(
+            unknown.is_empty(),
+            "clone coverage lists tables that are not site-scoped: {unknown:?}"
+        );
+    }
+    #[test]
+    fn clone_pool_falls_back_when_the_source_pool_is_foreign() {
+        let mapped = Uuid::new_v4();
+        let fallback = Uuid::new_v4();
+        let mut pool_ids = HashMap::new();
+        pool_ids.insert(mapped, mapped);
+        assert_eq!(clone_pool(&pool_ids, mapped, fallback), (mapped, true));
+        let foreign = Uuid::new_v4();
+        assert_eq!(clone_pool(&pool_ids, foreign, fallback), (fallback, false));
     }
 }

@@ -57,6 +57,7 @@ import {
   errorPagesApi,
   errorPageKeys,
   ERROR_PAGE_MESSAGES,
+  ERROR_PAGE_SAMPLE,
   ERROR_PAGE_VARIABLES,
   defaultErrorPageTemplate,
   renderErrorPageTemplate,
@@ -87,10 +88,17 @@ import type {
 import {
   ERROR_PAGE_CONTENT_TYPE_LABELS,
   ERROR_PAGE_CONTENT_TYPES,
-  ERROR_PAGE_STATUS_CODES,
   type ErrorPage,
   type ErrorPageContentType,
+  type ErrorPageScope,
 } from '@/api/types'
+import {
+  UNMATCHED_HOST_STATUS_CODES,
+  asErrorPageScope,
+  defaultStatusCodeForScope,
+  filterErrorPagesByScope,
+  statusCodesForScope,
+} from '@/lib/errorPageScope'
 
 const langLabels: Record<string, string> = { en: 'English', zh: '中文', ja: '日本語' }
 
@@ -886,6 +894,7 @@ interface ErrorPageEditor {
   content_type: ErrorPageContentType
   body_template: string
   enabled: boolean
+  scope: ErrorPageScope
   existingId: string | null
 }
 
@@ -900,15 +909,18 @@ function ErrorPagesCard({ canWrite }: { canWrite: boolean }) {
   const toast = useToast()
   const queryClient = useQueryClient()
 
+  const [scope, setScope] = useState<ErrorPageScope>('site')
   const [editor, setEditor] = useState<ErrorPageEditor | null>(null)
   const [pendingReset, setPendingReset] = useState<ErrorPageEditor | null>(null)
   const [pendingDelete, setPendingDelete] = useState<ErrorPage | null>(null)
 
   const pagesQuery = useQuery({
-    queryKey: errorPageKeys.list(),
-    queryFn: () => errorPagesApi.list(),
-    select: (res) => res.items,
+    queryKey: errorPageKeys.list(scope),
+    queryFn: () => errorPagesApi.list(scope),
+    select: (res) => filterErrorPagesByScope(res.items, scope),
   })
+
+  const scopeStatusCodes = statusCodesForScope(scope)
 
   const byStatus = useMemo(() => {
     const map = new Map<number, ErrorPage>()
@@ -929,6 +941,7 @@ function ErrorPagesCard({ canWrite }: { canWrite: boolean }) {
             content_type: state.content_type,
             body_template: state.body_template,
             enabled: state.enabled,
+            scope: state.scope,
           })
         : errorPagesApi.upsert({
             status_code: state.status_code,
@@ -936,12 +949,14 @@ function ErrorPagesCard({ canWrite }: { canWrite: boolean }) {
             content_type: state.content_type,
             body_template: state.body_template,
             enabled: state.enabled,
+            scope: state.scope,
           }),
     onSuccess: () => {
       toast.success(t('pages.errorPages.saved'))
       setEditor(null)
       invalidate()
     },
+    onError: (e) => toast.error(errorMessage(e)),
   })
 
   const toggle = useMutation({
@@ -960,7 +975,7 @@ function ErrorPagesCard({ canWrite }: { canWrite: boolean }) {
     },
   })
 
-  const openEditor = (statusCode: number) => {
+  const openEditor = (statusCode: number, editorScope: ErrorPageScope = scope) => {
     const existing = byStatus.get(statusCode)
     setEditor({
       status_code: statusCode,
@@ -973,11 +988,17 @@ function ErrorPagesCard({ canWrite }: { canWrite: boolean }) {
           (existing?.content_type as ErrorPageContentType) ?? 'text/html',
         ),
       enabled: existing?.enabled ?? true,
+      scope: asErrorPageScope(existing?.scope ?? editorScope),
       existingId: existing?.id ?? null,
     })
   }
 
-  const previewHtml = editor ? renderErrorPageTemplate(editor.body_template) : ''
+  const previewHtml = editor
+    ? renderErrorPageTemplate(editor.body_template, {
+        ...ERROR_PAGE_SAMPLE,
+        host: '203.0.113.10',
+      })
+    : ''
 
   return (
     <>
@@ -998,6 +1019,44 @@ function ErrorPagesCard({ canWrite }: { canWrite: boolean }) {
           }
         />
         <CardBody>
+          {/* Scope tabs — site pages vs. the unmatched-Host fallback pages. */}
+          <div
+            className="mb-4 inline-flex rounded-lg border border-line bg-recessed p-0.5"
+            role="tablist"
+            aria-label={t('pages.errorPages.scopeLabel')}
+          >
+            {(
+              [
+                { value: 'site', label: t('pages.errorPages.scopeSite') },
+                { value: 'unmatched_host', label: t('pages.errorPages.scopeUnmatched') },
+              ] as const
+            ).map((tab) => (
+              <button
+                key={tab.value}
+                type="button"
+                role="tab"
+                aria-selected={scope === tab.value}
+                onClick={() => setScope(tab.value)}
+                className={cn(
+                  'rounded-md px-3 py-1.5 text-[13px] font-medium transition-colors',
+                  scope === tab.value
+                    ? 'bg-elevated text-fg shadow-sm'
+                    : 'text-fg-subtle hover:text-fg',
+                )}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+          {scope === 'unmatched_host' && (
+            <p className="mb-4 flex items-start gap-2 rounded-md border border-warning/40 bg-warning/8 p-2.5 text-xs text-fg">
+              <Warning weight="duotone" className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
+              <span>
+                {t('pages.errorPages.scopeUnmatchedHint')}
+                {t('pages.errorPages.scopeUnmatchedFallback')}
+              </span>
+            </p>
+          )}
           {pagesQuery.isError && !pagesQuery.data ? (
             <ErrorState
               error={pagesQuery.error}
@@ -1006,13 +1065,13 @@ function ErrorPagesCard({ canWrite }: { canWrite: boolean }) {
             />
           ) : pagesQuery.isPending ? (
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-              {ERROR_PAGE_STATUS_CODES.map((c) => (
+              {scopeStatusCodes.map((c) => (
                 <SkeletonCard key={c} />
               ))}
             </div>
           ) : (
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-              {ERROR_PAGE_STATUS_CODES.map((code) => {
+              {scopeStatusCodes.map((code) => {
                 const page = byStatus.get(code)
                 const customized = Boolean(page)
                 return (
@@ -1044,15 +1103,23 @@ function ErrorPagesCard({ canWrite }: { canWrite: boolean }) {
                           </p>
                         </div>
                       </div>
-                      {customized ? (
-                        <Badge tone="brand" size="sm">
-                          {t('pages.errorPages.customized')}
-                        </Badge>
-                      ) : (
-                        <Badge tone="neutral" size="sm">
-                          {t('pages.errorPages.default')}
-                        </Badge>
-                      )}
+                      <span className="flex shrink-0 items-center gap-1.5">
+                        {customized &&
+                          asErrorPageScope(page?.scope) === 'unmatched_host' && (
+                            <Badge tone="warning" size="sm">
+                              {t('pages.errorPages.scopeUnmatched')}
+                            </Badge>
+                          )}
+                        {customized ? (
+                          <Badge tone="brand" size="sm">
+                            {t('pages.errorPages.customized')}
+                          </Badge>
+                        ) : (
+                          <Badge tone="neutral" size="sm">
+                            {t('pages.errorPages.default')}
+                          </Badge>
+                        )}
+                      </span>
                     </div>
                     <div className="mt-4 flex items-center justify-between">
                       <span className="text-xs text-fg-subtle">
@@ -1153,6 +1220,46 @@ function ErrorPagesCard({ canWrite }: { canWrite: boolean }) {
               </div>
             </div>
 
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+              <Select
+                label={t('pages.errorPages.scopeLabel')}
+                value={editor.scope}
+                options={[
+                  { value: 'site', label: t('pages.errorPages.scopeSite') },
+                  { value: 'unmatched_host', label: t('pages.errorPages.scopeUnmatched') },
+                ]}
+                onChange={(e) => {
+                  const nextScope = e.target.value as ErrorPageScope
+                  setEditor((prev) => {
+                    if (!prev) return prev
+                    return {
+                      ...prev,
+                      scope: nextScope,
+                      status_code: defaultStatusCodeForScope(nextScope, prev.status_code),
+                    }
+                  })
+                }}
+              />
+              {editor.scope === 'unmatched_host' && (
+                <Select
+                  label={t('pages.errorPages.statusCode')}
+                  value={String(editor.status_code)}
+                  options={UNMATCHED_HOST_STATUS_CODES.map((c) => ({
+                    value: String(c),
+                    label: `${c} · ${ERROR_PAGE_MESSAGES[c] ?? String(c)}`,
+                  }))}
+                  onChange={(e) =>
+                    setEditor({ ...editor, status_code: Number(e.target.value) })
+                  }
+                />
+              )}
+              {editor.scope === 'unmatched_host' && (
+                <p className="self-end pb-1.5 text-xs text-fg-subtle">
+                  {t('pages.errorPages.scopeUnmatchedHint')}
+                </p>
+              )}
+            </div>
+
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_1fr_220px]">
               {/* Template */}
               <div className="flex flex-col gap-1.5">
@@ -1196,6 +1303,13 @@ function ErrorPagesCard({ canWrite }: { canWrite: boolean }) {
                   <BracketsCurly weight="duotone" className="h-4 w-4" />
                   {t('pages.errorPages.variables')}
                 </span>
+                {editor.scope === 'unmatched_host' && (
+                  <p className="flex flex-wrap items-center gap-1 text-xs text-fg-subtle">
+                    {t('pages.errorPages.scopeUnmatchedVars')}
+                    <code className="pw-mono text-brand">{'{{host}}'}</code>
+                    <code className="pw-mono text-brand">{'{{request_id}}'}</code>
+                  </p>
+                )}
                 <div className="flex max-h-[388px] flex-col gap-1 overflow-y-auto rounded-md border border-line bg-recessed/40 p-2">
                   {ERROR_PAGE_VARIABLES.map((v) => (
                     <button

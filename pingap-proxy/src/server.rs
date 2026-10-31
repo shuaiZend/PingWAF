@@ -1744,19 +1744,23 @@ impl ProxyHttp for Server {
     }
     fn fail_to_connect(
         &self,
-        _session: &mut Session,
+        session: &mut Session,
         _peer: &HttpPeer,
         ctx: &mut Self::CTX,
         mut e: Box<pingora::Error>,
     ) -> Box<pingora::Error> {
+        // Connection attempts can be retried safely, but do not multiply
+        // non-idempotent methods across the default retry budget.
+        let method = session.req_header().method.as_str();
+        if !matches!(method, "GET" | "HEAD" | "OPTIONS" | "TRACE") {
+            return e;
+        }
         // The peer is the one `upstream_peer` just returned, whose address
         // it recorded on the context; no need to format it again.
         if let Some(upstream_instance) = &ctx.upstream.upstream_instance {
             upstream_instance.on_transport_failure(&ctx.upstream.address);
         }
-        let Some(max_retries) = ctx.upstream.max_retries else {
-            return e;
-        };
+        let max_retries = ctx.upstream.max_retries.unwrap_or(3);
         if ctx.upstream.retries >= max_retries {
             return e;
         }

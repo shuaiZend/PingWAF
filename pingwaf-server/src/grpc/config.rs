@@ -187,6 +187,11 @@ async fn load_cache_rules(
 ) -> Result<Vec<cache_rules::Model>, sea_orm::DbErr> {
     cache_rules::Entity::find()
         .filter(cache_rules::Column::SiteId.eq(site_id))
+        // The console numbers the list in this order; without an explicit
+        // ORDER BY PostgreSQL is free to return rows in any order, so the
+        // number would not match the data plane's first-match evaluation.
+        .order_by_asc(cache_rules::Column::Name)
+        .order_by_asc(cache_rules::Column::Id)
         .all(db)
         .await
 }
@@ -1453,6 +1458,7 @@ fn error_page_to_proto(row: &error_pages::Model) -> CustomErrorPage {
         body_template: row.body_template.clone(),
         name: row.name.clone(),
         enabled: row.enabled,
+        scope: row.scope.clone(),
     }
 }
 

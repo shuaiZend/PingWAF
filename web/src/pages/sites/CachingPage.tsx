@@ -6,6 +6,8 @@ import {
   ArrowClockwise,
   ArrowCounterClockwise,
   Broom,
+  CaretDown,
+  CaretUp,
   CheckCircle,
   Lightning,
   PencilSimple,
@@ -30,6 +32,7 @@ import { cachingApi, cacheKeys } from '@/api/caching'
 import { useCanWrite } from '@/hooks'
 import { cn } from '@/lib/utils'
 import { formatDateTime, formatNumber, formatPercent, formatSize } from '@/lib/format'
+import { mergeCacheRows, presetToExpression, type CacheRow } from '@/lib/cachePolicy'
 import type {
   CacheRule,
   CacheSettings,
@@ -173,6 +176,8 @@ export function CachingPage() {
   const { siteId = '' } = useParams<{ siteId: string }>()
 
   const [dialogOpen, setDialogOpen] = useState(false)
+  /** The five preset families stay folded away until the operator needs them. */
+  const [policyOpen, setPolicyOpen] = useState(false)
   const [editing, setEditing] = useState<CacheRule | null>(null)
   const [form, setForm] = useState<FormState>(emptyForm())
   const [error, setError] = useState<string | null>(null)
@@ -223,10 +228,17 @@ export function CachingPage() {
     refetchInterval: 30_000,
   })
 
-  const rules = useMemo(
-    () => [...(rulesQuery.data ?? [])].sort((a, b) => a.name.localeCompare(b.name)),
-    [rulesQuery.data],
+  /** Explicit rules first (backend order), then the category presets. */
+  const cacheRows = useMemo(
+    () =>
+      mergeCacheRows(
+        rulesQuery.data ?? [],
+        settingsQuery.data?.cache_type_policy,
+        POLICY_CATEGORIES,
+      ),
+    [rulesQuery.data, settingsQuery.data?.cache_type_policy],
   )
+  const rules = rulesQuery.data ?? []
 
   const settings = settingsQuery.data
   const cacheEnabled = settings?.cache_enabled ?? false
@@ -455,6 +467,56 @@ export function CachingPage() {
       invalidate()
     },
     onError: (e) => setError(errorText(e)),
+  })
+
+  /**
+   * Turns a category preset into an explicit rule (same extensions/TTLs and
+   * origin-silent behaviour as the preset), then disables the preset so the
+   * same requests are not matched twice.
+   */
+  const convertPreset = useMutation({
+    mutationFn: async (key: PolicyCategoryKey) => {
+      const row = policyInput[key]
+      const expression = presetToExpression(row.extensions.split(','))
+      if (!expression) {
+        throw new Error(t('pages.caching.presetConvertDisabled'))
+      }
+      const category = t(`pages.caching.policyCat.${key}`)
+      const created = await cachingApi.createRule(siteId, {
+        name: t('pages.caching.presetName', { category }),
+        match_expression: expression,
+        edge_ttl_seconds: Number(row.edge),
+        browser_ttl_seconds: Number(row.browser),
+        cache_eligible: true,
+        // The compiled preset treats an origin that sends no Cache-Control as
+        // cacheable; the explicit copy must do the same or hit rate drops.
+        respect_origin: false,
+        enabled: true,
+      })
+      const policy = policyFromInput()
+      policy[key] = { ...policy[key], enabled: false }
+      // Two HTTP calls cannot be atomic: if disabling the preset fails the
+      // rule is removed again so the list does not show the same policy twice.
+      return cachingApi
+        .updateSettings(siteId, { cache_type_policy: policy })
+        .catch(async (error) => {
+          await cachingApi.deleteRule(siteId, created.id)
+          throw error
+        })
+        .then(() => category)
+    },
+    onSuccess: (category) => {
+      queryClient.setQueryData<CacheSettings>(
+        cacheKeys.settings(siteId),
+        (prev) => (prev ? { ...prev, ...policyFromInput() } : prev),
+      )
+      toast.success(
+        t('pages.caching.presetConverted'),
+        t('pages.caching.presetConvertedDescription', { category }),
+      )
+      invalidate()
+    },
+    onError: (e) => toast.error(t('pages.caching.actionFailed'), errorText(e)),
   })
 
   const toggle = useMutation({
@@ -695,49 +757,76 @@ export function CachingPage() {
   const refreshing =
     settingsQuery.isFetching || rulesQuery.isFetching || statusQuery.isFetching
 
-  const columns: Column<CacheRule>[] = [
+  /** A preset can only be converted when at least one extension survives. */
+  const presetConvertible = (row: CacheRow) =>
+    row.kind === 'preset' && presetToExpression(row.extensions) !== null
+
+  const columns: Column<CacheRow>[] = [
+    {
+      key: 'order',
+      header: '#',
+      accessor: (r) => r.order,
+      width: '1%',
+      cell: (r) => (
+        <span className="tabular-nums text-xs text-fg-subtle">{r.order}</span>
+      ),
+    },
     {
       key: 'name',
       header: t('common.name'),
-      accessor: (r) => r.name,
+      accessor: (r) => (r.kind === 'rule' ? r.name : t(`pages.caching.policyCat.${r.key}`)),
       sortable: true,
-      cell: (r) => (
-        <div className="min-w-0">
-          <div className="flex min-w-0 items-center gap-2">
-            <p className="truncate text-[13px] font-medium text-fg-strong">{r.name}</p>
-            {!r.cache_eligible && (
-              <Badge tone="neutral" size="sm">
-                {t('pages.caching.notEligible')}
-              </Badge>
-            )}
+      cell: (r) => {
+        const label =
+          r.kind === 'rule' ? r.name : t(`pages.caching.policyCat.${r.key as PolicyCategoryKey}`)
+        const muted = r.kind === 'preset' && (!r.enabled || r.extensions.length === 0)
+        return (
+          <div className={cn('min-w-0', muted && 'opacity-60')}>
+            <div className="flex min-w-0 items-center gap-2">
+              <p className="truncate text-[13px] font-medium text-fg-strong">{label}</p>
+              {r.kind === 'preset' && (
+                <Badge tone="brand" size="sm">
+                  {t('pages.caching.presetBadge')}
+                </Badge>
+              )}
+              {r.kind === 'rule' && !r.cacheEligible && (
+                <Badge tone="neutral" size="sm">
+                  {t('pages.caching.notEligible')}
+                </Badge>
+              )}
+            </div>
+            <p className="pw-mono truncate text-xs text-fg-subtle">
+              {r.kind === 'rule'
+                ? r.matchExpression || t('pages.caching.allRequests')
+                : r.extensions.length > 0
+                  ? r.extensions.map((extension) => `.${extension}`).join(', ')
+                  : t('pages.caching.presetNoExtensions')}
+            </p>
           </div>
-          <p className="pw-mono truncate text-xs text-fg-subtle">
-            {r.match_expression || t('pages.caching.allRequests')}
-          </p>
-        </div>
-      ),
+        )
+      },
     },
     {
       key: 'edge_ttl',
       header: t('pages.caching.edgeTtl'),
-      accessor: (r) => r.edge_ttl_seconds,
+      accessor: (r) => r.edgeTtlSeconds,
       align: 'right',
       width: '1%',
       cell: (r) => (
         <span className="tabular-nums text-[13px] text-fg">
-          {formatTtl(r.edge_ttl_seconds, t)}
+          {formatTtl(r.edgeTtlSeconds, t)}
         </span>
       ),
     },
     {
       key: 'browser_ttl',
       header: t('pages.caching.browserTtl'),
-      accessor: (r) => r.browser_ttl_seconds,
+      accessor: (r) => r.browserTtlSeconds,
       align: 'right',
       width: '1%',
       cell: (r) => (
         <span className="tabular-nums text-[13px] text-fg-subtle">
-          {formatTtl(r.browser_ttl_seconds, t)}
+          {formatTtl(r.browserTtlSeconds, t)}
         </span>
       ),
     },
@@ -746,45 +835,74 @@ export function CachingPage() {
       header: t('common.enabled'),
       accessor: (r) => (r.enabled ? 1 : 0),
       width: '1%',
-      cell: (r) => (
-        <Switch
-          size="sm"
-          checked={r.enabled}
-          disabled={!canWrite || toggle.isPending}
-          aria-label={`${t('common.enabled')}: ${r.name}`}
-          onCheckedChange={(enabled) => toggle.mutate({ rule: r, enabled })}
-        />
-      ),
+      cell: (r) =>
+        r.kind === 'rule' ? (
+          <Switch
+            size="sm"
+            checked={r.enabled}
+            disabled={!canWrite || toggle.isPending}
+            aria-label={`${t('common.enabled')}: ${r.name}`}
+            onCheckedChange={(enabled) => {
+              const rule = rules.find((rule) => rule.id === r.key)
+              if (rule) toggle.mutate({ rule, enabled })
+            }}
+          />
+        ) : (
+          <Badge tone={r.enabled ? 'success' : 'neutral'} dot>
+            {r.enabled ? t('common.enabled') : t('common.disabled')}
+          </Badge>
+        ),
     },
     {
       key: 'row-actions',
       header: '',
       align: 'right',
       width: '1%',
-      cell: (r) => (
-        <div className="flex items-center justify-end gap-1">
+      cell: (r) =>
+        r.kind === 'rule' ? (
+          <div className="flex items-center justify-end gap-1">
+            <Button
+              size="icon"
+              variant="ghost"
+              aria-label={t('common.edit')}
+              disabled={!canWrite}
+              onClick={() => {
+                const rule = rules.find((rule) => rule.id === r.key)
+                if (!rule) return
+                setEditing(rule)
+                setDialogOpen(true)
+              }}
+              icon={<PencilSimple weight="duotone" className="h-4 w-4" />}
+            />
+            <Button
+              size="icon"
+              variant="ghost"
+              className="hover:text-fg-danger"
+              aria-label={t('common.delete')}
+              disabled={!canWrite}
+              onClick={() => {
+                const rule = rules.find((rule) => rule.id === r.key)
+                if (rule) setPendingDelete(rule)
+              }}
+              icon={<Trash weight="duotone" className="h-4 w-4" />}
+            />
+          </div>
+        ) : (
           <Button
-            size="icon"
+            size="sm"
             variant="ghost"
-            aria-label={t('common.edit')}
-            disabled={!canWrite}
-            onClick={() => {
-              setEditing(r)
-              setDialogOpen(true)
-            }}
-            icon={<PencilSimple weight="duotone" className="h-4 w-4" />}
-          />
-          <Button
-            size="icon"
-            variant="ghost"
-            className="hover:text-fg-danger"
-            aria-label={t('common.delete')}
-            disabled={!canWrite}
-            onClick={() => setPendingDelete(r)}
-            icon={<Trash weight="duotone" className="h-4 w-4" />}
-          />
-        </div>
-      ),
+            disabled={!canWrite || !presetConvertible(r) || convertPreset.isPending}
+            title={
+              presetConvertible(r)
+                ? undefined
+                : t('pages.caching.presetConvertDisabled')
+            }
+            loading={convertPreset.isPending && convertPreset.variables === r.key}
+            onClick={() => convertPreset.mutate(r.key as PolicyCategoryKey)}
+          >
+            {t('pages.caching.presetToRule')}
+          </Button>
+        ),
     },
   ]
 
@@ -1164,125 +1282,21 @@ export function CachingPage() {
             </CardBody>
           </Card>
 
-          {/* ── Cache type policy ───────────────────────────────────── */}
-          <Card className="mb-4">
-            <CardHeader
-              title={t('pages.caching.policyTitle')}
-              description={t('pages.caching.policyHint', {
-                max: formatNumber(MAX_POLICY_TTL_SECONDS),
-              })}
-            />
-            <CardBody className="flex flex-col gap-3">
-              {settingsQuery.isPending && !settings ? (
-                <Skeleton className="h-20 w-full" />
-              ) : (
-                <>
-                  <div className="flex flex-col gap-3">
-                    {POLICY_CATEGORIES.map((key) => {
-                      const row = policyInput[key]
-                      const update = (patch: Partial<PolicyRowState>) => {
-                        setPolicyError(null)
-                        setPolicyInput((prev) => ({
-                          ...prev,
-                          [key]: { ...prev[key], ...patch },
-                        }))
-                      }
-                      return (
-                        <div
-                          key={key}
-                          className="grid grid-cols-1 gap-3 rounded-lg border border-border-subtle p-3 sm:grid-cols-2 lg:grid-cols-[180px_140px_140px_1fr]"
-                        >
-                          <div className="flex items-center gap-3">
-                            <Switch
-                              size="sm"
-                              checked={row.enabled}
-                              disabled={!canWrite || savePolicy.isPending}
-                              aria-label={t(
-                                `pages.caching.policyCat.${key}`,
-                              )}
-                              onCheckedChange={(enabled) => update({ enabled })}
-                            />
-                            <span className="text-sm font-medium">
-                              {t(`pages.caching.policyCat.${key}`)}
-                            </span>
-                          </div>
-                          <Input
-                            type="number"
-                            min={0}
-                            max={MAX_POLICY_TTL_SECONDS}
-                            className="tabular-nums"
-                            label={t('pages.caching.policyEdgeTtl')}
-                            value={row.edge}
-                            disabled={
-                              !canWrite || !row.enabled || savePolicy.isPending
-                            }
-                            onChange={(e) => update({ edge: e.target.value })}
-                          />
-                          <Input
-                            type="number"
-                            min={0}
-                            max={MAX_POLICY_TTL_SECONDS}
-                            className="tabular-nums"
-                            label={t('pages.caching.policyBrowserTtl')}
-                            value={row.browser}
-                            disabled={
-                              !canWrite || !row.enabled || savePolicy.isPending
-                            }
-                            onChange={(e) =>
-                              update({ browser: e.target.value })
-                            }
-                          />
-                          <Input
-                            label={t('pages.caching.policyExtensions')}
-                            placeholder={t(
-                              'pages.caching.policyExtensionsPlaceholder',
-                            )}
-                            value={row.extensions}
-                            disabled={
-                              !canWrite || !row.enabled || savePolicy.isPending
-                            }
-                            onChange={(e) =>
-                              update({ extensions: e.target.value })
-                            }
-                          />
-                        </div>
-                      )
-                    })}
-                  </div>
-                  {policyError && (
-                    <p className="text-xs text-fg-danger">{policyError}</p>
-                  )}
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <span className="text-xs text-fg-subtle">
-                      {t('pages.caching.policyOrderHint')}
-                    </span>
-                    <Button
-                      size="sm"
-                      variant="primary"
-                      disabled={
-                        !canWrite || !policyDirty || savePolicy.isPending
-                      }
-                      loading={savePolicy.isPending}
-                      onClick={submitPolicy}
-                    >
-                      {t('common.save')}
-                    </Button>
-                  </div>
-                </>
-              )}
-            </CardBody>
-          </Card>
-
-          {/* ── Rules ───────────────────────────────────────────────── */}
+          {/* ── Unified cache rules + collapsed presets ─────────────── */}
           <Card className="mb-4">
             <CardHeader
               title={t('pages.caching.rulesTitle')}
               description={t('pages.caching.rulesHint')}
             />
             <CardBody className="p-0">
-              {rulesQuery.isPending ? (
+              <div className="border-b border-line px-4 py-3">
+                <p className="text-xs leading-relaxed text-fg-subtle">
+                  {t('pages.caching.mergedOrderHint')}
+                </p>
+              </div>
+              {rulesQuery.isPending && settingsQuery.isPending ? (
                 <SkeletonRows rows={4} columns={5} />
-              ) : rules.length === 0 ? (
+              ) : cacheRows.length === 0 ? (
                 <EmptyState
                   className="border-0 py-12"
                   icon={<Lightning weight="duotone" className="h-8 w-8" />}
@@ -1319,13 +1333,16 @@ export function CachingPage() {
               ) : (
                 <Table
                   columns={columns}
-                  data={rules}
-                  rowKey={(r) => r.id}
+                  data={cacheRows}
+                  rowKey={(r) => r.key}
                   dense
                   onRowClick={
                     canWrite
                       ? (r) => {
-                          setEditing(r)
+                          if (r.kind !== 'rule') return
+                          const rule = rules.find((rule) => rule.id === r.key)
+                          if (!rule) return
+                          setEditing(rule)
                           setDialogOpen(true)
                         }
                       : undefined
@@ -1333,6 +1350,136 @@ export function CachingPage() {
                 />
               )}
             </CardBody>
+          </Card>
+
+          {/* ── Category presets (collapsed by default) ─────────────── */}
+          <Card className="mb-4">
+            <CardHeader
+              title={t('pages.caching.policyTitle')}
+              description={t('pages.caching.policyHint', {
+                max: formatNumber(MAX_POLICY_TTL_SECONDS),
+              })}
+              action={
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setPolicyOpen((open) => !open)}
+                  aria-expanded={policyOpen}
+                  icon={
+                    policyOpen ? (
+                      <CaretUp weight="duotone" className="h-4 w-4" />
+                    ) : (
+                      <CaretDown weight="duotone" className="h-4 w-4" />
+                    )
+                  }
+                >
+                  {policyOpen
+                    ? t('pages.caching.policyEditorHide')
+                    : t('pages.caching.policyEditorShow')}
+                </Button>
+              }
+            />
+            {policyOpen && (
+              <CardBody className="flex flex-col gap-3">
+                {settingsQuery.isPending && !settings ? (
+                  <Skeleton className="h-20 w-full" />
+                ) : (
+                  <>
+                    <div className="flex flex-col gap-3">
+                      {POLICY_CATEGORIES.map((key) => {
+                        const row = policyInput[key]
+                        const update = (patch: Partial<PolicyRowState>) => {
+                          setPolicyError(null)
+                          setPolicyInput((prev) => ({
+                            ...prev,
+                            [key]: { ...prev[key], ...patch },
+                          }))
+                        }
+                        return (
+                          <div
+                            key={key}
+                            className="grid grid-cols-1 gap-3 rounded-lg border border-border-subtle p-3 sm:grid-cols-2 lg:grid-cols-[180px_140px_140px_1fr]"
+                          >
+                            <div className="flex items-center gap-3">
+                              <Switch
+                                size="sm"
+                                checked={row.enabled}
+                                disabled={!canWrite || savePolicy.isPending}
+                                aria-label={t(
+                                  `pages.caching.policyCat.${key}`,
+                                )}
+                                onCheckedChange={(enabled) => update({ enabled })}
+                              />
+                              <span className="text-sm font-medium">
+                                {t(`pages.caching.policyCat.${key}`)}
+                              </span>
+                            </div>
+                            <Input
+                              type="number"
+                              min={0}
+                              max={MAX_POLICY_TTL_SECONDS}
+                              className="tabular-nums"
+                              label={t('pages.caching.policyEdgeTtl')}
+                              value={row.edge}
+                              disabled={
+                                !canWrite || !row.enabled || savePolicy.isPending
+                              }
+                              onChange={(e) => update({ edge: e.target.value })}
+                            />
+                            <Input
+                              type="number"
+                              min={0}
+                              max={MAX_POLICY_TTL_SECONDS}
+                              className="tabular-nums"
+                              label={t('pages.caching.policyBrowserTtl')}
+                              value={row.browser}
+                              disabled={
+                                !canWrite || !row.enabled || savePolicy.isPending
+                              }
+                              onChange={(e) =>
+                                update({ browser: e.target.value })
+                              }
+                            />
+                            <Input
+                              label={t('pages.caching.policyExtensions')}
+                              placeholder={t(
+                                'pages.caching.policyExtensionsPlaceholder',
+                              )}
+                              value={row.extensions}
+                              disabled={
+                                !canWrite || !row.enabled || savePolicy.isPending
+                              }
+                              onChange={(e) =>
+                                update({ extensions: e.target.value })
+                              }
+                            />
+                          </div>
+                        )
+                      })}
+                    </div>
+                    {policyError && (
+                      <p className="text-xs text-fg-danger">{policyError}</p>
+                    )}
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <span className="text-xs text-fg-subtle">
+                        {t('pages.caching.policyOrderHint')}
+                      </span>
+                      <Button
+                        size="sm"
+                        variant="primary"
+                        disabled={
+                          !canWrite || !policyDirty || savePolicy.isPending
+                        }
+                        loading={savePolicy.isPending}
+                        onClick={submitPolicy}
+                      >
+                        {t('common.save')}
+                      </Button>
+                    </div>
+                  </>
+                )}
+              </CardBody>
+            )}
           </Card>
 
           {/* ── Purge ───────────────────────────────────────────────── */}

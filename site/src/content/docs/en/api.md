@@ -56,6 +56,51 @@ A site in observation mode (`waf_settings.mode = monitor`) can whitelist request
 | `POST /sites/{id}/path-exceptions` | Create: `path` (starts with `/`, ≤512), `match_type` (`prefix`/`exact`/`wildcard`), `skip_layers`, `note`, `log_hits`, `enabled` |
 | `GET|PUT|DELETE /sites/{id}/path-exceptions/{id}` | Read / partial update / delete (`204`) |
 
+## Error page scopes
+
+Custom error pages (`GET|POST /error-pages`, administrators) carry a `scope`:
+
+- **`site`** (default) — replaces error responses of matched sites; status
+  codes 400–599; templates render the full context (`request_id`,
+  `error_code`, `site_name`, `client_ip`, …).
+- **`unmatched_host`** — the edge's fallback for requests whose `Host`
+  matches no configured site (bare IP + port, unknown hostnames). Only 404,
+  421 and 503 are accepted; duplicates per `(scope, status_code)` answer
+  `409`. The fallback exists only while at least one enabled page of this
+  scope is configured — otherwise the gateway keeps its plain default 404 —
+  and it never overrides a matched site's own locations. Its template gets
+  only `{{ host }}` (HTML-escaped) and `{{ request_id }}`; responses carry
+  `Cache-Control: no-store`.
+
+## Site clones copy everything
+
+`POST /sites/{id}/clone` now copies **every** site-scoped table, including
+the sensitive ones: certificates **with their private keys** (each row
+re-keyed to the clone, `site_ssl.certificate_id` remapped to the clone's own
+copy), the source site's own certificate-sharing links, Basic Auth
+credentials, the OIDC configuration (including `cookie_secret`) and visitor
+authorizations. Treat the clone API as a secret-duplication operation — the
+console requires an explicit acknowledgement before it will send the
+request. The clone still starts `paused`, forwarded-header trust
+(`trust_proxy_headers`, trusted proxy ranges/groups) is still reset, and the
+OIDC callback still names the source domain, so the identity-provider
+registration must be updated before the clone is enabled. References the
+mapping cannot resolve (a deleted pool, a foreign rule group) fall back to
+the clone's own default pool instead of dangling.
+
+## Cache rule precedence and presets
+
+Caching has two layers: explicit rules (the `cache-rules` endpoints, matched
+by expression) and the five extension-based category presets on
+`cache-settings` (`web_assets`, `image`, `media`, `other`, `html`). Explicit
+rules evaluate **first**, presets after — first match wins — and presets
+match only by file extension, so API endpoints and extension-less paths
+need an explicit rule. A site with only presets still caches; the REST API
+is unchanged (`cache-rules` + `cache-settings`), the console's merged list
+is presentation only. The console's *Convert to rule* action turns a preset
+into an explicit `http.request.uri.path matches "(?i)\.(?:ext|…)$"` rule
+with the preset's extensions and TTLs and disables the preset.
+
 ## Flush logs
 
 `POST /agents/flush-logs` (administrators) asks every connected agent to ship its in-memory log buffer immediately instead of waiting out the batch interval. Returns `{ "delivered": N, "offline": M }`; offline agents are counted but not queued, and `delivered` means the command was handed over — not that the entries are stored yet.
