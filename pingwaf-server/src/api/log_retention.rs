@@ -35,6 +35,14 @@ pub struct UpdateLogRetentionRequest {
     /// Days a row of `security_events` is kept.
     #[serde(default)]
     pub security_event_retention_days: Option<i32>,
+    /// Skip access-log rows for static-asset requests that triggered no
+    /// security rule.
+    #[serde(default)]
+    pub skip_static_access_logs: Option<bool>,
+    /// Replacement for the static-suffix list. `None` keeps the current
+    /// list; an empty array clears it (the switch then skips nothing).
+    #[serde(default)]
+    pub static_suffixes: Option<Vec<String>>,
 }
 
 /// `GET /api/v1/settings/log-retention` — administrators only.
@@ -56,11 +64,22 @@ async fn update(
 
     if payload.access_log_retention_days.is_none()
         && payload.security_event_retention_days.is_none()
+        && payload.skip_static_access_logs.is_none()
+        && payload.static_suffixes.is_none()
     {
         return Err(ApiError::BadRequest(
-            "provide at least one retention window".to_string(),
+            "provide at least one retention or filtering setting".to_string(),
         ));
     }
+
+    // Validate before touching the row so a bad suffix list cannot leave a
+    // half-applied update behind.
+    let suffixes = payload
+        .static_suffixes
+        .as_deref()
+        .map(log_retention::normalize_suffix_list)
+        .transpose()
+        .map_err(ApiError::BadRequest)?;
 
     let row = load(&state.db).await?;
     let mut active: log_retention::ActiveModel = row.into();
@@ -73,6 +92,12 @@ async fn update(
         active.security_event_retention_days =
             Set(validate_days(days, "security event")?);
     }
+    if let Some(skip) = payload.skip_static_access_logs {
+        active.skip_static_access_logs = Set(skip);
+    }
+    if let Some(suffixes) = suffixes {
+        active.static_suffixes = Set(suffixes);
+    }
     active.updated_at = Set(Utc::now());
 
     let updated = active.update(&state.db).await?;
@@ -80,8 +105,15 @@ async fn update(
         actor = %current.id,
         access_days = updated.access_log_retention_days,
         security_days = updated.security_event_retention_days,
+        skip_static = updated.skip_static_access_logs,
+        suffixes = updated.static_suffixes.len(),
         "log retention settings updated"
     );
+
+    // The filter rides inside every rule bundle, so each site's fingerprint
+    // changes; push the new configuration now instead of waiting for the
+    // next periodic sync.
+    crate::grpc::notify_all_config_changed(&state, None).await;
 
     Ok(Json(updated))
 }
@@ -119,6 +151,13 @@ pub async fn load(
         access_log_retention_days: Set(log_retention::DEFAULT_RETENTION_DAYS),
         security_event_retention_days: Set(
             log_retention::DEFAULT_RETENTION_DAYS,
+        ),
+        skip_static_access_logs: Set(true),
+        static_suffixes: Set(
+            log_retention::DEFAULT_STATIC_SUFFIXES
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
         ),
         updated_at: Set(Utc::now()),
     };

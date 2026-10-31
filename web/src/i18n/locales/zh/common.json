@@ -389,9 +389,10 @@
       "activeVisitorsHint": "最近 5 分钟独立 IP",
       "asOf": "更新于",
       "clientTypes": "客户端类型",
-      "clientTypesHint": "所选时间范围内的桌面 / 移动 / 其它客户端占比",
+      "clientTypesHint": "所选时间范围内的桌面 / 移动 / AI 机器人 / 其它客户端占比",
       "desktop": "桌面端",
       "mobile": "移动端",
+      "aiBots": "AI 机器人",
       "other": "其它"
     },
     "sites": {
@@ -601,7 +602,8 @@
         "headers": "请求头",
         "clientIp": "客户端 IP",
         "country": "国家代码",
-        "args": "URI 参数"
+        "args": "URI 参数",
+        "responseStatus": "响应状态码"
       },
       "operators": {
         "eq": "等于",
@@ -1299,6 +1301,12 @@
       "addOperation": "添加操作",
       "moveUp": "上移",
       "moveDown": "下移",
+      "directionChanged": "方向已切换，不兼容的匹配条件与操作已重置。",
+      "matchMode": "匹配方式",
+      "matchModeLiteral": "字面量",
+      "matchModeRegex": "正则",
+      "regexCaptureHint": "支持 $1、${name} 引用查找表达式中的捕获组。",
+      "greedy": "贪婪模式",
       "namePlaceholder": "添加 CORS 头",
       "nameRequired": "请填写名称。",
       "operationsRequired": "请至少添加一个操作。",
@@ -1988,6 +1996,15 @@
       "logRetentionEsNote": "已发送到 Elasticsearch 的日志在那里独立保留 360 天，不受此处设置影响。",
       "logRetentionRange": "请输入 1 到 3650 之间的天数。",
       "logRetentionSaved": "日志留存设置已保存",
+      "logRetentionSkipStatic": "不保存静态资源访问日志",
+      "logRetentionSkipStaticDescription": "仅当请求未触发任何安全规则时跳过记录；被拦截或挑战的请求仍会记录。",
+      "logRetentionSuffixes": "静态资源后缀",
+      "logRetentionSuffixesDescription": "请求路径以上述任一后缀结尾且未触发安全规则时，不记录访问日志。后缀为 1-10 位小写字母或数字。",
+      "logRetentionSuffixPlaceholder": "输入后缀后按回车或逗号添加，如 png",
+      "logRetentionSuffixInvalid": "后缀仅允许 1-10 位小写字母或数字。",
+      "logRetentionSuffixDuplicate": "该后缀已存在。",
+      "logRetentionSuffixLimit": "最多允许 64 个后缀。",
+      "logRetentionRestoreDefaults": "恢复默认后缀",
       "permissions": "权限",
       "permissionsHint": "此密钥被允许执行的操作",
       "expires": "过期时间",
@@ -2759,6 +2776,29 @@
       "certFollowGlobal": "证书校验：跟随全局默认",
       "originTlsSummary": "源站证书校验（站点默认）：",
       "originTlsSettingsLink": "前往 SSL 页设置 →",
+      "groups": {
+        "ingress": {
+          "title": "流量接入",
+          "description": "管理客户端到边缘的接入方式：可信代理与下游超时。"
+        },
+        "origin": {
+          "title": "回源与容灾",
+          "description": "管理边缘到源站的回源行为，以及控制面不可达时的降级策略。"
+        },
+        "pools": {
+          "title": "源站池与路由",
+          "description": "管理源站池及其节点，以及请求按路径分发的路由规则。"
+        }
+      },
+      "originVerifyCard": {
+        "title": "源站证书校验",
+        "description": "HTTPS 回源时是否必须提供能被信任库校验通过的证书。在 SSL 页编辑。",
+        "editSsl": "去 SSL 页编辑",
+        "followGlobal": "跟随全局默认",
+        "enabled": "开启：校验源站证书",
+        "disabled": "关闭：不校验源站证书",
+        "note": "此项为只读展示；修改请前往该站点的 SSL 设置页。"
+      },
       "addressFamily": "地址族",
       "addressFamilyHint": "auto 优先 IPv4；仅支持单栈的源站可固定 ipv4/ipv6（IP 直连地址忽略此项）。",
       "addressFamilyOptions": {

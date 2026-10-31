@@ -133,6 +133,11 @@ pub enum RewriteOperation {
     ReplaceBody {
         search: String,
         replacement: String,
+        /// `search` is a regular expression and `replacement` may reference
+        /// `$1` / `${name}` capture groups.
+        is_regex: bool,
+        /// Replace every match (`true`, the default) or only the first.
+        greedy: bool,
     },
     SetBody {
         content: String,
@@ -174,8 +179,22 @@ enum CompiledOperation {
 /// A body-only operation, applied during the response-body phase.
 #[derive(Debug, Clone)]
 enum BodyOperation {
-    Replace { search: String, replacement: String },
+    Replace {
+        search: BodySearch,
+        replacement: String,
+        /// Replace every match (`true`) or only the first occurrence.
+        greedy: bool,
+    },
     Set { content: String },
+}
+
+/// A compiled `replace_body` search: literal bytes or a precompiled regular
+/// expression (whose replacement may reference `$1` / `${name}` capture
+/// groups, like `sub_filter`'s).
+#[derive(Debug, Clone)]
+enum BodySearch {
+    Literal(String),
+    Regex(regex::bytes::Regex),
 }
 
 /// A rule with its condition parsed and operations compiled.
@@ -884,6 +903,26 @@ struct RewriteBodyReplacer {
     buffer: BytesMut,
 }
 
+/// Replaces only the first occurrence of `search` in `data`.
+fn replace_first_literal(
+    data: &[u8],
+    search: &[u8],
+    replacement: &[u8],
+) -> Vec<u8> {
+    match data.windows(search.len()).position(|w| w == search) {
+        Some(pos) => {
+            let mut out = Vec::with_capacity(
+                data.len() - search.len() + replacement.len(),
+            );
+            out.extend_from_slice(&data[..pos]);
+            out.extend_from_slice(replacement);
+            out.extend_from_slice(&data[pos + search.len()..]);
+            out
+        },
+        None => data.to_vec(),
+    }
+}
+
 impl ModifyResponseBody for RewriteBodyReplacer {
     fn handle(
         &mut self,
@@ -904,11 +943,35 @@ impl ModifyResponseBody for RewriteBodyReplacer {
                 BodyOperation::Replace {
                     search,
                     replacement,
-                } => {
-                    if !search.is_empty() {
-                        data = data
-                            .replace(search.as_bytes(), replacement.as_bytes());
-                    }
+                    greedy,
+                } => match search {
+                    BodySearch::Regex(regex) => {
+                        data = if *greedy {
+                            regex
+                                .replace_all(&data, replacement.as_bytes())
+                                .to_vec()
+                        } else {
+                            regex
+                                .replace(&data, replacement.as_bytes())
+                                .to_vec()
+                        };
+                    },
+                    BodySearch::Literal(search) => {
+                        if !search.is_empty() {
+                            data = if *greedy {
+                                data.replace(
+                                    search.as_bytes(),
+                                    replacement.as_bytes(),
+                                )
+                            } else {
+                                replace_first_literal(
+                                    &data,
+                                    search.as_bytes(),
+                                    replacement.as_bytes(),
+                                )
+                            };
+                        }
+                    },
                 },
                 BodyOperation::Set { content } => {
                     data = content.clone().into_bytes();
@@ -984,6 +1047,11 @@ enum OpSpec {
     ReplaceBody {
         search: String,
         replacement: String,
+        #[serde(default)]
+        is_regex: bool,
+        // Unset means replace-all, matching the historical behaviour.
+        #[serde(default = "default_true")]
+        greedy: bool,
     },
     SetBody {
         content: String,
@@ -1034,9 +1102,13 @@ impl RuleSpec {
                 OpSpec::ReplaceBody {
                     search,
                     replacement,
+                    is_regex,
+                    greedy,
                 } => RewriteOperation::ReplaceBody {
                     search,
                     replacement,
+                    is_regex,
+                    greedy,
                 },
                 OpSpec::SetBody { content } => {
                     RewriteOperation::SetBody { content }
@@ -1125,10 +1197,27 @@ fn compile_rule(rule: &RewriteRule) -> Result<CompiledRewriteRule> {
             RewriteOperation::ReplaceBody {
                 search,
                 replacement,
+                is_regex,
+                greedy,
             } => {
+                // A broken regular expression fails rule compilation, which
+                // drops the whole rule with a warning — the same fate any
+                // other invalid operation gets.
+                let search = if *is_regex {
+                    let regex = regex::bytes::Regex::new(search)
+                        .map_err(|e| {
+                            invalid(format!(
+                                "invalid body regex '{search}': {e}"
+                            ))
+                        })?;
+                    BodySearch::Regex(regex)
+                } else {
+                    BodySearch::Literal(search.clone())
+                };
                 body_operations.push(BodyOperation::Replace {
-                    search: search.clone(),
+                    search,
                     replacement: replacement.clone(),
+                    greedy: *greedy,
                 });
             },
             RewriteOperation::SetBody { content } => {
@@ -1226,6 +1315,8 @@ fn convert_operation(op: &CacheRewriteOperation) -> Option<RewriteOperation> {
         "replace_body" => RewriteOperation::ReplaceBody {
             search: op.name.clone(),
             replacement: op.value.clone(),
+            is_regex: op.is_regex.unwrap_or(false),
+            greedy: op.greedy.unwrap_or(true),
         },
         other => {
             debug!(op_type = other, "unsupported rewrite operation type");
@@ -1427,7 +1518,7 @@ impl RewritePlugin {
                         session.req_header().uri.path().to_string()
                     });
                     let replaced = regex
-                        .replace(&current, replacement.as_str())
+                        .replace_all(&current, replacement.as_str())
                         .to_string();
                     if replaced != current {
                         new_path = Some(replaced);
@@ -1875,6 +1966,120 @@ rules = '[{"id":"h","direction":"response","operations":[{"type":"set_header","n
         assert_eq!(201, resp.status.as_u16());
     }
 
+    fn compile_body_rule(op: RewriteOperation) -> Vec<BodyOperation> {
+        compile_rule(&RewriteRule {
+            id: "t".to_string(),
+            name: "t".to_string(),
+            condition: None,
+            direction: RewriteDirection::Response,
+            operations: vec![op],
+            priority: 0,
+            enabled: true,
+        })
+        .unwrap()
+        .body_operations
+    }
+
+    async fn run_body(
+        s: &Session,
+        ops: Vec<BodyOperation>,
+        body: &str,
+    ) -> String {
+        let mut replacer = RewriteBodyReplacer {
+            ops,
+            buffer: BytesMut::new(),
+        };
+        let mut body = Some(Bytes::copy_from_slice(body.as_bytes()));
+        replacer.handle(s, &mut body, true).unwrap();
+        String::from_utf8(body.unwrap().to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn replace_body_regex_supports_capture_groups_and_greedy() {
+        let s = session("GET", "/", "rewrite.test").await;
+        // Greedy (default): every match is replaced and `$1` expands.
+        let ops = compile_body_rule(RewriteOperation::ReplaceBody {
+            search: r"ver\s+(\d+)".to_string(),
+            replacement: "v$1".to_string(),
+            is_regex: true,
+            greedy: true,
+        });
+        assert_eq!("v1 and v2", run_body(&s, ops, "ver 1 and ver 2").await);
+
+        // Non-greedy: only the first match is replaced.
+        let ops = compile_body_rule(RewriteOperation::ReplaceBody {
+            search: r"ver\s+(\d+)".to_string(),
+            replacement: "v$1".to_string(),
+            is_regex: true,
+            greedy: false,
+        });
+        assert_eq!(
+            "v1 and ver 2",
+            run_body(&s, ops, "ver 1 and ver 2").await
+        );
+
+        // A broken regular expression fails compilation, which drops the
+        // whole rule instead of half-applying it.
+        assert!(compile_rule(&RewriteRule {
+            id: "t".to_string(),
+            name: "t".to_string(),
+            condition: None,
+            direction: RewriteDirection::Response,
+            operations: vec![RewriteOperation::ReplaceBody {
+                search: "ver(".to_string(),
+                replacement: "v".to_string(),
+                is_regex: true,
+                greedy: true,
+            }],
+            priority: 0,
+            enabled: true,
+        })
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn replace_body_literal_first_only() {
+        let s = session("GET", "/", "rewrite.test").await;
+        let ops = compile_body_rule(RewriteOperation::ReplaceBody {
+            search: "aa".to_string(),
+            replacement: "b".to_string(),
+            is_regex: false,
+            greedy: false,
+        });
+        assert_eq!("baa", run_body(&s, ops, "aaaa").await);
+
+        // Greedy literal keeps the historical replace-all behaviour.
+        let ops = compile_body_rule(RewriteOperation::ReplaceBody {
+            search: "aa".to_string(),
+            replacement: "b".to_string(),
+            is_regex: false,
+            greedy: true,
+        });
+        assert_eq!("bb", run_body(&s, ops, "aaaa").await);
+    }
+
+    #[tokio::test]
+    async fn test_regex_replace_path_replaces_every_match() {
+        let plugin = RewritePlugin::new(
+            &toml::from_str::<PluginConf>(
+                r###"
+category = "rewrite"
+rules = '[{"id":"zeros","direction":"request","operations":[{"type":"regex_replace_path","pattern":"o","replacement":"0"}]}]'
+"###,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let mut s = session("GET", "/foo/boo", "rewrite.test").await;
+        let result = plugin
+            .handle_request(PluginStep::Request, &mut s, &mut Ctx::default())
+            .await
+            .unwrap();
+        assert_eq!(true, result == RequestPluginResult::Continue);
+        assert_eq!("/f00/b00", s.req_header().uri.path());
+    }
+
     mod agent_mode {
         use super::*;
         use crate::waf::tests::install_test_agent;
@@ -1934,6 +2139,8 @@ rules = '[{"id":"h","direction":"response","operations":[{"type":"set_header","n
                         r#type: "regex_replace_path".to_string(),
                         name: "^/api/(.*)".to_string(),
                         value: "/$1".to_string(),
+                        is_regex: None,
+                        greedy: None,
                     },
                 ])]))
                 .unwrap();
@@ -1978,6 +2185,8 @@ rules = '[{"id":"h","direction":"response","operations":[{"type":"set_header","n
                     r#type: "set_header".to_string(),
                     name: "x-rewritten".to_string(),
                     value: "1".to_string(),
+                    is_regex: None,
+                    greedy: None,
                 }])]);
             config.sites[0].rules.as_mut().unwrap().rewrite_rules[0]
                 .match_expression =

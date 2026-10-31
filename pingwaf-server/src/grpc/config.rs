@@ -14,7 +14,8 @@ use pingwaf_proto::control_plane::{
     AiBotPolicy, AiCrawlConfig, BasicAuthConfig, BasicAuthCredential,
     BotProtectionConfig, CacheRule, CacheTypeCategory, CacheTypePolicy,
     ChallengeConfig, CustomErrorPage, FailoverMode, GeoConfig,
-    GlobalCacheSettings, HealthCheckConfig, IpAccessRule, OidcAccessRule,
+    GlobalCacheSettings, HealthCheckConfig, IpAccessRule, LogSettings,
+    OidcAccessRule,
     OidcConfig, OidcHeaderClaim, RateLimitRule, ResponseReplaceConfig,
     ResponseReplaceRule, RewriteOperation, RewriteRule, RouteConfig,
     RuleBundle, RuleOverride, Site, SiteCacheSettings, SiteConfig, SitePolicy,
@@ -1383,6 +1384,11 @@ fn parse_operations(ops: &serde_json::Value) -> Vec<RewriteOperation> {
                     .and_then(|v| v.as_str())
                     .unwrap_or_default()
                     .to_string(),
+                // `replace_body` extras, stored by the console as plain
+                // booleans; absent on older rows, which keeps the historical
+                // literal match-all behaviour.
+                is_regex: obj.get("is_regex").and_then(|v| v.as_bool()),
+                greedy: obj.get("greedy").and_then(|v| v.as_bool()),
             })
         })
         .collect()
@@ -1465,6 +1471,15 @@ pub async fn build_rule_bundle(
         .await
         .ok()
         .map(|row| row.verify_cert);
+    // Deployment-wide access-log filtering. A read failure leaves the field
+    // unset, which the agent reads as "never skip logging" (fail-open), the
+    // same degradation an old server without the field produces.
+    let log_settings = crate::api::log_retention::load(db).await.ok().map(
+        |row| LogSettings {
+            skip_static_access_logs: Some(row.skip_static_access_logs),
+            static_suffixes: row.static_suffixes,
+        },
+    );
 
     let custom_rules: Vec<WafRule> =
         rules_rows.iter().map(rule_to_proto).collect();
@@ -1516,6 +1531,7 @@ pub async fn build_rule_bundle(
         response_replace: response_replace_to_proto(site_row),
         ai_crawl,
         oidc: oidc_to_proto(oidc.as_ref(), oidc_provider_row.as_ref()),
+        log_settings,
     };
 
     bundle.config_hash = fingerprint(&bundle);

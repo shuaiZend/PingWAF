@@ -70,6 +70,10 @@ pub struct CachedRules {
     /// rather than switching every HTTPS origin to strict validation.
     #[serde(default)]
     pub origin_verify_cert: Option<bool>,
+    /// Deployment-wide static-asset access-log filtering; `None` when the
+    /// server never sent it (old control plane) — nothing is then skipped.
+    #[serde(default)]
+    pub log_settings: Option<Arc<LogSettings>>,
     /// When the cache was last updated from the server
     pub updated_at: DateTime<Utc>,
     /// Hash of the configuration (for delta sync). An `Arc` so the hot path
@@ -86,6 +90,7 @@ impl Default for CachedRules {
             global_fail_open: None,
             global_cache: None,
             origin_verify_cert: None,
+            log_settings: None,
             updated_at: Utc::now(),
             config_hash: Arc::from(""),
         }
@@ -678,6 +683,25 @@ impl GlobalCacheSettings {
     }
 }
 
+/// Deployment-wide access-log filtering, mirrored from the control plane's
+/// `log_retention_settings` row via the `LogSettings` bundle field. Absent
+/// (`None` on [`CachedRules::log_settings`]) means the server never sent it
+/// (old control plane): logging is never skipped (fail-open).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct LogSettings {
+    #[serde(default)]
+    pub skip_static_access_logs: Option<bool>,
+    #[serde(default)]
+    pub static_suffixes: Vec<String>,
+}
+
+impl LogSettings {
+    /// `false` when unset: an absent flag must not start skipping logs.
+    pub fn skip_static_access_logs(&self) -> bool {
+        self.skip_static_access_logs.unwrap_or(false)
+    }
+}
+
 /// Site-level cache limits, mirrored from the `sites` cache columns. `None`
 /// fields fall back level by level: type limit → site cap → global cap.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -942,6 +966,14 @@ pub struct RewriteOperation {
     pub name: String,
     #[serde(default)]
     pub value: String,
+    /// `replace_body` only: `name` is a regular expression and `value` may
+    /// reference `$1` / `${name}` capture groups. `None` = literal match.
+    #[serde(default)]
+    pub is_regex: Option<bool>,
+    /// `replace_body` only: `true` (or unset) replaces every match, `false`
+    /// only the first occurrence.
+    #[serde(default)]
+    pub greedy: Option<bool>,
 }
 
 // ─── Error Pages ────────────────────────────────────────────
@@ -1590,6 +1622,17 @@ impl RuleCache {
             if let Some(origin_verify_cert) = bundle.origin_verify_cert {
                 updated.origin_verify_cert = Some(origin_verify_cert);
             }
+            // Log settings are sticky: a bundle without `log_settings` (an
+            // old control plane, or a server that failed to read its
+            // retention row) keeps the last known value instead of clearing
+            // it. This deliberately trades instant fail-open degradation for
+            // stability against transient server-side read errors; an agent
+            // restart re-reads the snapshot and falls back to None (never
+            // skip) if the server keeps omitting the field.
+            if let Some(ls) = &bundle.log_settings {
+                updated.log_settings =
+                    Some(Arc::new(Self::convert_log_settings(ls)));
+            }
             updated.config_hash = bundle.config_hash.as_str().into();
             updated.updated_at = Utc::now();
             Arc::new(updated)
@@ -1653,6 +1696,7 @@ impl RuleCache {
         let mut global_fail_open = None;
         let mut global_cache = None;
         let mut origin_verify_cert = None;
+        let mut log_settings = None;
         for site in &config.sites {
             if let Some(ref bundle) = site.rules {
                 failover_registry = Some(Arc::new(failover_registry_from(
@@ -1664,6 +1708,10 @@ impl RuleCache {
                     .as_ref()
                     .map(|gc| Arc::new(Self::convert_global_cache(gc)));
                 origin_verify_cert = bundle.origin_verify_cert;
+                log_settings = bundle
+                    .log_settings
+                    .as_ref()
+                    .map(|ls| Arc::new(Self::convert_log_settings(ls)));
                 break;
             }
         }
@@ -1684,6 +1732,9 @@ impl RuleCache {
             }
             if let Some(verify_cert) = origin_verify_cert {
                 updated.origin_verify_cert = Some(verify_cert);
+            }
+            if let Some(ls) = &log_settings {
+                updated.log_settings = Some(Arc::clone(ls));
             }
 
             for site in &config.sites {
@@ -1834,6 +1885,12 @@ impl RuleCache {
     /// synced. `None` means the agent must fall back to its local setting.
     pub fn global_fail_open(&self) -> Option<bool> {
         self.inner.load().global_fail_open
+    }
+
+    /// Deployment-wide static-asset access-log filtering; `None` when the
+    /// control plane never sent it (nothing is then skipped).
+    pub fn log_settings(&self) -> Option<Arc<LogSettings>> {
+        self.inner.load().log_settings.clone()
     }
 
     /// Look up site rules by site ID.
@@ -2626,6 +2683,13 @@ impl RuleCache {
         }
     }
 
+    fn convert_log_settings(ls: &proto::LogSettings) -> LogSettings {
+        LogSettings {
+            skip_static_access_logs: ls.skip_static_access_logs,
+            static_suffixes: ls.static_suffixes.clone(),
+        }
+    }
+
     fn convert_site_cache_settings(
         s: &proto::SiteCacheSettings,
     ) -> SiteCacheSettings {
@@ -2862,6 +2926,8 @@ impl RuleCache {
                     op_type: o.r#type.clone(),
                     name: o.name.clone(),
                     value: o.value.clone(),
+                    is_regex: o.is_regex,
+                    greedy: o.greedy,
                 })
                 .collect(),
             enabled: r.enabled,
@@ -3196,6 +3262,7 @@ mod tests {
                 ..Default::default()
             })),
             origin_verify_cert: None,
+            log_settings: None,
             updated_at: Utc::now(),
             config_hash: Arc::from("abc"),
         };
@@ -3791,6 +3858,7 @@ mod tests {
             global_fail_open: Some(true),
             global_cache: None,
             origin_verify_cert: Some(false),
+            log_settings: None,
             updated_at: Utc::now(),
             config_hash: "abc".into(),
         };
@@ -3940,6 +4008,7 @@ mod tests {
                     })
                 }),
                 origin_verify_cert: None,
+                log_settings: None,
                 updated_at: Utc::now(),
                 config_hash: Arc::from(""),
             }));

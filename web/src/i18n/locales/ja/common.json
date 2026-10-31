@@ -389,9 +389,10 @@
       "activeVisitorsHint": "過去5分間のユニークIP",
       "asOf": "基準時刻",
       "clientTypes": "クライアント種別",
-      "clientTypesHint": "選択した期間のデスクトップ／モバイル／その他の比率",
+      "clientTypesHint": "選択した期間のデスクトップ／モバイル／AI ボット／その他の比率",
       "desktop": "デスクトップ",
       "mobile": "モバイル",
+      "aiBots": "AI ボット",
       "other": "その他"
     },
     "sites": {
@@ -601,7 +602,8 @@
         "headers": "ヘッダー",
         "clientIp": "クライアント IP",
         "country": "国コード",
-        "args": "URI 引数"
+        "args": "URI 引数",
+        "responseStatus": "レスポンスステータス"
       },
       "operators": {
         "eq": "等しい",
@@ -1299,6 +1301,12 @@
       "addOperation": "オペレーションを追加",
       "moveUp": "上へ",
       "moveDown": "下へ",
+      "directionChanged": "方向を切り替えたため、互換性のない条件とオペレーションをリセットしました。",
+      "matchMode": "一致方式",
+      "matchModeLiteral": "リテラル",
+      "matchModeRegex": "正規表現",
+      "regexCaptureHint": "$1 や ${name} で検索パターンのキャプチャグループを参照できます。",
+      "greedy": "全置換（貪欲）",
       "namePlaceholder": "CORS ヘッダーを追加",
       "nameRequired": "名前は必須です。",
       "operationsRequired": "少なくとも 1 つのオペレーションを追加してください。",
@@ -1988,6 +1996,15 @@
       "logRetentionEsNote": "Elasticsearch に転送済みのログは、この設定とは無関係に 360 日間保持されます。",
       "logRetentionRange": "1〜3650 の日数を入力してください。",
       "logRetentionSaved": "ログ保持設定が保存されました",
+      "logRetentionSkipStatic": "静的リソースのアクセスログを保存しない",
+      "logRetentionSkipStaticDescription": "セキュリティルールに一致しなかったリクエストのみ記録をスキップします。ブロックやチャレンジが発生したリクエストは引き続き記録されます。",
+      "logRetentionSuffixes": "静的リソースの拡張子",
+      "logRetentionSuffixesDescription": "パスがこれらの拡張子のいずれかで終わり、セキュリティルールに一致しないリクエストはアクセスログに記録されません。拡張子は 1〜10 文字の小文字英数字です。",
+      "logRetentionSuffixPlaceholder": "拡張子を入力して Enter またはカンマで追加（例: png）",
+      "logRetentionSuffixInvalid": "拡張子には 1〜10 文字の小文字英数字のみ使用できます。",
+      "logRetentionSuffixDuplicate": "この拡張子は既に存在します。",
+      "logRetentionSuffixLimit": "拡張子は最大 64 個までです。",
+      "logRetentionRestoreDefaults": "デフォルトの拡張子に戻す",
       "permissions": "権限",
       "permissionsHint": "このキーに許可される操作",
       "expires": "有効期限",
@@ -2750,6 +2767,29 @@
       "certFollowGlobal": "証明書検証：デプロイ既定に従う",
       "originTlsSummary": "オリジン証明書検証（サイト既定）：",
       "originTlsSettingsLink": "SSL ページで設定 →",
+      "groups": {
+        "ingress": {
+          "title": "トラフィック受付",
+          "description": "クライアントからエッジへの接続方法：信頼プロキシと下流タイムアウトを管理します。"
+        },
+        "origin": {
+          "title": "オリジンとフェイルオーバー",
+          "description": "エッジからオリジンへの接続動作と、コントロールプレーン到達不能時の縮退動作を管理します。"
+        },
+        "pools": {
+          "title": "オリジンプールとルート",
+          "description": "オリジンプールとそのノード、パスによるリクエスト振り分けルールを管理します。"
+        }
+      },
+      "originVerifyCard": {
+        "title": "オリジン証明書検証",
+        "description": "HTTPS オリジン接続で信頼できるストアにより検証可能な証明書を必須とするかどうか。SSL ページで編集します。",
+        "editSsl": "SSL ページで編集",
+        "followGlobal": "グローバル既定に従う",
+        "enabled": "オン：オリジン証明書を検証します",
+        "disabled": "オフ：オリジン証明書を検証しません",
+        "note": "ここでは読み取り専用です。変更はこのサイトの SSL 設定ページで行ってください。"
+      },
       "addressFamily": "アドレスファミリー",
       "addressFamilyHint": "auto は IPv4 を優先します。単一スタックのオリジンは ipv4/ipv6 を固定できます（IP リテラルは無視されます）。",
       "addressFamilyOptions": {

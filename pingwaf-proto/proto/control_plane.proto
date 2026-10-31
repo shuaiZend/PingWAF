@@ -395,6 +395,23 @@ message RuleBundle {
   // instance. Absent = the site has no OIDC (old servers never send it), and
   // the data plane generates no plugin for it.
   optional OidcConfig oidc = 31;
+
+  // Deployment-wide access-log settings: whether static-asset requests that
+  // triggered no security rule are skipped from `access_logs`. Absent = old
+  // server: the agent never skips logging (fail-open).
+  optional LogSettings log_settings = 32;
+}
+
+// Global access-log filtering configuration. Carried on every `RuleBundle`
+// because the data plane consults it at request completion, when the only
+// handle it has is the bundle already resolved for the request host.
+message LogSettings {
+  // Skip the access-log entry for static-asset paths (see
+  // `static_suffixes`) when the request triggered no WAF verdict.
+  optional bool skip_static_access_logs = 1;
+  // Path suffixes classified as static assets, lowercase, no leading dot.
+  // An empty list with the switch on skips nothing.
+  repeated string static_suffixes = 2;
 }
 
 // AI crawler control. The control plane renders the file bodies (they are
@@ -814,6 +831,13 @@ message RewriteOperation {
   string type = 1;
   string name = 2;
   string value = 3;
+  // `replace_body` only: treat `name` as a regular expression and support
+  // `$1` / `${name}` capture-group references in `value`. Unset = literal
+  // match (old agents / old servers).
+  optional bool is_regex = 4;
+  // `replace_body` only: true = replace every match (default), false =
+  // replace only the first occurrence. Unset = replace all (old behaviour).
+  optional bool greedy = 5;
 }
 
 message CustomErrorPage {

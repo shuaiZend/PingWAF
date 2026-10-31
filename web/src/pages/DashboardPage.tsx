@@ -576,6 +576,11 @@ export function DashboardPage() {
                     color: '#18794e',
                   },
                   {
+                    name: t('pages.dashboard.aiBots'),
+                    value: clientTypes.data?.ai_bots ?? 0,
+                    color: '#8b5cf6',
+                  },
+                  {
                     name: t('pages.dashboard.other'),
                     value: clientTypes.data?.other ?? 0,
                     color: '#ffb224',

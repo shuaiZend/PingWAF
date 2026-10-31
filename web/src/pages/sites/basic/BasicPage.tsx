@@ -5,6 +5,7 @@ import { useQuery } from '@tanstack/react-query'
 import { ArrowClockwise, Plus } from '@phosphor-icons/react'
 import { PageHeader } from '@/components/PageHeader'
 import { Button } from '@/components/ui/Button'
+import { Card, CardBody, CardHeader } from '@/components/ui/Card'
 import { sitesApi, siteKeys } from '@/api/sites'
 import { ipGroupsApi, ipGroupKeys } from '@/api/ipGroups'
 import { useCanWrite } from '@/hooks'
@@ -12,6 +13,7 @@ import type { IpGroupResponse } from '@/api/types'
 import { FailoverPanel } from '../FailoverPanel'
 import { ProxyTrustCard } from './ProxyTrustCard'
 import { DownstreamTimeoutCard } from './DownstreamTimeoutCard'
+import { OriginVerifyCertCard } from './OriginVerifyCertCard'
 import { OriginPoolsSection } from './OriginPoolsSection'
 import { RoutesSection } from './RoutesSection'
 import { PoolDialog, type PoolDialogRequest } from './PoolDialog'
@@ -123,38 +125,55 @@ export function BasicPage() {
         }
       />
 
-      {siteQuery.data && (
-        <section className="mt-6">
-          <h2 className="text-sm font-semibold text-fg-strong">
-            {t('pages.basic.sections.trust')}
-          </h2>
-          <div className="mt-3">
+      {/* ── Group 1: traffic ingress ──────────────────────────────────── */}
+      <Card className="mt-6">
+        <CardHeader
+          title={t('pages.basic.groups.ingress.title')}
+          description={t('pages.basic.groups.ingress.description')}
+        />
+        <CardBody className="space-y-4">
+          {siteQuery.data && (
             <ProxyTrustCard
               site={siteQuery.data.site}
               ipGroups={gateableGroups}
             />
-          </div>
-        </section>
-      )}
+          )}
+          {siteQuery.data && (
+            /* Remount when the server value changes so an unsaved draft is
+                replaced by the authoritative value after a save/refetch. */
+            <DownstreamTimeoutCard
+              key={`${siteQuery.data.site.id}-${siteQuery.data.site.downstream_timeout_secs}`}
+              site={siteQuery.data.site}
+            />
+          )}
+        </CardBody>
+      </Card>
 
-      {siteQuery.data && (
-        <section className="mt-6">
-          {/* Remount when the server value changes so an unsaved draft is
-              replaced by the authoritative value after a save/refetch. */}
-          <DownstreamTimeoutCard
-            key={`${siteQuery.data.site.id}-${siteQuery.data.site.downstream_timeout_secs}`}
-            site={siteQuery.data.site}
-          />
-        </section>
-      )}
-      {/* Disconnected (failover) policy */}
-      <FailoverPanel />
+      {/* ── Group 2: origin & failover ────────────────────────────────── */}
+      <Card className="mt-6">
+        <CardHeader
+          title={t('pages.basic.groups.origin.title')}
+          description={t('pages.basic.groups.origin.description')}
+        />
+        <CardBody className="space-y-4">
+          {siteQuery.data && (
+            <OriginVerifyCertCard
+              siteId={siteId}
+              originVerifyCert={siteQuery.data.site.origin_verify_cert ?? null}
+            />
+          )}
+          {/* Disconnected (failover) policy */}
+          <FailoverPanel />
+        </CardBody>
+      </Card>
 
-      <section className="mt-8">
-        <h2 className="text-sm font-semibold text-fg-strong">
-          {t('pages.basic.sections.pools')}
-        </h2>
-        <div className="mt-3">
+      {/* ── Group 3: pools & routes ───────────────────────────────────── */}
+      <Card className="mt-6">
+        <CardHeader
+          title={t('pages.basic.groups.pools.title')}
+          description={t('pages.basic.groups.pools.description')}
+        />
+        <CardBody className="space-y-4">
           <OriginPoolsSection
             siteId={siteId}
             siteOriginVerifyCert={siteQuery.data?.site.origin_verify_cert ?? null}
@@ -163,15 +182,6 @@ export function BasicPage() {
             onEditPool={(pool) => setPoolRequest({ mode: 'edit', pool })}
             onCreatePool={() => setPoolRequest({ mode: 'create' })}
           />
-        </div>
-      </section>
-
-      <section className="mt-8">
-        <h2 className="text-sm font-semibold text-fg-strong">
-          {t('pages.basic.sections.routes')}
-        </h2>
-        <p className="mt-0.5 text-[13px] text-fg-subtle">{t('pages.basic.routesDescription')}</p>
-        <div className="mt-3">
           <RoutesSection
             siteId={siteId}
             routesQuery={routesQuery}
@@ -180,8 +190,8 @@ export function BasicPage() {
             onEditRoute={(route) => setRouteRequest({ mode: 'edit', route })}
             onCreateRoute={openCreateRoute}
           />
-        </div>
-      </section>
+        </CardBody>
+      </Card>
 
       {poolRequest && (
         <PoolDialog

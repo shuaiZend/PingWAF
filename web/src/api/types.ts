@@ -949,10 +949,12 @@ export interface ActiveVisitorsResponse {
 export interface ClientTypesResponse {
   desktop: number
   mobile: number
+  ai_bots: number
   other: number
   total: number
   desktop_share: number
   mobile_share: number
+  ai_bots_share: number
   other_share: number
 }
 
@@ -1237,6 +1239,10 @@ export interface LogRetentionSettings {
   access_log_retention_days: number
   /** Days a row of `security_events` is kept. */
   security_event_retention_days: number
+  /** Skip access logs for requests that hit no security rule and end in a static suffix. */
+  skip_static_access_logs: boolean
+  /** Suffixes (lowercase, no leading dot, 1-10 chars of `[a-z0-9]`) treated as static assets. */
+  static_suffixes: string[]
   updated_at: string
 }
 
@@ -1244,6 +1250,8 @@ export interface LogRetentionSettings {
 export interface UpdateLogRetentionRequest {
   access_log_retention_days?: number
   security_event_retention_days?: number
+  skip_static_access_logs?: boolean
+  static_suffixes?: string[]
 }
 
 /* ── Control-plane self-protection (port 9080) ────────────────────── */
@@ -2018,6 +2026,16 @@ export interface RewriteOperation {
   name?: string
   /** Header value / replacement / regex substitution. */
   value?: string
+  /**
+   * `replace_body` only: treat `name` as a regex instead of a literal string.
+   * Backend default is `false`.
+   */
+  is_regex?: boolean
+  /**
+   * `replace_body` only: replace all occurrences (true) or only the first
+   * one (false). Backend default is `true`.
+   */
+  greedy?: boolean
 }
 
 export interface RewriteRule {

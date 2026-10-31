@@ -357,6 +357,11 @@ export function TrafficPanels({ siteId }: { siteId?: string }) {
                     color: '#18794e',
                   },
                   {
+                    name: t('pages.dashboard.aiBots'),
+                    value: clientTypes?.ai_bots ?? 0,
+                    color: '#8b5cf6',
+                  },
+                  {
                     name: t('pages.dashboard.other'),
                     value: clientTypes?.other ?? 0,
                     color: '#ffb224',

@@ -56,7 +56,11 @@ export interface ExpressionField {
   choices?: string[]
 }
 
-export const EXPRESSION_FIELDS: ExpressionField[] = [
+/**
+ * Request-side fields (`http.request.*`, `http.*`, `ip.*`).
+ * Used by builders whose rule direction is `request`.
+ */
+export const REQUEST_FIELDS: ExpressionField[] = [
   {
     value: 'http.request.uri.path',
     labelKey: 'path',
@@ -119,6 +123,18 @@ export const EXPRESSION_FIELDS: ExpressionField[] = [
     placeholder: 'redirect',
   },
 ]
+
+/** Response-side fields — currently only the response status code. */
+export const RESPONSE_FIELDS: ExpressionField[] = [
+  {
+    value: 'http.response.status',
+    labelKey: 'responseStatus',
+    placeholder: '404',
+  },
+]
+
+/** All fields the builder offers (request + response combined). */
+export const EXPRESSION_FIELDS: ExpressionField[] = [...REQUEST_FIELDS, ...RESPONSE_FIELDS]
 
 export const DEFAULT_FIELD = 'http.request.uri.path'
 

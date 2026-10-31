@@ -389,9 +389,10 @@
       "activeVisitorsHint": "Unique IPs in the last 5 minutes",
       "asOf": "as of",
       "clientTypes": "Client Types",
-      "clientTypesHint": "Desktop vs. mobile vs. other clients over the selected range",
+      "clientTypesHint": "Desktop / mobile / AI bot / other client shares over the selected range",
       "desktop": "Desktop",
       "mobile": "Mobile",
+      "aiBots": "AI Bots",
       "other": "Other"
     },
     "sites": {
@@ -601,7 +602,8 @@
         "headers": "Headers",
         "clientIp": "Client IP",
         "country": "Country code",
-        "args": "URI arguments"
+        "args": "URI arguments",
+        "responseStatus": "Response status"
       },
       "operators": {
         "eq": "equals",
@@ -1299,6 +1301,12 @@
       "addOperation": "Add operation",
       "moveUp": "Move up",
       "moveDown": "Move down",
+      "directionChanged": "Direction changed — incompatible conditions and operations were reset.",
+      "matchMode": "Match mode",
+      "matchModeLiteral": "Literal",
+      "matchModeRegex": "Regex",
+      "regexCaptureHint": "Use $1 or ${name} to reference capture groups from the search pattern.",
+      "greedy": "Greedy",
       "namePlaceholder": "Add CORS header",
       "nameRequired": "Name is required.",
       "operationsRequired": "Add at least one operation.",
@@ -1988,6 +1996,15 @@
       "logRetentionEsNote": "Logs already shipped to Elasticsearch are kept there for 360 days regardless of these values.",
       "logRetentionRange": "Enter a value between 1 and 3650 days.",
       "logRetentionSaved": "Log retention settings saved",
+      "logRetentionSkipStatic": "Skip access logs for static assets",
+      "logRetentionSkipStaticDescription": "Only requests that trigger no security rule are skipped; blocked and challenged requests are still logged.",
+      "logRetentionSuffixes": "Static asset suffixes",
+      "logRetentionSuffixesDescription": "Requests whose path ends with any of these suffixes and triggers no security rule are not logged. Suffixes are 1-10 lowercase letters or digits.",
+      "logRetentionSuffixPlaceholder": "Type a suffix and press Enter or comma, e.g. png",
+      "logRetentionSuffixInvalid": "Suffixes allow 1-10 lowercase letters or digits only.",
+      "logRetentionSuffixDuplicate": "This suffix already exists.",
+      "logRetentionSuffixLimit": "At most 64 suffixes are allowed.",
+      "logRetentionRestoreDefaults": "Restore default suffixes",
       "permissions": "Permissions",
       "permissionsHint": "What this key is allowed to do",
       "expires": "Expires",
@@ -2759,6 +2776,29 @@
       "certFollowGlobal": "certificate check follows the deployment default",
       "originTlsSummary": "Origin certificate check (site default):",
       "originTlsSettingsLink": "Configure on the SSL page →",
+      "groups": {
+        "ingress": {
+          "title": "Traffic ingress",
+          "description": "How clients reach the edge: trusted proxy handling and downstream timeouts."
+        },
+        "origin": {
+          "title": "Origin & failover",
+          "description": "How the edge reaches your origins, and what to serve when the control plane is unreachable."
+        },
+        "pools": {
+          "title": "Origin pools & routes",
+          "description": "Origin pools with their nodes, and the path-based routing rules that dispatch requests."
+        }
+      },
+      "originVerifyCard": {
+        "title": "Origin certificate check",
+        "description": "Whether HTTPS origin pulls must present a certificate the trust store can verify. Edited on the SSL page.",
+        "editSsl": "Edit on SSL page",
+        "followGlobal": "Follows the global default",
+        "enabled": "On: origin certificates are verified",
+        "disabled": "Off: origin certificates are not verified",
+        "note": "Read-only here; to change it, go to this site's SSL settings page."
+      },
       "addressFamily": "Address family",
       "addressFamilyHint": "auto prefers IPv4; pin ipv4/ipv6 for single-stack origins (IP literals ignore it).",
       "addressFamilyOptions": {

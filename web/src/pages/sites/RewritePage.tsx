@@ -32,7 +32,8 @@ import { rewriteApi, rewriteKeys } from '@/api/rewrite'
 import { useCanWrite, useSiteDetail } from '@/hooks'
 import { ResponseReplaceCard } from './ResponseReplaceCard'
 import {
-  EXPRESSION_FIELDS,
+  REQUEST_FIELDS,
+  RESPONSE_FIELDS,
   EXPRESSION_OPERATORS,
   buildExpression,
   parseExpression,
@@ -45,6 +46,7 @@ import {
   REWRITE_OPERATION_TYPES,
   type CreateRewriteRuleRequest,
   type RewriteOperation,
+  type RewriteOperationType,
   type RewriteRule,
 } from '@/api/types'
 
@@ -60,11 +62,23 @@ interface FormState {
   enabled: boolean
 }
 
-const emptyCondition = (): ExpressionCondition => ({
-  field: EXPRESSION_FIELDS[0].value,
+const emptyCondition = (direction: string = 'request'): ExpressionCondition => ({
+  field: (direction === 'response' ? RESPONSE_FIELDS : REQUEST_FIELDS)[0].value,
   operator: 'eq',
   value: '',
 })
+
+/** Condition fields the builder offers for one direction. */
+const fieldsForDirection = (direction: string): typeof REQUEST_FIELDS =>
+  direction === 'response' ? RESPONSE_FIELDS : REQUEST_FIELDS
+
+/** Operation types offered for one direction. `replace_body` runs on responses only. */
+const operationTypesForDirection = (
+  direction: string,
+): RewriteOperationType[] =>
+  direction === 'response'
+    ? REWRITE_OPERATION_TYPES
+    : REWRITE_OPERATION_TYPES.filter((ty) => ty !== 'replace_body')
 
 const emptyForm = (): FormState => ({
   name: '',
@@ -85,7 +99,7 @@ function formFromRule(rule: RewriteRule): FormState {
     direction: rule.direction,
     conditionMode: parsed ? 'builder' : rule.condition_expr ? 'expression' : 'builder',
     combinator: parsed?.combinator ?? 'and',
-    conditions: parsed?.conditions?.length ? parsed.conditions : [emptyCondition()],
+    conditions: parsed?.conditions?.length ? parsed.conditions : [emptyCondition(rule.direction)],
     expression: rule.condition_expr,
     operations: rule.operations.length ? rule.operations : [{ type: 'set_header', name: '', value: '' }],
     priority: rule.priority,
@@ -147,6 +161,31 @@ export function RewritePage() {
       ),
     [rulesQuery.data],
   )
+
+  // Builder fields depend on the direction: response rules only match on the
+  // response status, request rules on the request attributes.
+  const availableFields = useMemo(
+    () => fieldsForDirection(form.direction),
+    [form.direction],
+  )
+
+  /** Direction switch may invalidate the selected fields / operation types. */
+  const changeDirection = (direction: string) => {
+    if (form.direction === direction) return
+    const allowedFields = fieldsForDirection(direction).map((fl) => fl.value)
+    const conditionsValid = form.conditions.every((c) => allowedFields.includes(c.field))
+    const allowedOps = operationTypesForDirection(direction)
+    const keptOps = form.operations.filter((o) => allowedOps.includes(o.type as RewriteOperationType))
+    if (!conditionsValid || keptOps.length !== form.operations.length) {
+      toast.info(t('pages.rewrite.directionChanged'))
+    }
+    setForm((f) => ({
+      ...f,
+      direction,
+      conditions: conditionsValid ? f.conditions : [emptyCondition(direction)],
+      operations: keptOps.length ? keptOps : [{ type: 'set_header', name: '', value: '' }],
+    }))
+  }
 
   // Re-seed the dialog form every time it opens (render-phase reset), so the
   // first paint already shows the right rule instead of the previous one.
@@ -239,6 +278,11 @@ export function RewritePage() {
         type: o.type,
         name: o.name?.trim() || undefined,
         value: o.value ?? undefined,
+        // replace_body-specific knobs; backend defaults are is_regex=false,
+        // greedy=true, so only send them for that operation type.
+        ...(o.type === 'replace_body'
+          ? { is_regex: o.is_regex ?? false, greedy: o.greedy ?? true }
+          : {}),
       })),
       priority: Number.isFinite(form.priority) ? form.priority : 0,
       enabled: form.enabled,
@@ -511,7 +555,7 @@ export function RewritePage() {
                 value: d,
                 label: t(`pages.rewrite.dir.${d}`, d),
               }))}
-              onChange={(e) => setForm((f) => ({ ...f, direction: e.target.value }))}
+              onChange={(e) => changeDirection(e.target.value)}
             />
           </div>
 
@@ -532,7 +576,9 @@ export function RewritePage() {
                       ...f,
                       conditionMode: 'builder',
                       combinator: parsed?.combinator ?? 'and',
-                      conditions: parsed?.conditions?.length ? parsed.conditions : [emptyCondition()],
+                      conditions: parsed?.conditions?.length
+                        ? parsed.conditions
+                        : [emptyCondition(f.direction)],
                     }
                   }
                   return { ...f, conditionMode: mode as FormState['conditionMode'] }
@@ -564,7 +610,7 @@ export function RewritePage() {
                     <Select
                       className="h-9 w-40 text-xs"
                       value={c.field}
-                      options={EXPRESSION_FIELDS.map((f) => ({
+                      options={availableFields.map((f) => ({
                         value: f.value,
                         label: t(`pages.waf.fields.${f.labelKey}`, f.value),
                       }))}
@@ -609,7 +655,10 @@ export function RewritePage() {
                   className="w-fit"
                   icon={<Plus weight="bold" className="h-3.5 w-3.5" />}
                   onClick={() =>
-                    setForm((f) => ({ ...f, conditions: [...f.conditions, emptyCondition()] }))
+                    setForm((f) => ({
+                      ...f,
+                      conditions: [...f.conditions, emptyCondition(f.direction)],
+                    }))
                   }
                 >
                   {t('pages.rewrite.addCondition')}
@@ -641,10 +690,16 @@ export function RewritePage() {
                       <Select
                         className="h-8 flex-1 text-xs"
                         value={op.type}
-                        options={REWRITE_OPERATION_TYPES.map((ty) => ({
-                          value: ty,
-                          label: t(`operations.${ty}`, ty),
-                        }))}
+                        options={(() => {
+                          const allowed = operationTypesForDirection(form.direction)
+                          const types = allowed.includes(op.type as RewriteOperationType)
+                            ? allowed
+                            : [op.type as RewriteOperationType, ...allowed]
+                          return types.map((ty) => ({
+                            value: ty,
+                            label: t(`operations.${ty}`, ty),
+                          }))
+                        })()}
                         onChange={(e) => setOperation(i, { type: e.target.value })}
                       />
                       <div className="flex items-center">
@@ -698,6 +753,37 @@ export function RewritePage() {
                         />
                       )}
                     </div>
+                    {op.type === 'replace_body' && (
+                      <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                        <div>
+                          <Select
+                            className="h-8 text-xs"
+                            label={t('pages.rewrite.matchMode')}
+                            value={(op.is_regex ?? false) ? 'regex' : 'literal'}
+                            options={[
+                              { value: 'literal', label: t('pages.rewrite.matchModeLiteral') },
+                              { value: 'regex', label: t('pages.rewrite.matchModeRegex') },
+                            ]}
+                            onChange={(e) =>
+                              setOperation(i, { is_regex: e.target.value === 'regex' })
+                            }
+                          />
+                          {(op.is_regex ?? false) && (
+                            <p className="mt-1 text-xs text-fg-subtle">
+                              {t('pages.rewrite.regexCaptureHint')}
+                            </p>
+                          )}
+                        </div>
+                        <div className="flex items-end pb-1">
+                          <Switch
+                            size="sm"
+                            checked={op.greedy ?? true}
+                            label={t('pages.rewrite.greedy')}
+                            onCheckedChange={(greedy) => setOperation(i, { greedy })}
+                          />
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )
               })}

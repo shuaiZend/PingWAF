@@ -19,7 +19,7 @@
 ### Dashboard Overview
 
 The dashboard provides:
-- **Analytics**: Request trends, per-site traffic over time, top rules triggered, status codes
+- **Analytics**: Request trends, per-site traffic over time, top rules triggered, status codes, client-type mix (desktop / mobile / AI bots / other)
 - **Sites**: Manage protected websites
 - **Agents**: Monitor connected data-plane agents
 - **Logs**: Security events and access logs
@@ -363,6 +363,7 @@ Sites → [site] → SSL Settings
 - Force HTTPS redirect
 - HSTS configuration
 - OCSP stapling
+- Origin certificate check — whether this site validates HTTPS origin certificates. This is the site default each origin pool's **Verify origin certificate** inherits (see [Origin Pools](#origin-pools)); the Basic page shows it as a read-only card with a link here, so the SSL page is the only place to edit it
 
 ### Certificate Status and Events
 
@@ -382,17 +383,40 @@ The SSL/TLS page also keeps an event log per certificate — created, renewal re
 Sites → [site] → Rewrite Rules → Add
 ```
 
-| Field | Description |
-|-------|-------------|
-| Type | `request` or `response` |
-| Match | URL pattern (regex) |
-| Replace | Replacement string |
-| Headers | Add/remove/modify headers |
+A rewrite rule has a **direction** (`request` or `response`), an optional
+**condition** (Cloudflare-style expression; built with the visual builder or
+written as an expression) and an ordered list of **operations**. Request rules
+run during the request phase; response rules run during the response phase and
+can additionally match on `http.response.status`. The condition builder offers
+only fields valid for the chosen direction, and switching the direction clears
+conditions and operations that are not valid for it — the console tells you
+with a toast. `replace_body` is offered for response rules only.
+
+Operations (the console's types):
+
+| Operation | Direction | Effect |
+|-----------|-----------|--------|
+| Set / add / remove header | both | Modify a request or response header |
+| Set path | request | Replace the whole forwarded path with a literal value |
+| Regex replace path | request | Rewrite the path via a regex (`$1` / `${name}` capture groups in the replacement); **every match** is replaced |
+| Set / remove query param | request | Set or remove a query-string parameter |
+| Replace body | response | Replace text inside the response body (see below) |
+
+**Replace body** options:
+
+- **Match mode**: literal text or a regular expression. With a regex the
+  pattern must compile (validated with a `400` at save time) and the
+  replacement may reference capture groups with `$1` / `${name}`.
+- **Greedy** (default on): replace every match; off = only the first
+  occurrence.
+- Size caps: pattern at most 512 bytes, replacement at most 2048 bytes.
 
 Examples:
-- Strip `/api/v1` prefix: match `^/api/v1/(.*)` → replace `/$1`
-- Add security headers: `X-Frame-Options: DENY`
-- Remove `Server` header from responses
+- Strip `/api/v1` prefix: regex replace path, `^/api/v1/(.*)` → `/$1`
+- Add security headers: set header `X-Frame-Options: DENY`
+- Remove `Server` header from responses: remove header `Server`
+- Drop a tracking parameter: remove query param `utm_source`
+- Swap a brand string in HTML responses: replace body, literal, `Acme Corp` → `PingWAF`
 
 ### Response Body Replacement
 
@@ -457,6 +481,7 @@ Sites → [site] → Error Pages → Add
 - All proxied requests with timing information
 - Filter by status code, path, client IP
 - Request headers and a body preview (first 1 KiB) are stored in PostgreSQL, so requests can be inspected from the dashboard without Elasticsearch
+- Static-asset requests (path ending in a configured suffix) that triggered no security rule are not recorded when the deployment-wide filter is on — see [Log Retention](#log-retention). Requests that did trigger a rule always appear here
 
 #### Unassigned (no Host header) traffic
 
@@ -495,7 +520,29 @@ PINGWAF_ES_URLS=http://elasticsearch:9200
 
 ### Log Retention
 
-Purge old logs:
+How long logs are kept — and which access-log rows are skipped — is a
+deployment-wide decision, configured under **Settings → Log retention**
+(administrators only):
+
+| Setting | Description |
+|---------|-------------|
+| Access log retention | Days an `access_logs` row is kept, 1–3650 (default 180) |
+| Security event retention | Days a `security_events` row is kept, 1–3650 (default 180) |
+| Skip static access logs | Skip access-log rows for static-asset requests that triggered no security rule (default on). Requests that did trigger a rule are always logged, and security events are never filtered |
+| Static suffixes | Path suffixes counted as static assets, matched case-insensitively without the leading dot |
+
+A fresh deployment starts with 18 built-in suffixes (`css`, `js`, `mjs`,
+`map`, `png`, `jpg`, `jpeg`, `gif`, `webp`, `avif`, `svg`, `ico`, `bmp`,
+`woff`, `woff2`, `ttf`, `otf`, `eot`). Document-like extensions such as
+`json`/`html` are deliberately not included — APIs commonly answer with them,
+and skipping them would hide real traffic. The list accepts at most 64
+entries, each 1–10 lowercase letters or digits; saving an empty list with the
+switch on skips nothing. Saving any change pushes the new filter to every
+agent with the next configuration sync (the control plane notifies them
+immediately); agents that have not received the setting keep logging
+everything.
+
+Purge old logs manually:
 ```
 Logs → Purge (select age threshold)
 ```

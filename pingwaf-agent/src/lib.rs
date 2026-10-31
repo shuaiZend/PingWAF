@@ -241,6 +241,13 @@ impl PingWafAgent {
         self.rule_cache.get_site_rules_by_id(site_id)
     }
 
+    /// Deployment-wide static-asset access-log filtering; `None` when the
+    /// control plane never sent it (old server) — nothing is then skipped.
+    #[inline]
+    pub fn log_settings(&self) -> Option<Arc<cache::LogSettings>> {
+        self.rule_cache.log_settings()
+    }
+
     /// Check if an IP is dynamically blocked for a site.
     #[inline]
     pub fn is_ip_blocked(&self, site_id: &str, ip: &str) -> bool {

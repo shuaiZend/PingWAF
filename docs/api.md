@@ -2241,19 +2241,27 @@ The window is fixed at five minutes on the dashboard; `minutes` is accepted
 
 ### GET /analytics/client-types
 
-Share of desktop vs. mobile vs. other clients over a window. Classification
-is a constant predicate over the recorded user agent: `mobile` matches
-Mobile/Android/iPhone/iPad/iPod, `other` matches an empty agent plus
+Share of desktop vs. mobile vs. AI bots vs. other clients over a window.
+Classification is a constant predicate over the recorded user agent, applied
+in a fixed order so later branches cannot shadow earlier ones: `mobile`
+matches Mobile/Android/iPhone/iPad/iPod, then `ai_bots` matches the
+distinctive AI-crawler markers (`gpt`, `claude`, `-ai`, `extended`,
+`perplexity`), then `other` matches an empty agent plus
 bot/spider/crawler/curl/wget/python/go-http-client/headless, and everything
-else counts as `desktop`. Shares are computed server-side (`count / total`,
-`0.0` when the window is empty) so a client never divides by zero.
+else counts as `desktop`. AI crawlers whose only marker is the generic `bot`
+suffix (ccbot, bytespider, amazonbot, …) still land in `other`; because the AI
+families moved out of it, the `other` count is expected to drop compared with
+the previous three-way classification. Shares are computed server-side
+(`count / total`, `0.0` when the window is empty) so a client never divides by
+zero.
 
 **Query Parameters:** `site_id`, `from`, `to`, or `range` (same semantics as
 `/analytics/ai-crawlers`).
 
 ```json
-{ "desktop": 100, "mobile": 40, "other": 5, "total": 145,
-  "desktop_share": 0.6897, "mobile_share": 0.2759, "other_share": 0.0345 }
+{ "desktop": 100, "mobile": 40, "ai_bots": 3, "other": 2, "total": 145,
+  "desktop_share": 0.6897, "mobile_share": 0.2759, "ai_bots_share": 0.0207,
+  "other_share": 0.0138 }
 ```
 
 ---
@@ -2914,7 +2922,7 @@ removed; the database column is dropped by migration `000054`).
 
 ### GET /sites/{site_id}/rewrite-rules
 
-List rewrite rules.
+List rewrite rules (paginated), ordered by `priority` then `name`.
 
 ### POST /sites/{site_id}/rewrite-rules
 
@@ -2924,19 +2932,51 @@ Create a rewrite rule.
 ```json
 {
   "name": "Strip API prefix",
-  "type": "request",
-  "match_pattern": "^/api/v1/(.*)",
-  "replace_with": "/$1",
-  "headers_add": {"X-Forwarded-By": "PingWAF"},
-  "headers_remove": ["Server"],
+  "direction": "request",
+  "condition_expr": "http.request.uri.path starts_with \"/api/\"",
+  "operations": [
+    { "type": "regex_replace_path", "name": "^/api/(.*)", "value": "/$1" }
+  ],
   "priority": 10,
   "enabled": true
 }
 ```
 
+| Field | Description |
+|-------|-------------|
+| `name` | 1–200 characters |
+| `direction` | `request` (default) or `response` |
+| `condition_expr` | Optional Cloudflare-style condition expression (see the plugin doc `pingap-plugin/docs/rewrite.md`); omitted = always matches |
+| `operations` | Ordered JSON array of operations; every entry must carry a whitelisted `type` |
+| `priority` | Lower runs first |
+| `enabled` | Defaults to `true` |
+
+Operation types:
+
+| `type` | Fields | Direction | Effect |
+|---|---|---|---|
+| `set_header` / `add_header` | `name`, `value` | both | Set (replacing) or append a header |
+| `remove_header` | `name` | both | Remove a header |
+| `set_path` | `value` | request | Replace the whole forwarded path |
+| `regex_replace_path` | `name` = pattern, `value` = replacement | request | Rewrite the path via a regex (`$1` / `${name}` capture groups); **every match** is replaced |
+| `set_query_param` / `remove_query_param` | `name` (and `value` for set) | request | Set or remove a query-string parameter |
+| `replace_body` | `name` = search, `value` = replacement, plus `is_regex` / `greedy` below | response | Replace text inside the response body (requires buffering it) |
+
+`replace_body` extras (both optional): `is_regex` treats `name` as a regular
+expression — it must compile, or the API answers `400` — and `value` may
+reference `$1` / `${name}` capture groups; `greedy` (default `true`) replaces
+every match, `false` only the first occurrence. Save-time validation: pattern
+1–512 bytes, replacement at most 2048 bytes, and only the eight `type` values
+above are accepted — the protocol also carries `set_body` / `set_status_code`,
+but those are unpublished and refused with `400`. A `replace_body` operation on
+a **request** rule is also refused with `400` (body replacement only applies to
+the response), including when a PUT switches a rule's direction without
+replacing its operations.
+
 ### PUT /sites/{site_id}/rewrite-rules/{rule_id}
 
-Update a rewrite rule.
+Update a rewrite rule; omitted fields keep their value. Validation is the same
+as on create.
 
 ### DELETE /sites/{site_id}/rewrite-rules/{rule_id}
 
@@ -3043,8 +3083,9 @@ Test Elasticsearch connectivity.
 
 ### GET /settings/log-retention
 
-How long the PostgreSQL log tables are kept, in days. Administrators only. The
-row is created with the default `180` days on first read.
+How long the PostgreSQL log tables are kept, in days, plus the deployment-wide
+static-asset access-log filter. Administrators only. The row is created with
+the default `180` days on first read.
 
 **Response (200):**
 ```json
@@ -3052,28 +3093,57 @@ row is created with the default `180` days on first read.
   "id": 1,
   "access_log_retention_days": 180,
   "security_event_retention_days": 180,
-  "updated_at": "2026-09-30T00:00:00Z"
+  "skip_static_access_logs": true,
+  "static_suffixes": ["css", "js", "mjs", "map", "png", "jpg", "jpeg",
+                      "gif", "webp", "avif", "svg", "ico", "bmp", "woff",
+                      "woff2", "ttf", "otf", "eot"],
+  "updated_at": "2026-10-31T00:00:00Z"
 }
 ```
 
+The filter fields: `skip_static_access_logs` (default `true`) drops access-log
+rows for requests whose path ends in one of `static_suffixes` **and** that
+triggered no security rule. Requests that did trigger a rule are always logged,
+and `security_events` is never filtered. Matching is by path suffix only, and
+the setting is global (not per site). The filter is fail-open: an agent that
+has not received `log_settings` in its rule bundle — an agent older than the
+field, or a control-plane read failure — never skips logging.
+
 ### PUT /settings/log-retention
 
-Update one or both retention windows. Administrators only. Each value must be
-between `1` and `3650` days.
+Update the retention windows and/or the static-asset filter. Administrators
+only. At least one field is required; a body with none is rejected with `400`.
+Each `*_retention_days` value must be between `1` and `3650` days.
 
 **Request:**
 ```json
 {
   "access_log_retention_days": 90,
-  "security_event_retention_days": 365
+  "security_event_retention_days": 365,
+  "skip_static_access_logs": true,
+  "static_suffixes": ["png", "jpg", "css", "js"]
 }
 ```
 
-A background sweep runs shortly after startup and then every six hours, so a
-saved change takes effect without a restart. The optional `site_id` on
-`DELETE /logs/purge` still narrows a manual purge; these settings configure the
-automatic sweeps only. Elasticsearch archives are governed separately: the ILM
-policy deletes indices after a fixed 360 days.
+| Field | Description |
+|-------|-------------|
+| `access_log_retention_days` / `security_event_retention_days` | Omitted = keep current value |
+| `skip_static_access_logs` | Omitted = keep current value |
+| `static_suffixes` | Omitted = keep the current list; a present array **replaces** it (an empty array clears it — with the switch on, nothing is then skipped) |
+
+Suffix entries are validated server-side before the row is touched: each is
+trimmed, one leading `.` is stripped, lowercased and deduplicated (order
+preserved); every entry must end up as 1–10 lowercase letters or digits, and
+the list accepts at most 64 entries — anything else is a `400` naming the
+first offending entry.
+
+A saved change is pushed to every registered agent's next configuration
+update immediately (each site's bundle carries the filter), so no restart and
+no manual sync is involved. A background sweep runs shortly after startup and
+then every six hours, so retention changes take effect without a restart. The
+optional `site_id` on `DELETE /logs/purge` still narrows a manual purge; these
+settings configure the automatic sweeps only. Elasticsearch archives are
+governed separately: the ILM policy deletes indices after a fixed 360 days.
 
 ### GET /settings/defense
 

@@ -394,9 +394,22 @@ pub struct ActiveVisitors {
 }
 
 /// The fixed client-type classifier (C2): constant predicates only, ordered
-/// mobile → other → desktop so later branches cannot shadow earlier ones.
+/// mobile → ai_bots → other → desktop so later branches cannot shadow
+/// earlier ones. The AI branch sits *before* `other`'s generic `bot`
+/// keyword, otherwise every AI crawler would be swallowed into "other".
 fn client_type_case() -> String {
     const MOBILE: [&str; 5] = ["mobile", "android", "iphone", "ipad", "ipod"];
+    // AI crawler families from [`crate::api::ai_crawl::AI_BOTS`], compressed
+    // into the few most distinctive, non-overlapping markers so the 30s
+    // polling query stays cheap: `gpt` (GPTBot, ChatGPT-User), `claude`
+    // (ClaudeBot, Claude-User), `-ai` (anthropic-ai, cohere-ai), `extended`
+    // (Google-Extended, Applebot-Extended), `perplexity`. Families whose
+    // only marker is the generic `bot` suffix (ccbot, bytespider, amazonbot,
+    // youbot, …) are caught by `other`'s `bot` keyword instead; the two
+    // Meta families (meta-externalagent, facebookexternalhit) are the known
+    // gaps and land in `desktop`, pinned by the tests below.
+    const AI_BOTS: [&str; 5] =
+        ["gpt", "claude", "-ai", "extended", "perplexity"];
     const OTHER: [&str; 8] = [
         "bot",
         "spider",
@@ -411,6 +424,11 @@ fn client_type_case() -> String {
     for pattern in MOBILE {
         sql.push_str(&format!(
             " WHEN user_agent ILIKE '%{pattern}%' THEN 'mobile'"
+        ));
+    }
+    for pattern in AI_BOTS {
+        sql.push_str(&format!(
+            " WHEN user_agent ILIKE '%{pattern}%' THEN 'ai_bots'"
         ));
     }
     sql.push_str(" WHEN user_agent IS NULL OR user_agent = '' THEN 'other'");
@@ -428,10 +446,12 @@ fn client_type_case() -> String {
 pub struct ClientTypes {
     pub desktop: i64,
     pub mobile: i64,
+    pub ai_bots: i64,
     pub other: i64,
     pub total: i64,
     pub desktop_share: f64,
     pub mobile_share: f64,
+    pub ai_bots_share: f64,
     pub other_share: f64,
 }
 
@@ -446,8 +466,8 @@ fn share(count: i64, total: i64) -> f64 {
 
 /// `GET /api/v1/analytics/client-types` (C2)
 ///
-/// Splits the window's requests into desktop / mobile / other with one
-/// grouped `CASE` query. Accepts the named `range` like `/analytics/ai-crawlers`;
+/// Splits the window's requests into desktop / mobile / AI bots / other with
+/// one grouped `CASE` query. Accepts the named `range` like `/analytics/ai-crawlers`;
 /// explicit `from`/`to` win when both are sent, an unknown range is a 400.
 async fn client_types(
     State(state): State<AppState>,
@@ -470,22 +490,26 @@ async fn client_types(
 
     let mut desktop = 0i64;
     let mut mobile = 0i64;
+    let mut ai_bots = 0i64;
     let mut other = 0i64;
     for row in &rows {
         match get_value::<String>(row, "kind").as_str() {
             "desktop" => desktop = get_value::<i64>(row, "requests"),
             "mobile" => mobile = get_value::<i64>(row, "requests"),
+            "ai_bots" => ai_bots = get_value::<i64>(row, "requests"),
             _ => other = get_value::<i64>(row, "requests"),
         }
     }
-    let total = desktop + mobile + other;
+    let total = desktop + mobile + ai_bots + other;
     Ok(Json(ClientTypes {
         desktop,
         mobile,
+        ai_bots,
         other,
         total,
         desktop_share: share(desktop, total),
         mobile_share: share(mobile, total),
+        ai_bots_share: share(ai_bots, total),
         other_share: share(other, total),
     })
     .into_response())
@@ -1537,8 +1561,9 @@ mod tests {
     }
 
     /// C2: every UA pattern falls into its contract bucket and the branch
-    /// order is fixed mobile → other → desktop, so a desktop agent can never
-    /// shadow a mobile one.
+    /// order is fixed mobile → ai_bots → other → desktop, so a desktop agent
+    /// can never shadow a mobile one and the generic `bot` keyword can never
+    /// swallow an AI crawler.
     #[test]
     fn client_type_case_classifies_in_contract_order() {
         let sql = client_type_case();
@@ -1546,6 +1571,7 @@ mod tests {
         assert!(sql.ends_with("ELSE 'desktop' END"));
 
         let mobile = ["mobile", "android", "iphone", "ipad", "ipod"];
+        let ai_bots = ["gpt", "claude", "-ai", "extended", "perplexity"];
         let other = [
             "bot",
             "spider",
@@ -1566,25 +1592,117 @@ mod tests {
                 "{pattern} must classify as mobile: {clause}"
             );
         }
+        for pattern in ai_bots {
+            let clause = sql
+                .split("WHEN")
+                .find(|clause| clause.contains(&format!("%{pattern}%")))
+                .unwrap_or_else(|| panic!("missing pattern {pattern}"));
+            assert!(
+                clause.contains("THEN 'ai_bots'"),
+                "{pattern} must classify as ai_bots: {clause}"
+            );
+        }
         for pattern in other {
             let clause = sql
                 .split("WHEN")
-                .find(|clause| clause.contains(pattern))
+                .find(|clause| clause.contains(&format!("%{pattern}%")))
                 .unwrap_or_else(|| panic!("missing pattern {pattern}"));
             assert!(
                 clause.contains("THEN 'other'"),
                 "{pattern} must classify as other: {clause}"
             );
         }
+        // The AI branch must precede `other`'s generic `bot` keyword, or
+        // every `*bot` crawler would land in "other".
+        assert!(
+            sql.find("%bot%") > sql.find("%gpt%"),
+            "ai_bots branches must come before the generic bot keyword"
+        );
         // NULL / empty user agents are "other", before any ILIKE branch.
         assert!(
             sql.contains("user_agent IS NULL OR user_agent = '' THEN 'other'")
         );
         // No user input can reach this SQL: only the constant patterns above.
-        for pattern in mobile.iter().chain(other.iter()) {
+        for pattern in mobile.iter().chain(ai_bots.iter()).chain(other.iter())
+        {
             assert!(sql.contains(&format!("ILIKE '%{pattern}%'")));
         }
-        assert_eq!(sql.matches("THEN").count(), mobile.len() + other.len() + 1);
+        assert_eq!(
+            sql.matches("THEN").count(),
+            mobile.len() + ai_bots.len() + other.len() + 1
+        );
+    }
+
+    /// The AI pattern set deliberately covers only the distinctive markers;
+    /// these catalogue families classify elsewhere, and the test pins the
+    /// gap so a future expansion of `AI_BOTS` patterns is a conscious one.
+    #[test]
+    fn client_type_ai_gaps_land_in_their_contract_buckets() {
+        // Families without a distinctive marker are caught by `other`'s
+        // generic `bot` keyword.
+        for ua in [
+            "CCBot/2.0",
+            "Bytespider",
+            "Amazonbot/1.0",
+            "YouBot/1.0",
+            "Timpibot/0.1",
+            "ImagesiftBot/1.0",
+        ] {
+            assert!(!client_type_case_matches(ua, "ai_bots"), "{ua}");
+        }
+        // Known gaps: the Meta families carry no marker; they fall to
+        // desktop through the ELSE branch.
+        for ua in ["meta-externalagent/1.1", "facebookexternalhit/1.1"] {
+            assert!(!client_type_case_matches(ua, "ai_bots"), "{ua}");
+            assert!(!client_type_case_matches(ua, "other"), "{ua}");
+        }
+        // The distinctive markers classify their families as AI bots.
+        for ua in [
+            "GPTBot/1.2",
+            "ChatGPT-User/1.0",
+            "ClaudeBot/1.0",
+            "anthropic-ai/1.0",
+            "Google-Extended/1.0",
+            "PerplexityBot/1.0",
+        ] {
+            assert!(client_type_case_matches(ua, "ai_bots"), "{ua}");
+        }
+    }
+
+    /// Evaluates the constant classifier against a sample user agent by
+    /// mapping it onto the ILIKE branches the SQL CASE would take.
+    fn client_type_case_matches(ua: &str, kind: &str) -> bool {
+        fn ilike(ua: &str, pattern: &str) -> bool {
+            ua.to_lowercase().contains(pattern)
+        }
+        if ua.is_empty() {
+            return kind == "other";
+        }
+        match kind {
+            "mobile" => ilike(ua, "mobile")
+                || ilike(ua, "android")
+                || ilike(ua, "iphone")
+                || ilike(ua, "ipad")
+                || ilike(ua, "ipod"),
+            "ai_bots" => {
+                ilike(ua, "gpt")
+                    || ilike(ua, "claude")
+                    || ilike(ua, "-ai")
+                    || ilike(ua, "extended")
+                    || ilike(ua, "perplexity")
+            },
+            "other" => {
+                ilike(ua, "bot")
+                    || ilike(ua, "spider")
+                    || ilike(ua, "crawler")
+                    || ilike(ua, "curl")
+                    || ilike(ua, "wget")
+                    || ilike(ua, "python")
+                    || ilike(ua, "go-http-client")
+                    || ilike(ua, "headless")
+            },
+            _ => true,
+        }
     }
 
     /// C2: shares are count/total and an empty window yields 0.0 everywhere.
@@ -1593,14 +1711,17 @@ mod tests {
         let empty = ClientTypes {
             desktop: 0,
             mobile: 0,
+            ai_bots: 0,
             other: 0,
             total: 0,
             desktop_share: share(0, 0),
             mobile_share: share(0, 0),
+            ai_bots_share: share(0, 0),
             other_share: share(0, 0),
         };
         assert_eq!(empty.desktop_share, 0.0);
         assert_eq!(empty.mobile_share, 0.0);
+        assert_eq!(empty.ai_bots_share, 0.0);
         assert_eq!(empty.other_share, 0.0);
 
         assert_eq!(share(25, 100), 0.25);

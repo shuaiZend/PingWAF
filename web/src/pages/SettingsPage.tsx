@@ -26,6 +26,7 @@ import {
   UploadSimple,
   GithubLogo,
   ArrowSquareOut,
+  X,
 } from '@phosphor-icons/react'
 import { PageHeader } from '@/components/PageHeader'
 import { Card, CardBody, CardHeader } from '@/components/ui/Card'
@@ -623,6 +624,34 @@ function ElasticsearchCard({ canWrite }: { canWrite: boolean }) {
 const MIN_RETENTION_DAYS = 1
 const MAX_RETENTION_DAYS = 3650
 
+/** Mirrors the server's built-in suffix list (`models::log_retention`). */
+const DEFAULT_STATIC_SUFFIXES = [
+  'css',
+  'js',
+  'mjs',
+  'map',
+  'png',
+  'jpg',
+  'jpeg',
+  'gif',
+  'webp',
+  'avif',
+  'svg',
+  'ico',
+  'bmp',
+  'woff',
+  'woff2',
+  'ttf',
+  'otf',
+  'eot',
+]
+
+/** Server-side rules: trim, strip leading dots, lowercase, then `[a-z0-9]{1,10}`. */
+const STATIC_SUFFIX_RE = /^[a-z0-9]{1,10}$/
+const MAX_STATIC_SUFFIXES = 64
+
+const normalizeSuffix = (raw: string) => raw.trim().replace(/^\.+/, '').toLowerCase()
+
 function LogRetentionCard({ canWrite }: { canWrite: boolean }) {
   const { t } = useTranslation()
   const toast = useToast()
@@ -630,6 +659,10 @@ function LogRetentionCard({ canWrite }: { canWrite: boolean }) {
 
   const [accessDays, setAccessDays] = useState('')
   const [securityDays, setSecurityDays] = useState('')
+  const [skipStatic, setSkipStatic] = useState(true)
+  const [suffixes, setSuffixes] = useState<string[]>(DEFAULT_STATIC_SUFFIXES)
+  const [suffixInput, setSuffixInput] = useState('')
+  const [suffixError, setSuffixError] = useState<string | null>(null)
   const [dirty, setDirty] = useState(false)
   useRegisterUnsaved(dirty)
 
@@ -644,6 +677,10 @@ function LogRetentionCard({ canWrite }: { canWrite: boolean }) {
     setLastServerRow(serverRow)
     setAccessDays(String(serverRow.access_log_retention_days))
     setSecurityDays(String(serverRow.security_event_retention_days))
+    setSkipStatic(serverRow.skip_static_access_logs ?? true)
+    setSuffixes(serverRow.static_suffixes ?? DEFAULT_STATIC_SUFFIXES)
+    setSuffixInput('')
+    setSuffixError(null)
     setDirty(false)
   }
 
@@ -655,18 +692,57 @@ function LogRetentionCard({ canWrite }: { canWrite: boolean }) {
     Number.isInteger(value) && value >= MIN_RETENTION_DAYS && value <= MAX_RETENTION_DAYS
   const valid = inRange(parsed.access) && inRange(parsed.security)
 
+  const addSuffixes = (raw: string) => {
+    const parts = raw
+      .split(/[,,]/)
+      .map(normalizeSuffix)
+      .filter((s) => s.length > 0)
+    setSuffixInput('')
+    if (parts.length === 0) return
+    for (const part of parts) {
+      if (!STATIC_SUFFIX_RE.test(part)) {
+        setSuffixError(t('pages.settings.logRetentionSuffixInvalid'))
+        return
+      }
+      if (suffixes.includes(part)) {
+        setSuffixError(t('pages.settings.logRetentionSuffixDuplicate'))
+        return
+      }
+    }
+    if (suffixes.length + parts.length > MAX_STATIC_SUFFIXES) {
+      setSuffixError(t('pages.settings.logRetentionSuffixLimit'))
+      return
+    }
+    setSuffixError(null)
+    setSuffixes([...suffixes, ...parts])
+    setDirty(true)
+  }
+
+  const removeSuffix = (suffix: string) => {
+    setSuffixes(suffixes.filter((s) => s !== suffix))
+    setDirty(true)
+  }
+
   const save = useMutation({
     mutationFn: () =>
       settingsApi.saveLogRetention({
         access_log_retention_days: parsed.access,
         security_event_retention_days: parsed.security,
+        skip_static_access_logs: skipStatic,
+        static_suffixes: suffixes,
       }),
     onSuccess: (row) => {
       void queryClient.invalidateQueries({ queryKey: settingsKeys.logRetention() })
       setAccessDays(String(row.access_log_retention_days))
       setSecurityDays(String(row.security_event_retention_days))
+      setSkipStatic(row.skip_static_access_logs ?? true)
+      setSuffixes(row.static_suffixes ?? DEFAULT_STATIC_SUFFIXES)
+      setSuffixError(null)
       setDirty(false)
       toast.success(t('pages.settings.logRetentionSaved'))
+    },
+    onError: (e) => {
+      toast.error(errorMessage(e))
     },
   })
 
@@ -714,6 +790,79 @@ function LogRetentionCard({ canWrite }: { canWrite: boolean }) {
               setDirty(true)
             }}
           />
+        </div>
+
+        <div className="mt-4 border-t border-line pt-4">
+          <Switch
+            checked={skipStatic}
+            onCheckedChange={(checked) => {
+              setSkipStatic(checked)
+              setDirty(true)
+            }}
+            disabled={!canWrite}
+            label={t('pages.settings.logRetentionSkipStatic')}
+            description={t('pages.settings.logRetentionSkipStaticDescription')}
+          />
+        </div>
+
+        <div className="mt-4">
+          <Input
+            label={t('pages.settings.logRetentionSuffixes')}
+            value={suffixInput}
+            disabled={!canWrite}
+            placeholder={t('pages.settings.logRetentionSuffixPlaceholder')}
+            onChange={(e) => setSuffixInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ',') {
+                e.preventDefault()
+                addSuffixes(suffixInput)
+              }
+            }}
+          />
+          <p className="mt-0.5 text-xs text-fg-subtle">
+            {t('pages.settings.logRetentionSuffixesDescription')}
+          </p>
+          {suffixes.length > 0 && (
+            <div className="mt-2 flex flex-wrap items-center gap-1.5">
+              {suffixes.map((suffix) => (
+                <span
+                  key={suffix}
+                  className="pw-mono inline-flex items-center gap-1 rounded-md border border-line bg-fill px-2 py-1 text-xs text-fg"
+                >
+                  {suffix}
+                  <button
+                    type="button"
+                    aria-label={t('common.delete')}
+                    disabled={!canWrite}
+                    onClick={() => removeSuffix(suffix)}
+                    className="text-fg-subtle transition-colors hover:text-fg-danger disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <X weight="bold" className="h-3 w-3" />
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+          {suffixError && (
+            <p className="mt-2 flex items-center gap-2 text-xs text-fg-danger">
+              <Warning weight="duotone" className="h-4 w-4 shrink-0" />
+              {suffixError}
+            </p>
+          )}
+          <div className="mt-2">
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={!canWrite}
+              onClick={() => {
+                setSuffixes(DEFAULT_STATIC_SUFFIXES)
+                setSuffixError(null)
+                setDirty(true)
+              }}
+            >
+              {t('pages.settings.logRetentionRestoreDefaults')}
+            </Button>
+          </div>
         </div>
 
         {!valid && (

@@ -8,6 +8,62 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.33.0] — 2026-10-31
+
+Feature release: static-asset access-log filtering, AI bots as a first-class
+client type, and regex support in rewrite body replacement. One migration
+ships automatically; the `RuleBundle` proto gains an optional field, so old
+agents keep working against a new control plane.
+
+### Added
+
+- **Static-asset access-log filtering** (`Settings → Log retention`,
+  administrators only). `skip_static_access_logs` (default on) drops access-log
+  rows for requests whose path ends in a static suffix and that triggered no
+  security rule — image/CSS/JS noise no longer floods `access_logs`. Requests
+  that did trigger a rule are always logged and `security_events` is never
+  filtered, so incident forensics loses nothing. The suffix list is editable
+  (a fresh deployment starts with 18 built-in suffixes; at most 64 entries,
+  each 1–10 lowercase letters or digits, validated and normalised server-side);
+  an empty list with the switch on skips nothing. The filter rides every rule
+  bundle and the control plane pushes a change immediately — agents that
+  predate the field keep logging everything (fail-open).
+- **AI bots are a client type of their own.** `/analytics/client-types` now
+  reports four buckets — `desktop`, `mobile`, `ai_bots`, `other` — with an
+  `ai_bots_share`, and the dashboard's client-type donut (overview, traffic
+  page, per-site traffic) gained an AI-bot slice. GPTBot, ClaudeBot,
+  Google-Extended, Perplexity and friends were previously swallowed by
+  `other`; the generic `bot` keyword there still catches ccbot, bytespider,
+  amazonbot and similar, so `other` shrinks but does not disappear. Comparisons
+  across the upgrade should expect the `other` share to drop.
+- **`replace_body` supports regex and first-match-only.** Rewrite-rule body
+  replacement accepts `is_regex` (`$1` / `${name}` capture references; the
+  pattern is validated to compile at save time) and `greedy` (default on =
+  replace every match, the historical behaviour; off = only the first
+  occurrence). Pattern is capped at 512 bytes and replacement at 2048, matching
+  the response-replace limits. The console offers these knobs only for
+  response-direction rules and clears conditions that do not survive a
+  direction switch.
+
+### Fixed
+
+- **`regex_replace_path` now replaces every match.** It used to substitute only
+  the first occurrence, so a rule that cleaned repeated markers in a path
+  silently left the rest behind — behaviour that contradicted every other
+  regex replacement in the product. Existing rules that relied on
+  first-match-only semantics must add an anchor (`^` / `$`) or move the
+  repetition into the pattern.
+
+### Changed
+
+- The site **Basic** page is regrouped into three sections (traffic intake /
+  origin & failover / origin pools & routes). The site-level origin
+  certificate check is now edited only on the site's SSL page; the Basic page
+  shows it as a read-only card with a link there.
+- New migration `log_retention_settings` columns `skip_static_access_logs`
+  (default `true`) and `static_suffixes`; the `RuleBundle` proto carries an
+  optional `LogSettings` to agents.
+
 ## [PingWAF 0.32.2] — 2026-10-28
 
 Security and robustness release. One new table (`refresh_tokens`) ships with

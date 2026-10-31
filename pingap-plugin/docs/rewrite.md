@@ -50,10 +50,10 @@ header/status/body operations.
 | `add_header` | `name`, `value` | both | Append a header value, keeping existing ones. |
 | `remove_header` | `name` | both | Remove a header entirely. |
 | `set_path` | `value` | request | Replace the request path with a literal value. |
-| `regex_replace_path` | `pattern`, `replacement` | request | Rewrite the path via a regex; `$1`/`${1}` capture groups are substituted in `replacement`. |
+| `regex_replace_path` | `pattern`, `replacement` | request | Rewrite the path via a regex; `$1`/`${1}` capture groups are substituted in `replacement`. Every match is replaced. |
 | `set_query_param` | `name`, `value` | request | Set (or add) a query-string parameter. |
 | `remove_query_param` | `name` | request | Remove a query-string parameter. |
-| `replace_body` | `search`, `replacement` | response | Literal search/replace across the buffered response body. |
+| `replace_body` | `search`, `replacement`, `is_regex`, `greedy` | response | Search/replace across the buffered response body. With `is_regex: true`, `search` is a regular expression and `replacement` may reference `$1`/`${name}` capture groups. `greedy` (default `true`) replaces every match; `false` replaces only the first occurrence. |
 | `set_body` | `content` | response | Replace the entire response body with `content`. |
 | `set_status_code` | `code` | response | Override the response status code (e.g. `404` → `200`). |
 

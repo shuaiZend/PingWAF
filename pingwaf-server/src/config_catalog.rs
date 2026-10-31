@@ -207,6 +207,17 @@ pub static GLOBAL_TABLES: &[TableSpec] = &[
         order: "id",
         secrets: &[],
     },
+    // Global (not per-site) since the static-asset access-log filter rides
+    // inside every rule bundle.
+    TableSpec {
+        name: "log_retention_settings",
+        scopes: GD,
+        filter: Filter::Singleton,
+        layer: 1,
+        key: Some("id"),
+        order: "id",
+        secrets: &[],
+    },
     global("error_pages", "status_code"),
 ];
 
@@ -242,15 +253,6 @@ pub static DEPLOYMENT_ONLY_TABLES: &[TableSpec] = &[
         scopes: D,
         filter: Filter::Singleton,
         layer: 2,
-        key: Some("id"),
-        order: "id",
-        secrets: &[],
-    },
-    TableSpec {
-        name: "log_retention_settings",
-        scopes: D,
-        filter: Filter::Singleton,
-        layer: 1,
         key: Some("id"),
         order: "id",
         secrets: &[],
@@ -516,8 +518,10 @@ mod tests {
     #[test]
     fn catalogue_covers_the_confirmed_configuration() {
         assert_eq!(SITE_TABLES.len(), 24);
-        assert_eq!(GLOBAL_TABLES.len(), 4);
-        assert_eq!(DEPLOYMENT_ONLY_TABLES.len(), 10);
+        // log_retention_settings moved from deployment-only to global: the
+        // static-asset access-log filter rides inside every rule bundle.
+        assert_eq!(GLOBAL_TABLES.len(), 5);
+        assert_eq!(DEPLOYMENT_ONLY_TABLES.len(), 9);
         assert_eq!(tables_for(VersionScope::Deployment).len(), 38);
         let names: BTreeSet<_> = tables_for(VersionScope::Deployment)
             .into_iter()

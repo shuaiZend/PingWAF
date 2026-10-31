@@ -1563,6 +1563,10 @@ struct PendingAccess {
     /// Response facts, present once `handle_response` held the entry back
     /// for body capture.
     response: Option<ResponseFacts>,
+    /// The request produced at least one security event (WAF verdict,
+    /// body-inspection event, …). Such requests are always access-logged,
+    /// even when the static-asset filter would skip the path.
+    waf_triggered: bool,
     start: Instant,
 }
 
@@ -1800,6 +1804,18 @@ fn register_pending_access(request_id: &str, pending: PendingAccess) {
         }
     }
     PENDING_ACCESS.insert(request_id.to_string(), pending);
+}
+
+/// Flags the pending access entry as security-relevant. Every path that
+/// writes a security event for the request funnels through here, so the
+/// static-asset access-log filter can keep those entries no matter what the
+/// path looks like. A missing entry is fine: plugin-generated answers (block
+/// and challenge pages) remove the entry before answering and are never
+/// filtered in the first place.
+fn mark_waf_triggered(request_id: &str) {
+    if let Some(mut entry) = PENDING_ACCESS.get_mut(request_id) {
+        entry.waf_triggered = true;
+    }
 }
 
 /// Backfills the request-body facts of a pending access entry once the
@@ -2046,6 +2062,9 @@ pub fn sweep_stale_access(ttl: Duration) -> usize {
             continue;
         };
         if let Some(mut facts) = pending.response.take() {
+            if should_skip_access_log(agent, &pending) {
+                continue;
+            }
             facts.abandoned = true;
             emit_access(agent, &request_id, pending, facts);
         }
@@ -2170,6 +2189,43 @@ fn emit_access(
     });
 }
 
+/// Whether the request path looks like a static asset: the last path
+/// segment's extension (after the final dot, case-insensitive, query and
+/// fragment stripped) is one of the configured suffixes.
+fn is_static_path(path: &str, suffixes: &[String]) -> bool {
+    if suffixes.is_empty() {
+        return false;
+    }
+    let clean = path.split(['?', '#']).next().unwrap_or(path);
+    let Some((_, ext)) = clean.rsplit_once('.') else {
+        return false;
+    };
+    // An extension must not contain separators or be empty.
+    if ext.is_empty() || ext.contains('/') {
+        return false;
+    }
+    let ext = ext.to_lowercase();
+    suffixes.iter().any(|s| s == &ext)
+}
+
+/// Skip decision for a proxied request's access entry: only when the
+/// deployment switched static-asset filtering on, the path is static, and
+/// the request produced no security event. Everything else — the filter off,
+/// an unknown suffix list, a WAF event, or an old control plane that never
+/// sent `log_settings` — logs as before (fail-open).
+fn should_skip_access_log(agent: &PingWafAgent, pending: &PendingAccess) -> bool {
+    let Some(settings) = agent.log_settings() else {
+        return false;
+    };
+    if !settings.skip_static_access_logs() {
+        return false;
+    }
+    if pending.waf_triggered {
+        return false;
+    }
+    is_static_path(&pending.path, &settings.static_suffixes)
+}
+
 /// Emits the access entry for a response the plugin answers with itself. The
 /// entry records what the client is about to receive — status, headers and
 /// truncated body — so a blocked or challenged request is as replayable in
@@ -2286,6 +2342,7 @@ pub(crate) fn emit_challenge_access(
         request_body_truncated: false,
         body_limit: log_body_limit(),
         response: None,
+        waf_triggered: false,
         start: Instant::now(),
     };
     PENDING_ACCESS.insert(request_id.clone(), pending);
@@ -2853,6 +2910,9 @@ impl WafPlugin {
         let Some(agent) = PingWafAgent::instance() else {
             return;
         };
+        // The request produced a security event: its access entry must
+        // survive the static-asset filter even if the path looks static.
+        mark_waf_triggered(request_id);
         let blocked =
             matches!(verdict.action, WafAction::Block | WafAction::Challenge);
         agent.record_request(blocked);
@@ -3667,6 +3727,7 @@ impl Plugin for WafPlugin {
                     request_body_truncated: false,
                     body_limit,
                     response: None,
+                    waf_triggered: false,
                     start: Instant::now(),
                 },
             );
@@ -4364,6 +4425,10 @@ impl Plugin for WafPlugin {
             if let Some(agent) = PingWafAgent::instance()
                 && let Some(dv) = entry.deferred.as_ref()
             {
+                // A security event was emitted for this request, so its
+                // access entry must survive the static-asset log filter
+                // even though the request itself continues (fail-open).
+                mark_waf_triggered(&request_id);
                 agent.log_security_event(SecurityEvent {
                     site_id: dv.site_id.clone(),
                     request_id: request_id.clone(),
@@ -4463,6 +4528,10 @@ impl Plugin for WafPlugin {
                         if let Some(agent) = PingWafAgent::instance()
                             && let Some(dv) = entry.deferred.as_ref()
                         {
+                            // Same invariant as body_stage_timeout: a
+                            // security event pins the access entry against
+                            // the static-asset log filter.
+                            mark_waf_triggered(&request_id);
                             agent.log_security_event(body_prefix_event(
                                 dv,
                                 &request_id,
@@ -4671,6 +4740,9 @@ impl Plugin for WafPlugin {
             else {
                 return Ok(ResponsePluginResult::Unchanged);
             };
+            if should_skip_access_log(&agent, &pending) {
+                return Ok(ResponsePluginResult::Unchanged);
+            }
             pending.user_identity = identity_from(ctx, pending.user_identity);
             emit_access(&agent, &request_id, pending, facts);
         }
@@ -4709,6 +4781,9 @@ impl Plugin for WafPlugin {
             };
             if let Some(chunk) = body.as_ref() {
                 facts.absorb(chunk, limit);
+            }
+            if should_skip_access_log(&agent, &pending) {
+                return Ok(ResponseBodyPluginResult::Unchanged);
             }
             emit_access(&agent, &request_id, pending, facts);
             return Ok(ResponseBodyPluginResult::Unchanged);
@@ -8560,5 +8635,144 @@ inspect_body = true"###,
             .await
                 == RequestPluginResult::Continue
         );
+    }
+
+    fn static_suffixes() -> Vec<String> {
+        ["css", "js", "png"]
+            .into_iter()
+            .map(String::from)
+            .collect()
+    }
+
+    #[test]
+    fn static_path_matches_the_last_segment_extension() {
+        let suffixes = static_suffixes();
+        assert!(is_static_path("/assets/logo.PNG", &suffixes));
+        assert!(is_static_path("/static/app.min.js", &suffixes));
+        assert!(is_static_path("/a/b/style.css?ver=7", &suffixes));
+        assert!(is_static_path("/a/b/pic.png#frag", &suffixes));
+        // Not static: no extension, dotless last segment, unknown or
+        // separator-bearing extension.
+        assert!(!is_static_path("/", &suffixes));
+        assert!(!is_static_path("/api/users", &suffixes));
+        assert!(!is_static_path("/a.b/c", &suffixes));
+        assert!(!is_static_path("/assets/logo.gif", &suffixes));
+        assert!(!is_static_path("/assets/logo.png/x", &suffixes));
+        assert!(!is_static_path("/file.", &suffixes));
+        // The plain suffix without a dot separator is not a match.
+        assert!(!is_static_path("/css", &suffixes));
+    }
+
+    #[test]
+    fn static_path_needs_a_non_empty_suffix_list() {
+        assert!(!is_static_path("/logo.png", &[]));
+    }
+
+    fn skip_pending(path: &str, waf_triggered: bool) -> PendingAccess {
+        PendingAccess {
+            site_id: "site-1".to_string(),
+            client_ip: "203.0.113.7".to_string(),
+            method: "GET".to_string(),
+            scheme: "https".to_string(),
+            protocol: "HTTP/2.0".to_string(),
+            host: "example.com".to_string(),
+            path: path.to_string(),
+            query: String::new(),
+            user_agent: "test".to_string(),
+            referer: String::new(),
+            tls_version: String::new(),
+            country_code: String::new(),
+            user_identity: String::new(),
+            request_headers: Vec::new(),
+            request_body: None,
+            request_body_size: 0,
+            request_body_truncated: false,
+            body_limit: 0,
+            response: None,
+            waf_triggered,
+            start: Instant::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn skip_decision_follows_settings_and_verdicts() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = AgentConfig {
+            cache_dir: dir.path().to_string_lossy().to_string(),
+            fail_open: true,
+            ..Default::default()
+        };
+        let (_guard, _agent, _dir) =
+            install_test_agent_with(config, dir).await;
+        let agent = PingWafAgent::instance().unwrap();
+
+        // No log_settings at all: nothing is skipped (old control plane).
+        assert!(!should_skip_access_log(
+            &agent,
+            &skip_pending("/logo.png", false)
+        ));
+
+        // Filter on: static paths without a security event are skipped…
+        agent
+            .rule_cache
+            .update_from_bundle(&proto::RuleBundle {
+                site_id: "site-1".to_string(),
+                config_hash: "hash-1".to_string(),
+                log_settings: Some(proto::LogSettings {
+                    skip_static_access_logs: Some(true),
+                    static_suffixes: static_suffixes(),
+                }),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(should_skip_access_log(
+            &agent,
+            &skip_pending("/assets/logo.png?ver=1", false)
+        ));
+        // …but a request that triggered a rule is always logged…
+        assert!(!should_skip_access_log(
+            &agent,
+            &skip_pending("/assets/logo.png", true)
+        ));
+        // …as are non-static paths…
+        assert!(!should_skip_access_log(
+            &agent,
+            &skip_pending("/api/users", false)
+        ));
+        // …and an empty suffix list skips nothing.
+        agent
+            .rule_cache
+            .update_from_bundle(&proto::RuleBundle {
+                site_id: "site-1".to_string(),
+                config_hash: "hash-2".to_string(),
+                log_settings: Some(proto::LogSettings {
+                    skip_static_access_logs: Some(true),
+                    static_suffixes: Vec::new(),
+                }),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(!should_skip_access_log(
+            &agent,
+            &skip_pending("/assets/logo.png", false)
+        ));
+
+        // Switch off: nothing is skipped again.
+        agent
+            .rule_cache
+            .update_from_bundle(&proto::RuleBundle {
+                site_id: "site-1".to_string(),
+                config_hash: "hash-3".to_string(),
+                log_settings: Some(proto::LogSettings {
+                    skip_static_access_logs: Some(false),
+                    static_suffixes: static_suffixes(),
+                }),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(!should_skip_access_log(
+            &agent,
+            &skip_pending("/assets/logo.png", false)
+        ));
     }
 }
