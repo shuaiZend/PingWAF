@@ -53,8 +53,9 @@ use pingwaf_agent::cache::CustomErrorPage;
 use pingwaf_challenge::generate_request_id;
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::atomic::AtomicU64;
+use std::sync::{Arc, Mutex, OnceLock};
 use tera::{Context, Tera};
 use tracing::{debug, warn};
 
@@ -477,8 +478,27 @@ impl ErrorPagePlugin {
     }
 }
 
+/// Tera instances shared by sites whose global error-page set is identical.
+static SITE_PAGES_CACHE: OnceLock<Mutex<HashMap<u64, CompiledSitePages>>> =
+    OnceLock::new();
+
 /// Compile agent-supplied error pages into a fresh [`Tera`] + page map.
 fn build_site_pages(pages: &[CustomErrorPage]) -> Result<CompiledSitePages> {
+    // Error pages are global, so every site's context compiles exactly the
+    // same Tera grammar. Cache the compiled pair by a content fingerprint:
+    // a deployment with many sites otherwise pays one full Tera compilation
+    // (grammar + templates) per site for an identical page set.
+    let fingerprint = pages_fingerprint(pages);
+    {
+        let cache = SITE_PAGES_CACHE
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some((tera, map)) = cache.get(&fingerprint) {
+            return Ok((Arc::clone(tera), Arc::clone(map)));
+        }
+    }
+
     let mut tera = Tera::default();
     tera.add_raw_template(STYLE_PARTIAL, PW_STYLE)
         .map_err(|e| {
@@ -513,7 +533,37 @@ fn build_site_pages(pages: &[CustomErrorPage]) -> Result<CompiledSitePages> {
             },
         );
     }
-    Ok((Arc::new(tera), Arc::new(map)))
+    let compiled: CompiledSitePages = (Arc::new(tera), Arc::new(map));
+    let mut cache = SITE_PAGES_CACHE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // Global pages change as a unit; 64 distinct sets is already far beyond
+    // any realistic deployment, and the bound keeps a bad caller from growing
+    // this process-wide cache without limit.
+    if cache.len() >= 64 {
+        cache.clear();
+    }
+    cache.insert(
+        fingerprint,
+        (Arc::clone(&compiled.0), Arc::clone(&compiled.1)),
+    );
+    Ok(compiled)
+}
+
+/// Content fingerprint of the page set a Tera instance is compiled from.
+fn pages_fingerprint(pages: &[CustomErrorPage]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    pages.len().hash(&mut hasher);
+    for page in pages {
+        page.status_code.hash(&mut hasher);
+        page.content_type.hash(&mut hasher);
+        page.body_template.hash(&mut hasher);
+        page.name.hash(&mut hasher);
+        page.enabled.hash(&mut hasher);
+        page.scope.hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 /// Parse the `pages` array from a plugin config into [`ErrorPageConfig`]s.
@@ -1045,5 +1095,25 @@ template = '{"error":"rate_limit_exceeded","request_id":"{{ request_id }}"}'
             only_fallback.is_empty(),
             "a site location must not serve the unmatched-host template"
         );
+    }
+    #[test]
+    fn identical_page_sets_share_tera() {
+        let page = |name: &str| CustomErrorPage {
+            id: name.to_string(),
+            status_code: 503,
+            content_type: "text/html".to_string(),
+            body_template: format!("<p>{name}</p>"),
+            name: name.to_string(),
+            enabled: true,
+            scope: "site".to_string(),
+        };
+        let pages = vec![page("shared")];
+        let (first, _) = build_site_pages(&pages).unwrap();
+        let (second, _) = build_site_pages(&pages).unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+
+        let other = vec![page("different")];
+        let (third, _) = build_site_pages(&other).unwrap();
+        assert!(!Arc::ptr_eq(&first, &third));
     }
 }
