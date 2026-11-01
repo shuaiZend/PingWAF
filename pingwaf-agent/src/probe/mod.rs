@@ -623,10 +623,19 @@ fn read_load() -> (f64, f64, f64, u32) {
 
 #[cfg(target_os = "linux")]
 fn count_tcp_connections() -> u32 {
+    use std::io::{BufRead, BufReader};
+
     let mut count = 0_u32;
     for path in ["/proc/net/tcp", "/proc/net/tcp6"] {
-        if let Ok(table) = std::fs::read_to_string(path) {
-            count += table.lines().skip(1).count() as u32;
+        // `/proc/net/tcp*` can hold thousands of sockets; reading it into a
+        // String allocated the whole table on every heartbeat. Count lines
+        // through a fixed buffer instead and skip the header.
+        if let Ok(file) = std::fs::File::open(path) {
+            count += BufReader::new(file)
+                .lines()
+                .skip(1)
+                .take_while(|line| line.is_ok())
+                .count() as u32;
         }
     }
     count

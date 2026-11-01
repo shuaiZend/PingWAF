@@ -2926,9 +2926,10 @@ impl WafPlugin {
     /// Create a new plugin from configuration.
     pub fn new(params: &PluginConf) -> Result<Self> {
         debug!(params = params.to_string(), "new waf plugin");
-        // Load the embedded GeoIP database here rather than on the first
-        // request: the lookup is on the request path and its parse is not.
-        LazyLock::force(&GEO_DB);
+        // Do not force the embedded GeoIP database here: sites without geo
+        // rules would pay its parse and resident memory for nothing. The
+        // `LazyLock` still initialises on the first geo lookup, and the
+        // request path only takes that cost when a geo rule actually runs.
         Self::try_from(params)
     }
 
