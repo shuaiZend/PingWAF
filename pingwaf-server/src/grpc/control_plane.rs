@@ -625,6 +625,7 @@ impl ControlPlaneTrait for ControlPlaneService {
             Vec::with_capacity(batch_size);
         let mut event_batch: Vec<security_event::ActiveModel> =
             Vec::with_capacity(batch_size);
+        let mut batch_bytes: usize = 0;
 
         loop {
             let message = match inbound.message().await {
@@ -666,6 +667,8 @@ impl ControlPlaneTrait for ControlPlaneService {
                 continue;
             }
             received += 1;
+            batch_bytes =
+                batch_bytes.saturating_add(estimate_log_entry_bytes(&message));
 
             let site_id = parse_optional_uuid(&message.site_id);
             let agent_id = parse_optional_uuid(&message.agent_id);
@@ -745,8 +748,10 @@ impl ControlPlaneTrait for ControlPlaneService {
             // (2026-10-18 audit).
             if access_batch.len() >= batch_size
                 || event_batch.len() >= batch_size
+                || batch_bytes >= LOG_BATCH_BYTES
             {
                 flush(&self.db, &mut access_batch, &mut event_batch).await?;
+                batch_bytes = 0;
             }
         }
 
@@ -2274,6 +2279,64 @@ async fn mark_offline(db: &DatabaseConnection, agent_id: Uuid) {
     }
 }
 
+/// Soft byte budget for one in-flight log batch. The row-count limit alone
+/// lets a handful of large bodies pin far more memory than intended.
+const LOG_BATCH_BYTES: usize = 4 * 1024 * 1024;
+/// `insert_many` builds one SQL statement per call; cap the row count so a
+/// large batch does not produce an oversized parameter buffer.
+const LOG_INSERT_CHUNK: usize = 64;
+
+/// Rough wire size of one entry. Exact serialization is not needed: this only
+/// decides when to flush, and over-counting is safer than under-counting.
+fn estimate_log_entry_bytes(entry: &LogEntry) -> usize {
+    let headers: usize = entry
+        .request_headers
+        .iter()
+        .chain(entry.response_headers.iter())
+        .map(|(k, v)| k.len() + v.len())
+        .sum();
+    let tags: usize = entry.waf_matched_tags.iter().map(String::len).sum();
+    256 + entry.client_ip.len()
+        + entry.method.len()
+        + entry.scheme.len()
+        + entry.host.len()
+        + entry.path.len()
+        + entry.query_string.len()
+        + entry.protocol.len()
+        + entry.request_body.len()
+        + entry.response_body.len()
+        + entry.upstream_addr.len()
+        + entry.waf_action.len()
+        + entry.waf_rule_id.len()
+        + entry.waf_details.len()
+        + entry.waf_rule_name.len()
+        + entry.waf_event_type.len()
+        + headers
+        + tags
+}
+
+/// Inserts access rows in bounded chunks, moving each chunk out of the Vec.
+async fn insert_access_chunks(
+    db: &DatabaseConnection,
+    mut rows: Vec<access_log::ActiveModel>,
+) -> Result<(), Status> {
+    while rows.len() > LOG_INSERT_CHUNK {
+        let tail = rows.split_off(LOG_INSERT_CHUNK);
+        if let Err(err) = access_log::Entity::insert_many(rows).exec(db).await {
+            tracing::error!(error = %err, "failed to persist access logs");
+            return Err(db_status(err));
+        }
+        rows = tail;
+    }
+    if !rows.is_empty() {
+        if let Err(err) = access_log::Entity::insert_many(rows).exec(db).await {
+            tracing::error!(error = %err, "failed to persist access logs");
+            return Err(db_status(err));
+        }
+    }
+    Ok(())
+}
+
 /// Writes the accumulated rows, clearing both buffers.
 async fn flush(
     db: &DatabaseConnection,
@@ -2285,10 +2348,7 @@ async fn flush(
         let _timer = pingwaf_profiler::timed_method(
             pingwaf_profiler::Method::DbPersistLogs,
         );
-        if let Err(err) = access_log::Entity::insert_many(rows).exec(db).await {
-            tracing::error!(error = %err, "failed to persist access logs");
-            return Err(db_status(err));
-        }
+        insert_access_chunks(db, rows).await?;
     }
     if !events.is_empty() {
         let rows = std::mem::take(events);
@@ -3278,5 +3338,16 @@ mod tests {
         // Within the window nobody sweeps again — not even concurrently.
         let previous = sweep.load(Ordering::Relaxed);
         assert!(now.saturating_sub(previous) < 3600);
+    }
+    #[test]
+    fn log_batch_estimate_tracks_large_bodies() {
+        let mut entry = LogEntry::default();
+        assert!(estimate_log_entry_bytes(&entry) < 1024);
+
+        entry.response_body = vec![b'x'; LOG_BATCH_BYTES];
+        assert!(
+            estimate_log_entry_bytes(&entry) >= LOG_BATCH_BYTES,
+            "a body larger than the batch budget must trigger a flush"
+        );
     }
 }

@@ -10,8 +10,8 @@ use chrono::{DateTime, Utc};
 use sea_orm::sea_query::{Expr, Func};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, Condition, ConnectionTrait, DbErr,
-    EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, Set,
-    TransactionTrait,
+    EntityTrait, FromQueryResult, PaginatorTrait, QueryFilter, QueryOrder,
+    QuerySelect, Set, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -126,6 +126,68 @@ impl From<site::Model> for SiteResponse {
             user_id: model.user_id,
             created_at: model.created_at,
             updated_at: model.updated_at,
+        }
+    }
+}
+
+/// Columns the list endpoint actually serializes. `sites` also carries the
+/// type-policy and failover JSON blobs, which the dashboard list never reads;
+/// selecting them was pure per-request allocation.
+#[derive(Debug, FromQueryResult)]
+struct SiteListRow {
+    id: Uuid,
+    user_id: Uuid,
+    name: String,
+    domain: String,
+    alternate_domains: Vec<String>,
+    status: String,
+    plan: String,
+    cache_quota_mb: i32,
+    cache_max_file_size_mb: Option<i32>,
+    cache_type_limits_mb: Option<serde_json::Value>,
+    trust_proxy_headers: bool,
+    trusted_header: String,
+    trust_last_hop: bool,
+    trusted_proxy_ranges: Vec<String>,
+    trusted_proxy_group_ids: Vec<Uuid>,
+    origin_verify_cert: Option<bool>,
+    downstream_timeout_secs: i32,
+    response_replace: Option<serde_json::Value>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+impl From<SiteListRow> for SiteResponse {
+    fn from(row: SiteListRow) -> Self {
+        Self {
+            id: row.id,
+            name: row.name,
+            domain: row.domain,
+            alternate_domains: row.alternate_domains,
+            status: row.status,
+            plan: row.plan,
+            cache_quota_mb: row.cache_quota_mb,
+            cache_max_file_size_mb: row.cache_max_file_size_mb,
+            cache_type_limits_mb: row
+                .cache_type_limits_mb
+                .and_then(|value| serde_json::from_value(value).ok()),
+            trust_proxy_headers: row.trust_proxy_headers,
+            trusted_header: row.trusted_header,
+            trust_last_hop: row.trust_last_hop,
+            trusted_proxy_ranges: row.trusted_proxy_ranges,
+            trusted_proxy_group_ids: row.trusted_proxy_group_ids,
+            origin_verify_cert: row.origin_verify_cert,
+            downstream_timeout_secs:
+                crate::defaults::normalize_site_downstream_timeout_secs(
+                    row.downstream_timeout_secs,
+                ),
+            response_replace: row
+                .response_replace
+                .as_ref()
+                .and_then(ResponseReplaceConfig::from_json),
+            user_id: row.user_id,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
         }
     }
 }
@@ -1093,8 +1155,32 @@ async fn list(
     }
 
     let paginator = site::Entity::find()
+        .select_only()
+        .columns([
+            site::Column::Id,
+            site::Column::UserId,
+            site::Column::Name,
+            site::Column::Domain,
+            site::Column::AlternateDomains,
+            site::Column::Status,
+            site::Column::Plan,
+            site::Column::CacheQuotaMb,
+            site::Column::CacheMaxFileSizeMb,
+            site::Column::CacheTypeLimitsMb,
+            site::Column::TrustProxyHeaders,
+            site::Column::TrustedHeader,
+            site::Column::TrustLastHop,
+            site::Column::TrustedProxyRanges,
+            site::Column::TrustedProxyGroupIds,
+            site::Column::OriginVerifyCert,
+            site::Column::DownstreamTimeoutSecs,
+            site::Column::ResponseReplace,
+            site::Column::CreatedAt,
+            site::Column::UpdatedAt,
+        ])
         .filter(condition)
         .order_by_desc(site::Column::CreatedAt)
+        .into_model::<SiteListRow>()
         .paginate(&state.db, pagination.limit());
 
     let total = paginator.num_items().await?;
