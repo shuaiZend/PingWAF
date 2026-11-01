@@ -222,7 +222,7 @@ pub async fn start_server(mut config: ServerConfig) -> anyhow::Result<()> {
             tracing::info!(
                 access_log_enabled = policy.access_log_enabled,
                 allowlist_enabled = policy.allowlist_enabled,
-                waf_enabled = policy.waf.is_some(),
+                waf_enabled = policy.waf_enabled,
                 "control plane self-protection loaded"
             );
             state.protection.store(policy);

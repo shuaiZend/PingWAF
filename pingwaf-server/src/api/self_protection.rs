@@ -25,7 +25,7 @@
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::str::FromStr;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
@@ -183,8 +183,13 @@ pub struct ProtectionPolicy {
     pub access_log_enabled: bool,
     pub allowlist_enabled: bool,
     pub allowlist: Allowlist,
-    /// Built only when the WAF is enabled; `None` short-circuits the guard.
-    pub waf: Option<Arc<WafEngine>>,
+    /// Built on the first request that needs it. The engine is immutable for
+    /// a given blocking mode, so deferring construction avoids compiling the
+    /// full managed-rule automaton in every process that never receives an
+    /// admin request (and lets a co-located edge build the shared base first).
+    pub waf: OnceLock<Arc<WafEngine>>,
+    /// Whether the WAF is enabled for this policy.
+    pub waf_enabled: bool,
     /// True when the WAF answers blocks (vs. monitor mode).
     pub waf_blocking: bool,
     /// `updated_at` of the settings row this policy was built from.
@@ -197,7 +202,8 @@ impl Default for ProtectionPolicy {
             access_log_enabled: false,
             allowlist_enabled: false,
             allowlist: Allowlist::default(),
-            waf: None,
+            waf: OnceLock::new(),
+            waf_enabled: false,
             waf_blocking: false,
             settings_updated_at: DateTime::<Utc>::MIN_UTC,
         }
@@ -412,15 +418,13 @@ pub async fn refresh(
     let settings = load_settings(db).await?;
     let allowlist = effective_allowlist(db, &settings).await?;
     let waf_blocking = settings.waf_mode == waf_mode::BLOCK;
-    let waf = settings
-        .waf_enabled
-        .then(|| control_plane_waf(waf_blocking));
 
     Ok(ProtectionPolicy {
         access_log_enabled: settings.access_log_enabled,
         allowlist_enabled: settings.ip_allowlist_enabled,
         allowlist,
-        waf,
+        waf: OnceLock::new(),
+        waf_enabled: settings.waf_enabled,
         waf_blocking,
         settings_updated_at: settings.updated_at,
     })
@@ -440,7 +444,7 @@ pub fn start_refresh_task(state: AppState) -> tokio::task::JoinHandle<()> {
                         tracing::info!(
                             allowlist_enabled = policy.allowlist_enabled,
                             allowlist_entries = policy.allowlist.len(),
-                            waf_enabled = policy.waf.is_some(),
+                            waf_enabled = policy.waf_enabled,
                             "control plane protection settings reloaded"
                         );
                         state.protection.store(policy);
@@ -809,9 +813,13 @@ pub async fn waf_guard(
     next: Next,
 ) -> Response {
     let policy = state.protection.policy();
-    let Some(engine) = policy.waf.clone() else {
+    if !policy.waf_enabled {
         return next.run(request).await;
-    };
+    }
+    let engine = policy
+        .waf
+        .get_or_init(|| control_plane_waf(policy.waf_blocking))
+        .clone();
     if exempt(request.uri().path()) {
         return next.run(request).await;
     }
