@@ -4853,7 +4853,7 @@ impl Plugin for WafPlugin {
                         // the upstream still has no body byte; the rest of
                         // the body then flows through untouched.
                         if let Some(dv) = entry.deferred.as_mut() {
-                            dv.request_data.body = Some(staged.to_vec());
+                            dv.request_data.body = Some(staged.clone());
                             let agent = PingWafAgent::instance();
                             let (log_body, log_body_size, log_truncated) =
                                 entry.log_prefix.finish();
@@ -4920,7 +4920,7 @@ impl Plugin for WafPlugin {
             let full = std::mem::take(&mut entry.buffer).freeze();
             let agent = PingWafAgent::instance();
             if let Some(dv) = entry.deferred.as_mut() {
-                dv.request_data.body = Some(full.to_vec());
+                dv.request_data.body = Some(full.clone());
                 let outcome = self.enforce_verdict(
                     agent.as_ref(),
                     &dv.site_id,

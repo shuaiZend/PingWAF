@@ -44,7 +44,7 @@ fn main() {
             path: reqpath,
             query,
             headers,
-            body,
+            body: body.map(Into::into),
             ..pingwaf_waf::RequestData::new(method, "/")
         };
         let verdict = engine.inspect(&req);

@@ -237,7 +237,7 @@ pub struct RequestData {
     pub query: String,
     /// Header pairs in wire order; names will be lower-cased internally.
     pub headers: Vec<(String, String)>,
-    pub body: Option<Vec<u8>>,
+    pub body: Option<bytes::Bytes>,
     pub client_ip: String,
     /// Optional GeoIP country code (ISO-3166 alpha-2).
     pub country_code: Option<String>,
@@ -1822,7 +1822,7 @@ mod tests {
     #[test]
     fn small_bodies_reserve_kib_not_a_mib() {
         let mut request = req("POST", "/login", "");
-        request.body = Some(vec![b'a'; 1024]);
+        request.body = Some(bytes::Bytes::from(vec![b'a'; 1024]));
         let estimate = estimated_scan_bytes(&request);
         assert!(
             estimate < 1024 * 1024,
@@ -1834,7 +1834,8 @@ mod tests {
     fn exhausted_budget_skips_the_body_instead_of_blocking() {
         let engine = engine();
         let mut request = req("POST", "/login", "");
-        request.body = Some(b"username=1' OR '1'='1".to_vec());
+        request.body =
+            Some(bytes::Bytes::from(b"username=1' OR '1'='1".to_vec()));
         let verdict = engine.inspect_without_body(&request);
         assert_ne!(
             verdict.action,
@@ -1860,7 +1861,7 @@ mod tests {
         request
             .headers
             .push(("Content-Encoding".into(), "br".into()));
-        request.body = Some(b"abc".to_vec());
+        request.body = Some(bytes::Bytes::from(b"abc".to_vec()));
         let verdict = engine.inspect(&request);
         assert_eq!(verdict.action, WafAction::Pass);
         assert!(
@@ -1936,7 +1937,7 @@ mod tests {
             // monitored verdict under test.
             ("user-agent".into(), "Mozilla/5.0".into()),
         ];
-        r.body = Some(body.as_bytes().to_vec());
+        r.body = Some(bytes::Bytes::from(body.as_bytes().to_vec()));
 
         // Advanced-mode sites run Strict: the only level that ships the rule,
         // and the only one where `http.request.body` is ever populated.
@@ -2058,7 +2059,8 @@ mod tests {
         assert!(query.details.contains("surface=query"), "{}", query.details);
 
         let mut body_req = req("POST", "/api/users", "");
-        body_req.body = Some(b"q=<script>alert(1)</script>".to_vec());
+        body_req.body =
+            Some(bytes::Bytes::from(b"q=<script>alert(1)</script>".to_vec()));
         let body = e.inspect(&body_req);
         assert!(body.details.contains("surface=body"), "{}", body.details);
 
@@ -2083,7 +2085,8 @@ mod tests {
     fn several_hit_surfaces_are_aggregated() {
         let e = engine();
         let mut r = req("POST", "/api/users", "id=1' OR 1=1 --");
-        r.body = Some(b"q=<script>alert(1)</script>".to_vec());
+        r.body =
+            Some(bytes::Bytes::from(b"q=<script>alert(1)</script>".to_vec()));
         let v = e.inspect(&r);
         assert!(v.details.contains("surface=query"), "{}", v.details);
         assert!(v.details.contains("surfaces=query,body"), "{}", v.details);
@@ -2435,7 +2438,9 @@ mod tests {
             "Content-Type".into(),
             "application/x-www-form-urlencoded".into(),
         ));
-        r.body = Some(b"comment=<script>alert(1)</script>&author=bob".to_vec());
+        r.body = Some(bytes::Bytes::from(
+            b"comment=<script>alert(1)</script>&author=bob".to_vec(),
+        ));
         let v = e.inspect(&r);
         assert!(matches!(v.action, WafAction::Block | WafAction::Monitor));
     }
@@ -2474,10 +2479,10 @@ mod tests {
     fn xxe_in_body_blocked() {
         let e = engine();
         let mut r = req("POST", "/api/xml", "");
-        r.body = Some(
+        r.body = Some(bytes::Bytes::from(
             br#"<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><foo>&xxe;</foo>"#
                 .to_vec(),
-        );
+        ));
         let v = e.inspect(&r);
         assert!(matches!(v.action, WafAction::Block | WafAction::Monitor));
     }
@@ -2688,7 +2693,7 @@ mod tests {
         let mut r = req("POST", path, "");
         r.headers
             .push(("Content-Type".into(), "application/json".into()));
-        r.body = Some(body.as_bytes().to_vec());
+        r.body = Some(bytes::Bytes::from(body.as_bytes().to_vec()));
         r
     }
 
@@ -2819,10 +2824,10 @@ mod tests {
             "Content-Type".into(),
             "application/x-www-form-urlencoded".into(),
         ));
-        r.body = Some(
+        r.body = Some(bytes::Bytes::from(
             b"user=rootxx&pam=&expired=2&old=test|whoami&new1=test2&new2=test2"
                 .to_vec(),
-        );
+        ));
         let v = e.inspect(&r);
         assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
     }
@@ -3014,8 +3019,9 @@ mod tests {
             "Content-Type".into(),
             "application/x-www-form-urlencoded".into(),
         ));
-        r.body =
-            Some(b"code=f(x)\r\n  y = x^2\r\n\r\nNote: plot y\r\n".to_vec());
+        r.body = Some(bytes::Bytes::from(
+            b"code=f(x)\r\n  y = x^2\r\n\r\nNote: plot y\r\n".to_vec(),
+        ));
         let v = e.inspect(&r);
         assert_ne!(v.action, WafAction::Block, "details: {}", v.details);
     }
@@ -3042,10 +3048,10 @@ mod tests {
         let mut r = req("POST", "/analytics/v2_upload", "");
         r.headers
             .push(("Content-Type".into(), "application/json".into()));
-        r.body = Some(
+        r.body = Some(bytes::Bytes::from(
             br#"{"common":{"browser":"Chrome(114)"},"events":[{"mapValue":{"attributes":"{\"href\":\"javascript: void(0);\",\"data-reactid\":\".c.0.1\"}","queryPath":".tc-15-tablist > li > a"}}]}"#
                 .to_vec(),
-        );
+        ));
         let v = e.inspect(&r);
         assert_ne!(v.action, WafAction::Block, "details: {}", v.details);
     }
@@ -3080,10 +3086,10 @@ mod tests {
         let mut r = req("POST", "/analytics/v2_upload", "");
         r.headers
             .push(("Content-Type".into(), "application/json".into()));
-        r.body = Some(
+        r.body = Some(bytes::Bytes::from(
             br#"{"events":[{"mapValue":{"attributes":"{\"href\":\"javascript: void(0);\"}"}}]}"#
                 .to_vec(),
-        );
+        ));
         let v = e.inspect(&r);
         assert_ne!(v.action, WafAction::Block, "details: {}", v.details);
     }
@@ -3100,11 +3106,11 @@ mod tests {
             "Content-Type".into(),
             "application/x-www-form-urlencoded".into(),
         ));
-        r.body = Some(
+        r.body = Some(bytes::Bytes::from(
             b"action=configureSecurityGroupPermissions\
               &param=%7B%22add%22%3A5%2C%22delete%22%3A0%7D"
                 .to_vec(),
-        );
+        ));
         let v = e.inspect(&r);
         assert_ne!(v.action, WafAction::Block, "details: {}", v.details);
     }
@@ -3149,7 +3155,7 @@ mod tests {
             "Content-Type".into(),
             "application/x-www-form-urlencoded".into(),
         ));
-        r.body = Some(body);
+        r.body = Some(bytes::Bytes::from(body));
         r
     }
 
@@ -3257,10 +3263,10 @@ mod tests {
             "Content-Type".into(),
             "application/x-www-form-urlencoded".into(),
         ));
-        r.body = Some(
+        r.body = Some(bytes::Bytes::from(
             b"log=2024-01-01 12:00:00 INFO started\r\n2024-01-01 INFO done"
                 .to_vec(),
-        );
+        ));
         let v = e.inspect(&r);
         assert_ne!(v.action, WafAction::Block, "details: {}", v.details);
     }
@@ -3381,8 +3387,9 @@ mod tests {
         let e = strict_engine();
         let mut r = req("POST", "/collect", "");
         r.headers.push(("Content-Type".into(), "text/plain".into()));
-        r.body =
-            Some(b"paste: ctx['lookup'](val) worked\r\nnext line".to_vec());
+        r.body = Some(bytes::Bytes::from(
+            b"paste: ctx['lookup'](val) worked\r\nnext line".to_vec(),
+        ));
         let v = e.inspect(&r);
         assert_ne!(v.action, WafAction::Block, "details: {}", v.details);
         let v = e.inspect(&req("POST", "/w", "tpl=win['constructor'](1)"));
@@ -3547,9 +3554,9 @@ mod tests {
             "Content-Type".into(),
             "application/x-www-form-urlencoded".into(),
         ));
-        form.body = Some(
+        form.body = Some(bytes::Bytes::from(
             b"ip=x%7C%7Cping+-c+10+127.0.0.1%7C%7C&Submit=Submit".to_vec(),
-        );
+        ));
         let v = e.inspect(&form);
         assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
     }
@@ -3702,7 +3709,7 @@ mod tests {
             "Content-Type".into(),
             "application/x-www-form-urlencoded".into(),
         ));
-        form.body = Some(
+        form.body = Some(bytes::Bytes::from(
             format!("depreciation={body}", body = concat!(
                 "eyJmaXJzdCI6IjEiLCJvZyI6IiNyZXE9I2NvbnRleHQuZ2V0KCdjb20ub3BlbnN5bXBob255Lnh3b3JrMicpIiIsInBhZCI6IkEy",
                 "MzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3IiwicGFk",
@@ -3757,7 +3764,7 @@ mod tests {
                 "IjoiQTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njc4QTIzNDU2NzhBMjM0NTY3OEEyMzQ1Njd9"
             ))
                 .into_bytes(),
-        );
+        ));
         let v = e.inspect(&form);
         assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
     }
@@ -3773,9 +3780,9 @@ mod tests {
             "Content-Type".into(),
             "application/x-www-form-urlencoded".into(),
         ));
-        form.body = Some(
+        form.body = Some(bytes::Bytes::from(
             b"refresh=4+AND+x+union%23+fillerfillerfiller+select1+%23".to_vec(),
-        );
+        ));
         let v = e.inspect(&form);
         assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
     }
@@ -3791,10 +3798,10 @@ mod tests {
             "Content-Type".into(),
             "application/x-www-form-urlencoded".into(),
         ));
-        form.body = Some(
+        form.body = Some(bytes::Bytes::from(
             b"q=UNION+--+pick+a+plan%0ASELECT+x+FROM+t&n=the+union+%231+selects+members"
                 .to_vec(),
-        );
+        ));
         let v = e.inspect(&form);
         assert_ne!(v.action, WafAction::Block, "details: {}", v.details);
     }
@@ -3821,7 +3828,9 @@ mod tests {
             "Content-Type".into(),
             "application/x-www-form-urlencoded".into(),
         ));
-        form.body = Some(b"ip=127.0.0.1%3Bwh%60%60oami&Submit=Submit".to_vec());
+        form.body = Some(bytes::Bytes::from(
+            b"ip=127.0.0.1%3Bwh%60%60oami&Submit=Submit".to_vec(),
+        ));
         let v = e.inspect(&form);
         assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
 
@@ -3888,9 +3897,9 @@ mod tests {
             "Content-Type".into(),
             "application/x-www-form-urlencoded".into(),
         ));
-        r.body = Some(
+        r.body = Some(bytes::Bytes::from(
             b"subPayType%5Bdeduct%5D%5B%5D=panshi&subPayType%5Breturn%5D%5B%5D=trade&payType%5B%5D=all".to_vec(),
-        );
+        ));
         let v = e.inspect(&r);
         assert_ne!(v.action, WafAction::Block, "details: {}", v.details);
 
@@ -3901,10 +3910,10 @@ mod tests {
             "Content-Type".into(),
             "application/x-www-form-urlencoded".into(),
         ));
-        r.body = Some(
+        r.body = Some(bytes::Bytes::from(
             b"this%5B%27constructor%27%5D%5B%27constructor%27%5D=payload"
                 .to_vec(),
-        );
+        ));
         let v = e.inspect(&r);
         assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
 
@@ -3935,10 +3944,10 @@ mod tests {
             "Content-Type".into(),
             "application/x-www-form-urlencoded".into(),
         ));
-        r.body = Some(
+        r.body = Some(bytes::Bytes::from(
             b"form_id=user_register_form&mail%5B%23post_render%5D%5B%5D=exec&mail%5B%23markup%5D=id"
                 .to_vec(),
-        );
+        ));
         let v = e.inspect(&r);
         assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
     }
@@ -4034,14 +4043,14 @@ mod tests {
             "Content-Type".into(),
             "application/x-www-form-urlencoded".into(),
         ));
-        form.body = Some(
+        form.body = Some(bytes::Bytes::from(
             concat!(
                 "depreciation=PG1ldGEgaHR0cC1lcXVpdj0icmVmcmVzaCIgY29udGVudD0i",
                 "MjsgdXJsPScmI3g0YTthdmFzY3JpcHQ6YWxlcnQoMSknIj4=&Submit=x",
             )
             .as_bytes()
             .to_vec(),
-        );
+        ));
         let v = e.inspect(&form);
         assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
     }
@@ -4053,7 +4062,7 @@ mod tests {
             "Content-Type".into(),
             "application/x-www-form-urlencoded".into(),
         ));
-        r.body = Some(body.to_vec());
+        r.body = Some(bytes::Bytes::from(body.to_vec()));
         e.inspect(&r)
     }
 
@@ -4109,7 +4118,7 @@ mod tests {
         let mut r = req("POST", "/x", "");
         r.headers
             .push(("Content-Type".into(), "application/json".into()));
-        r.body = Some(body.to_vec());
+        r.body = Some(bytes::Bytes::from(body.to_vec()));
         e.inspect(&r)
     }
 

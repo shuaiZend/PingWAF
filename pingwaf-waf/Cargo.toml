@@ -24,4 +24,5 @@ base64 = { workspace = true }
 # in-memory decompression only (see `normalize::body`).
 flate2 = { workspace = true }
 ipnet = { workspace = true }
+bytes = { workspace = true }
 once_cell = "1"

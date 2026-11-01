@@ -881,10 +881,7 @@ pub async fn waf_guard(
                     .map(|value| (name.as_str().to_string(), value.to_string()))
             })
             .collect(),
-        body: bytes
-            .as_ref()
-            .filter(|bytes| !bytes.is_empty())
-            .map(|bytes| bytes.to_vec()),
+        body: bytes.as_ref().filter(|bytes| !bytes.is_empty()).cloned(),
         client_ip,
         country_code: None,
         scheme,
