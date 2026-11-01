@@ -597,7 +597,7 @@ fn finish_scalar(kind: &FieldKind, op: Operator, v: Value) -> Result<Value> {
         // cannot pin tens of MB per profile. A pattern that genuinely needs
         // more falls back to the old constructor; this keeps existing rule
         // semantics instead of silently dropping the rule.
-        const MAX_REGEX_SIZE: usize = 4 * 1024 * 1024;
+        const MAX_REGEX_SIZE: usize = 1024 * 1024;
         let re = match RegexBuilder::new(&pattern)
             .size_limit(MAX_REGEX_SIZE)
             .dfa_size_limit(MAX_REGEX_SIZE)
