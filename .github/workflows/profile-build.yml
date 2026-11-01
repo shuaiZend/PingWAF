@@ -1,0 +1,74 @@
+name: Profile build (dhat)
+
+# Manual, analysis-only build. It never creates a release or a version tag; it
+# only uploads an amd64 binary that carries dhat's instrumented allocator and
+# debug symbols. Do not use it for production.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dhat-amd64:
+    name: Build amd64 dhat binary
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 26.12.1
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build frontend dist
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            protobuf-compiler \
+            libprotobuf-dev \
+            cmake \
+            libclang-dev \
+            pkg-config \
+            libssl-dev \
+            nasm
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.98.1
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: profile-dhat-amd64
+
+      - name: Export PROTOC
+        shell: bash
+        run: echo "PROTOC=$(command -v protoc)" >> "$GITHUB_ENV"
+
+      # `release-perf` keeps debug symbols so dhat stack frames resolve to
+      # function names; the shipped `release` profile strips them.
+      - name: Build with dhat
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --profile release-perf --bin pingwaf \
+            --features tracing,dhat
+          ls -lh target/release-perf/pingwaf
+          cp target/release-perf/pingwaf pingwaf-dhat-linux-amd64
+
+      - name: Upload dhat binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: pingwaf-dhat-linux-amd64
+          path: pingwaf-dhat-linux-amd64
+          retention-days: 7
