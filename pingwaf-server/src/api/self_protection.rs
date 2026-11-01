@@ -22,10 +22,10 @@
 //! proxy therefore sees the proxy's address, and the proxy's range must be
 //! allowlisted.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
@@ -366,6 +366,45 @@ pub async fn effective_allowlist(
     Ok(allowlist)
 }
 
+/// The control-plane WAF engine is immutable for a given blocking mode: the
+/// level, stack set and rule list are compiled from constants. Refreshing the
+/// settings row every [`REFRESH_INTERVAL`] used to construct a new engine —
+/// and therefore re-walk the regex compilation path — even when nothing had
+/// changed. Keep the two variants alive instead.
+static CONTROL_PLANE_WAF: LazyLock<Mutex<HashMap<bool, Arc<WafEngine>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn control_plane_waf(blocking: bool) -> Arc<WafEngine> {
+    let mut cache = CONTROL_PLANE_WAF
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(engine) = cache.get(&blocking) {
+        return Arc::clone(engine);
+    }
+    let engine = Arc::new(WafEngine::new(&WafEngineConfig {
+        mode: if blocking {
+            WafMode::Block
+        } else {
+            WafMode::Monitor
+        },
+        level: WafLevel::default(),
+        stacks: StackSet::default(),
+        monitor_categories: CategorySet::EMPTY,
+        monitor_stacks: StackSet::EMPTY,
+        monitor_managed_rules: HashSet::new(),
+        disabled_managed_rules: HashSet::new(),
+        monitor_custom_rules: HashSet::new(),
+        threshold: 40,
+        paranoia_level: 2,
+        max_decode_layers: 3,
+        rules: Vec::new(),
+        enable_managed_rules: true,
+        fast_path_block_on_critical: true,
+    }));
+    cache.insert(blocking, Arc::clone(&engine));
+    engine
+}
+
 /// Builds the enforcement policy from the current settings row.
 pub async fn refresh(
     db: &DatabaseConnection,
@@ -373,28 +412,9 @@ pub async fn refresh(
     let settings = load_settings(db).await?;
     let allowlist = effective_allowlist(db, &settings).await?;
     let waf_blocking = settings.waf_mode == waf_mode::BLOCK;
-    let waf = settings.waf_enabled.then(|| {
-        Arc::new(WafEngine::new(&WafEngineConfig {
-            mode: if waf_blocking {
-                WafMode::Block
-            } else {
-                WafMode::Monitor
-            },
-            level: WafLevel::default(),
-            stacks: StackSet::default(),
-            monitor_categories: CategorySet::EMPTY,
-            monitor_stacks: StackSet::EMPTY,
-            monitor_managed_rules: std::collections::HashSet::new(),
-            disabled_managed_rules: std::collections::HashSet::new(),
-            monitor_custom_rules: std::collections::HashSet::new(),
-            threshold: 40,
-            paranoia_level: 2,
-            max_decode_layers: 3,
-            rules: Vec::new(),
-            enable_managed_rules: true,
-            fast_path_block_on_critical: true,
-        }))
-    });
+    let waf = settings
+        .waf_enabled
+        .then(|| control_plane_waf(waf_blocking));
 
     Ok(ProtectionPolicy {
         access_log_enabled: settings.access_log_enabled,
@@ -944,5 +964,19 @@ mod tests {
             "a=1&token=[redacted]&api_key=[redacted]"
         );
         assert_eq!(redact_query("flag"), "flag");
+    }
+}
+#[cfg(test)]
+mod control_plane_waf_tests {
+    use super::control_plane_waf;
+
+    #[test]
+    fn control_plane_engine_is_reused_per_mode() {
+        let blocking = control_plane_waf(true);
+        let blocking_again = control_plane_waf(true);
+        assert!(std::sync::Arc::ptr_eq(&blocking, &blocking_again));
+
+        let monitor = control_plane_waf(false);
+        assert!(!std::sync::Arc::ptr_eq(&blocking, &monitor));
     }
 }
