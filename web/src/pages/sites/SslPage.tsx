@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -34,7 +34,9 @@ import { SkeletonRows, SkeletonStat } from '@/components/ui/Skeleton'
 import { useToast } from '@/components/ui/Toast'
 import { ErrorState } from '@/components/ErrorState'
 import { CertWarningsBadge } from '@/components/ssl/CertWarnings'
+import { Tooltip } from '@/components/ui/Tooltip'
 import { sslApi, sslKeys, daysUntilExpiry, expiryTone, groupCertsByRelation } from '@/api/ssl'
+import { ApiError } from '@/api/client'
 import { MtlsMaterial } from '@/pages/sites/MtlsMaterial'
 import { useCanWrite, useNow } from '@/hooks'
 import { cn } from '@/lib/utils'
@@ -247,6 +249,9 @@ export function SslPage() {
   const [shareOpen, setShareOpen] = useState(false)
   const [pendingUnlink, setPendingUnlink] = useState(false)
   const [howToShareOpen, setHowToShareOpen] = useState(false)
+  /** Set when removing a share hit a 409: the certificate is still selected. */
+  const [unlinkConflict, setUnlinkConflict] = useState(false)
+  const clearCertRef = useRef<HTMLDivElement | null>(null)
 
   const certsQuery = useQuery({
     queryKey: sslKeys.list(siteId),
@@ -344,8 +349,18 @@ export function SslPage() {
       )
       void queryClient.invalidateQueries({ queryKey: sslKeys.site(siteId) })
     },
-    onError: (e) =>
-      toast.error(t('pages.ssl.unlinkFailed'), e instanceof Error ? e.message : undefined),
+    onError: (e) => {
+      // 409 — this site still serves the shared certificate; point at the
+      // clear button inline instead of only toasting.
+      if (e instanceof ApiError && e.status === 409) {
+        setPendingDelete(null)
+        setUnlinkConflict(true)
+        clearCertRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        toast.error(t('pages.ssl.unlinkFailed'), e.message)
+        return
+      }
+      toast.error(t('pages.ssl.unlinkFailed'), e instanceof Error ? e.message : undefined)
+    },
   })
 
   /** Clears the selected certificate — `clear_certificate: true`, mutually exclusive with the id. */
@@ -357,6 +372,7 @@ export function SslPage() {
         prev ? { ...prev, https: { ...prev.https, certificate_id: null } } : prev,
       )
       setPendingUnlink(false)
+      setUnlinkConflict(false)
       toast.success(t('pages.ssl.certificateCleared'))
     },
     onError: (e) =>
@@ -595,14 +611,20 @@ export function SslPage() {
             onClick={() => setAsCurrent(c)}
             icon={<Check weight="duotone" className="h-4 w-4" />}
           />
-          <Button
-            size="icon"
-            variant="ghost"
-            aria-label={t('pages.ssl.renew')}
-            disabled={!canWrite || renew.isPending || c.relation === 'linked'}
-            onClick={() => renew.mutate(c)}
-            icon={<ArrowsClockwise weight="duotone" className="h-4 w-4" />}
-          />
+          <Tooltip
+            content={
+              c.relation === 'linked' ? t('pages.ssl.renewSharedHint') : t('pages.ssl.renew')
+            }
+          >
+            <Button
+              size="icon"
+              variant="ghost"
+              aria-label={t('pages.ssl.renew')}
+              disabled={!canWrite || renew.isPending || c.relation === 'linked'}
+              onClick={() => renew.mutate(c)}
+              icon={<ArrowsClockwise weight="duotone" className="h-4 w-4" />}
+            />
+          </Tooltip>
           {c.relation === 'linked' ? (
             <Button
               size="icon"
@@ -840,21 +862,31 @@ export function SslPage() {
                       >
                         {t('pages.ssl.shareOut')}
                       </Button>
-                      {/* Unbind: clear_certificate, confirmed below. */}
-                      {canWrite &&
-                        !drafts.https.self_signed &&
-                        drafts.https.certificate_id && (
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            className="hover:text-fg-danger"
-                            loading={clearCurrentCert.isPending}
-                            onClick={() => setPendingUnlink(true)}
-                            icon={<LinkBreak weight="duotone" className="h-4 w-4" />}
-                          >
-                            {t('pages.ssl.unbind')}
-                          </Button>
+                      {/* Unbind: clear_certificate, confirmed below. The ref +
+                          highlight drive the 409 recovery flow from the
+                          "remove share" action below. */}
+                      <div
+                        ref={clearCertRef}
+                        className={cn(
+                          'flex items-center rounded-md',
+                          unlinkConflict && 'ring-2 ring-danger/60',
                         )}
+                      >
+                        {canWrite &&
+                          !drafts.https.self_signed &&
+                          drafts.https.certificate_id && (
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="hover:text-fg-danger"
+                              loading={clearCurrentCert.isPending}
+                              onClick={() => setPendingUnlink(true)}
+                              icon={<LinkBreak weight="duotone" className="h-4 w-4" />}
+                            >
+                              {t('pages.ssl.unbind')}
+                            </Button>
+                          )}
+                      </div>
                     </div>
                     {certs.length === 0 && (
                       <p className="text-xs leading-relaxed text-fg-subtle">
@@ -866,6 +898,14 @@ export function SslPage() {
               </div>
 
               <CardError message={httpsError} />
+              {unlinkConflict && (
+                <p
+                  role="alert"
+                  className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-[13px] text-fg-warning"
+                >
+                  {t('pages.ssl.clearFirst')}
+                </p>
+              )}
             </>
           )}
         </CardBody>

@@ -1551,6 +1551,24 @@ export interface CertificateBinding {
   domain: string
 }
 
+/** One site entry of `GET /certificates/{id}/usage`. */
+export interface CertificateUsageSite {
+  id: string
+  domain: string
+  /** True when this site currently serves the certificate (its TLS choice). */
+  selected?: boolean
+}
+
+/** `GET /certificates/{id}/usage` — who owns, shares and serves a certificate. */
+export interface CertificateUsage {
+  /** Owning site (`site_id`), or `null` for an unbound upload. */
+  owner: { id: string; domain: string } | null
+  /** Sites the certificate is shared with (shared bindings). */
+  linked_sites: CertificateUsageSite[]
+  /** Sites whose current TLS choice is this certificate. */
+  serving_sites: CertificateUsageSite[]
+}
+
 /** `POST /certificates/{id}/bindings` — add the certificate to a site. */
 export interface BindCertificateRequest {
   site_id: string

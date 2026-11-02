@@ -5,6 +5,7 @@ import type {
 
   CertificateListQuery,
   CertificateSummary,
+  CertificateUsage,
   CertificateWithSite,
   CreateCertificateLinkRequest,
   CreateSslRequest,
@@ -107,6 +108,14 @@ export const sslApi = {
   /* ── Certificate bindings (one certificate, many sites) ───────────── */
 
   /**
+   * Who owns / shares / currently serves a certificate —
+   * `GET /certificates/{id}/usage`. Powers the bind and delete dialogs so
+   * they can explain a 409 before (or instead of) it happens.
+   */
+  usage: (certId: string) =>
+    apiClient.get<CertificateUsage>(`/certificates/${certId}/usage`),
+
+  /**
    * Binds an existing certificate to a site; 200 + the certificate on
    * success, 400 when the certificate does not cover the site's hostnames
    * (the message lists them), 409 when the site already owns it.
@@ -165,6 +174,7 @@ export const sslKeys = {
   available: (siteId: string) => [...sslKeys.site(siteId), 'available'] as const,
   global: (query?: CertificateListQuery) => [...sslKeys.all, 'global', query ?? {}] as const,
   summary: () => [...sslKeys.all, 'summary'] as const,
+  usage: (certId: string) => [...sslKeys.all, 'usage', certId] as const,
   events: (query?: CertificateEventListQuery) =>
     [...sslKeys.all, 'events', query ?? {}] as const,
   certEvents: (certId: string, query?: CertificateEventListQuery) =>

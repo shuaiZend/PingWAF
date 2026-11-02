@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -44,8 +45,17 @@ import {
   type CertificateEvent,
   type CertificateListQuery,
   type CertificateWithSite,
+  type CertificateUsage,
   type CreateSslRequest,
 } from '@/api/types'
+
+/** One per-site outcome of the batch bind; failures keep the dialog open. */
+interface BindAttempt {
+  siteId: string
+  ok: boolean
+  /** Human-readable failure reason; present when `ok` is false. */
+  error?: string
+}
 
 const STATUS_TONE: Record<string, BadgeTone> = {
   active: 'success',
@@ -92,6 +102,7 @@ function isAcme(cert: CertificateWithSite): boolean {
 export function GlobalSslPage() {
   const { t } = useTranslation()
   const toast = useToast()
+  const navigate = useNavigate()
   const queryClient = useQueryClient()
   const canWrite = useCanWrite()
   const now = useNow(60_000)
@@ -107,6 +118,12 @@ export function GlobalSslPage() {
   const [bindTarget, setBindTarget] = useState<CertificateWithSite | null>(null)
   const [bindSelection, setBindSelection] = useState<string[]>([])
   const [bindError, setBindError] = useState<string | null>(null)
+  /** Per-site outcomes of the last batch bind; non-empty keeps the dialog open. */
+  const [bindResults, setBindResults] = useState<BindAttempt[]>([])
+  /** Site whose unbind hit a 409 (it still serves the certificate). */
+  const [unbindConflictSite, setUnbindConflictSite] = useState<string | null>(null)
+  /** Bindings queued for the two-step unbind confirmation. */
+  const [pendingUnbind, setPendingUnbind] = useState<{ certId: string; siteId: string } | null>(null)
 
   const sitesQuery = useSitesList()
   const sites = sitesQuery.data ?? []
@@ -150,6 +167,28 @@ export function GlobalSslPage() {
   })
 
   const summary = summaryQuery.data
+
+  // `usage` gives the owner / linked / serving split (with `selected` flags)
+  // that the list rows do not carry; the dialogs fall back to `bound_sites`
+  // when it cannot be fetched.
+  const bindUsageQuery = useQuery({
+    queryKey: sslKeys.usage(bindTarget?.id ?? 'none'),
+    queryFn: () => sslApi.usage(bindTarget!.id),
+    enabled: bindTarget !== null,
+  })
+  const deleteUsageQuery = useQuery({
+    queryKey: sslKeys.usage(pendingDelete?.id ?? 'none'),
+    queryFn: () => sslApi.usage(pendingDelete!.id),
+    enabled: pendingDelete !== null,
+  })
+  const bindUsage: CertificateUsage | undefined = bindUsageQuery.data
+  const deleteUsage = deleteUsageQuery.data
+  // A certificate any site currently serves, or that is still shared, cannot
+  // be deleted: the confirm button becomes a "go handle it" pointer instead.
+  const deleteBlocked = Boolean(
+    deleteUsage &&
+      (deleteUsage.serving_sites.length > 0 || deleteUsage.linked_sites.length > 0),
+  )
   const filtersActive = Boolean(siteFilter || statusFilter)
 
   const invalidate = () => {
@@ -199,26 +238,55 @@ export function GlobalSslPage() {
     onError: (e) => toast.error(t('pages.sslGlobal.deleteFailed'), errorMessage(e)),
   })
 
-  /** One request per newly selected site; a 400 lists uncovered hostnames. */
+  /** Error text for one failed bind attempt; 409 means the site owns the cert. */
+  const bindFailMessage = (e: unknown): string => {
+    if (e instanceof ApiError) {
+      if (e.status === 400) return errorMessage(e)
+      if (e.status === 409) return t('pages.sslGlobal.alreadyOwner')
+      return errorMessage(e)
+    }
+    return e instanceof Error ? e.message : String(e)
+  }
+
+  /**
+   * One request per newly selected site, collected independently — a single
+   * failure must not abort the batch. Successes invalidate, failures stay in
+   * the dialog's result area.
+   */
   const bindCert = useMutation({
     mutationFn: async (ids: string[]) => {
       const target = bindTarget
-      if (!target) return null
-      for (const siteId of ids) {
-        await sslApi.bind(target.id, { site_id: siteId })
+      if (!target) return { target: null, results: [] as BindAttempt[] }
+      const results = await Promise.all(
+        ids.map(async (siteId): Promise<BindAttempt> => {
+          try {
+            await sslApi.bind(target.id, { site_id: siteId })
+            return { siteId, ok: true }
+          } catch (e) {
+            return { siteId, ok: false, error: bindFailMessage(e) }
+          }
+        }),
+      )
+      return { target, results }
+    },
+    onSuccess: ({ target, results }) => {
+      const failures = results.filter((r) => !r.ok)
+      if (failures.length === 0) {
+        toast.success(t('pages.sslGlobal.bindSites'), target?.domain)
+        setBindTarget(null)
+        setBindSelection([])
+        setBindError(null)
+        setBindResults([])
+        invalidate()
+        return
       }
-      return target
-    },
-    onSuccess: (cert) => {
-      toast.success(t('pages.sslGlobal.bindSites'), cert?.domain)
-      setBindTarget(null)
-      setBindSelection([])
-      setBindError(null)
+      // Keep the dialog open with the per-site outcomes; drop the sites that
+      // succeeded from the selection so a retry only resubmits the rest.
+      setBindResults(results)
+      setBindSelection((prev) =>
+        prev.filter((siteId) => failures.some((f) => f.siteId === siteId)),
+      )
       invalidate()
-    },
-    onError: (e) => {
-      // 400 carries the list of hostnames the certificate does not cover.
-      setBindError(errorMessage(e))
     },
   })
 
@@ -227,16 +295,20 @@ export function GlobalSslPage() {
       sslApi.unbind(certId, siteId),
     onSuccess: () => {
       setBindError(null)
+      setUnbindConflictSite(null)
+      setPendingUnbind(null)
       invalidate()
     },
-    onError: (e) => {
-      // 409 — the site still serves this certificate; it must be switched first.
-      toast.error(
-        e instanceof ApiError && e.status === 409
-          ? t('pages.sslGlobal.unbindBlocked')
-          : t('pages.sslGlobal.bindSites'),
-        errorMessage(e),
-      )
+    onError: (e, { siteId }) => {
+      // 409 — the site still serves this certificate; guide to its SSL page
+      // inline instead of only toasting.
+      if (e instanceof ApiError && e.status === 409) {
+        setUnbindConflictSite(siteId)
+        setPendingUnbind(null)
+        toast.error(t('pages.sslGlobal.unbindBlocked'), errorMessage(e))
+        return
+      }
+      toast.error(t('pages.sslGlobal.bindSites'), errorMessage(e))
     },
   })
 
@@ -321,6 +393,8 @@ export function GlobalSslPage() {
           setBindTarget(cert)
           setBindSelection([])
           setBindError(null)
+          setBindResults([])
+          setUnbindConflictSite(null)
         }}
       >
         <LinkIcon weight="duotone" className="h-4 w-4" />
@@ -373,25 +447,27 @@ export function GlobalSslPage() {
       header: t('pages.sslGlobal.site'),
       accessor: (r) => r.site_domain ?? '',
       cell: (r) => {
-        // An unbound certificate has no owner; the badge nudges binding it.
-        if (r.site_id === null) {
+        // Owner site first (its domain), then the share count. A certificate
+        // with no owner and no shares is the only "unbound" case.
+        if (r.site_id === null && (r.bound_count ?? 0) === 0) {
           return (
             <Badge tone="warning" size="sm" dot>
               {t('pages.sslGlobal.unbound')}
             </Badge>
           )
         }
-        const extra =
-          r.bound_count !== undefined && r.bound_count > 1
-            ? ` · ${t('pages.sslGlobal.boundCount', { count: r.bound_count })}`
-            : ''
         return (
           <div className="flex flex-col gap-0.5">
-            <span className="text-fg">{r.site_domain ?? '—'}</span>
-            <span className="text-xs text-fg-subtle">
-              {r.site_name ?? ''}
-              {extra}
+            <span className="text-fg">
+              {r.site_id
+                ? t('pages.sslGlobal.ownerLine', { domain: r.site_domain ?? '—' })
+                : t('pages.sslGlobal.unbound')}
             </span>
+            {(r.bound_count ?? 0) > 0 && (
+              <span className="text-xs text-fg-subtle">
+                {t('pages.sslGlobal.sharedCount', { count: r.bound_count })}
+              </span>
+            )}
           </div>
         )
       },
@@ -1028,17 +1104,27 @@ export function GlobalSslPage() {
         </div>
       </Dialog>
 
-      {/* Binding dialog: multi-select visible sites, unbind existing ones. */}
+      {/* Binding dialog: three row states — owner, bound, bindable. The
+          `usage` query supplies owner/linked/selected; the list row's
+          `bound_sites` is the fallback. */}
       <Dialog
         open={bindTarget !== null}
         onClose={() => setBindTarget(null)}
         title={t('pages.sslGlobal.bindDialogTitle')}
         description={
           bindTarget
-            ? `${bindTarget.domain} · ${
-                bindTarget.bound_count !== undefined && bindTarget.bound_count > 0
-                  ? t('pages.sslGlobal.boundCount', { count: bindTarget.bound_count })
-                  : t('pages.sslGlobal.unbound')
+            ? `${t('pages.sslGlobal.ownerLine', {
+                domain:
+                  bindUsage?.owner?.domain ?? bindTarget.site_domain ?? '—',
+              })} · ${
+                (bindUsage?.linked_sites.length ?? bindTarget.bound_count ?? 0) > 0
+                  ? t('pages.sslGlobal.sharedCount', {
+                      count:
+                        bindUsage?.linked_sites.length ??
+                        bindTarget.bound_count ??
+                        0,
+                    })
+                  : t('pages.sslGlobal.notShared')
               }`
             : undefined
         }
@@ -1054,7 +1140,7 @@ export function GlobalSslPage() {
               loading={bindCert.isPending}
               onClick={() => bindCert.mutate(bindSelection)}
             >
-              {t('pages.sslGlobal.bindSites')}
+              {t('pages.sslGlobal.bindSelectedCount', { count: bindSelection.length })}
             </Button>
           </div>
         }
@@ -1064,53 +1150,96 @@ export function GlobalSslPage() {
             <p className="text-[13px] text-fg-subtle">{t('pages.sslGlobal.bindEmpty')}</p>
           ) : (
             sites.map((s) => {
-              const bound = bindTarget?.bound_sites?.some((b) => b.id === s.id)
-              const owner = bindTarget?.site_id === s.id
-              const checked = bindSelection.includes(s.id) || bound
+              const owner =
+                bindUsage?.owner?.id === s.id || bindTarget?.site_id === s.id
+              const linked =
+                (bindUsage?.linked_sites ?? []).some((b) => b.id === s.id) ||
+                (bindTarget?.bound_sites ?? []).some((b) => b.id === s.id)
+              // Owner rows are pinned; bound rows are checked but unbindable;
+              // everything else is a fresh checkbox.
+              const checked = owner || linked || bindSelection.includes(s.id)
               return (
                 <div
                   key={s.id}
-                  className="flex items-center justify-between gap-2 rounded-md border border-line bg-elevated px-3 py-2"
+                  className="flex flex-col gap-1 rounded-md border border-line bg-elevated px-3 py-2"
                 >
-                  <label className="flex min-w-0 items-center gap-2">
-                    <input
-                      type="checkbox"
-                      className="h-4 w-4 accent-[var(--color-brand)]"
-                      disabled={!canWrite || bound || bindCert.isPending}
-                      checked={checked}
-                      onChange={(e) =>
-                        setBindSelection((prev) =>
-                          e.target.checked
-                            ? [...prev, s.id]
-                            : prev.filter((id) => id !== s.id),
-                        )
-                      }
-                    />
-                    <span className="min-w-0 truncate">
-                      <span className="pw-mono text-[13px] font-medium text-fg-strong">
-                        {s.domain}
+                  <div className="flex items-center justify-between gap-2">
+                    <label className="flex min-w-0 items-center gap-2">
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4 accent-[var(--color-brand)]"
+                        disabled={!canWrite || bindCert.isPending || owner || linked}
+                        checked={checked}
+                        onChange={(e) =>
+                          setBindSelection((prev) =>
+                            e.target.checked
+                              ? [...prev, s.id]
+                              : prev.filter((id) => id !== s.id),
+                          )
+                        }
+                      />
+                      <span className="min-w-0 truncate">
+                        <span className="pw-mono text-[13px] font-medium text-fg-strong">
+                          {s.domain}
+                        </span>
+                        <span className="ml-2 text-xs text-fg-subtle">{s.name}</span>
                       </span>
-                      <span className="ml-2 text-xs text-fg-subtle">{s.name}</span>
-                    </span>
-                  </label>
-                  {(bound || owner) && (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      className="hover:text-fg-danger"
-                      disabled={!canWrite || unbindCert.isPending}
-                      onClick={() =>
-                        bindTarget &&
-                        unbindCert.mutate({ certId: bindTarget.id, siteId: s.id })
-                      }
-                    >
-                      <LinkBreak weight="duotone" className="h-4 w-4" />
-                      {t('pages.sslGlobal.unbind')}
-                    </Button>
+                    </label>
+                    {owner ? (
+                      <Badge tone="brand" size="sm">
+                        {t('pages.sslGlobal.ownerBadge')}
+                      </Badge>
+                    ) : linked ? (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="hover:text-fg-danger"
+                        disabled={!canWrite || bindCert.isPending || unbindCert.isPending}
+                        onClick={() =>
+                          bindTarget &&
+                          setPendingUnbind({ certId: bindTarget.id, siteId: s.id })
+                        }
+                      >
+                        <LinkBreak weight="duotone" className="h-4 w-4" />
+                        {t('pages.sslGlobal.unbind')}
+                      </Button>
+                    ) : null}
+                  </div>
+                  {unbindConflictSite === s.id && (
+                    <div className="flex flex-wrap items-center gap-2 rounded-md border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-xs text-fg-warning">
+                      <span>{t('pages.sslGlobal.unbindInUse')}</span>
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        onClick={() => navigate(`/sites/${s.id}/ssl`)}
+                      >
+                        {t('pages.sslGlobal.goToSiteSsl')}
+                      </Button>
+                    </div>
                   )}
                 </div>
               )
             })
+          )}
+          {bindResults.length > 0 && (
+            <div
+              role="alert"
+              className="flex flex-col gap-1 rounded-md border border-danger/40 bg-danger/8 px-3 py-2"
+            >
+              <p className="text-[13px] font-medium text-fg-danger">
+                {t('pages.sslGlobal.batchFailed', {
+                  count: bindResults.filter((r) => !r.ok).length,
+                })}
+              </p>
+              {bindResults
+                .filter((r) => !r.ok)
+                .map((r) => (
+                  <p key={r.siteId} className="text-xs text-fg-danger">
+                    {sites.find((s) => s.id === r.siteId)?.domain ?? r.siteId} —{' '}
+                    {r.error ?? t('pages.sslGlobal.batchResult')}
+                  </p>
+                ))}
+            </div>
           )}
           {bindError && (
             <p
@@ -1123,22 +1252,76 @@ export function GlobalSslPage() {
         </div>
       </Dialog>
 
+      {/* Two-step unbind: the site falls back to its own certificate (or none). */}
+      <ConfirmDialog
+        open={pendingUnbind !== null}
+        onClose={() => setPendingUnbind(null)}
+        onConfirm={() => pendingUnbind && unbindCert.mutate(pendingUnbind)}
+        title={t('pages.sslGlobal.unbindTitle')}
+        description={t('pages.sslGlobal.unbindConfirmDescription')}
+        confirmLabel={t('pages.sslGlobal.unbind')}
+        loading={unbindCert.isPending}
+      />
+
       <ConfirmDialog
         open={pendingDelete !== null}
         onClose={() => setPendingDelete(null)}
         onConfirm={() => pendingDelete && deleteCert.mutate(pendingDelete.id)}
         title={t('pages.ssl.deleteTitle')}
         description={t('pages.ssl.deleteDescription')}
+        confirmLabel={
+          deleteBlocked ? t('pages.sslGlobal.goHandle') : t('common.delete')
+        }
+        disabled={deleteBlocked}
         loading={deleteCert.isPending}
       >
         {pendingDelete && (
-          <div className="flex items-center gap-2 rounded-md bg-recessed px-3 py-2 text-[13px]">
-            <Globe weight="duotone" className="h-4 w-4 shrink-0 text-fg-subtle" />
-            <span className="pw-mono text-fg">{pendingDelete.domain}</span>
-            <span className="ml-auto text-xs text-fg-subtle">
-              {pendingDelete.site_domain}
-            </span>
-          </div>
+          <>
+            <div className="flex items-center gap-2 rounded-md bg-recessed px-3 py-2 text-[13px]">
+              <Globe weight="duotone" className="h-4 w-4 shrink-0 text-fg-subtle" />
+              <span className="pw-mono text-fg">{pendingDelete.domain}</span>
+            </div>
+            {/* Blocked delete: show the sites that pin the certificate, each
+                clickable so the operator can go fix it there. */}
+            {deleteBlocked && (
+              <div className="flex flex-col gap-1.5 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-[13px]">
+                {(deleteUsage?.serving_sites ?? []).length > 0 && (
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="font-medium text-fg-warning">
+                      {t('pages.sslGlobal.deleteBlockedServing')}
+                    </span>
+                    {deleteUsage!.serving_sites.map((site) => (
+                      <button
+                        key={site.id}
+                        type="button"
+                        className="pw-mono text-xs text-link underline underline-offset-2"
+                        onClick={() => navigate(`/sites/${site.id}/ssl`)}
+                      >
+                        {site.domain}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {(deleteUsage?.linked_sites ?? []).length > 0 && (
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="font-medium text-fg-warning">
+                      {t('pages.sslGlobal.deleteBlockedLinked')}
+                    </span>
+                    {deleteUsage!.linked_sites.map((site) => (
+                      <button
+                        key={site.id}
+                        type="button"
+                        className="pw-mono text-xs text-link underline underline-offset-2"
+                        onClick={() => navigate(`/sites/${site.id}/ssl`)}
+                      >
+                        {site.domain}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </>
         )}
       </ConfirmDialog>
     </div>
