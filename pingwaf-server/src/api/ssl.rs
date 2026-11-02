@@ -152,9 +152,12 @@ pub struct CertificateResponse {
     pub relation: String,
     /// Sites that reach this certificate through `site_certificate_links`, i.e.
     /// the sharing grants. The owner is **not** synthesised into this list — it
-    /// is `site_id` — but it can appear through a link row of its own, which is
-    /// what migration 85 backfilled for a site that had already selected its
-    /// certificate (and what `POST /sites/{id}/certificate-links` writes).
+    /// is `site_id` — and it is filtered out when a link row of its own exists:
+    /// migration 85 backfilled one for every site that had already selected its
+    /// certificate, so such a row repeats the owner relation instead of
+    /// granting anything. The row stays in the table — the data plane still
+    /// reads it when it assembles a site's selectable certificates, and a site
+    /// cloning its own certificates copies it — only this read is filtered.
     ///
     /// Filled in by [`bound_sites_index`]: one `is_in` query per page, never one
     /// per row.
@@ -590,6 +593,23 @@ fn certificate_warnings_for(
 /// The sites each certificate is bound to, keyed by certificate id.
 type BoundSites = HashMap<Uuid, Vec<BoundSiteRef>>;
 
+/// True when a `site_certificate_links` row merely restates ownership: a site
+/// that selects its own certificate got such a row from migration 85. Such a
+/// row is not a share, so it must not inflate `bound_count` nor block a delete.
+fn is_owner_self_link(link_site: Uuid, owner: Option<Uuid>) -> bool {
+    owner == Some(link_site)
+}
+
+/// The owner site of `cert_id`, as recorded in the `owners` index a read path
+/// builds for the certificates it just loaded: `None` for an unbound
+/// certificate, and for an id the caller did not put in the index.
+fn owner_of(
+    owners: &HashMap<Uuid, Option<Uuid>>,
+    cert_id: Uuid,
+) -> Option<Uuid> {
+    owners.get(&cert_id).copied().flatten()
+}
+
 /// Loads [`BoundSites`] for the given certificate ids in **two** queries
 /// (links, then site domains) however many certificates a page holds.
 ///
@@ -599,9 +619,18 @@ type BoundSites = HashMap<Uuid, Vec<BoundSiteRef>>;
 /// query, not one per row. A database error degrades to "nothing bound": this
 /// decorates a listing, and the paths where the answer decides something
 /// (delete, unbind) query the link table themselves.
+///
+/// `owners` maps each certificate id to its owner (`site_certificates.site_id`)
+/// and is what makes the answer mean "shared with *other* sites".
+/// `m20240101_000085_site_certificate_links` backfilled a link row for the
+/// certificate every site had already selected, so an owner's own row is a
+/// duplicate of the owner relation rather than a grant: counting it made a
+/// certificate with no share report `bound_count: 1`, pointing at the owner
+/// itself. The row stays in the table; the read filters it.
 async fn bound_sites_index(
     state: &AppState,
     cert_ids: impl IntoIterator<Item = Uuid>,
+    owners: &HashMap<Uuid, Option<Uuid>>,
 ) -> BoundSites {
     let ids: Vec<Uuid> = {
         let mut ids: Vec<Uuid> = cert_ids.into_iter().collect();
@@ -629,6 +658,11 @@ async fn bound_sites_index(
 
     let mut cert_to_sites: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
     for link in &links {
+        // The owner's own link row (migration 85 backfill) is the owner
+        // relation written twice, not a share — see this function's docs.
+        if owner_of(owners, link.certificate_id) == Some(link.site_id) {
+            continue;
+        }
         cert_to_sites
             .entry(link.certificate_id)
             .or_default()
@@ -663,8 +697,27 @@ async fn bound_sites_index(
 }
 
 /// Copies a certificate's bindings onto its response.
-fn attach_bindings(response: &mut CertificateResponse, bound: &BoundSites) {
-    let sites = bound.get(&response.id).cloned().unwrap_or_default();
+///
+/// The owner is filtered out here as well as in [`bound_sites_index`]: this is
+/// the one place the response fields are written, and the rule the console
+/// depends on — `bound_count` counts *other* sites — must hold for a
+/// [`BoundSites`] map built by anyone, not only by the query helper. The row
+/// itself is left in the table (migration 85 backfilled the owner's own link
+/// when the site had already selected the certificate; it repeats the owner
+/// relation, it does not share anything).
+fn attach_bindings(
+    response: &mut CertificateResponse,
+    bound: &BoundSites,
+    owners: &HashMap<Uuid, Option<Uuid>>,
+) {
+    let owner = owner_of(owners, response.id);
+    let sites: Vec<BoundSiteRef> = bound
+        .get(&response.id)
+        .into_iter()
+        .flatten()
+        .filter(|site| Some(site.id) != owner)
+        .cloned()
+        .collect();
     response.bound_count = sites.len();
     response.bound_sites = sites;
 }
@@ -906,7 +959,12 @@ async fn list_certificates(
     // warnings" rather than failing the read: the list is a listing, and
     // holding it hostage to an advisory field would be the wrong trade.
     let served = site_hostname_index(&state, std::iter::once(id)).await;
-    let bound = bound_sites_index(&state, rows.iter().map(|row| row.id)).await;
+    // One map for the whole page: `bound_count` counts the *other* sites, so
+    // the owner of each row has to come along with the ids.
+    let owners: HashMap<Uuid, Option<Uuid>> =
+        rows.iter().map(|row| (row.id, row.site_id)).collect();
+    let bound =
+        bound_sites_index(&state, rows.iter().map(|row| row.id), &owners).await;
     let items: Vec<CertificateResponse> = rows
         .into_iter()
         .map(|row| {
@@ -925,7 +983,7 @@ async fn list_certificates(
                 response.site_id.unwrap_or_default(),
                 &response.domain,
             ));
-            attach_bindings(&mut response, &bound);
+            attach_bindings(&mut response, &bound, &owners);
             response
         })
         .collect();
@@ -1131,7 +1189,10 @@ async fn list_available_certificates(
             .chain(std::iter::once(id)),
     )
     .await;
-    let bound = bound_sites_index(&state, rows.iter().map(|row| row.id)).await;
+    let owners: HashMap<Uuid, Option<Uuid>> =
+        rows.iter().map(|row| (row.id, row.site_id)).collect();
+    let bound =
+        bound_sites_index(&state, rows.iter().map(|row| row.id), &owners).await;
     let items: Vec<CertificateResponse> = rows
         .into_iter()
         .map(|row| {
@@ -1142,7 +1203,7 @@ async fn list_available_certificates(
                 response.site_id.unwrap_or_default(),
                 &response.domain,
             ));
-            attach_bindings(&mut response, &bound);
+            attach_bindings(&mut response, &bound, &owners);
             response
         })
         .collect();
@@ -1363,14 +1424,16 @@ async fn show_certificate(
 
     let row = find_certificate(&state, id, target).await?;
     let served = site_hostname_index(&state, std::iter::once(id)).await;
-    let bound = bound_sites_index(&state, std::iter::once(target)).await;
+    let owners = HashMap::from([(target, row.site_id)]);
+    let bound =
+        bound_sites_index(&state, std::iter::once(target), &owners).await;
     let mut response = CertificateResponse::from(row);
     response.warnings = Some(certificate_warnings_for(
         &served,
         response.site_id.unwrap_or_default(),
         &response.domain,
     ));
-    attach_bindings(&mut response, &bound);
+    attach_bindings(&mut response, &bound, &owners);
     Ok(Json(response))
 }
 
@@ -1641,12 +1704,16 @@ async fn delete_certificate_row(
     }
 
     // Any remaining grant means another site serves this PEM: refuse instead of
-    // pulling the certificate out from under it.
+    // pulling the certificate out from under it. The owner's own row is not a
+    // grant - migration 85 wrote one when a site selected its certificate - so
+    // it is skipped here as well; otherwise a delete would answer 409 with a
+    // site the console never offers an unbind button for.
     let mut bound: Vec<Uuid> = certificate_links::Entity::find()
         .filter(certificate_links::Column::CertificateId.eq(target))
         .all(&state.db)
         .await?
         .into_iter()
+        .filter(|link| !is_owner_self_link(link.site_id, owner))
         .map(|link| link.site_id)
         .collect();
     if !bound.is_empty() {
@@ -1907,7 +1974,12 @@ async fn list_all_certificates(
         rows.iter().filter_map(|row| row.site_id).chain(requested),
     )
     .await;
-    let bound = bound_sites_index(&state, rows.iter().map(|row| row.id)).await;
+    // Built once for the page: one entry per certificate, so the binding count
+    // can drop the owner's own link row (see `bound_sites_index`).
+    let owners: HashMap<Uuid, Option<Uuid>> =
+        rows.iter().map(|row| (row.id, row.site_id)).collect();
+    let bound =
+        bound_sites_index(&state, rows.iter().map(|row| row.id), &owners).await;
     let items: Vec<CertificateWithSite> = rows
         .into_iter()
         .map(|row| {
@@ -1924,7 +1996,7 @@ async fn list_all_certificates(
             );
             let mut certificate = CertificateResponse::from(row);
             certificate.warnings = Some(warnings);
-            attach_bindings(&mut certificate, &bound);
+            attach_bindings(&mut certificate, &bound, &owners);
             CertificateWithSite {
                 certificate,
                 site_domain,
@@ -2055,14 +2127,16 @@ async fn show_global_certificate(
     let served =
         site_hostname_index(&state, std::iter::once(row.site_id).flatten())
             .await;
-    let bound = bound_sites_index(&state, std::iter::once(target)).await;
+    let owners = HashMap::from([(target, row.site_id)]);
+    let bound =
+        bound_sites_index(&state, std::iter::once(target), &owners).await;
     let mut response = CertificateResponse::from(row);
     response.warnings = Some(certificate_warnings_for(
         &served,
         response.site_id.unwrap_or_default(),
         &response.domain,
     ));
-    attach_bindings(&mut response, &bound);
+    attach_bindings(&mut response, &bound, &owners);
     Ok(Json(response))
 }
 
@@ -2094,7 +2168,10 @@ pub struct CertificateUsageResponse {
     /// also covers an owner site the caller cannot see: the certificate is
     /// still readable, so the answer degrades in this field instead of 404ing.
     pub owner: Option<BoundSiteRef>,
-    /// `site_certificate_links` rows of this certificate.
+    /// `site_certificate_links` rows of this certificate — the sharing grants.
+    /// The owner's own row is excluded: migration 85 backfilled one for every
+    /// site that had already selected its certificate, so it repeats the owner
+    /// relation instead of granting anything (the row stays in the table).
     pub linked_sites: Vec<LinkedSiteRef>,
     /// Sites whose `site_ssl.certificate_id` is this certificate.
     pub serving_sites: Vec<BoundSiteRef>,
@@ -2110,6 +2187,13 @@ pub struct CertificateUsageResponse {
 /// `serving_sites` is derived from `site_ssl` and `linked_sites` only carries
 /// the flag.
 ///
+/// The owner's own link row is dropped from `linked_sites`: migration 85
+/// backfilled `(site_id, certificate_id)` for every site that had already
+/// selected its certificate, so the owner's row repeats the owner relation
+/// instead of granting anything. `serving_sites` keeps it — an owner serving
+/// its own certificate is the normal case — which is why the two lists are not
+/// derived from one another.
+///
 /// An id that does not resolve (a row deleted between two of the handler's
 /// queries) is skipped; an unresolvable **owner** is logged once and reported
 /// as `null`, matching how [`bound_sites_index`] treats a stale link.
@@ -2121,6 +2205,11 @@ fn certificate_usage_snapshot(
 ) -> CertificateUsageResponse {
     let serving: HashSet<Uuid> = serving_ids.into_iter().collect();
 
+    // Kept as the raw id: the owner's own link row is not a share, so it is
+    // filtered out of `linked_sites` below. `serving_sites` keeps the owner —
+    // an owner serving its own certificate is the normal case, and it is the
+    // delete blocker the console has to explain.
+    let owner_id = owner;
     let owner = owner.and_then(|id| match sites.get(&id) {
         Some((domain, _)) => Some(BoundSiteRef {
             id,
@@ -2137,6 +2226,7 @@ fn certificate_usage_snapshot(
 
     let mut linked_sites: Vec<LinkedSiteRef> = linked_ids
         .into_iter()
+        .filter(|id| Some(*id) != owner_id)
         .filter_map(|id| {
             sites.get(&id).map(|(domain, _)| LinkedSiteRef {
                 id,
@@ -2174,7 +2264,9 @@ fn certificate_usage_snapshot(
 /// Four queries, whatever the number of sites involved:
 ///
 /// 1. the certificate row — [`find_certificate_by_id`], `site_id` is the owner;
-/// 2. `site_certificate_links` filtered on `certificate_id` — the grants;
+/// 2. `site_certificate_links` filtered on `certificate_id` — the grants, minus
+///    the owner's own row (migration 85's backfill; see
+///    [`certificate_usage_snapshot`]);
 /// 3. `site_ssl` filtered on `certificate_id` — the sites that selected it,
 ///    which is the `selected` flag and the first delete blocker in
 ///    [`delete_certificate_row`];
@@ -2262,10 +2354,12 @@ async fn update_global_certificate(
         // certificate has none to be measured against.
         None => Vec::new(),
     };
-    let bound = bound_sites_index(&state, std::iter::once(target)).await;
+    let owners = HashMap::from([(target, updated.site_id)]);
+    let bound =
+        bound_sites_index(&state, std::iter::once(target), &owners).await;
     let mut response = CertificateResponse::from(updated);
     response.warnings = Some(warnings);
-    attach_bindings(&mut response, &bound);
+    attach_bindings(&mut response, &bound, &owners);
     Ok(Json(response))
 }
 
@@ -2403,14 +2497,16 @@ async fn bind_certificate(
         std::iter::once(certificate.site_id).flatten(),
     )
     .await;
-    let bound = bound_sites_index(&state, std::iter::once(target)).await;
+    let owners = HashMap::from([(target, certificate.site_id)]);
+    let bound =
+        bound_sites_index(&state, std::iter::once(target), &owners).await;
     let mut response = CertificateResponse::from(certificate);
     response.warnings = Some(certificate_warnings_for(
         &served,
         response.site_id.unwrap_or_default(),
         &response.domain,
     ));
-    attach_bindings(&mut response, &bound);
+    attach_bindings(&mut response, &bound, &owners);
     Ok(Json(response))
 }
 
@@ -3025,28 +3121,108 @@ mod tests {
             ],
         );
 
-        let mut response = CertificateResponse::from(cert_model(bound_id));
+        let owners = HashMap::from([(bound_id, None)]);
+        let mut response =
+            CertificateResponse::from(cert_model(bound_id, None));
         assert_eq!(response.bound_count, 0);
         assert!(response.bound_sites.is_empty());
 
-        attach_bindings(&mut response, &bound);
+        attach_bindings(&mut response, &bound, &owners);
         assert_eq!(response.bound_count, 2);
         assert_eq!(response.bound_sites[1].domain, "b.example.com");
 
         // An unbound certificate keeps the empty pair, so a client can tell
         // "checked, nothing bound" from a missing field.
-        let mut unbound = CertificateResponse::from(cert_model(Uuid::new_v4()));
-        attach_bindings(&mut unbound, &bound);
+        let mut unbound =
+            CertificateResponse::from(cert_model(Uuid::new_v4(), None));
+        attach_bindings(&mut unbound, &bound, &owners);
         assert_eq!(unbound.bound_count, 0);
         assert!(unbound.bound_sites.is_empty());
     }
 
-    /// A certificate model that is unbound and carries no material beyond what
-    /// these assertions read.
-    fn cert_model(id: Uuid) -> site_certificates::Model {
+    /// An owner's link row pointing at itself is not a share.
+    /// `m20240101_000085_site_certificate_links` backfilled one for every site
+    /// that had already selected its certificate, so a certificate nobody else
+    /// uses still carries a row. Counting it made the console report "shared
+    /// with 1 site" and name the owner — the demo hit exactly that
+    /// (`mirror.shede.cn`, `bound_count: 1` for zero shares).
+    #[test]
+    fn an_owner_self_link_does_not_block_deletion() {
+        let owner = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        assert!(is_owner_self_link(owner, Some(owner)));
+        assert!(!is_owner_self_link(other, Some(owner)));
+        assert!(!is_owner_self_link(other, None));
+    }
+
+    #[test]
+    fn owner_self_link_is_not_counted_as_a_share() {
+        let owner = Uuid::new_v4();
+        let cert_id = Uuid::new_v4();
+        let mut bound = BoundSites::new();
+        bound.insert(
+            cert_id,
+            vec![BoundSiteRef {
+                id: owner,
+                domain: "mirror.shede.cn".to_string(),
+            }],
+        );
+        let owners = HashMap::from([(cert_id, Some(owner))]);
+
+        let mut response =
+            CertificateResponse::from(cert_model(cert_id, Some(owner)));
+        attach_bindings(&mut response, &bound, &owners);
+
+        assert_eq!(response.bound_count, 0);
+        assert!(response.bound_sites.is_empty());
+        // The owner relation itself is untouched: it is `site_id`, and the
+        // row is still in `site_certificate_links`.
+        assert_eq!(response.site_id, Some(owner));
+    }
+
+    /// The filter drops the owner only: a genuine share next to it survives,
+    /// so the fix cannot hide real grants.
+    #[test]
+    fn a_real_share_is_still_counted() {
+        let owner = Uuid::new_v4();
+        let shared = Uuid::new_v4();
+        let cert_id = Uuid::new_v4();
+        let mut bound = BoundSites::new();
+        bound.insert(
+            cert_id,
+            vec![
+                BoundSiteRef {
+                    id: owner,
+                    domain: "mirror.shede.cn".to_string(),
+                },
+                BoundSiteRef {
+                    id: shared,
+                    domain: "www.shede.cn".to_string(),
+                },
+            ],
+        );
+        let owners = HashMap::from([(cert_id, Some(owner))]);
+
+        let mut response =
+            CertificateResponse::from(cert_model(cert_id, Some(owner)));
+        attach_bindings(&mut response, &bound, &owners);
+
+        assert_eq!(response.bound_count, 1);
+        assert_eq!(
+            response.bound_sites,
+            vec![BoundSiteRef {
+                id: shared,
+                domain: "www.shede.cn".to_string(),
+            }]
+        );
+    }
+
+    /// A certificate model carrying no material beyond what these assertions
+    /// read; `owner` is `site_certificates.site_id`.
+    fn cert_model(id: Uuid, owner: Option<Uuid>) -> site_certificates::Model {
         site_certificates::Model {
             id,
-            site_id: None,
+            site_id: owner,
             domain: "a.example.com".to_string(),
             cert_pem: None,
             key_pem: None,
@@ -3326,6 +3502,80 @@ mod tests {
         );
     }
 
+    /// The owner's own link row is a duplicate of the owner relation, not a
+    /// grant: migration 85 backfilled it for every site that had already
+    /// selected its certificate, so leaving it in `linked_sites` offers the
+    /// operator an "unlink" button for a share that does not exist.
+    /// `serving_sites` keeps the owner — a site serving its own certificate is
+    /// the normal case, and it is the delete blocker the dialog has to explain.
+    #[test]
+    fn usage_excludes_the_owner_self_link() {
+        let owner = Uuid::new_v4();
+        let shared = Uuid::new_v4();
+        let sites = visible_index(&[
+            (owner, "mirror.shede.cn"),
+            (shared, "www.shede.cn"),
+        ]);
+
+        // `site_ssl` has the owner selected — the state migration 85 turned
+        // into the self-link row.
+        let usage = certificate_usage_snapshot(
+            Some(owner),
+            vec![owner, shared],
+            vec![owner],
+            &sites,
+        );
+
+        assert_eq!(
+            usage.linked_sites,
+            vec![LinkedSiteRef {
+                id: shared,
+                domain: "www.shede.cn".to_string(),
+                selected: false,
+            }]
+        );
+        assert_eq!(
+            usage.serving_sites,
+            vec![BoundSiteRef {
+                id: owner,
+                domain: "mirror.shede.cn".to_string(),
+            }]
+        );
+        // The owner is still reported as the owner.
+        assert_eq!(
+            usage.owner,
+            Some(BoundSiteRef {
+                id: owner,
+                domain: "mirror.shede.cn".to_string(),
+            })
+        );
+    }
+
+    /// Nothing but the self-link: the certificate the demo reported as shared
+    /// with one site is shared with none, and the owner relation is what is
+    /// left. Guards the empty case against the filter turning into one that
+    /// also drops real grants (see `a_real_share_is_still_counted` for the
+    /// other direction).
+    #[test]
+    fn usage_without_links_is_empty() {
+        let owner = Uuid::new_v4();
+        let usage = certificate_usage_snapshot(
+            Some(owner),
+            vec![owner],
+            Vec::new(),
+            &visible_index(&[(owner, "mirror.shede.cn")]),
+        );
+        assert!(usage.linked_sites.is_empty());
+        assert!(usage.serving_sites.is_empty());
+        assert_eq!(
+            usage.owner,
+            Some(BoundSiteRef {
+                id: owner,
+                domain: "mirror.shede.cn".to_string(),
+            })
+        );
+    }
+
     /// `selected` is `site_ssl.certificate_id == cert` — exactly the state
     /// `DELETE /certificates/{id}/bindings/{site}` and
     /// `DELETE /certificates/{id}` refuse with a `409` — so it must come from
@@ -3388,7 +3638,11 @@ mod tests {
     #[test]
     fn certificate_usage_reports_a_serving_site_without_a_link_row() {
         let owner = Uuid::new_v4();
-        let sites = visible_index(&[(owner, "a.example.com")]);
+        let shared = Uuid::new_v4();
+        let sites = visible_index(&[
+            (owner, "a.example.com"),
+            (shared, "b.example.com"),
+        ]);
 
         let usage = certificate_usage_snapshot(
             Some(owner),
@@ -3406,17 +3660,19 @@ mod tests {
         );
 
         // ... and the mirrored case: a grant with no selection is linked only.
+        // The grant has to belong to *another* site: the owner's own link row
+        // is not a share (`usage_excludes_the_owner_self_link`).
         let usage = certificate_usage_snapshot(
             Some(owner),
-            vec![owner],
+            vec![shared],
             Vec::new(),
             &sites,
         );
         assert_eq!(
             usage.linked_sites,
             vec![LinkedSiteRef {
-                id: owner,
-                domain: "a.example.com".to_string(),
+                id: shared,
+                domain: "b.example.com".to_string(),
                 selected: false,
             }]
         );
