@@ -33,6 +33,7 @@ use crate::api::challenge::challenge_level;
 use crate::api::ip_rules::ip_action;
 use crate::api::site_basic_auth as site_basic_auth_api;
 use crate::api::site_oidc as site_oidc_api;
+use crate::api::ssl::uncovered_site_hostnames;
 use crate::api::waf_settings::{
     clamp_body_stage_timeout_secs, DEFAULT_BODY_STAGE_TIMEOUT_SECS,
     MAX_BODY_STAGE_TIMEOUT_SECS,
@@ -280,12 +281,34 @@ async fn load_ssl(
         .await
 }
 
+/// The certificates a site can reach, split by how it reaches them.
+///
+/// Both halves matter and for different reasons: the posture row may *select* a
+/// certificate of either kind, and a linked one is also the fallback material
+/// when the site has none of its own (see [`pick_linked_certificate`]).
+struct SiteCertificates {
+    /// Rows owned by this site (`site_certificates.site_id`).
+    own: Vec<site_certificates::Model>,
+    /// Rows granted through `site_certificate_links`.
+    linked: Vec<site_certificates::Model>,
+}
+
+impl SiteCertificates {
+    /// Every row the site can select, owned first.
+    fn selectable(&self) -> impl Iterator<Item = &site_certificates::Model> {
+        self.own.iter().chain(self.linked.iter())
+    }
+}
+
 async fn load_certificates(
     db: &DatabaseConnection,
     site_id: Uuid,
-) -> Result<Vec<site_certificates::Model>, sea_orm::DbErr> {
+) -> Result<SiteCertificates, sea_orm::DbErr> {
     // Own certificates plus the ones shared through `site_certificate_links`;
-    // the posture row may select either.
+    // the posture row may select either. One link query and one certificate
+    // query, then the ownership split is a field comparison — the alternative
+    // (a second certificate query for the linked half) would read the same rows
+    // twice.
     let linked_ids: Vec<Uuid> = certificate_links::Entity::find()
         .filter(certificate_links::Column::SiteId.eq(site_id))
         .all(db)
@@ -299,11 +322,24 @@ async fn load_certificates(
         condition =
             condition.add(site_certificates::Column::Id.is_in(linked_ids));
     }
-    site_certificates::Entity::find()
+    let rows = site_certificates::Entity::find()
         .filter(condition)
         .order_by_desc(site_certificates::Column::UpdatedAt)
         .all(db)
-        .await
+        .await?;
+
+    let mut certificates = SiteCertificates {
+        own: Vec::with_capacity(rows.len()),
+        linked: Vec::new(),
+    };
+    for row in rows {
+        if row.site_id == Some(site_id) {
+            certificates.own.push(row);
+        } else {
+            certificates.linked.push(row);
+        }
+    }
+    Ok(certificates)
 }
 
 async fn load_ip_access_rules(
@@ -609,9 +645,95 @@ fn cache_type_policy_to_proto(
     }
 }
 
+/// The hostnames a site answers for, as certificate coverage measures them.
+///
+/// Borrowed rather than copied: the bundle builder already holds the site row,
+/// and the coverage check runs once per site.
+#[derive(Clone, Copy)]
+struct SiteHosts<'a> {
+    domain: &'a str,
+    alternate: &'a [String],
+}
+
+/// The linked certificate that covers most of a site's hostnames, if any.
+///
+/// `site_certificate_links` says a site *may* serve a certificate; it does not
+/// say which of several grants it should serve, so the material is chosen the
+/// way an operator would read the warning list: the certificate naming the
+/// fewest hostnames this site does not serve wins, because those are the ones
+/// whose TLS handshake would fail.
+///
+/// Candidates must be servable — a complete PEM pair — and must cover at least
+/// one of the site's hostnames:
+///
+/// - a linked ACME row that has not been issued yet has nothing to serve, and
+///   must not shadow a usable grant;
+/// - a certificate covering *none* of the site's hostnames is worse than no
+///   certificate at all (a browser rejects the name instead of failing the
+///   handshake), so it is skipped with a warning rather than injected.
+///
+/// Ties keep the first candidate in query order (`updated_at` descending) and
+/// log the rest: two certificates covering a site equally well is an operator
+/// decision the control plane should not make silently.
+fn pick_linked_certificate<'a>(
+    site: SiteHosts<'_>,
+    linked: &'a [site_certificates::Model],
+) -> Option<&'a site_certificates::Model> {
+    let served_count = std::iter::once(site.domain)
+        .chain(site.alternate.iter().map(String::as_str))
+        .filter(|host| !host.is_empty())
+        .count();
+
+    let mut best: Option<(&site_certificates::Model, usize)> = None;
+    for cert in linked {
+        let servable = cert
+            .cert_pem
+            .as_deref()
+            .is_some_and(|pem| !pem.trim().is_empty())
+            && cert
+                .key_pem
+                .as_deref()
+                .is_some_and(|pem| !pem.trim().is_empty());
+        if !servable {
+            continue;
+        }
+        // "Covers the most" is measured on the *site* side: the hostnames this
+        // certificate cannot validate are the ones whose handshake would fail.
+        let uncovered =
+            uncovered_site_hostnames(&cert.domain, site.domain, site.alternate)
+                .len();
+        if uncovered >= served_count {
+            tracing::warn!(
+                site_domain = %site.domain,
+                cert_id = %cert.id,
+                domain = %cert.domain,
+                "linked certificate covers none of the site hostnames; not serving it"
+            );
+            continue;
+        }
+        match best {
+            None => best = Some((cert, uncovered)),
+            Some((_, kept_uncovered)) if uncovered < kept_uncovered => {
+                best = Some((cert, uncovered));
+            },
+            Some((kept, kept_uncovered)) if uncovered == kept_uncovered => {
+                tracing::warn!(
+                    site_domain = %site.domain,
+                    kept = %kept.id,
+                    ignored = %cert.id,
+                    "two linked certificates cover this site equally well; serving the newest"
+                );
+            },
+            Some(_) => {},
+        }
+    }
+    best.map(|(cert, _)| cert)
+}
+
 fn ssl_to_proto(
     row: &site_ssl::Model,
-    certs: &[site_certificates::Model],
+    certs: &SiteCertificates,
+    site: SiteHosts<'_>,
     mtls: &MtlsPush,
 ) -> SslConfig {
     // The posture row selects a certificate but does not copy its material:
@@ -620,16 +742,16 @@ fn ssl_to_proto(
     // row only, so they are backfilled here for the agent.
     let selected = row
         .certificate_id
-        .and_then(|id| certs.iter().find(|cert| cert.id == id));
+        .and_then(|id| certs.selectable().find(|cert| cert.id == id));
     // A selected certificate row wins over the legacy inline copy on
     // `site_ssl`. Preferring the inline PEM made a switch look ignored on
     // installations that predate the certificate table (their `site_ssl` row
     // still carries the old material).
-    let cert_pem = selected
+    let mut cert_pem = selected
         .and_then(|cert| cert.cert_pem.clone())
         .or_else(|| row.cert_pem.clone())
         .unwrap_or_default();
-    let key_pem = selected
+    let mut key_pem = selected
         .and_then(|cert| cert.key_pem.clone())
         .or_else(|| row.key_pem.clone())
         .unwrap_or_default();
@@ -657,11 +779,43 @@ fn ssl_to_proto(
         json_to_string_map(&row.acme_dns_config.clone().or_else(|| {
             selected.and_then(|cert| cert.acme_dns_config.clone())
         }));
-    let certificate_id = row
+    let mut certificate_id = row
         .certificate_id
         .or(selected.map(|cert| cert.id))
         .map(|id| id.to_string())
         .unwrap_or_default();
+
+    // Sharing, data plane side: a site that owns no material of its own serves
+    // the best certificate linked to it. `site_certificate_links` used to grant
+    // *selection* only, so a site that never picked a certificate out of its
+    // grants served none — one uploaded PEM shared with three sites took effect
+    // on the one site that selected it.
+    //
+    // The priority is the site's own intent first:
+    //   1. the certificate its posture selects (or the legacy inline PEM),
+    //   2. a linked certificate, but only when the site asked for neither an
+    //      ACME order (`acme_enabled`) nor a generated certificate
+    //      (`self_signed`),
+    //   3. nothing, which leaves the handshake to fail as it did before.
+    //
+    // An injected certificate never creates an ACME order: `acme_enabled` stays
+    // false, so a using site cannot renew a certificate it does not own.
+    if cert_pem.trim().is_empty() && !acme_enabled && !row.self_signed {
+        if let Some(cert) = pick_linked_certificate(site, &certs.linked) {
+            cert_pem = cert.cert_pem.clone().unwrap_or_default();
+            key_pem = cert.key_pem.clone().unwrap_or_default();
+            // The edge attributes its certificate events through this id, and
+            // the material really is that row's.
+            certificate_id = cert.id.to_string();
+            tracing::debug!(
+                site_domain = %site.domain,
+                cert_id = %cert.id,
+                domain = %cert.domain,
+                "serving a linked certificate"
+            );
+        }
+    }
+
     SslConfig {
         cert_pem,
         key_pem,
@@ -1567,9 +1721,17 @@ pub async fn build_rule_bundle(
         challenge: Some(challenge_to_proto(challenge.as_ref())),
         rewrite_rules: rewrites.iter().map(rewrite_rule_to_proto).collect(),
         error_pages: err_pages.iter().map(error_page_to_proto).collect(),
-        ssl: ssl
-            .as_ref()
-            .map(|row| ssl_to_proto(row, &certificates, &mtls)),
+        ssl: ssl.as_ref().map(|row| {
+            ssl_to_proto(
+                row,
+                &certificates,
+                SiteHosts {
+                    domain: &site_row.domain,
+                    alternate: &site_row.alternate_domains,
+                },
+                &mtls,
+            )
+        }),
         upstreams: pools_to_proto(
             &pools,
             &upstreams,
@@ -2813,5 +2975,245 @@ mod tests {
         // A rule with neither group nor ranges matches nothing and is skipped.
         let empty = ip_rule_model(None, Vec::new());
         assert!(ip_access_rule_to_proto(&empty, &groups).is_none());
+    }
+
+    /* ── Linked certificates reach the data plane ─────────────────── */
+
+    /// A linked certificate row as `site_certificate_links` makes it visible:
+    /// owned by another site, carrying a complete PEM pair unless `pem` is
+    /// `None` (an ACME order that has not been issued yet).
+    fn linked_cert(
+        domain: &str,
+        pem: Option<&str>,
+    ) -> site_certificates::Model {
+        site_certificates::Model {
+            id: Uuid::new_v4(),
+            site_id: Some(Uuid::new_v4()),
+            domain: domain.to_string(),
+            cert_pem: pem.map(|pem| format!("{pem}-CERT")),
+            key_pem: pem.map(|pem| format!("{pem}-KEY")),
+            issuer: None,
+            not_before: None,
+            expires_at: None,
+            auto_renew: true,
+            acme_email: None,
+            acme_challenge_type: acme_challenge::HTTP_01.to_string(),
+            acme_dns_provider: None,
+            acme_dns_config: None,
+            status: "active".to_string(),
+            failure_reason: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    /// A posture row that selects nothing and asks for nothing: the shape of a
+    /// site a certificate was just bound to.
+    fn bare_ssl_row(site_id: Uuid) -> site_ssl::Model {
+        site_ssl::Model {
+            id: Uuid::new_v4(),
+            site_id,
+            cert_pem: None,
+            key_pem: None,
+            issuer: None,
+            domain: "a.example.com".to_string(),
+            expires_at: None,
+            auto_renew: true,
+            acme_email: None,
+            acme_challenge_type: None,
+            acme_dns_provider: None,
+            acme_dns_config: None,
+            https_enabled: true,
+            min_tls_version: "1.2".to_string(),
+            max_tls_version: None,
+            self_signed: false,
+            certificate_id: None,
+            mtls_enabled: false,
+            mtls_client_ca: None,
+            mtls_organization: None,
+            mtls_require_client_cert: false,
+            hsts_enabled: false,
+            hsts_max_age: 0,
+            always_use_https: false,
+            http1_enabled: true,
+            http2_enabled: true,
+            created_at: Utc::now(),
+        }
+    }
+
+    fn certs(
+        own: Vec<site_certificates::Model>,
+        linked: Vec<site_certificates::Model>,
+    ) -> SiteCertificates {
+        SiteCertificates { own, linked }
+    }
+
+    fn hosts<'a>(domain: &'a str, alternate: &'a [String]) -> SiteHosts<'a> {
+        SiteHosts { domain, alternate }
+    }
+
+    /// The gap this closes: sharing a certificate only granted *selection*, so a
+    /// site that never picked one out of its grants served no certificate at
+    /// all. A site with no material of its own now serves the linked PEM.
+    #[test]
+    fn a_linked_certificate_is_injected_when_the_site_has_none_of_its_own() {
+        let site_id = Uuid::new_v4();
+        let row = bare_ssl_row(site_id);
+        let linked = vec![linked_cert("a.example.com", Some("linked"))];
+
+        let ssl = ssl_to_proto(
+            &row,
+            &certs(Vec::new(), linked),
+            hosts("a.example.com", &[]),
+            &MtlsPush::default(),
+        );
+
+        assert_eq!(ssl.cert_pem, "linked-CERT");
+        assert_eq!(ssl.key_pem, "linked-KEY");
+        // The edge attributes its certificate events through this id, and the
+        // material really is that row's.
+        assert!(!ssl.certificate_id.is_empty());
+        // Sharing must never turn a certificate into an ACME order for the
+        // site that borrowed it.
+        assert!(!ssl.acme_enabled);
+        // ... nor switch HTTPS on: that stays the site's own setting.
+        assert!(ssl.enabled);
+    }
+
+    /// The priority rule: what the site chose itself always wins, so adding a
+    /// link never silently replaces a certificate the operator selected.
+    #[test]
+    fn an_owned_selected_certificate_wins_over_a_linked_one() {
+        let site_id = Uuid::new_v4();
+        let mut row = bare_ssl_row(site_id);
+        let mut own = linked_cert("a.example.com", Some("own"));
+        own.site_id = Some(site_id);
+        row.certificate_id = Some(own.id);
+        let own_id = own.id.to_string();
+
+        let ssl = ssl_to_proto(
+            &row,
+            &certs(
+                vec![own],
+                vec![linked_cert("a.example.com", Some("linked"))],
+            ),
+            hosts("a.example.com", &[]),
+            &MtlsPush::default(),
+        );
+
+        assert_eq!(ssl.cert_pem, "own-CERT");
+        assert_eq!(ssl.certificate_id, own_id);
+    }
+
+    /// ... and a site with no link keeps the historical behaviour: an HTTPS
+    /// posture with no material, which the edge reports as a failed handshake
+    /// rather than serving someone else's certificate.
+    #[test]
+    fn a_site_without_links_gets_no_certificate() {
+        let row = bare_ssl_row(Uuid::new_v4());
+        let ssl = ssl_to_proto(
+            &row,
+            &certs(Vec::new(), Vec::new()),
+            hosts("a.example.com", &[]),
+            &MtlsPush::default(),
+        );
+
+        assert!(ssl.cert_pem.is_empty());
+        assert!(ssl.key_pem.is_empty());
+        assert!(ssl.certificate_id.is_empty());
+    }
+
+    /// Several grants, one winner: the certificate that leaves the fewest site
+    /// hostnames uncovered, i.e. the one whose handshake will actually work for
+    /// most of the site.
+    #[test]
+    fn the_linked_certificate_covering_most_hostnames_wins() {
+        let row = bare_ssl_row(Uuid::new_v4());
+        let alternate = vec!["b.example.com".to_string()];
+        let linked = vec![
+            linked_cert("a.example.com", Some("narrow")),
+            linked_cert("a.example.com,b.example.com", Some("wide")),
+        ];
+
+        let ssl = ssl_to_proto(
+            &row,
+            &certs(Vec::new(), linked),
+            hosts("a.example.com", &alternate),
+            &MtlsPush::default(),
+        );
+
+        assert_eq!(ssl.cert_pem, "wide-CERT");
+    }
+
+    /// A grant that covers nothing is worse than no certificate — the browser
+    /// rejects the name instead of the handshake failing — so it is not served.
+    #[test]
+    fn a_linked_certificate_covering_nothing_is_not_injected() {
+        let row = bare_ssl_row(Uuid::new_v4());
+        let ssl = ssl_to_proto(
+            &row,
+            &certs(Vec::new(), vec![linked_cert("other.com", Some("wrong"))]),
+            hosts("a.example.com", &[]),
+            &MtlsPush::default(),
+        );
+
+        assert!(ssl.cert_pem.is_empty());
+    }
+
+    /// A linked row whose order has not been issued carries no PEM: it must not
+    /// shadow a grant that can actually be served.
+    #[test]
+    fn an_unissued_linked_certificate_never_shadows_a_servable_one() {
+        let row = bare_ssl_row(Uuid::new_v4());
+        let linked = vec![
+            linked_cert("a.example.com", None),
+            linked_cert("a.example.com", Some("issued")),
+        ];
+
+        let ssl = ssl_to_proto(
+            &row,
+            &certs(Vec::new(), linked),
+            hosts("a.example.com", &[]),
+            &MtlsPush::default(),
+        );
+
+        assert_eq!(ssl.cert_pem, "issued-CERT");
+    }
+
+    /// The site's own ACME intent outranks a linked certificate: a site waiting
+    /// for its own order must not start serving someone else's PEM, which would
+    /// pre-empt the order it asked for.
+    #[test]
+    fn an_acme_site_is_not_preempted_by_a_linked_certificate() {
+        let mut row = bare_ssl_row(Uuid::new_v4());
+        row.acme_email = Some("admin@example.com".to_string());
+
+        let ssl = ssl_to_proto(
+            &row,
+            &certs(Vec::new(), vec![linked_cert("a.example.com", Some("x"))]),
+            hosts("a.example.com", &[]),
+            &MtlsPush::default(),
+        );
+
+        assert!(ssl.cert_pem.is_empty());
+        assert!(ssl.acme_enabled);
+    }
+
+    /// Same for a self-signed site: the posture asks the edge to generate a
+    /// certificate, so it keeps doing that.
+    #[test]
+    fn a_self_signed_site_is_not_preempted_by_a_linked_certificate() {
+        let mut row = bare_ssl_row(Uuid::new_v4());
+        row.self_signed = true;
+
+        let ssl = ssl_to_proto(
+            &row,
+            &certs(Vec::new(), vec![linked_cert("a.example.com", Some("x"))]),
+            hosts("a.example.com", &[]),
+            &MtlsPush::default(),
+        );
+
+        assert!(ssl.cert_pem.is_empty());
+        assert!(ssl.self_signed);
     }
 }

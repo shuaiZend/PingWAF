@@ -65,6 +65,20 @@ pub struct CertificateResponse {
     /// one shared by another site. Lets the console group the picker.
     #[serde(default = "owner_relation")]
     pub relation: String,
+    /// Sites that reach this certificate through `site_certificate_links`, i.e.
+    /// the sharing grants. The owner is **not** synthesised into this list — it
+    /// is `site_id` — but it can appear through a link row of its own, which is
+    /// what migration 85 backfilled for a site that had already selected its
+    /// certificate (and what `POST /sites/{id}/certificate-links` writes).
+    ///
+    /// Filled in by [`bound_sites_index`]: one `is_in` query per page, never one
+    /// per row.
+    #[serde(default)]
+    pub bound_sites: Vec<BoundSiteRef>,
+    /// `bound_sites.len()`, repeated so the console can render a count without
+    /// walking the array.
+    #[serde(default)]
+    pub bound_count: usize,
     /// Why the last ACME issuance attempt was given up on; null while an
     /// order is healthy or after it succeeded.
     pub failure_reason: Option<String>,
@@ -89,6 +103,16 @@ fn owner_relation() -> String {
     "owner".to_string()
 }
 
+/// One site a certificate is bound to, as the console shows it.
+///
+/// The domain travels with the id so a bound-site list renders without a second
+/// round trip per certificate.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct BoundSiteRef {
+    pub id: Uuid,
+    pub domain: String,
+}
+
 impl From<site_certificates::Model> for CertificateResponse {
     fn from(m: site_certificates::Model) -> Self {
         Self {
@@ -105,6 +129,10 @@ impl From<site_certificates::Model> for CertificateResponse {
             acme_dns_config: m.acme_dns_config,
             status: m.status,
             relation: owner_relation(),
+            // Filled in by `attach_bindings` on every read path; a freshly
+            // built response (the create paths) has no links by construction.
+            bound_sites: Vec::new(),
+            bound_count: 0,
             failure_reason: m.failure_reason,
             has_certificate: m.cert_pem.is_some(),
             has_private_key: m.key_pem.is_some(),
@@ -329,6 +357,55 @@ fn uncovered_certificate_domains(
     uncovered
 }
 
+/// Site hostnames the certificate does **not** cover — the direction that
+/// decides whether a certificate can serve a site at all.
+///
+/// Deliberately not [`uncovered_certificate_domains`] with the arguments
+/// swapped: that one reports *extra* certificate hostnames, which are only a
+/// warning, while this one reports hostnames the site answers for but the
+/// certificate cannot validate — the TLS handshake fails for exactly those, so a
+/// bind request naming them is rejected. A certificate carrying SANs for other
+/// sites is therefore accepted (its extra names warn), and a certificate issued
+/// for a different domain is refused.
+///
+/// Returns the uncovered site hostnames in site order (primary first), with
+/// duplicates removed and both sides lower-cased. An empty certificate hostname
+/// list covers nothing and returns no verdict, so a malformed row cannot reject
+/// a bind on its own.
+///
+/// Also used by the gRPC configuration builder to choose between several
+/// certificates linked to one site: the shortest result wins, and a result as
+/// long as the site's hostname count means the certificate covers nothing.
+pub(crate) fn uncovered_site_hostnames(
+    cert_domain: &str,
+    site_domain: &str,
+    alternate: &[String],
+) -> Vec<String> {
+    let cert_names: Vec<String> = split_domains(cert_domain)
+        .iter()
+        .map(|name| name.to_ascii_lowercase())
+        .collect();
+    if cert_names.is_empty() {
+        return Vec::new();
+    }
+
+    let mut uncovered: Vec<String> = Vec::new();
+    let served = std::iter::once(site_domain.to_ascii_lowercase())
+        .chain(alternate.iter().map(|domain| domain.to_ascii_lowercase()));
+    for host in served.filter(|domain| !domain.is_empty()) {
+        if cert_names
+            .iter()
+            .any(|name| cert_name_covers_site_name(name, &host))
+        {
+            continue;
+        }
+        if !uncovered.iter().any(|existing| existing == &host) {
+            uncovered.push(host);
+        }
+    }
+    uncovered
+}
+
 /// Builds the advisory warnings for a saved certificate, logging each one.
 /// Never fails and never blocks the save.
 fn certificate_warnings(
@@ -423,6 +500,88 @@ fn certificate_warnings_for(
             format!("certificate domain {domain} is not served by this site")
         })
         .collect()
+}
+
+/// The sites each certificate is bound to, keyed by certificate id.
+type BoundSites = HashMap<Uuid, Vec<BoundSiteRef>>;
+
+/// Loads [`BoundSites`] for the given certificate ids in **two** queries
+/// (links, then site domains) however many certificates a page holds.
+///
+/// One `is_in` over `site_certificate_links` answers "which sites use this
+/// certificate" for the whole page, and the domains come from the same
+/// [`site_hostname_index`] the warnings already need — so a page pays one extra
+/// query, not one per row. A database error degrades to "nothing bound": this
+/// decorates a listing, and the paths where the answer decides something
+/// (delete, unbind) query the link table themselves.
+async fn bound_sites_index(
+    state: &AppState,
+    cert_ids: impl IntoIterator<Item = Uuid>,
+) -> BoundSites {
+    let ids: Vec<Uuid> = {
+        let mut ids: Vec<Uuid> = cert_ids.into_iter().collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    };
+    if ids.is_empty() {
+        return HashMap::new();
+    }
+    let links = match certificate_links::Entity::find()
+        .filter(certificate_links::Column::CertificateId.is_in(ids))
+        .all(&state.db)
+        .await
+    {
+        Ok(rows) => rows,
+        Err(err) => {
+            tracing::warn!(error = %err, "could not load certificate bindings");
+            return HashMap::new();
+        },
+    };
+    if links.is_empty() {
+        return HashMap::new();
+    }
+
+    let mut cert_to_sites: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+    for link in &links {
+        cert_to_sites
+            .entry(link.certificate_id)
+            .or_default()
+            .push(link.site_id);
+    }
+    let sites =
+        site_hostname_index(state, links.iter().map(|link| link.site_id)).await;
+
+    let mut bound: BoundSites = HashMap::with_capacity(cert_to_sites.len());
+    for (cert_id, mut site_ids) in cert_to_sites {
+        // Deterministic order: the link table has no natural one, and a list
+        // that reshuffles between two identical requests is noise in the
+        // console and in any diff of two responses.
+        site_ids.sort_unstable();
+        let refs: Vec<BoundSiteRef> = site_ids
+            .into_iter()
+            .filter_map(|site_id| {
+                // A site deleted between the two queries leaves a link row that
+                // `ON DELETE CASCADE` already removed; skipping a stale id is
+                // the same fail-soft as a missing warning entry.
+                sites.get(&site_id).map(|(domain, _)| BoundSiteRef {
+                    id: site_id,
+                    domain: domain.clone(),
+                })
+            })
+            .collect();
+        if !refs.is_empty() {
+            bound.insert(cert_id, refs);
+        }
+    }
+    bound
+}
+
+/// Copies a certificate's bindings onto its response.
+fn attach_bindings(response: &mut CertificateResponse, bound: &BoundSites) {
+    let sites = bound.get(&response.id).cloned().unwrap_or_default();
+    response.bound_count = sites.len();
+    response.bound_sites = sites;
 }
 
 /// Longest single hostname a certificate row may name. A DNS name is at most
@@ -597,6 +756,18 @@ pub fn routes() -> Router<AppState> {
             "/certificates/{cert_id}/renew",
             axum::routing::post(renew_global_certificate),
         )
+        // Binding a certificate to a site, from the certificate's side: one
+        // uploaded PEM can serve several sites and the upload no longer names
+        // one. The site-scoped pair above stays the site's own view of the same
+        // relation.
+        .route(
+            "/certificates/{cert_id}/bindings",
+            axum::routing::post(bind_certificate),
+        )
+        .route(
+            "/certificates/{cert_id}/bindings/{site_id}",
+            axum::routing::delete(unbind_certificate),
+        )
         .route(
             "/certificates/{cert_id}/events",
             get(list_certificate_events),
@@ -645,6 +816,7 @@ async fn list_certificates(
     // warnings" rather than failing the read: the list is a listing, and
     // holding it hostage to an advisory field would be the wrong trade.
     let served = site_hostname_index(&state, std::iter::once(id)).await;
+    let bound = bound_sites_index(&state, rows.iter().map(|row| row.id)).await;
     let items: Vec<CertificateResponse> = rows
         .into_iter()
         .map(|row| {
@@ -658,6 +830,7 @@ async fn list_certificates(
                 response.site_id.unwrap_or_default(),
                 &response.domain,
             ));
+            attach_bindings(&mut response, &bound);
             response
         })
         .collect();
@@ -820,6 +993,7 @@ async fn list_available_certificates(
             .chain(std::iter::once(id)),
     )
     .await;
+    let bound = bound_sites_index(&state, rows.iter().map(|row| row.id)).await;
     let items: Vec<CertificateResponse> = rows
         .into_iter()
         .map(|row| {
@@ -830,6 +1004,7 @@ async fn list_available_certificates(
                 response.site_id.unwrap_or_default(),
                 &response.domain,
             ));
+            attach_bindings(&mut response, &bound);
             response
         })
         .collect();
@@ -846,7 +1021,7 @@ async fn create_certificate(
     let id = parse_uuid(&site_id, "site id")?;
     let site = load_site_write(&state.db, id, &current).await?;
 
-    let model = insert_certificate(&state.db, &site, payload).await?;
+    let model = insert_certificate(&state.db, Some(&site), payload).await?;
     announce_certificate_created(&state, &model, Some(&current.email)).await;
     // Advisory only: a certificate naming hosts this site does not serve is
     // saved anyway, with the mismatch reported back to the operator.
@@ -866,10 +1041,9 @@ async fn create_certificate(
 /// commits.
 async fn insert_certificate<C: ConnectionTrait>(
     db: &C,
-    site: &site::Model,
+    site: Option<&site::Model>,
     payload: CreateCertificateRequest,
 ) -> Result<site_certificates::Model, ApiError> {
-    let site_id = site.id;
     let domain = validate_cert_domain_list(&payload.domain)?;
     if !acme_challenge::is_valid(&payload.acme_challenge_type) {
         return Err(ApiError::BadRequest(format!(
@@ -878,13 +1052,17 @@ async fn insert_certificate<C: ConnectionTrait>(
         )));
     }
     // An ACME order without an uploaded PEM is issued against the site's whole
-    // hostname set, which a wildcard may not contain under http-01.
+    // hostname set, which a wildcard may not contain under http-01. Without a
+    // site the whole request is refused further down instead: an order no site
+    // carries can never be picked up by the edge.
     if payload.cert_pem.is_none() && payload.acme_email.is_some() {
-        ensure_acme_wildcard_supported(
-            site,
-            &split_domains(&domain),
-            Some(&payload.acme_challenge_type),
-        )?;
+        if let Some(site) = site {
+            ensure_acme_wildcard_supported(
+                site,
+                &split_domains(&domain),
+                Some(&payload.acme_challenge_type),
+            )?;
+        }
     }
 
     // Reject unparsable or mismatched PEM pairs before they reach the data
@@ -919,9 +1097,28 @@ async fn insert_certificate<C: ConnectionTrait>(
         (None, None) => {},
     }
 
+    let timestamp = Utc::now();
     let status = if has_pem {
-        cert_status::ACTIVE
+        match site {
+            // Nothing serves an unbound row, so no edge report ever corrects
+            // its status. Recording what the dates say keeps a lapsed
+            // certificate from looking healthy in the console forever.
+            None => uploaded_cert_status(payload.expires_at, timestamp),
+            Some(_) => cert_status::ACTIVE,
+        }
     } else if payload.acme_email.is_some() {
+        if site.is_none() {
+            // Issuance runs on the edge, driven by the configuration of the
+            // site that carries the certificate. One no site carries is never
+            // picked up, so the row would sit `pending` until the stale-order
+            // sweep marked it `failed` — say why instead.
+            return Err(ApiError::BadRequest(
+                "an ACME certificate needs a site_id: issuance runs on the edge \
+                 for the site that carries it — upload the PEM instead, or name \
+                 the site"
+                    .to_string(),
+            ));
+        }
         cert_status::PENDING
     } else {
         // Neither a PEM pair nor an ACME order: nothing to serve, and the
@@ -931,10 +1128,9 @@ async fn insert_certificate<C: ConnectionTrait>(
         ));
     };
 
-    let timestamp = Utc::now();
     let model = site_certificates::ActiveModel {
         id: Set(Uuid::new_v4()),
-        site_id: Set(Some(site_id)),
+        site_id: Set(site.map(|site| site.id)),
         domain: Set(domain),
         cert_pem: Set(payload.cert_pem),
         key_pem: Set(payload.key_pem),
@@ -954,14 +1150,39 @@ async fn insert_certificate<C: ConnectionTrait>(
     .insert(db)
     .await?;
 
-    tracing::info!(site_id = %site_id, cert_id = %model.id, "certificate created");
+    tracing::info!(
+        site_id = ?model.site_id,
+        cert_id = %model.id,
+        domain = %model.domain,
+        "certificate created"
+    );
     Ok(model)
+}
+
+/// Initial status of an uploaded certificate that no site serves yet.
+///
+/// Served certificates get their status corrected by the edge report, which is
+/// why the upload path writes `active` for them. An unbound row has no edge to
+/// report anything, so its status follows its own dates from the start.
+fn uploaded_cert_status(
+    expires_at: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> &'static str {
+    match expires_at {
+        Some(expires_at) if expires_at <= now => cert_status::EXPIRED,
+        _ => cert_status::ACTIVE,
+    }
 }
 
 /// Records the audit event for a committed certificate and pushes the change
 /// to the site's agents. The event is best-effort (like every certificate
 /// event); the touch failure is logged, not propagated — the row already
 /// exists, so an error response would misrepresent the outcome.
+///
+/// An unbound certificate has no site whose configuration could have changed —
+/// it reaches the edge the moment it is bound — so only the audit event is
+/// written for it. The event row keeps `site_id` NULL rather than a nil UUID,
+/// which is what "belongs to no site" means in this table.
 async fn announce_certificate_created(
     state: &AppState,
     model: &site_certificates::Model,
@@ -970,7 +1191,7 @@ async fn announce_certificate_created(
     write_cert_event(
         &state.db,
         model.id,
-        model.site_id.unwrap_or_default(),
+        model.site_id,
         "created",
         format!(
             "Certificate for {} created (status: {})",
@@ -979,16 +1200,17 @@ async fn announce_certificate_created(
         None,
     )
     .await;
-    if let Err(err) = touch_site(state, model.site_id.unwrap_or_default()).await
-    {
+    let Some(site_id) = model.site_id else {
+        return;
+    };
+    if let Err(err) = touch_site(state, site_id).await {
         tracing::warn!(
             cert_id = %model.id,
             error = %err,
             "could not touch the site after certificate creation"
         );
     }
-    notify_config_changed(state, model.site_id.unwrap_or_default(), actor)
-        .await;
+    notify_config_changed(state, site_id, actor).await;
 }
 
 /// `GET /api/v1/sites/{site_id}/certificates/{cert_id}`
@@ -1003,12 +1225,14 @@ async fn show_certificate(
 
     let row = find_certificate(&state, id, target).await?;
     let served = site_hostname_index(&state, std::iter::once(id)).await;
+    let bound = bound_sites_index(&state, std::iter::once(target)).await;
     let mut response = CertificateResponse::from(row);
     response.warnings = Some(certificate_warnings_for(
         &served,
         response.site_id.unwrap_or_default(),
         &response.domain,
     ));
+    attach_bindings(&mut response, &bound);
     Ok(Json(response))
 }
 
@@ -1024,7 +1248,42 @@ async fn update_certificate(
     let site = load_site_write(&state.db, id, &current).await?;
 
     let row = find_certificate(&state, id, target).await?;
+    let updated =
+        apply_certificate_update(&state, Some(&site), row, payload).await?;
 
+    tracing::info!(site_id = %id, cert_id = %target, "certificate updated");
+    touch_site(&state, id).await?;
+    // A shared certificate can be served by several sites, so every one of them
+    // has to re-pull — not only the owner. Replacing the PEM of a certificate
+    // another site links would otherwise reach the edge only on its next
+    // unrelated configuration change.
+    notify_certificate_users(&state, target, Some(id), Some(&current.email))
+        .await;
+
+    // The warning is evaluated against the certificate as it is stored now,
+    // not against the payload alone: an update that only replaces the PEM
+    // still has to surface a hostname mismatch introduced earlier.
+    let warnings = certificate_warnings(site.id, &site, &updated.domain);
+    let mut response = CertificateResponse::from(updated);
+    response.warnings = Some(warnings);
+    Ok(Json(response))
+}
+
+/// Validates and applies one certificate update, with or without an owner site.
+///
+/// Split out of the handler so the path that edits a certificate uploaded
+/// before it was bound (`PUT /certificates/{id}` on an unowned row) shares every
+/// check rather than re-implementing them: the PEM pair, the hostname list and
+/// the ACME bounds are identical whether or not a site currently owns the row.
+/// `site` is `None` for an unbound certificate, which drops exactly the one
+/// site-scoped step — the ACME wildcard guard, which needs the site's hostname
+/// set to compare against.
+async fn apply_certificate_update(
+    state: &AppState,
+    site: Option<&site::Model>,
+    row: site_certificates::Model,
+    payload: UpdateCertificateRequest,
+) -> Result<site_certificates::Model, ApiError> {
     // Replacing either half of the stored pair re-validates the pair as it
     // will be after this request: the update path used to store an unparsable
     // certificate (or a key that does not match it) that create would have
@@ -1081,13 +1340,15 @@ async fn update_certificate(
         None => non_empty(&row.acme_email),
     };
     if cert_missing && acme_email.is_some() {
-        let challenge = non_empty(&payload.acme_challenge_type)
-            .unwrap_or_else(|| row.acme_challenge_type.clone());
-        ensure_acme_wildcard_supported(
-            &site,
-            &split_domains(effective_domain),
-            Some(&challenge),
-        )?;
+        if let Some(site) = site {
+            let challenge = non_empty(&payload.acme_challenge_type)
+                .unwrap_or_else(|| row.acme_challenge_type.clone());
+            ensure_acme_wildcard_supported(
+                site,
+                &split_domains(effective_domain),
+                Some(&challenge),
+            )?;
+        }
     }
 
     let mut active: site_certificates::ActiveModel = row.into();
@@ -1146,17 +1407,45 @@ async fn update_certificate(
     active.updated_at = Set(Utc::now());
 
     let updated = active.update(&state.db).await?;
-    tracing::info!(site_id = %id, cert_id = %target, "certificate updated");
-    touch_site(&state, id).await?;
-    notify_config_changed(&state, id, Some(&current.email)).await;
+    Ok(updated)
+}
 
-    // The warning is evaluated against the certificate as it is stored now,
-    // not against the payload alone: an update that only replaces the PEM
-    // still has to surface a hostname mismatch introduced earlier.
-    let warnings = certificate_warnings(site.id, &site, &updated.domain);
-    let mut response = CertificateResponse::from(updated);
-    response.warnings = Some(warnings);
-    Ok(Json(response))
+/// Pushes the configuration of every site that uses `cert_id`: the owner, when
+/// it has one, plus every site holding a link row.
+///
+/// Certificate material is no longer reachable from one site alone — a PEM on
+/// the owner's row is injected into the bundle of each site that links it — so
+/// a change to the row is a change to *their* configurations too. `touch_site`
+/// runs for each of them so the fingerprint the agents compare moves as well.
+///
+/// Best-effort like [`notify_config_changed`] itself: the rows are committed,
+/// and an agent that misses the push picks the change up on its next sync.
+async fn notify_certificate_users(
+    state: &AppState,
+    cert_id: Uuid,
+    owner: Option<Uuid>,
+    actor: Option<&str>,
+) {
+    let linked: Vec<Uuid> = certificate_links::Entity::find()
+        .filter(certificate_links::Column::CertificateId.eq(cert_id))
+        .all(&state.db)
+        .await
+        .map(|rows| rows.into_iter().map(|link| link.site_id).collect())
+        .unwrap_or_default();
+    let mut sites: Vec<Uuid> = owner.into_iter().chain(linked).collect();
+    sites.sort_unstable();
+    sites.dedup();
+
+    for site_id in sites {
+        if let Err(err) = touch_site(state, site_id).await {
+            tracing::warn!(
+                %site_id,
+                error = %err,
+                "could not touch a site that uses this certificate"
+            );
+        }
+        notify_config_changed(state, site_id, actor).await;
+    }
 }
 
 /// `DELETE /api/v1/sites/{site_id}/certificates/{cert_id}`
@@ -1170,9 +1459,29 @@ async fn delete_certificate(
     load_site_write(&state.db, id, &current).await?;
     find_certificate(&state, id, target).await?;
 
-    // A certificate still selected by a site must be detached first: deleting
-    // it would leave `site_ssl.certificate_id` dangling, and the data plane
-    // would silently serve no certificate for that site.
+    delete_certificate_row(&state, &current, Some(id), target).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// Deletes a certificate after refusing while anything still depends on it.
+///
+/// `owner` is the site the request was authorised through, `None` when the row
+/// has no owner (uploaded, not bound to a site of its own yet).
+///
+/// Two blockers, in this order:
+///
+/// 1. a `site_ssl.certificate_id` still selecting it — deleting would leave the
+///    id dangling and the data plane would silently serve no certificate;
+/// 2. a `site_certificate_links` grant — another site serves this PEM, so the
+///    operator has to unbind first. The order matters: an unlink is itself
+///    refused while the site has the certificate selected, so reporting the
+///    link first would send the operator in a circle.
+async fn delete_certificate_row(
+    state: &AppState,
+    current: &AuthUser,
+    owner: Option<Uuid>,
+    target: Uuid,
+) -> Result<(), ApiError> {
     let in_use: Vec<Uuid> = site_ssl::Entity::find()
         .filter(site_ssl::Column::CertificateId.eq(target))
         .all(&state.db)
@@ -1191,29 +1500,53 @@ async fn delete_certificate(
         )));
     }
 
+    // Any remaining grant means another site serves this PEM: refuse instead of
+    // pulling the certificate out from under it.
+    let mut bound: Vec<Uuid> = certificate_links::Entity::find()
+        .filter(certificate_links::Column::CertificateId.eq(target))
+        .all(&state.db)
+        .await?
+        .into_iter()
+        .map(|link| link.site_id)
+        .collect();
+    if !bound.is_empty() {
+        bound.sort_unstable();
+        bound.dedup();
+        return Err(ApiError::Conflict(format!(
+            "certificate is bound to site(s) {}; unbind it there first",
+            bound
+                .iter()
+                .map(Uuid::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
+
     site_certificates::Entity::delete_by_id(target)
         .exec(&state.db)
         .await?;
 
     // Shared uses must not outlive the certificate. `site_certificate_links`
     // has no FK on `certificate_id` (site-scoped restore requires that), so the
-    // cleanup is explicit. `site_ssl.certificate_id` is left as-is on purpose:
-    // the data plane falls back to the legacy PEM/self-signed path, and a
-    // dangling id is rejected on the next save rather than silently changing
-    // TLS behaviour here.
+    // cleanup is explicit — unreachable through the guard above, kept as the
+    // belt-and-braces that a row written by another path cannot outlive its
+    // certificate. `site_ssl.certificate_id` is left as-is on purpose: the data
+    // plane falls back to the legacy PEM/self-signed path, and a dangling id is
+    // rejected on the next save rather than silently changing TLS behaviour
+    // here.
     certificate_links::Entity::delete_many()
         .filter(certificate_links::Column::CertificateId.eq(target))
         .exec(&state.db)
         .await?;
 
-    tracing::info!(site_id = %id, cert_id = %target, "certificate deleted");
+    tracing::info!(site_id = ?owner, cert_id = %target, "certificate deleted");
     // Deleting the certificate cascades to its events, so the deletion's own
     // audit trail must not point at the deleted row — referencing it violates
     // `fk_certificate_events_certificate_id` and the event is silently lost.
     let event = certificate_events::ActiveModel {
         id: Set(Uuid::new_v4()),
         certificate_id: Set(None),
-        site_id: Set(Some(id)),
+        site_id: Set(owner),
         event_type: Set("deleted".to_string()),
         message: Set(format!("Certificate {target} deleted")),
         details: Set(None),
@@ -1222,10 +1555,11 @@ async fn delete_certificate(
     if let Err(err) = event.insert(&state.db).await {
         tracing::warn!(%err, "failed to write certificate event");
     }
-    touch_site(&state, id).await?;
-    notify_config_changed(&state, id, Some(&current.email)).await;
-
-    Ok(StatusCode::NO_CONTENT.into_response())
+    if let Some(owner) = owner {
+        touch_site(state, owner).await?;
+        notify_config_changed(state, owner, Some(&current.email)).await;
+    }
+    Ok(())
 }
 
 /// `POST /api/v1/sites/{site_id}/certificates/{cert_id}/renew`
@@ -1258,7 +1592,7 @@ async fn renew_certificate(
     write_cert_event(
         &state.db,
         target,
-        id,
+        Some(id),
         "renewal_requested",
         format!("Manual renewal requested for {}", domain),
         None,
@@ -1429,9 +1763,12 @@ async fn list_all_certificates(
         rows.iter().filter_map(|row| row.site_id).chain(requested),
     )
     .await;
+    let bound = bound_sites_index(&state, rows.iter().map(|row| row.id)).await;
     let items: Vec<CertificateWithSite> = rows
         .into_iter()
         .map(|row| {
+            // An unbound certificate has no owner: the two site columns stay
+            // empty, which is what the console renders as "not bound yet".
             let (site_domain, site_name) = row
                 .site_id
                 .and_then(|id| sites.get(&id).cloned())
@@ -1443,6 +1780,7 @@ async fn list_all_certificates(
             );
             let mut certificate = CertificateResponse::from(row);
             certificate.warnings = Some(warnings);
+            attach_bindings(&mut certificate, &bound);
             CertificateWithSite {
                 certificate,
                 site_domain,
@@ -1453,20 +1791,57 @@ async fn list_all_certificates(
     Ok(Json(Page::new(items, total, pagination)))
 }
 
-/// `POST /api/v1/certificates` — upload a certificate or apply for one on
-/// behalf of a site.
+/// `POST /api/v1/certificates` without a site: a certificate that exists before
+/// anything is bound to it.
+///
+/// Administrator-only, like every other certificate operation addressed by
+/// certificate id with no site to authorise through (see
+/// [`authorize_certificate`]) — there is no ownership that could grant the write.
+///
+/// Only an uploaded PEM can land here. An ACME request is refused by
+/// [`insert_certificate`]: issuance runs on the edge, driven by the
+/// configuration of the site that carries the certificate, so an order nothing
+/// carries would sit `pending` until the stale sweep marked it `failed`.
+async fn create_unbound_certificate(
+    state: &AppState,
+    current: &AuthUser,
+    payload: CreateCertificateRequest,
+) -> Result<Response, ApiError> {
+    current.require_admin().map_err(ApiError::from)?;
+    if payload.activate {
+        return Err(ApiError::BadRequest(
+            "activate requires site_id: turning HTTPS on is a per-site setting"
+                .to_string(),
+        ));
+    }
+
+    let model = insert_certificate(&state.db, None, payload).await?;
+    announce_certificate_created(state, &model, Some(&current.email)).await;
+    // Coverage is measured against a site's hostnames, and nothing is bound
+    // yet: "checked, nothing to report" rather than a missing field.
+    let mut response = CertificateResponse::from(model);
+    response.warnings = Some(Vec::new());
+    Ok((StatusCode::CREATED, Json(response)).into_response())
+}
+
+/// `POST /api/v1/certificates` — upload a certificate, optionally on behalf of
+/// a site, or apply for one for a site.
+///
+/// `site_id` is optional: a PEM already in hand has no intrinsic site, and the
+/// same certificate may later serve several of them, so an upload without a site
+/// creates an **unbound** row (`site_id = NULL`, `bound_count = 0`) that
+/// `POST /certificates/{id}/bindings` attaches afterwards. The `domain` is what
+/// identifies the certificate and stays mandatory.
 ///
 /// `activate` attaches it to its site and turns HTTPS on in the same call, so
-/// the dashboard does not have to make a second request.
+/// the dashboard does not have to make a second request; it needs a site.
 async fn create_global_certificate(
     State(state): State<AppState>,
     current: AuthUser,
     Json(payload): Json<CreateCertificateRequest>,
 ) -> Result<Response, ApiError> {
     let Some(raw_site) = payload.site_id else {
-        return Err(ApiError::BadRequest(
-            "site_id is required: a certificate belongs to a site".to_string(),
-        ));
+        return create_unbound_certificate(&state, &current, payload).await;
     };
     let site_id = parse_uuid(&raw_site.to_string(), "site id")?;
     let site = load_site_write(&state.db, site_id, &current).await?;
@@ -1477,7 +1852,7 @@ async fn create_global_certificate(
     // pending certificate behind, which is how the dashboard used to show an
     // errored request with the task already in the list.
     let txn = state.db.begin().await?;
-    let model = insert_certificate(&txn, &site, payload).await?;
+    let model = insert_certificate(&txn, Some(&site), payload).await?;
     if activate {
         let posture = TlsPostureRequest {
             https_enabled: Some(true),
@@ -1499,6 +1874,30 @@ async fn create_global_certificate(
     Ok((StatusCode::CREATED, Json(response)).into_response())
 }
 
+/// Authorises a certificate operation that is addressed by certificate id.
+///
+/// A certificate with an owner is authorised through that site, exactly as
+/// before. One that has no owner yet has no site to check either, so it is
+/// administrator-only — the same boundary [`scope_site`] draws for the
+/// cross-site listing.
+async fn authorize_certificate(
+    state: &AppState,
+    current: &AuthUser,
+    owner: Option<Uuid>,
+    write: bool,
+) -> Result<(), ApiError> {
+    match owner {
+        Some(owner) if write => {
+            load_site_write(&state.db, owner, current).await?;
+        },
+        Some(owner) => {
+            load_site_read(&state.db, owner, current).await?;
+        },
+        None => current.require_admin().map_err(ApiError::from)?,
+    }
+    Ok(())
+}
+
 /// `GET /api/v1/certificates/{cert_id}`
 async fn show_global_certificate(
     State(state): State<AppState>,
@@ -1507,29 +1906,28 @@ async fn show_global_certificate(
 ) -> Result<Json<CertificateResponse>, ApiError> {
     let target = parse_uuid(&cert_id, "certificate id")?;
     let row = find_certificate_by_id(&state, target).await?;
-    load_site_read(
-        &state.db,
-        row.site_id.ok_or_else(|| {
-            ApiError::BadRequest(
-                "certificate is not bound to any site".to_string(),
-            )
-        })?,
-        &current,
-    )
-    .await?;
+    authorize_certificate(&state, &current, row.site_id, false).await?;
+
     let served =
         site_hostname_index(&state, std::iter::once(row.site_id).flatten())
             .await;
+    let bound = bound_sites_index(&state, std::iter::once(target)).await;
     let mut response = CertificateResponse::from(row);
     response.warnings = Some(certificate_warnings_for(
         &served,
         response.site_id.unwrap_or_default(),
         &response.domain,
     ));
+    attach_bindings(&mut response, &bound);
     Ok(Json(response))
 }
 
 /// `PUT /api/v1/certificates/{cert_id}`
+///
+/// Works on an unbound row too: a certificate uploaded before it is bound still
+/// has to be editable (a wrong domain, a rotated PEM) without inventing a site
+/// for it. Both cases share [`apply_certificate_update`]; only the ACME wildcard
+/// guard and the warning computation need a site and are skipped without one.
 async fn update_global_certificate(
     State(state): State<AppState>,
     current: AuthUser,
@@ -1538,25 +1936,47 @@ async fn update_global_certificate(
 ) -> Result<Json<CertificateResponse>, ApiError> {
     let target = parse_uuid(&cert_id, "certificate id")?;
     let row = find_certificate_by_id(&state, target).await?;
-    update_certificate(
-        State(state),
-        current,
-        Path((
-            row.site_id
-                .ok_or_else(|| {
-                    ApiError::BadRequest(
-                        "certificate is not bound to any site".to_string(),
-                    )
-                })?
-                .to_string(),
-            cert_id,
-        )),
-        payload,
+    let site = match row.site_id {
+        Some(site_id) => {
+            Some(load_site_write(&state.db, site_id, &current).await?)
+        },
+        None => {
+            current.require_admin().map_err(ApiError::from)?;
+            None
+        },
+    };
+
+    let updated =
+        apply_certificate_update(&state, site.as_ref(), row, payload.0).await?;
+    tracing::info!(cert_id = %target, "certificate updated");
+    // The new material has to reach every site that serves it, owner or not.
+    notify_certificate_users(
+        &state,
+        target,
+        site.as_ref().map(|site| site.id),
+        Some(&current.email),
     )
-    .await
+    .await;
+
+    let warnings = match site.as_ref() {
+        Some(site) => certificate_warnings(site.id, site, &updated.domain),
+        // Coverage is measured against a site's hostnames; an unbound
+        // certificate has none to be measured against.
+        None => Vec::new(),
+    };
+    let bound = bound_sites_index(&state, std::iter::once(target)).await;
+    let mut response = CertificateResponse::from(updated);
+    response.warnings = Some(warnings);
+    attach_bindings(&mut response, &bound);
+    Ok(Json(response))
 }
 
 /// `DELETE /api/v1/certificates/{cert_id}`
+///
+/// Refused with `409` while any `site_certificate_links` row still grants the
+/// certificate to a site: that site's data-plane configuration carries the PEM,
+/// so deleting it would take its TLS down. An unbound certificate (no links, no
+/// owner) deletes straight away.
 async fn delete_global_certificate(
     State(state): State<AppState>,
     current: AuthUser,
@@ -1564,21 +1984,10 @@ async fn delete_global_certificate(
 ) -> Result<Response, ApiError> {
     let target = parse_uuid(&cert_id, "certificate id")?;
     let row = find_certificate_by_id(&state, target).await?;
-    delete_certificate(
-        State(state),
-        current,
-        Path((
-            row.site_id
-                .ok_or_else(|| {
-                    ApiError::BadRequest(
-                        "certificate is not bound to any site".to_string(),
-                    )
-                })?
-                .to_string(),
-            cert_id,
-        )),
-    )
-    .await
+    authorize_certificate(&state, &current, row.site_id, true).await?;
+
+    delete_certificate_row(&state, &current, row.site_id, target).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 /// `POST /api/v1/certificates/{cert_id}/renew`
@@ -1589,21 +1998,173 @@ async fn renew_global_certificate(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let target = parse_uuid(&cert_id, "certificate id")?;
     let row = find_certificate_by_id(&state, target).await?;
-    renew_certificate(
-        State(state),
-        current,
-        Path((
-            row.site_id
-                .ok_or_else(|| {
-                    ApiError::BadRequest(
-                        "certificate is not bound to any site".to_string(),
-                    )
-                })?
+    // ACME issuance and renewal run on the edge, driven by a site's config, so a
+    // certificate no site carries has nothing to renew against. Saying so beats
+    // arming an order that can never be picked up.
+    let Some(owner) = row.site_id else {
+        return Err(ApiError::BadRequest(
+            "certificate is not bound to any site; bind it before triggering an ACME renewal"
                 .to_string(),
-            cert_id,
-        )),
+        ));
+    };
+    renew_certificate(State(state), current, Path((owner.to_string(), cert_id)))
+        .await
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BindCertificateRequest {
+    pub site_id: Uuid,
+}
+
+/// `POST /api/v1/certificates/{cert_id}/bindings`
+///
+/// Grants a site the right to serve this certificate — one `site_certificate_links`
+/// row — which is what puts the PEM into that site's data-plane configuration.
+///
+/// Two checks run before the grant is written:
+///
+/// - the certificate has to **cover** the site's hostnames. Binding one that
+///   cannot validate them would leave the site serving a TLS error it has no way
+///   to notice; the uncovered hostnames are listed in the `400`. Extra hostnames
+///   on the certificate are *not* an error — that is the same advisory warning
+///   the upload path reports — so a certificate with SANs for several sites binds
+///   to each of them.
+/// - a certificate that already has an owner is another site's row, so the caller
+///   must be able to read that site too, exactly like the site-scoped link
+///   endpoint.
+///
+/// Idempotent: binding twice returns the same `200` instead of a conflict, so a
+/// retried request is not an error. (The site-scoped
+/// `POST /sites/{id}/certificate-links` keeps reporting the duplicate; it is the
+/// site's own view and a re-link there means the operator expected a change.)
+async fn bind_certificate(
+    State(state): State<AppState>,
+    current: AuthUser,
+    Path(cert_id): Path<String>,
+    Json(payload): Json<BindCertificateRequest>,
+) -> Result<Json<CertificateResponse>, ApiError> {
+    let target = parse_uuid(&cert_id, "certificate id")?;
+    let certificate = find_certificate_by_id(&state, target).await?;
+    let site = load_site_write(&state.db, payload.site_id, &current).await?;
+
+    if let Some(owner) = certificate.site_id {
+        if owner == site.id {
+            return Err(ApiError::Conflict(
+                "certificate already belongs to this site".to_string(),
+            ));
+        }
+        load_site_read(&state.db, owner, &current).await?;
+    }
+
+    let uncovered = uncovered_site_hostnames(
+        &certificate.domain,
+        &site.domain,
+        &site.alternate_domains,
+    );
+    if !uncovered.is_empty() {
+        return Err(ApiError::BadRequest(format!(
+            "certificate {} (issued for {}) does not cover site hostname(s) {}",
+            certificate.id,
+            certificate.domain,
+            uncovered.join(", ")
+        )));
+    }
+
+    let exists = certificate_links::Entity::find()
+        .filter(certificate_links::Column::SiteId.eq(site.id))
+        .filter(certificate_links::Column::CertificateId.eq(certificate.id))
+        .one(&state.db)
+        .await?
+        .is_some();
+    if !exists {
+        certificate_links::ActiveModel {
+            site_id: Set(site.id),
+            certificate_id: Set(certificate.id),
+            linked_at: Set(Utc::now()),
+        }
+        .insert(&state.db)
+        .await?;
+        tracing::info!(
+            site_id = %site.id,
+            cert_id = %certificate.id,
+            domain = %certificate.domain,
+            "certificate bound to site"
+        );
+    }
+
+    // The site's bundle now carries the PEM, so its agents have to re-pull.
+    // `notify_config_changed` records a new configuration version only when the
+    // fingerprint actually moved, which is why this also runs on the idempotent
+    // path: a link written before this endpoint existed still has to reach the
+    // edge on the first call.
+    touch_site(&state, site.id).await?;
+    notify_config_changed(&state, site.id, Some(&current.email)).await;
+
+    let served = site_hostname_index(
+        &state,
+        std::iter::once(certificate.site_id).flatten(),
     )
-    .await
+    .await;
+    let bound = bound_sites_index(&state, std::iter::once(target)).await;
+    let mut response = CertificateResponse::from(certificate);
+    response.warnings = Some(certificate_warnings_for(
+        &served,
+        response.site_id.unwrap_or_default(),
+        &response.domain,
+    ));
+    attach_bindings(&mut response, &bound);
+    Ok(Json(response))
+}
+
+/// `DELETE /api/v1/certificates/{cert_id}/bindings/{site_id}`
+///
+/// Removes the grant; the certificate itself stays. The site falls back to
+/// whatever its own `site_ssl` row provides — nothing, when it was relying on the
+/// link — so the site's configuration is pushed straight away.
+///
+/// Refused while the site still *selects* this certificate in `site_ssl`: the
+/// selection is what serves it, and removing the grant underneath would drop the
+/// PEM out of the configuration silently. Clear or replace the selection first.
+async fn unbind_certificate(
+    State(state): State<AppState>,
+    current: AuthUser,
+    Path((cert_id, site_id)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    let target = parse_uuid(&cert_id, "certificate id")?;
+    let id = parse_uuid(&site_id, "site id")?;
+    let certificate = find_certificate_by_id(&state, target).await?;
+    let site = load_site_write(&state.db, id, &current).await?;
+    if let Some(owner) = certificate.site_id {
+        load_site_read(&state.db, owner, &current).await?;
+    }
+
+    let posture = site_ssl::Entity::find()
+        .filter(site_ssl::Column::SiteId.eq(site.id))
+        .one(&state.db)
+        .await?;
+    if posture.and_then(|row| row.certificate_id) == Some(target) {
+        return Err(ApiError::Conflict(
+            "certificate is the site's current TLS certificate; clear or replace it first"
+                .to_string(),
+        ));
+    }
+
+    let result = certificate_links::Entity::delete_many()
+        .filter(certificate_links::Column::SiteId.eq(site.id))
+        .filter(certificate_links::Column::CertificateId.eq(target))
+        .exec(&state.db)
+        .await?;
+    if result.rows_affected == 0 {
+        return Err(ApiError::NotFound(format!(
+            "certificate {target} is not bound to site {}",
+            site.id
+        )));
+    }
+
+    tracing::info!(site_id = %site.id, cert_id = %target, "certificate unbound from site");
+    touch_site(&state, site.id).await?;
+    notify_config_changed(&state, site.id, Some(&current.email)).await;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// `GET /api/v1/certificates/summary`
@@ -1686,7 +2247,7 @@ pub struct CertificateEventResponse {
 async fn write_cert_event(
     db: &sea_orm::DatabaseConnection,
     certificate_id: Uuid,
-    site_id: Uuid,
+    site_id: Option<Uuid>,
     event_type: &str,
     message: String,
     details: Option<serde_json::Value>,
@@ -1694,7 +2255,7 @@ async fn write_cert_event(
     let event = certificate_events::ActiveModel {
         id: Set(Uuid::new_v4()),
         certificate_id: Set(Some(certificate_id)),
-        site_id: Set(Some(site_id)),
+        site_id: Set(site_id),
         event_type: Set(event_type.to_string()),
         message: Set(message),
         details: Set(details),
@@ -1724,16 +2285,9 @@ async fn list_certificate_events(
 ) -> Result<Json<Page<CertificateEventResponse>>, ApiError> {
     let target = parse_uuid(&cert_id, "certificate id")?;
     let row = find_certificate_by_id(&state, target).await?;
-    load_site_read(
-        &state.db,
-        row.site_id.ok_or_else(|| {
-            ApiError::BadRequest(
-                "certificate is not bound to any site".to_string(),
-            )
-        })?,
-        &current,
-    )
-    .await?;
+    // An unbound certificate's history is readable by an administrator only,
+    // the same boundary `show_global_certificate` draws.
+    authorize_certificate(&state, &current, row.site_id, false).await?;
 
     let pagination = query.pagination.normalise();
     let mut condition = Condition::all()
@@ -2056,6 +2610,160 @@ mod tests {
         ] {
             let err = validate_cert_domain_list(raw).unwrap_err();
             assert_eq!(err.status(), StatusCode::BAD_REQUEST, "{raw:?}");
+        }
+    }
+
+    /* ── Binding: does the certificate cover the site? ─────────────── */
+
+    fn uncovered_hosts(
+        cert: &str,
+        site: &str,
+        alternate: &[&str],
+    ) -> Vec<String> {
+        let alternate: Vec<String> =
+            alternate.iter().map(|d| (*d).to_string()).collect();
+        uncovered_site_hostnames(cert, site, &alternate)
+    }
+
+    /// The gate on `POST /certificates/{id}/bindings`: every hostname the site
+    /// answers for has to be covered, so the handshake cannot fail on a name the
+    /// operator forgot.
+    #[test]
+    fn a_certificate_covering_the_site_hostnames_binds() {
+        assert!(
+            uncovered_hosts("a.example.com", "a.example.com", &[]).is_empty()
+        );
+        // Alternates are part of the site's hostname set.
+        assert!(uncovered_hosts(
+            "a.example.com,www.example.com",
+            "a.example.com",
+            &["www.example.com"]
+        )
+        .is_empty());
+        // A certificate wildcard covers one label under it (TLS standard).
+        assert!(
+            uncovered_hosts("*.example.com", "a.example.com", &[]).is_empty()
+        );
+        // A site wildcard serves any depth, mirroring the data plane.
+        assert!(
+            uncovered_hosts("a.b.example.com", "*.example.com", &[]).is_empty()
+        );
+    }
+
+    /// ... and a certificate issued for somewhere else is refused, naming the
+    /// hostnames it cannot validate. The primary hostname comes first, which is
+    /// the one the operator has to fix.
+    #[test]
+    fn an_uncovered_site_hostname_is_reported_for_a_bind() {
+        assert_eq!(
+            uncovered_hosts("other.com", "a.example.com", &[]),
+            vec!["a.example.com".to_string()]
+        );
+        assert_eq!(
+            uncovered_hosts(
+                "a.example.com",
+                "a.example.com",
+                &["b.example.com", "c.example.com"]
+            ),
+            vec!["b.example.com".to_string(), "c.example.com".to_string()]
+        );
+    }
+
+    /// The direction that would have been wrong: a certificate naming *extra*
+    /// hostnames is only an advisory warning on the upload path, never a bind
+    /// failure. One PEM with SANs for three sites has to bind to each of them.
+    #[test]
+    fn extra_certificate_hostnames_do_not_block_a_bind() {
+        assert!(uncovered_hosts(
+            "a.example.com,b.example.com",
+            "a.example.com",
+            &[]
+        )
+        .is_empty());
+        // ... while the same certificate is still "uncovered" in the warning
+        // direction, which is why the two functions are not interchangeable.
+        assert_eq!(
+            warnings_for("a.example.com,b.example.com", "a.example.com", &[]),
+            vec!["b.example.com".to_string()]
+        );
+    }
+
+    /// Uploaded certificates that nothing serves yet have no edge report to
+    /// correct their status, so the write records what the dates say.
+    #[test]
+    fn an_unbound_upload_gets_its_status_from_its_validity() {
+        let now = Utc::now();
+        assert_eq!(
+            uploaded_cert_status(Some(now + chrono::Duration::days(1)), now),
+            cert_status::ACTIVE
+        );
+        // No expiry recorded: nothing says it lapsed.
+        assert_eq!(uploaded_cert_status(None, now), cert_status::ACTIVE);
+        // Boundary: expiring exactly now is expired.
+        assert_eq!(uploaded_cert_status(Some(now), now), cert_status::EXPIRED);
+        assert_eq!(
+            uploaded_cert_status(Some(now - chrono::Duration::days(1)), now),
+            cert_status::EXPIRED
+        );
+    }
+
+    /// `bound_sites` / `bound_count` are filled from one index, and every
+    /// response starts empty rather than absent.
+    #[test]
+    fn bindings_are_copied_onto_the_response() {
+        let bound_id = Uuid::new_v4();
+        let mut bound = BoundSites::new();
+        bound.insert(
+            bound_id,
+            vec![
+                BoundSiteRef {
+                    id: Uuid::new_v4(),
+                    domain: "a.example.com".to_string(),
+                },
+                BoundSiteRef {
+                    id: Uuid::new_v4(),
+                    domain: "b.example.com".to_string(),
+                },
+            ],
+        );
+
+        let mut response = CertificateResponse::from(cert_model(bound_id));
+        assert_eq!(response.bound_count, 0);
+        assert!(response.bound_sites.is_empty());
+
+        attach_bindings(&mut response, &bound);
+        assert_eq!(response.bound_count, 2);
+        assert_eq!(response.bound_sites[1].domain, "b.example.com");
+
+        // An unbound certificate keeps the empty pair, so a client can tell
+        // "checked, nothing bound" from a missing field.
+        let mut unbound = CertificateResponse::from(cert_model(Uuid::new_v4()));
+        attach_bindings(&mut unbound, &bound);
+        assert_eq!(unbound.bound_count, 0);
+        assert!(unbound.bound_sites.is_empty());
+    }
+
+    /// A certificate model that is unbound and carries no material beyond what
+    /// these assertions read.
+    fn cert_model(id: Uuid) -> site_certificates::Model {
+        site_certificates::Model {
+            id,
+            site_id: None,
+            domain: "a.example.com".to_string(),
+            cert_pem: None,
+            key_pem: None,
+            issuer: None,
+            not_before: None,
+            expires_at: None,
+            auto_renew: true,
+            acme_email: None,
+            acme_challenge_type: acme_challenge::HTTP_01.to_string(),
+            acme_dns_provider: None,
+            acme_dns_config: None,
+            status: cert_status::ACTIVE.to_string(),
+            failure_reason: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
         }
     }
 

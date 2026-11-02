@@ -3740,6 +3740,57 @@ mod tests {
         assert!(names.contains(&"site1_loc".to_string()));
     }
 
+    /// The consumer half of "a shared certificate reaches the edge": the control
+    /// plane injects the linked PEM into `SslConfig`, and this translation is
+    /// what turns it into the certificate the listener actually serves.
+    ///
+    /// The site's **own** hostname set is what the certificate is presented for
+    /// — a shared PEM is not served under the owner's names — and no ACME task
+    /// is attached, because a certificate the site does not own is not the
+    /// site's to renew.
+    #[test]
+    fn an_injected_certificate_pem_is_served_for_the_site_hostnames() {
+        let mut site = site_rules("site1", "a.example.com");
+        site.alternate_domains = vec!["b.example.com".to_string()];
+        let mut default_pool = pool("pool1", vec![peer("10.0.0.1:8080")]);
+        default_pool.is_default = true;
+        site.upstreams = vec![default_pool];
+        // The shape a linked certificate takes on the wire: a PEM pair and no
+        // ACME order of the site's own.
+        let mut ssl = acme_ssl();
+        ssl.cert_pem = "-----BEGIN CERTIFICATE-----\nLINKED\n".to_string();
+        ssl.key_pem = "-----BEGIN PRIVATE KEY-----\nLINKED\n".to_string();
+        ssl.acme_enabled = false;
+        site.ssl_config = Some(ssl);
+
+        let config = cached_rules_to_pingap_config(
+            &one_site_cache(site),
+            Path::new("/tmp/pingwaf-test-cache"),
+        )
+        .expect("config should build");
+
+        let cert = config
+            .certificates
+            .get("site1_cert")
+            .expect("the injected PEM is served");
+        assert_eq!(
+            cert.domains.as_deref(),
+            Some("a.example.com,b.example.com")
+        );
+        assert_eq!(
+            cert.tls_cert.as_deref(),
+            Some("-----BEGIN CERTIFICATE-----\nLINKED\n")
+        );
+        assert_eq!(cert.acme, None);
+        // ... and the TLS listener exists to serve it.
+        assert!(
+            config
+                .servers
+                .get("pingwaf_tls")
+                .is_some_and(|server| server.global_certificates == Some(true))
+        );
+    }
+
     #[test]
     fn mtls_sites_contribute_their_ca_to_the_tls_listener() {
         let mut site = site_rules("site1", "a.example.com");
