@@ -533,12 +533,23 @@ cannot build would otherwise take down the whole agent configuration for the
 site. The policy becomes a per-site `sub_filter` plugin instance in the
 generated agent configuration.
 
-Known limitations: the plugin understands `gzip` / `x-gzip` and `deflate`
-responses and rewrites their decompressed bodies, then recompresses and keeps
-`Content-Encoding` — the body is re-chunked and a strong `ETag` is weakened even
-when nothing matched. Responses with `br`, `zstd` or multi-value encodings (e.g.
-`gzip, br`) are passed through untouched. Bodies **larger than 8 MiB after
-decompression** are passed through as the original compressed bytes.
+Compressed encodings: the plugin understands `gzip` / `x-gzip`, `deflate`
+(zlib wrapper, with raw deflate tried as a fallback), **`br`** (brotli) and
+**`zstd`** — the body is decompressed, rewritten and recompressed with the
+same algorithm, keeping `Content-Encoding`. The limits are the same for every
+supported encoding:
+
+- decompressed bodies are capped at **8 MiB**; anything larger is passed
+  through as the original compressed bytes;
+- decompression failure, recompression failure or **no match at all** output
+  the original compressed bytes — with no match the output is byte-identical
+  to the source, so the `ETag` and integrity digests stay valid;
+- the header changes apply whenever the plugin takes the response over (even
+  when the body falls back to the original bytes): `Content-Length` removed,
+  the response switched to chunked, a strong `ETag` weakened to `W/`,
+  `Content-MD5` and `Digest` removed, `Vary: Accept-Encoding` added;
+- multi-value encodings (e.g. `gzip, br`) are still passed through untouched,
+  no replacement.
 
 
 ### DELETE /sites/{site_id}
@@ -742,7 +753,7 @@ Create an origin pool.
 
 `lb_algorithm` accepts `round_robin`, `random`, `least_connections` or `hash:<type>[:<key>]` with type in `ip`, `url`, `path` (no key) or `header`, `cookie`, `query` (key required). A non-empty `sni` enables TLS to the origin.
 
-`sni` takes a concrete hostname or the marker **`$host`**, which makes the SNI follow each request: the proxy sends the client's `Host` header — port stripped, lowercased; a route's [upstream_host override](#upstream-host-override-upstream_host) override wins when set — as the TLS SNI, so one pool can front an origin that serves several virtual hosts (best when the site's domains and the `Host` headers actually agree). A `Host` that cannot be a TLS name — an IP literal, missing or malformed — resolves to **no SNI**, so origin certificate validation rejects the connection; a `Host` that is not one of the site's domains is still used but logged. `sni: ""` stays a plaintext pool with no SNI semantics at all.
+`sni` takes a concrete hostname or the marker **`$host`**, which makes the SNI follow each request: the proxy sends the client's `Host` header — port stripped, lowercased; a route's [upstream_host override](#upstream-host-override-upstream_host) override wins when set — as the TLS SNI, so one pool can front an origin that serves several virtual hosts (best when the site's domains and the `Host` headers actually agree). A `Host` that cannot be a TLS name — an IP literal, missing or malformed — resolves to **no SNI**, so origin certificate validation rejects the connection. The matched location also carries the site's host set (`site_hosts`: the site's `domain` plus its `alternate_domains`): a `Host` outside that set is still used, but the data plane logs a **warning** — advisory only, it never blocks the request; when the set is empty the membership check is skipped entirely, keeping the old no-warning behaviour. `sni: ""` stays a plaintext pool with no SNI semantics at all. **Behaviour change for transparent upstreams:** a transparent pool (`discovery = "transparent"` — no static nodes, it peers at the request's own target) now resolves its SNI through the same code path as static pools, whereas it previously forwarded the raw `Host` as SNI, IP literal included and case preserved. With this change an IP-literal `Host` resolves to **no SNI** and a hostname is lowercased before being sent, so a client that reaches an origin **by IP** through a TLS transparent pool whose origin selects its certificate by SNI (no default certificate) used to complete the handshake and now fails it — reach such origins by hostname.
 
 `$host` requires origin certificate verification to be enabled. Because the client thereby chooses the name the origin certificate must cover, that validation is the only backstop against an intercepted origin: a pool that pins `verify_cert: false` together with `sni: "$host"` is refused with `400 "$host requires origin certificate verification"` (leaving `verify_cert` unset is accepted and follows the cascade below, so switching verification off at site or global level removes the same guarantee — keep it on where `$host` pools run).
 
@@ -1007,14 +1018,24 @@ someone else's certificate).
 { "certificate_id": "uuid" }
 ```
 
-**Response (201):** the certificate, with `relation: "linked"`.
+**Response (201):** the certificate with `relation: "linked"`, fully decorated
+(`bound_sites` / `bound_count` / `warnings`, semantics under
+[Unbound certificates](#unbound-certificates)) — the same shape every other
+certificate response uses — and the site's agent configuration is **pushed
+immediately**: the shared PEM has to reach that site's data plane.
+
+**Idempotent:** calling again when the certificate is already linked to this
+site does not conflict — it returns the same **200** as
+[`POST /certificates/{id}/bindings`](#post-certificatescert_idbindings), with
+the same decorated certificate body. The target state is already reached, so a
+retry is a success, not an error.
 
 **Errors:**
 
 | Status | When |
 |--------|------|
 | `404` | The certificate does not exist (`certificate {id} not found`), or the caller cannot read the owning site. |
-| `409` | The certificate is already owned by this site (`certificate already belongs to this site`), or already linked (`certificate already linked to this site`). |
+| `409` | The certificate is already owned by this site (`certificate already belongs to this site`) — ownership is a real conflict: the site does not need, and cannot be granted, an authorisation to serve its own certificate. |
 
 ### DELETE /sites/{site_id}/certificate-links/{cert_id}
 
@@ -4406,6 +4427,7 @@ is the fleet" in one call.
       "name": "edge-01",
       "status": "online",
       "cpu_percent": 23.4,
+      "cpu_source": "probe",
       "memory_bytes": 1073741824,
       "connections": 128,
       "rps": null,
@@ -4458,7 +4480,8 @@ table does not reshuffle between polls:
 | `id` | Agent id |
 | `name` | Display name — the inventory keeps one identity per node, its `hostname` |
 | `status` | `online` / `offline` / `degraded`, as last reported |
-| `cpu_percent` | CPU load of the node, percent; `null` = no sample retained yet |
+| `cpu_percent` | CPU load of the node, percent; `null` = no reading from either source |
+| `cpu_source` | Where `cpu_percent` came from: `probe` = the agent host probe's ~5 s delta sample, comparable across agent versions (values can move sharply between polls); `heartbeat` = no probe sample available, so the live heartbeat's value is used — for agents that have not reported a probe sample yet that figure can be an **average since boot**, a different measure; `none` = neither source carried a reading |
 | `memory_bytes` | Memory in use on the node, bytes; `null` = no sample retained yet |
 | `connections` | Connections currently handled by the edge process; `null` = never reported (e.g. metric shipping disabled) |
 | `rps` | Requests per second handled by the edge; **`null` for every node today** — the heartbeat carries the counter but the control plane retains no per-agent copy, so the field has no data source. It stays in the contract because it is the figure operators ask for first |
@@ -4498,8 +4521,11 @@ makes a rolling restart readable. The table keeps its newest 100 rows overall.
 Known caveats, unchanged behaviour the numbers must be read with:
 
 - The heartbeat's `cpu_usage_percent` is the **average since boot**; the
-  `cpu_percent` here comes from the agent's newest host probe sample (a ~5 s
-  interval measurement), so it can move sharply between polls.
+  `cpu_percent` here prefers the agent's newest host probe sample (a ~5 s
+  interval measurement), so it can move sharply between polls. The
+  `cpu_source` field names the source the figure came from — `probe`,
+  `heartbeat` or `none` — so the two measures no longer have to be told
+  apart by guesswork.
 - `agents.memory_bytes` has a semantic drift: **before the agent's first
   heartbeat** it carries the host's *total* memory (the registration
   inventory value), afterwards the *used* memory from the probe samples.

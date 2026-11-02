@@ -553,6 +553,8 @@ sequence):
    and fails with `400` listing the uncovered ones. Binding several sites at
    once submits them one by one: successes are kept, failures are listed as
    `site — reason`, and the dialog only closes when everything succeeded.
+   Rebinding a site that is already bound is idempotent — the second call
+   returns the same `200` decorated certificate instead of a conflict.
 3. **Unbind** — refused with `409` while the certificate is that site's
    current TLS selection. Go to the site's SSL page first, switch to another
    certificate or clear the selection, then unbind. Unbinding a site that
@@ -603,8 +605,11 @@ appear in the same picker marked as shared.
 
 - **Linking** lists the certificates owned by sites you can read that this
   site does not own or use yet. Linking fails with
-  `certificate already belongs to this site` if the site already owns it, or
-  `certificate already linked to this site` if the link exists.
+  `certificate already belongs to this site` if the site already owns it.
+  Linking a certificate that is already linked is idempotent: the call
+  returns `200` with the fully decorated certificate (the first creation
+  answers `201`) instead of the old `409` — only a site that *owns* the
+  certificate is still refused with `409`.
 - **Selecting** a linked certificate works exactly like an owned one — the
   SSL settings picker shows both, with the shared ones labelled.
 - **Unlinking** is refused while the certificate is the site's current TLS
@@ -708,13 +713,23 @@ or replacement may **not contain a single quote**, and neither side may be
 empty. Clearing the policy is done with `null` — or an empty `rules` list,
 which counts as "no policy".
 
-**Compressed responses.** The replacement understands `gzip` / `x-gzip` and
-`deflate` responses: the body is decompressed, rewritten and recompressed with
-the same algorithm, so `Content-Encoding` is preserved. Responses with `br`,
-`zstd` or multi-value encodings (e.g. `gzip, br`) are passed through untouched.
-Note that even when no rule matches, a compressed response the plugin handles
-is re-chunked and its strong `ETag` weakened. Bodies **larger than 8 MiB after
-decompression** are passed through as the original compressed bytes.
+**Compressed responses.** The replacement understands `gzip` / `x-gzip`,
+`deflate` (zlib wrapper, with raw deflate tried as a fallback), **`br`**
+(brotli) and **`zstd`**: the body is decompressed, rewritten and recompressed
+with the same algorithm, so `Content-Encoding` is preserved. If your origin
+serves brotli- or zstd-compressed responses — previously passed through
+untouched with no replacement — they are rewritten like the rest now. The
+limits are the same for every supported encoding: decompressed bodies are
+capped at **8 MiB** (anything larger is passed through as the original
+compressed bytes), and decompression failure, recompression failure or **no
+match at all** output the original compressed bytes — with no match the output
+is byte-identical to the source, so the `ETag` and integrity digests stay
+valid. When the plugin does take a response over, the usual header changes
+apply even if the body fell back to the original bytes: `Content-Length`
+removed, the response switched to chunked, strong `ETag` weakened to `W/`,
+`Content-MD5` and `Digest` removed, `Vary: Accept-Encoding` added.
+Multi-value encodings (e.g. `gzip, br`) are still passed through untouched,
+no replacement.
 
 ## Custom Error Pages
 
@@ -924,6 +939,21 @@ The Agents page shows:
 - System info (hostname, OS, CPU, memory)
 - Agent version
 - Pending commands
+
+**Where the CPU number comes from.** The fleet view
+(`GET /api/v1/system/nodes`) labels each agent's CPU figure with a
+`cpu_source` field, and the three values read differently:
+
+- `probe` — a live reading from the agent's host probe (~5 s delta sample).
+  Comparable across agent versions; values can move sharply between polls.
+- `heartbeat` — the node has **not reported a probe sample yet**, so the
+  figure comes from the heartbeat. For an agent that has not been upgraded to
+  report probes, that is an **average since boot**, not the current load.
+- `none` — neither source produced a reading (`cpu_percent` is `null`).
+
+When graphing or alerting on node CPU, group by `cpu_source`: `probe` and
+`heartbeat` figures are different measures and must not be mixed in one
+series.
 
 ### Agent Commands
 

@@ -55,14 +55,14 @@ plugins = ["rewriteLinks"]
 
 ### 压缩响应
 
-插件可识别 `Content-Encoding: gzip`（含 `x-gzip`）与 `Content-Encoding: deflate`（zlib 封装；解不开时回退尝试 raw deflate）。对这类响应，插件先解压正文，在明文上运行过滤器，再用相同算法重新压缩后输出：
+插件可识别 `Content-Encoding: gzip`（含 `x-gzip`）、`Content-Encoding: deflate`（zlib 封装；解不开时回退尝试 raw deflate）、`Content-Encoding: br`（brotli）与 `Content-Encoding: zstd`。对这类响应，插件先解压正文，在明文上运行过滤器，再用相同算法重新压缩后输出：
 
 - 保留 `Content-Encoding`（以到达时的算法重新压缩），删除 `Content-Length`，响应改为 `Transfer-Encoding: chunked`。
 - 强 `ETag` 弱化为 `W/…`（它描述的是上游原始正文）；同理删除 `Content-MD5` 与 `Digest`；`Vary` 追加 `Accept-Encoding`（重压缩后的正文与上游发给其他 `Accept-Encoding` 的内容不同）。
-- **上限：解压后明文 8 MiB**（几 MiB 的 gzip 可膨胀到 GB 级，仅限制原始字节挡不住压缩炸弹）。超限或解压失败时，原样透传压缩字节。
-- **无规则命中：** 逐字节输出上游原始压缩字节——字节级一致，不做重压缩。
+- **上限：解压后明文 8 MiB**（几 MiB 的 gzip 可膨胀到 GB 级，仅限制原始字节挡不住压缩炸弹）。解压采用有界读取——解压器在膨胀过程中即按上限截停——超限的流会中途放弃，而不是先整体膨胀进内存再检查。超限、解压失败或重压缩失败时，原样透传压缩字节并保留 `Content-Encoding`。
+- **无规则命中：** 逐字节输出上游原始压缩字节——正文字节级一致，不做重压缩。但该响应已被插件接管，头部仍会按上述规范化处理（chunked、弱化 `ETag`、`Vary: Accept-Encoding` 等）。
 
-插件无法往返处理的编码——`br`、`zstd`、多值（如 `gzip, br`）或其他未知值——响应完全不改动（正文与响应头均原样透传），并记录一条 debug 日志。
+插件无法往返处理的编码——多值（如 `gzip, br`）或其他未知值——响应完全不改动（正文与响应头均原样透传），并记录一条 debug 日志。
 
 ### 代理层解压在先
 

@@ -8,6 +8,104 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [Unreleased]
+
+> **Not released this round** — these entries describe uncommitted workspace
+> changes and are listed for review only. No version is cut and no tag is
+> moved; the entries will be folded into the release notes of whichever
+> version ships this work.
+
+### Added
+
+- **`br` and `zstd` response-body rewriting.** The site `response_replace`
+  plugin (`sub_filter`) round-tripped only `gzip`/`x-gzip` and `deflate`
+  bodies, so an origin that ships brotli or zstd got its responses passed
+  through untouched and no replacement ever applied — operators saw the rule
+  configured, saved, and silently dead on modern stacks that negotiate
+  `br`. The plugin now decompresses `br` (brotli) and `zstd` bodies, applies
+  the rules, and recompresses with the same algorithm, keeping
+  `Content-Encoding`. The semantics are the ones the gzip/deflate paths
+  already follow: 8 MiB decompressed-plaintext cap (compression bombs pass
+  through as the original compressed bytes); decompression failure,
+  recompression failure and **no match** all emit the original compressed
+  bytes — a no-match response goes out byte-identical to the origin's, so
+  ETags and digests stay valid; a rewritten response switches to chunked
+  with `Content-Length` dropped, a strong `ETag` weakened to `W/`,
+  `Content-MD5`/`Digest` removed and `Vary: Accept-Encoding` set. Multi-value
+  encodings (`gzip, br`) are still passed through untouched.
+
+- **`cpu_source` on `GET /system/nodes`.** Each `agents[]` row now names where
+  its `cpu_percent` came from: `probe` (a 5-second interval delta from the
+  agent's host probe — the comparable measure), `heartbeat` (fallback when no
+  probe sample is retained; on agents older than 0.28.3 that value is an
+  average since boot, a different measure), or `none` (no reading from either
+  source, with `cpu_percent: null`). Until now the field silently mixed the
+  two measures, so a fleet graph could put a since-boot average next to a
+  5-second delta and read the difference as load.
+
+- **Data-plane warning for a `$host` SNI that is not one of the site's
+  domains.** Location configuration now carries `site_hosts` — the site's
+  `domain` plus `alternate_domains`, lowercased and deduplicated, generated
+  by `src/pingwaf.rs` — and a `$host` pool whose resolved `Host` is not in
+  that set logs a `warn` while still forwarding the request. The warning is
+  advisory: with `sni: "$host"` the client chooses the SNI, so a mismatched
+  `Host` is legitimate cross-edge serving as well as a misroute, and
+  blocking it could take working traffic down. An empty `site_hosts` set
+  keeps the old, silent behaviour; an IP-literal `Host` still falls back to
+  no SNI regardless of the set.
+
+### Changed
+
+- **Re-binding a shared certificate is idempotent.** Repeating
+  `POST /sites/{site_id}/certificate-links` for a certificate that was
+  already linked answered `409 certificate already linked to this site` — a
+  timeout retry, or two operators clicking the same link, surfaced a
+  conflict for a state that was already the goal. The endpoint now answers
+  the same `200` as `POST /certificates/{cert_id}/bindings`, with the same
+  decorated certificate body (`bound_sites`/`bound_count`/`warnings`/
+  `relation`). Ownership is still a `409`
+  (`certificate already belongs to this site`): that is a real conflict, a
+  site cannot hold a serving grant on the certificate it itself owns.
+  Callers that treated the old `409` as "already done" keep working; callers
+  that surfaced it as an error stop doing so.
+
+- **Transparent upstream SNI now resolves through the same code path as
+  static pools (behaviour change — ops confirmation required).** With the
+  `site_hosts` work above, a transparent pool (`discovery = "transparent"`)
+  stopped forwarding the raw `Host` as its TLS SNI — IP literal included,
+  case preserved — and goes through the same `resolve_sni` path instead: an
+  IP-literal `Host` resolves to **no SNI**, and a hostname is lowercased
+  before it is sent. Ops impact: a client that reaches an origin **by IP**
+  through a TLS transparent pool whose origin selects its certificate by
+  SNI and has no default certificate used to complete the handshake and now
+  fails it. Reach such origins by hostname, or give the origin a default
+  certificate, before rolling this out.
+
+### Fixed
+
+- **Creating a link through the legacy site-scoped endpoint now pushes
+  configuration and returns a fully decorated certificate.** The `201` from
+  `POST /sites/{site_id}/certificate-links` neither triggered the
+  `touch_site` + config-push side effect nor ran the certificate
+  decoration, unlike the same grant created through
+  `POST /certificates/{cert_id}/bindings`: the shared PEM reached the edge
+  only at the next unrelated configuration change — a newly linked site
+  could keep answering without the certificate for one push cycle — and the
+  `201` body lacked `bound_sites`/`bound_count`/`warnings`, so scripts
+  reading the two endpoints' responses saw different shapes for the same
+  state. Both are aligned with the certificate-side endpoint: the `201` is
+  fully decorated and the site's agents re-pull immediately.
+
+- **The `$host` hostname-mismatch warning never fired.** The API reference
+  documented "a `Host` that is not one of the site's domains is still used
+  but logged", but no code compared the resolved `Host` against the site's
+  domains, so a mismatched SNI choice was forwarded with no trace in the
+  logs — a misrouted edge or an unexpected virtual host was invisible until
+  an origin-side access log told a different story. The `site_hosts`
+  plumbing above makes the documented log line real. The transparent-upstream
+  SNI unification that came with it is a behaviour change, not a fix — it is
+  recorded under **Changed** below.
+
 ## [PingWAF 0.32.10] — 2026-11-02
 
 ### Fixed
