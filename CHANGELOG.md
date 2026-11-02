@@ -8,7 +8,7 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
-## [Unreleased]
+## [PingWAF 0.32.7] — 2026-11-02
 
 ### Added
 
@@ -30,6 +30,10 @@ verbatim for reference and attribution, and is not maintained here.
 
 ### Fixed
 
+- **0.32.6 was tagged but never published.** Its CHANGELOG section was left
+  uncommitted, so the release workflow refused to create the release and the
+  image build was skipped. 0.32.7 ships the same code with the section
+  committed; the 0.32.6 tag remains as a no-op.
 - **The certificate's own site is no longer offered for unbinding.** In the
   bind dialog the owning site was rendered like any other bound row, with an
   unbind button that could only ever end in a `409` — the owner cannot be
