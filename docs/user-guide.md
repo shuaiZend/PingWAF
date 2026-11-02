@@ -501,6 +501,72 @@ deletes immediately. The site-scoped alternative stays available: link from
 the site's SSL settings picker (see
 [Sharing certificates between sites](#sharing-certificates-between-sites)).
 
+### Certificate lifecycle
+
+A certificate moves through four states, and each state decides what you may
+do with it:
+
+```
+              upload with site_id          upload without site_id
+                     │                            │
+                     ▼                            ▼
+            ┌─────────────────┐          ┌─────────────────┐
+            │  Owner (site)   │          │    Unbound      │
+            └─────────────────┘          └─────────────────┘
+                     │                            │
+        bind other   │ share                      │ bind the
+        sites        ▼                            │ first site
+            ┌─────────────────┐                    │
+            │     Shared      │ ───────────────────┘
+            └─────────────────┘
+                     │
+   a site (own or    │ the site's SSL page
+   linked) selects   ▼ selects it as TLS
+   it as TLS    ┌─────────────────┐
+                │    In use       │
+                └─────────────────┘
+```
+
+- **Unbound** — uploaded without a site (`site_id: null`, `bound_count: 0`).
+  Nothing serves it; ACME and `activate` are refused (`400`) because both are
+  per-site operations. Delete it any time (`204`) or bind a site to put it to
+  work.
+- **Owner** — the site the certificate was created under. The owner is why
+  binding the certificate *back* to that site is refused (`409`): it already
+  has it. The owner also drives renewals and ACME bookkeeping.
+- **Shared** — bound to other sites via certificate bindings
+  (`bound_count` counts these **shared sites only, not the owner**).
+- **In use** — at least one site has selected the certificate as its TLS
+  certificate. This can be the owner's own selection, so a certificate can be
+  in use without any shared binding.
+
+**Recommended order of operations** (the console guides you through the same
+sequence):
+
+1. **Upload** — with a site (`Sites → [site] → Certificates → Add`) or
+   without one (see [Upload without a site, bind later](#upload-without-a-site-bind-later)).
+2. **Bind** — from the certificate's bind dialog. Your own site shows an
+   **owner** badge: it cannot be selected and has no unbind button. Other
+   sites are either already bound (unbindable, with a confirmation reminding
+   you the site falls back to its own certificate or none) or available to
+   bind — the bind checks that the certificate covers the site's hostnames
+   and fails with `400` listing the uncovered ones. Binding several sites at
+   once submits them one by one: successes are kept, failures are listed as
+   `site — reason`, and the dialog only closes when everything succeeded.
+3. **Unbind** — refused with `409` while the certificate is that site's
+   current TLS selection. Go to the site's SSL page first, switch to another
+   certificate or clear the selection, then unbind. Unbinding a site that
+   was only serving the certificate through the link drops it back to its own
+   material — or to no HTTPS at all, which is why the confirmation exists.
+4. **Delete** — refused with `409` while any site still selects the
+   certificate **or** any binding still grants it. The delete dialog checks
+   the certificate's usage first: if any site is serving or linked to it, the
+   affected sites are listed and the button becomes **Go handle**, taking you
+   to the first blocking site's SSL page. If the usage check itself is
+   unavailable, deletion is conservatively refused rather than allowed
+   through. Once nothing selects it and nothing is bound, the delete goes
+   through immediately (`204`).
+
 ### SSL Settings
 
 ```

@@ -8,6 +8,64 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [Unreleased]
+
+### Added
+
+- **Certificate usage endpoint.** `GET /api/v1/certificates/{cert_id}/usage`
+  (administrators) answers, in one call, the three relations a certificate
+  stands in: `owner` (the owning site, `null` for an unbound upload),
+  `linked_sites` (the shared bindings, each with a `selected` flag saying
+  whether that site's current TLS choice is this certificate) and
+  `serving_sites` (the sites whose SSL settings select it — a list that can
+  include sites with no binding row, because a site can select its own
+  certificate). Both site lists are domain-sorted and the answer costs four
+  fixed queries regardless of site count; an unknown certificate id answers
+  `404`. The console's bind, unbind and delete dialogs call it before
+  presenting any action, so a `409` is explained (or prevented) up front
+  instead of being discovered after the click. Operators wiring scripts
+  against the delete path can use the same call to see exactly which sites
+  must be switched/cleared and unbound before a `DELETE /certificates/{id}`
+  will succeed.
+
+### Fixed
+
+- **The certificate's own site is no longer offered for unbinding.** In the
+  bind dialog the owning site was rendered like any other bound row, with an
+  unbind button that could only ever end in a `409` — the owner cannot be
+  unbound from its own certificate. The owner row now shows an **owner**
+  badge with a disabled checkbox and no unbind button, and the dialog header
+  names the owner and the share count explicitly.
+- **The blocked delete button works again.** When deletion was refused (a
+  site still selects the certificate, or bindings remain), the confirm button
+  was disabled — a dead button with no way forward. The dialog now lists the
+  serving/linked sites and turns the button into **Go handle**, which jumps
+  straight to the first blocking site's SSL page so the selection can be
+  cleared or switched there.
+- **Batch binding no longer stops at the first failure.** Selecting several
+  sites and hitting a `400` (hostname not covered) on the first one aborted
+  the whole run: some sites got bound, the rest silently did not, and the
+  dialog gave no account of which was which. Each site is now submitted one
+  by one — successes are kept, failures are listed as `site — reason`, and
+  the dialog closes only when every selected site succeeded.
+- **Deletion stays blocked when the usage check is unavailable.** The delete
+  dialog's guard depended on the usage answer: if that request was still
+  loading or had failed, the dialog fell back to a state where the delete
+  could be confirmed without knowing who was serving the certificate. The
+  conservative rule is back — loading, failed or missing usage all count as
+  blocked, and the confirm refuses rather than guessing.
+- **Batch binding no longer storms the configuration.** The per-site binds
+  were fired concurrently, so binding N sites at once produced N racing
+  configuration-version bumps and agent pushes instead of one orderly
+  sequence. Binds are now submitted serially: one configuration increment
+  and push per site, in order.
+- **`site_ssl` certificate lookups have an index.** `site_ssl.certificate_id`
+  had no index, so every check that asks "which sites select this
+  certificate" — the usage endpoint's `selected`/`serving` lists and the
+  delete path's first blocker — scanned the table on every dialog open.
+  Migration `m20240101_000091_site_ssl_certificate_index` adds the partial
+  index `idx_site_ssl_certificate_id` behind those lookups.
+
 ## [PingWAF 0.32.5] — 2026-11-02
 
 ### Fixed

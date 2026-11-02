@@ -1126,9 +1126,13 @@ Every certificate response carries `site_id` (now nullable), `bound_sites` and
 }
 ```
 
-`bound_sites` lists every site that may serve the certificate (id + domain, so
-the console renders the list without a second request per row); `bound_count`
-is its length. A certificate uploaded without a site is **unbound**:
+`bound_sites` lists every site that may serve the certificate through a
+**shared binding** (id + domain, so the console renders the list without a
+second request per row); `bound_count` is its length. Both are derived from
+the `site_certificate_links` rows only — the **owner site is not counted**;
+it is expressed separately by `site_id`. A certificate owned by site A and
+shared with B and C therefore reports `site_id: A`, `bound_sites: [B, C]`
+and `bound_count: 2`. A certificate uploaded without a site is **unbound**:
 `site_id` is `null`, `bound_sites` is empty and `bound_count` is `0` — the
 fields are always present, so "checked, nothing bound" is distinguishable from
 a missing field — and its `status` follows its own validity dates, because no
@@ -1238,6 +1242,44 @@ query, so paging does not cost a lookup per row.
 ### GET /certificates/{cert_id}
 
 Get certificate details across sites, `warnings` included.
+
+### GET /certificates/{cert_id}/usage
+
+Who owns, shares and serves a certificate — the answer the console's bind,
+unbind and delete dialogs fetch before presenting any action, so a `409` can
+be explained (or prevented) instead of surfacing as a surprise. Administrators
+only.
+
+**Response (200):**
+```json
+{
+  "owner": { "id": "uuid", "domain": "a.example.com" },
+  "linked_sites": [
+    { "id": "uuid", "domain": "b.example.com", "selected": true }
+  ],
+  "serving_sites": [ { "id": "uuid", "domain": "b.example.com" } ]
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `owner` | The site that owns the certificate row (`site_certificates.site_id`), or `null` when the certificate is [unbound](#unbound-certificates). Binding the certificate to this site answers `409 certificate already belongs to this site`. |
+| `linked_sites` | Every site the certificate is **shared** with — the `site_certificate_links` grant rows that [DELETE /certificates/{cert_id}/bindings/{site_id}](#delete-certificatescert_idbindingssite_id) removes. `selected` is `true` when the site's current TLS choice (`site_ssl.certificate_id`) is this certificate — exactly the condition that makes unbinding that site a `409`. |
+| `serving_sites` | Sites whose SSL settings currently select this certificate (`site_ssl.certificate_id`) — the first [delete](#delete-certificatescert_id) blocker. Derived from `site_ssl`, **not** from the link table: a site can select its own certificate without any grant row, so a site may appear here while missing from `linked_sites`. |
+
+Both site lists are sorted by domain (id as the tiebreaker), so two identical
+requests produce identical output. The answer is assembled with a fixed four
+queries regardless of how many sites are involved — the certificate row, the
+link rows, the `site_ssl` rows and the site rows (which double as the
+visibility oracle for the owner). An unknown certificate id answers `404`.
+
+**Recommended sequence** when a certificate has to be removed and the console
+cannot do it in one step: clear or replace the selection on every serving
+site's SSL page ([PUT /sites/{site_id}/ssl-settings](#put-sitessite_idssl-settings)
+with `clear_certificate: true` or another `certificate_id`), unbind the
+remaining grants, then delete the certificate — switching/clearing first,
+then unbinding, then deleting. [GET /certificates/{cert_id}/usage](#get-certificatescert_idusage)
+tells you exactly which sites sit in each bucket before you start.
 
 ### POST /sites/{site_id}/certificates/{cert_id}/renew
 
