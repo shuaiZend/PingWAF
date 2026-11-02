@@ -12,6 +12,16 @@ describe('certificate bind / unbind / delete UI contract', () => {
   const page = read('src/pages/GlobalSslPage.tsx')
   const sslApi = read('src/api/ssl.ts')
 
+  it('delegates the three flow decisions to the pure helpers in lib/certFlow', () => {
+    expect(page).toMatch(/import \{[^}]*bindingKind[^}]*deleteBlockers[^}]*mergeBindResults[^}]*\} from '(@\/lib\/certFlow|\.\.\/lib\/certFlow)'/)
+    expect(page).toContain('bindingKind(')
+    expect(page).toContain('mergeBindResults(')
+    expect(page).toContain('deleteBlockers(')
+    // 旧的内联判定不应残留。
+    expect(page).not.toContain('bound_sites?.some(')
+    expect(page).not.toContain('deleteUsage.serving_sites.length > 0 || deleteUsage.linked_sites.length > 0')
+  })
+
   it('usage endpoint is wired: GET /certificates/{id}/usage with a cache key', () => {
     expect(sslApi).toContain("apiClient.get<CertificateUsage>(`/certificates/${certId}/usage`)")
     expect(sslApi).toContain("usage: (certId: string) => [...sslKeys.all, 'usage', certId] as const")
@@ -62,13 +72,13 @@ describe('certificate bind / unbind / delete UI contract', () => {
   })
 
   it('delete 409 guidance: blocked confirm navigates to the first blocking site', () => {
-    // 保守删除保护：usage 不可用（加载中/失败/回退 bound_sites）也视为 blocked。
-    expect(page).toMatch(/deleteUsage\.serving_sites\.length > 0 \|\| deleteUsage\.linked_sites\.length > 0/)
+    // 保守删除保护：deleteBlockers 在 usage 不可用时返回 unknown+blocked。
+    expect(page).toMatch(/const deleteGuard = deleteBlockers\(/)
+    expect(page).toMatch(/const deleteBlocked = pendingDelete === null \|\| deleteGuard\.blocked/)
     expect(page).toMatch(/deleteUsageQuery\.isError/)
-    expect(page).toMatch(/deleteUsageQuery\.isPending/)
     expect(page).toContain("t('pages.sslGlobal.usageUnavailable')")
     // blocked 分支的确认是跳转，不是删除；按钮不被 disabled，loading 仍生效。
-    expect(page).toMatch(/onConfirm=\{\(\) => \{\s*\n\s*if \(!pendingDelete\) return\s*\n\s*if \(deleteBlocked\) \{/)
+    expect(page).toMatch(/onConfirm=\{\(\) => \{\s*\n\s*if \(!pendingDelete\) return\s*\n\s*if \(deleteHasBlockingSites\) \{/)
     expect(page).toMatch(/navigate\(`\/sites\/\$\{firstBlockingSite\.id\}\/ssl`\)/)
     expect(page).not.toContain('disabled={deleteBlocked}')
     expect(page).toContain('disabled={deleteCert.isPending}')
@@ -76,6 +86,28 @@ describe('certificate bind / unbind / delete UI contract', () => {
     expect(page).toContain("t('pages.sslGlobal.deleteBlockedServing')")
     expect(page).toContain("t('pages.sslGlobal.deleteBlockedLinked')")
     expect(page).toMatch(/navigate\(`\/sites\/\$\{site\.id\}\/ssl`\)/)
+  })
+
+  it('delete confirm has three branches: go-handle / close (unknown) / delete', () => {
+    // 分支判定用 reason，而不是 sites.length 猜测。
+    expect(page).toMatch(
+      /deleteHasBlockingSites =\s*\n\s*deleteGuard\.reason === 'serving' \|\| deleteGuard\.reason === 'linked'/,
+    )
+    // 有具体阻塞站点 → 「前往处理」+ 跳转。
+    expect(page).toMatch(/deleteHasBlockingSites\s*\n\s*\? t\('pages\.sslGlobal\.goHandle'\)/)
+    // unknown（usage 未返回/失败）→ 按钮是关闭，onConfirm 只关弹窗、不含 navigate。
+    expect(page).toContain("? t('common.close')")
+    expect(page).toContain('deleteCert.mutate(pendingDelete.id)')
+    // unknown 分支不渲染空的阻塞站点警示框。
+    expect(page).not.toMatch(/\{deleteBlocked && \(/)
+  })
+
+  it('batch failure reason falls back to an i18n key instead of hardcoded English', () => {
+    // 纯函数无 i18n：reason 缺失时为空串，页面渲染时兜底 i18n key。
+    const flow = read('src/lib/certFlow.ts')
+    expect(flow).not.toContain("'unknown error'")
+    expect(flow).toContain('r.error ?? \'\''  )
+    expect(page).toContain("r.reason || t('pages.sslGlobal.batchResult')")
   })
 
   it('list rows: 属主：<domain> / 未绑定, second line shared count, unbound badge only when truly unbound', () => {

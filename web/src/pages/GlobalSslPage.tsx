@@ -37,6 +37,7 @@ import { ApiError } from '@/api/client'
 import { sslApi, sslKeys, daysUntilExpiry, expiryTone } from '@/api/ssl'
 import { useCanWrite, useNow, useSitesList } from '@/hooks'
 import { formatDateTime } from '@/lib/format'
+import { bindingKind, deleteBlockers, mergeBindResults } from '@/lib/certFlow'
 import {
   ACME_CHALLENGE_TYPES,
   ACME_DNS_PROVIDERS,
@@ -187,21 +188,16 @@ export function GlobalSslPage() {
   // prove the certificate is unused, so treat it as blocked instead of
   // letting a delete through to a 409. `bound_sites` from the list row is a
   // fallback signal when the usage query has not resolved yet.
-  const deleteBlocked = Boolean(
-    pendingDelete === null ||
-      deleteUsageQuery.isPending ||
-      deleteUsageQuery.isError ||
-      (pendingDelete?.bound_sites?.length ?? 0) > 0 ||
-      (deleteUsage &&
-        (deleteUsage.serving_sites.length > 0 || deleteUsage.linked_sites.length > 0)),
+  const deleteGuard = deleteBlockers(
+    pendingDelete ?? { site_id: null },
+    deleteUsage,
   )
+  const deleteBlocked = pendingDelete === null || deleteGuard.blocked
+  /** True only when we know which sites pin the cert (serving / linked). */
+  const deleteHasBlockingSites =
+    deleteGuard.reason === 'serving' || deleteGuard.reason === 'linked'
   /** First blocking site to navigate to when the confirm turns into "go handle". */
-  const firstBlockingSite =
-    deleteUsage?.serving_sites[0] ??
-    deleteUsage?.linked_sites[0] ??
-    (pendingDelete?.bound_sites?.length
-      ? pendingDelete.bound_sites[0]
-      : undefined)
+  const firstBlockingSite = deleteGuard.sites[0]
   const filtersActive = Boolean(siteFilter || statusFilter)
 
   const invalidate = () => {
@@ -1164,13 +1160,17 @@ export function GlobalSslPage() {
             <p className="text-[13px] text-fg-subtle">{t('pages.sslGlobal.bindEmpty')}</p>
           ) : (
             sites.map((s) => {
-              const owner =
-                bindUsage?.owner?.id === s.id || bindTarget?.site_id === s.id
-              const linked =
-                (bindUsage?.linked_sites ?? []).some((b) => b.id === s.id) ||
-                // Fallback (usage unavailable): the owner site must not be
-                // counted as linked, or it would get an unbind button.
-                (!owner && (bindTarget?.bound_sites ?? []).some((b) => b.id === s.id))
+              // Owner takes priority over bound, bound over bindable; the
+              // inlined bound_sites are the fallback when usage is missing
+              // and must not upgrade an owner row to "bound" (unbindable).
+              const kind = bindingKind(
+                bindTarget ?? { site_id: null },
+                bindUsage,
+                s.id,
+                (bindTarget?.bound_sites ?? []).map((b) => b.id),
+              )
+              const owner = kind === 'owner'
+              const linked = kind === 'bound'
               // Owner rows are pinned; bound rows are checked but unbindable;
               // everything else is a fresh checkbox.
               const checked = owner || linked || bindSelection.includes(s.id)
@@ -1244,15 +1244,14 @@ export function GlobalSslPage() {
             >
               <p className="text-[13px] font-medium text-fg-danger">
                 {t('pages.sslGlobal.batchFailed', {
-                  count: bindResults.filter((r) => !r.ok).length,
+                  count: mergeBindResults(bindResults).failed.length,
                 })}
               </p>
-              {bindResults
-                .filter((r) => !r.ok)
-                .map((r) => (
+              {mergeBindResults(bindResults)
+                .failed.map((r) => (
                   <p key={r.siteId} className="text-xs text-fg-danger">
                     {sites.find((s) => s.id === r.siteId)?.domain ?? r.siteId} —{' '}
-                    {r.error ?? t('pages.sslGlobal.batchResult')}
+                    {r.reason || t('pages.sslGlobal.batchResult')}
                   </p>
                 ))}
             </div>
@@ -1284,10 +1283,16 @@ export function GlobalSslPage() {
         onClose={() => setPendingDelete(null)}
         onConfirm={() => {
           if (!pendingDelete) return
-          if (deleteBlocked) {
+          if (deleteHasBlockingSites) {
             // "Go handle it": jump to the first blocking site instead of
             // deleting; the confirm button is never disabled for this branch.
             if (firstBlockingSite) navigate(`/sites/${firstBlockingSite.id}/ssl`)
+            setPendingDelete(null)
+            return
+          }
+          if (deleteBlocked) {
+            // usage 未返回（unknown）：无法给出跳转目标，只关闭弹窗；
+            // usageUnavailable 提示已在弹窗内说明原因。
             setPendingDelete(null)
             return
           }
@@ -1296,7 +1301,11 @@ export function GlobalSslPage() {
         title={t('pages.ssl.deleteTitle')}
         description={t('pages.ssl.deleteDescription')}
         confirmLabel={
-          deleteBlocked ? t('pages.sslGlobal.goHandle') : t('common.delete')
+          deleteHasBlockingSites
+            ? t('pages.sslGlobal.goHandle')
+            : deleteBlocked
+              ? t('common.close')
+              : t('common.delete')
         }
         disabled={deleteCert.isPending}
         loading={deleteCert.isPending}
@@ -1317,9 +1326,9 @@ export function GlobalSslPage() {
                 {t('pages.sslGlobal.usageUnavailable')}
               </div>
             )}
-            {/* Blocked delete: show the sites that pin the certificate, each
-                clickable so the operator can go fix it there. */}
-            {deleteBlocked && (
+            {/* Blocked delete (only when we know the pinning sites): show
+                them, each clickable so the operator can go fix it there. */}
+            {deleteHasBlockingSites && (
               <div className="flex flex-col gap-1.5 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-[13px]">
                 {(deleteUsage?.serving_sites ?? []).length > 0 && (
                   <div className="flex flex-wrap items-center gap-1.5">

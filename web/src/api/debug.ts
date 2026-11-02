@@ -185,6 +185,12 @@ export interface SystemAgentNode {
   status: string
   /** 节点 CPU（百分比）；null = 无样本。 */
   cpu_percent: number | null
+  /**
+   * `cpu_percent` 的来源：`probe` 是 5 秒区间差分（跨版本可比），
+   * `heartbeat` 只在没有探测样本时回退使用 —— 未升级的 agent 心跳是
+   * 开机以来均值，读数会被历史稀释。
+   */
+  cpu_source: 'probe' | 'heartbeat' | 'none'
   /** 节点内存占用（字节）；null = 无样本。 */
   memory_bytes: number | null
   /** 节点物理内存总量（字节）；null = 从未上报。 */
