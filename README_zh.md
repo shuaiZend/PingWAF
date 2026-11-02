@@ -137,12 +137,30 @@ graph TB
 
 基于公开的 [blazehttp](https://github.com/chaitin/blazehttp) 样本库（33 877 条原始 HTTP 报文：恶意 658 / 正常 33 219），对 release 构建逐字节回放实测。拦截数按 WAF 判决面统计——403 拦截页与 503 质询页；"正常流量受影响"同样计入两者，质询不会被藏进"拦截"数字里。
 
-| 档位 | 攻击拦截率 | 正常流量受影响 | p95 |
+在反向代理侧 WAF 真正能够判决的请求范围内，**Strict + 请求体检测的拦截率为 96.6%（616/638）**，正常流量受影响 **0.06%（19/33 219）**，准确率 **99.82%**。658 条恶意样本中有 20 条从未到达任何检测面，未计入该口径：19 条是不带 `Content-Length` / `Transfer-Encoding` 的 `POST`/`PUT`（按 RFC 7230 请求体为空），1 条把载荷藏在 URL fragment 里，HTTP 解析器在构造请求行前就已剥离。任何反代侧 WAF 对这 20 条都只能放行——把它们算作漏报会低估检出能力。
+
+| 档位 | 攻击拦截率（全量口径） | 正常流量受影响 | p95 |
 | --- | --- | --- | --- |
 | Normal（默认，不检测请求体） | 60.2% | 0.01% | 1 ms |
 | Normal + 请求体检测 | 71.9% | 0.04% | 1 ms |
 | Strict | 76.0% | 0.01% | 1 ms |
 | Strict + 请求体检测 | **93.8%** | **0.06%** | 2 ms |
+
+全量口径（93.8%，617/658）保留用于与其他测量直接对照；有效口径见上。
+
+### 跨厂商对比
+
+| 产品 / 模式 | 恶意样本 | 拦截率 | 正常样本 | 误报率 | 准确率 |
+|---|---|---|---|---|---|
+| **PingWAF 0.32.4 · Strict + body** | 658 | **93.8%**（617） | 33 219 | **0.06%**（19） | **99.82%** |
+| **PingWAF 0.32.4 · Normal** | 658 | **60.2%**（396） | 33 219 | **0.01%**（4） | **99.21%** |
+| SafeLine free · strict | 575 | 76.17%（438） | 33 094 | 0.22%（73） | 99.38% |
+| SafeLine free · balanced | 575 | 71.65%（412） | 33 094 | 0.07%（23） | 99.45% |
+| ModSecurity PL4 | 575 | 94.61%（544） | 33 094 | 52.46%（17 362） | 48.34% |
+| ModSecurity PL1 | 575 | 69.74%（401） | 33 094 | 17.58%（5 819） | 82.20% |
+| Cloudflare free | 570 | 10.70%（61） | 32 780 | 0.07%（23） | 98.40% |
+
+PingWAF 两行为本项目自行回放（有效口径 96.6%，见上），其余各行引自 blazehttp 项目 README，未在本地重跑。两边样本集接近但不相同（33 877 vs 33 669；恶意样本 658 vs 570–575），且第三方延迟含公网往返，而 PingWAF 的 p95 是环回判决延迟——只比检出与误报，不比毫秒。
 
 每个数字都可复现：套件定义、回放工具与原始指标在 [`tools/waf-bench/`](./tools/waf-bench)。方法论见**[测试方案](./docs/zh/waf-test-plan.md)**，结论、分类表、与 Cloudflare / 雷池 / ModSecurity 的横向对比（引自 blazehttp 评测）与已知限制见**[测试效果报告](./docs/zh/waf-test-report.md)**。
 
@@ -172,98 +190,24 @@ graph TB
 
 ## 🚀 快速开始
 
-> **注意：** 预编译二进制目前仅提供 **Linux（amd64 / arm64）** 版本——见 [Releases 页面](https://github.com/shuaiZend/PingWAF/releases)。macOS 请使用源码编译（方式 B）。Docker 镜像支持两种架构。
-
-### 方式 A —— Docker Compose（推荐）
-
-仓库内置的 [`docker-compose.yml`](./docker-compose.yml) 会以 `all-in-one` 模式连同 PostgreSQL 一起启动 PingWAF，默认拉取 GHCR 预构建镜像（`ghcr.io/shuaizend/pingwaf:latest`）。镜像已为二进制预置绑定 80/443 的能力（`setcap`），无需 root 与额外参数；若运行环境屏蔽文件能力（如 `no-new-privileges`、rootless Docker），加 `--cap-add=NET_BIND_SERVICE` 或改用 host 网络，详见 [docs/deployment.md](./docs/deployment.md#binding-ports-80443-in-containers)：
+两条典型路径：**Docker Compose**（一条命令，`all-in-one` 模式 + PostgreSQL；预编译二进制仅提供 Linux amd64/arm64——见 [Releases 页面](https://github.com/shuaiZend/PingWAF/releases)），或**源码构建**（Rust 1.96+、Node.js 26.12.1+、`protoc`）。
 
 ```bash
+# 路径 A —— Docker Compose（推荐；无需克隆仓库、无需 root）
 curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/deploy/compose/install.sh | bash
-```
+# 或克隆本仓库后执行：
+docker compose up -d
 
-安装器会创建 `./pingwaf`，下载官方 compose 文件、写入仅本人可读的 `.env`，并启动
-PingWAF 与 PostgreSQL（数据与证书保存在命名卷中，无需 root，也无需克隆仓库）。
-需要固定版本、修改管理员或端口时追加参数，例如
-`--tag 0.32.3 --admin-email you@example.com --admin-port 9443`；也可以在
-**[安装页](https://www.pingwaf.com/zh/install/)** 生成命令。想先检查文件内容，可克隆仓库后执行
-`docker compose up -d`，使用的是同一份 compose 文件。
-
-随后打开控制台：
-
-- **地址：** https://localhost:9080
-- **邮箱：** `admin@pingwaf.local`
-- **密码：** `pingwaf123`
-
-> ⚠️ **在任何生产环境使用前，请务必修改默认管理员密码与 `PINGWAF_JWT_SECRET`。**
-
-控制台默认以 **HTTPS** 提供服务，首次启动自动生成自签名证书，浏览器会提示不受信任；
-可在**设置 → 控制台 HTTPS** 下载该证书或上传正式证书替换。若访问使用的主机名不是
-`localhost`，请通过 `PINGWAF_TLS_SANS` 指定，使生成的证书覆盖该主机名。
-
-健康检查：`GET http://localhost:9080/healthz`（HTTP 与 HTTPS 均可访问；其余路径会 308 跳转到 `https://`）。
-
-### 方式 B —— 源码编译
-
-**环境要求**
-
-| 工具 | 版本 | 说明 |
-| --- | --- | --- |
-| Rust | 1.96+（MSRV） | CI 跟随 stable；Docker 镜像与发布二进制使用 1.98.1 构建 |
-| Node.js | 26.12.1+ | 构建控制台所需——低于该版本 `npm ci` 会因 `engine-strict` 直接失败（该补丁包含 2026-10 安全修复） |
-| `protoc` | 任意较新版本 | **必需**——用于 gRPC 代码生成 |
-| `cmake` | 任意较新版本 | 构建 TLS 后端（OpenSSL）所需 |
-| PostgreSQL | 14+（推荐 16） | 控制面数据存储 |
-
-> ⚠️ **`protoc` 为必需项。** 若缺失，`pingwaf-proto` 会静默降级为占位文件，导致下游 crate 编译失败。请先安装：
->
-> ```bash
-> brew install protobuf                        # macOS
-> sudo apt install protobuf-compiler cmake     # Debian / Ubuntu
-> ```
-
-**编译与运行**
-
-```bash
-git clone https://github.com/shuaiZend/PingWAF.git
-cd PingWAF
-
-# 1. 构建内嵌控制台
+# 路径 B —— 源码构建
+git clone https://github.com/shuaiZend/PingWAF.git && cd PingWAF
 cd web && npm ci && npm run build && cd ..
-
-# 2. 构建 pingwaf 二进制
 cargo build --release --bin pingwaf --features full
-
-# 3. 以 all-in-one 模式运行
-./target/release/pingwaf all-in-one \
-  --db-url "postgres://pingwaf:pingwaf@localhost:5432/pingwaf"
+./target/release/pingwaf all-in-one --db-url "postgres://pingwaf:pingwaf@localhost:5432/pingwaf"
 ```
 
-👉 完整流程（数据库准备、首个站点、分布式 Agent、systemd）请见 **[docs/quick-start.md](./docs/quick-start.md)**。
+随后打开控制台 **https://localhost:9080**（HTTPS，首次启动自动生成自签名证书），使用 `admin@pingwaf.local` / `pingwaf123` 登录——**生产环境务必修改默认密码与 `PINGWAF_JWT_SECRET`**。
 
-### 方式 C —— 安装脚本（Linux）
-
-脚本会下载预编译二进制并安装，可选配置 systemd 服务。它有两种运行方式：
-
-```bash
-# 交互安装：在终端上依次询问部署模式、管理员凭证、PostgreSQL URL、
-# 证书 SAN 列表与版本，随后打印安装计划并确认
-curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh -o install.sh
-bash install.sh
-
-# 一行命令、无人值守：使用默认值，不做任何提问（参数跟在 `-s --` 之后）
-curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh | sudo bash -s -- --mode all-in-one
-```
-
-> `curl | bash` 无法显示交互提示——通过管道执行时会自动以默认值非交互安装。
-> 管理员与 TLS 设置请用环境变量（`PINGWAF_ADMIN_EMAIL`、`PINGWAF_ADMIN_PASSWORD`、
-> `PINGWAF_TLS_SANS`）或参数（`--admin-email`、`--admin-password`、`--tls-sans`）
-> 传入；`--dry-run` 只打印解析后的安装计划，不做任何改动。安装引导页：
-> <https://www.pingwaf.com/install/>。
->
-> 每个架构的 release 同时提供两种归档：`pingwaf-linux-{amd64,arm64}.tar.xz`（主格式，更小）与 `.tar.gz`（兼容回退），各带 `.sha256` 校验文件。脚本优先下载 `.tar.xz`，在本地缺少 `xz(1)` 或下载失败时回退到 `.tar.gz`。
->
-> 二进制还内置管理员运维子命令（`user`、`mode`、`security`、`config`），控制台不可达时可直连 PostgreSQL 处置——见 **[docs/cli.md](./docs/cli.md)**（[中文版](./docs/zh/cli.md)）。
+👉 完整安装向导、交互式安装器、TLS/端口参数说明见**[官网安装页](https://www.pingwaf.com/zh/install/)**；分步上手见**[官网快速上手页](https://www.pingwaf.com/zh/quickstart/)**；仓库内完整流程（数据库准备、首个站点、分布式 Agent、systemd）见 **[docs/quick-start.md](./docs/quick-start.md)**。
 
 ---
 

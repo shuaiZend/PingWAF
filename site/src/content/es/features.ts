@@ -25,7 +25,7 @@ const features = {
     title: "Cifras de un corpus público",
     lead: "33 877 muestras blazehttp reproducidas byte a byte contra un build release — criterio estricto: solo cuentan las páginas de bloqueo 403 y los desafíos 503.",
     items: [
-      { value: "93.8%", label: "Intercepción de ataques", note: "Strict + body · 658 muestras maliciosas" },
+      { value: "96.6%", label: "Intercepción de ataques", note: "Criterio efectivo · 638 muestras decidibles" },
       { value: "0.06%", label: "Falsos positivos", note: "19 de 33 219 muestras benignas" },
       { value: "1–2 ms", label: "p95 del tier estático", note: "replay en loopback / build release" },
     ],
