@@ -1503,7 +1503,11 @@ export const CERTIFICATE_STATUSES: CertificateStatus[] = [
 /** `api::ssl::CertificateResponse` — never carries the private key. */
 export interface SslCertificate {
   id: string
-  site_id: string
+  /**
+   * Owning site. `null` for an unbound certificate — uploaded on the global
+   * page without a site; it must be bound to sites before a site can serve it.
+   */
+  site_id: string | null
   domain: string
   issuer: string | null
   not_before: string | null
@@ -1530,14 +1534,33 @@ export interface SslCertificate {
    * Optional so older responses without the field still satisfy the type.
    */
   relation?: 'owner' | 'linked' | 'available'
+  /**
+   * Sites this certificate is currently bound to (the owner first). Reported
+   * by the global list; absent on older responses.
+   */
+  bound_sites?: CertificateBinding[]
+  /** `bound_sites.length` when reported; 0 for an unbound certificate. */
+  bound_count?: number
   created_at: string
   updated_at: string
 }
 
+/** One certificate ↔ site binding entry of the global certificate list. */
+export interface CertificateBinding {
+  id: string
+  domain: string
+}
+
+/** `POST /certificates/{id}/bindings` — add the certificate to a site. */
+export interface BindCertificateRequest {
+  site_id: string
+}
+
 /** `api::ssl::CertificateWithSite` — a row of the cross-site certificate list. */
 export interface CertificateWithSite extends SslCertificate {
-  site_domain: string
-  site_name: string
+  /** Owning site domain; `null` for an unbound certificate. */
+  site_domain: string | null
+  site_name: string | null
 }
 
 /** `api::ssl::CertificateSummary` */
@@ -1557,8 +1580,11 @@ export interface CertificateListQuery extends PaginationQuery {
 }
 
 export interface CreateSslRequest {
-  /** Required by the global `/certificates` endpoint, ignored by the per-site one. */
-  site_id?: string
+  /**
+   * Required by the global `/certificates` endpoint when omitted there the
+   * certificate is uploaded unbound; ignored by the per-site one.
+   */
+  site_id?: string | null
   domain: string
   /** ACME automation. */
   auto_renew?: boolean

@@ -8,8 +8,11 @@ import {
   Globe,
   Info,
   Lightning,
+  Link as LinkIcon,
+  LinkBreak,
   Plus,
   Trash,
+  Warning,
 } from '@phosphor-icons/react'
 import { PageHeader } from '@/components/PageHeader'
 import { ErrorState } from '@/components/ErrorState'
@@ -29,6 +32,7 @@ import { Tabs } from '@/components/ui/Tabs'
 import { Textarea } from '@/components/ui/Textarea'
 import { useToast } from '@/components/ui/Toast'
 import { errorMessage } from '@/api/errors'
+import { ApiError } from '@/api/client'
 import { sslApi, sslKeys, daysUntilExpiry, expiryTone } from '@/api/ssl'
 import { useCanWrite, useNow, useSitesList } from '@/hooks'
 import { formatDateTime } from '@/lib/format'
@@ -100,6 +104,9 @@ export function GlobalSslPage() {
   const [formError, setFormError] = useState<string | null>(null)
   const [pendingDelete, setPendingDelete] = useState<CertificateWithSite | null>(null)
   const [eventTypeFilter, setEventTypeFilter] = useState('')
+  const [bindTarget, setBindTarget] = useState<CertificateWithSite | null>(null)
+  const [bindSelection, setBindSelection] = useState<string[]>([])
+  const [bindError, setBindError] = useState<string | null>(null)
 
   const sitesQuery = useSitesList()
   const sites = sitesQuery.data ?? []
@@ -151,7 +158,7 @@ export function GlobalSslPage() {
   }
 
   const createCert = useMutation({
-    mutationFn: (payload: CreateSslRequest & { site_id: string }) =>
+    mutationFn: (payload: CreateSslRequest) =>
       sslApi.createGlobal(payload),
     onSuccess: (cert) => {
       toast.success(
@@ -192,6 +199,47 @@ export function GlobalSslPage() {
     onError: (e) => toast.error(t('pages.sslGlobal.deleteFailed'), errorMessage(e)),
   })
 
+  /** One request per newly selected site; a 400 lists uncovered hostnames. */
+  const bindCert = useMutation({
+    mutationFn: async (ids: string[]) => {
+      const target = bindTarget
+      if (!target) return null
+      for (const siteId of ids) {
+        await sslApi.bind(target.id, { site_id: siteId })
+      }
+      return target
+    },
+    onSuccess: (cert) => {
+      toast.success(t('pages.sslGlobal.bindSites'), cert?.domain)
+      setBindTarget(null)
+      setBindSelection([])
+      setBindError(null)
+      invalidate()
+    },
+    onError: (e) => {
+      // 400 carries the list of hostnames the certificate does not cover.
+      setBindError(errorMessage(e))
+    },
+  })
+
+  const unbindCert = useMutation({
+    mutationFn: ({ certId, siteId }: { certId: string; siteId: string }) =>
+      sslApi.unbind(certId, siteId),
+    onSuccess: () => {
+      setBindError(null)
+      invalidate()
+    },
+    onError: (e) => {
+      // 409 — the site still serves this certificate; it must be switched first.
+      toast.error(
+        e instanceof ApiError && e.status === 409
+          ? t('pages.sslGlobal.unbindBlocked')
+          : t('pages.sslGlobal.bindSites'),
+        errorMessage(e),
+      )
+    },
+  })
+
   const openCreate = () => {
     setForm(emptyForm())
     setFormError(null)
@@ -200,18 +248,22 @@ export function GlobalSslPage() {
 
   const submit = () => {
     const domain = form.domain.trim()
-    if (!form.siteId) {
-      setFormError(t('pages.sslGlobal.siteRequired'))
+    const siteId = form.siteId
+    // ACME issuance serves a site's hostnames through its challenge, so it
+    // needs a site up front; manual PEM uploads can stay unbound for now.
+    if (form.mode === 'acme' && !siteId) {
+      setFormError(t('pages.sslGlobal.acmeNeedsSite'))
       return
     }
     if (!domain) {
       setFormError(t('pages.ssl.domainRequired'))
       return
     }
-    const payload: CreateSslRequest & { site_id: string } = {
-      site_id: form.siteId,
+    const payload: CreateSslRequest = {
+      ...(siteId ? { site_id: siteId } : {}),
       domain,
-      activate: form.activate,
+      // `activate` switches the site's TLS choice, which needs a site.
+      ...(siteId ? { activate: form.activate } : {}),
     }
     if (form.mode === 'acme') {
       payload.auto_renew = form.autoRenew
@@ -261,6 +313,19 @@ export function GlobalSslPage() {
 
   const actionCell = (cert: CertificateWithSite) => (
     <div className="flex items-center justify-end gap-1">
+      <Button
+        size="sm"
+        variant="ghost"
+        disabled={!canWrite}
+        onClick={() => {
+          setBindTarget(cert)
+          setBindSelection([])
+          setBindError(null)
+        }}
+      >
+        <LinkIcon weight="duotone" className="h-4 w-4" />
+        {t('pages.sslGlobal.bindSites')}
+      </Button>
       {isAcme(cert) && (
         <Button
           size="sm"
@@ -306,14 +371,30 @@ export function GlobalSslPage() {
     {
       key: 'site',
       header: t('pages.sslGlobal.site'),
-      accessor: (r) => r.site_domain,
-      sortable: true,
-      cell: (r) => (
-        <div className="flex flex-col gap-0.5">
-          <span className="text-fg">{r.site_domain}</span>
-          <span className="text-xs text-fg-subtle">{r.site_name}</span>
-        </div>
-      ),
+      accessor: (r) => r.site_domain ?? '',
+      cell: (r) => {
+        // An unbound certificate has no owner; the badge nudges binding it.
+        if (r.site_id === null) {
+          return (
+            <Badge tone="warning" size="sm" dot>
+              {t('pages.sslGlobal.unbound')}
+            </Badge>
+          )
+        }
+        const extra =
+          r.bound_count !== undefined && r.bound_count > 1
+            ? ` · ${t('pages.sslGlobal.boundCount', { count: r.bound_count })}`
+            : ''
+        return (
+          <div className="flex flex-col gap-0.5">
+            <span className="text-fg">{r.site_domain ?? '—'}</span>
+            <span className="text-xs text-fg-subtle">
+              {r.site_name ?? ''}
+              {extra}
+            </span>
+          </div>
+        )
+      },
     },
     {
       key: 'type',
@@ -705,7 +786,13 @@ export function GlobalSslPage() {
             <Button variant="secondary" onClick={() => setDialogOpen(false)}>
               {t('common.cancel')}
             </Button>
-            <Button variant="primary" loading={createCert.isPending} onClick={submit}>
+            <Button
+              variant="primary"
+              loading={createCert.isPending}
+              // ACME challenges need a site up front — block before the 400.
+              disabled={form.mode === 'acme' && !form.siteId}
+              onClick={submit}
+            >
               {form.mode === 'acme'
                 ? t('pages.sslGlobal.applyCertificate')
                 : t('pages.sslGlobal.uploadCertificate')}
@@ -740,7 +827,9 @@ export function GlobalSslPage() {
               label={t('pages.sslGlobal.site')}
               hint={t('pages.sslGlobal.siteHint')}
               options={[
-                { value: '', label: t('pages.sslGlobal.selectSite') },
+                // Unbound upload: the certificate is stored without a site and
+                // can be bound to one or more sites afterwards.
+                { value: '', label: t('pages.sslGlobal.noSiteOption') },
                 ...sites.map((s) => ({ value: s.id, label: `${s.domain} · ${s.name}` })),
               ]}
               value={form.siteId}
@@ -761,17 +850,31 @@ export function GlobalSslPage() {
               placeholder="example.com"
               containerClassName="pw-mono"
               value={form.domain}
-              hint={t('pages.ssl.domainAutofillHint')}
+              hint={
+                form.siteId
+                  ? t('pages.ssl.domainAutofillHint')
+                  : t('pages.sslGlobal.domainHint')
+              }
               onChange={(e) => setForm((f) => ({ ...f, domain: e.target.value }))}
             />
           </div>
 
-          {/* site_id stays required (server contract); other sites can still
-              reuse the certificate through the per-site share picker. */}
+          {/* Site selection is optional: without it the certificate is stored
+              unbound and can be bound to one or more sites afterwards. */}
           <p className="-mt-2 flex items-start gap-1.5 text-xs leading-relaxed text-fg-subtle">
             <Info weight="duotone" className="mt-0.5 h-3.5 w-3.5 shrink-0" />
             {t('pages.sslGlobal.multiSiteNote')}
           </p>
+
+          {form.mode === 'acme' && !form.siteId && (
+            <p
+              role="alert"
+              className="flex items-start gap-1.5 text-xs font-medium text-fg-warning"
+            >
+              <Warning weight="duotone" className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              {t('pages.sslGlobal.acmeNeedsSite')}
+            </p>
+          )}
 
           {form.mode === 'acme' ? (
             <>
@@ -906,18 +1009,115 @@ export function GlobalSslPage() {
             </>
           )}
 
-          <div className="rounded-lg border border-line bg-recessed/40 px-3 py-2.5">
-            <Switch
-              checked={form.activate}
-              onCheckedChange={(v) => setForm((f) => ({ ...f, activate: v }))}
-              label={t('pages.sslGlobal.activate')}
-              description={t('pages.sslGlobal.activateHint')}
-            />
-          </div>
+          {form.siteId && (
+            <div className="rounded-lg border border-line bg-recessed/40 px-3 py-2.5">
+              <Switch
+                checked={form.activate}
+                onCheckedChange={(v) => setForm((f) => ({ ...f, activate: v }))}
+                label={t('pages.sslGlobal.activate')}
+                description={t('pages.sslGlobal.activateHint')}
+              />
+            </div>
+          )}
 
           {formError && (
             <p className="text-[13px] font-medium text-fg-danger" role="alert">
               {formError}
+            </p>
+          )}
+        </div>
+      </Dialog>
+
+      {/* Binding dialog: multi-select visible sites, unbind existing ones. */}
+      <Dialog
+        open={bindTarget !== null}
+        onClose={() => setBindTarget(null)}
+        title={t('pages.sslGlobal.bindDialogTitle')}
+        description={
+          bindTarget
+            ? `${bindTarget.domain} · ${
+                bindTarget.bound_count !== undefined && bindTarget.bound_count > 0
+                  ? t('pages.sslGlobal.boundCount', { count: bindTarget.bound_count })
+                  : t('pages.sslGlobal.unbound')
+              }`
+            : undefined
+        }
+        size="md"
+        footer={
+          <div className="flex items-center justify-end gap-2">
+            <Button variant="secondary" onClick={() => setBindTarget(null)}>
+              {t('common.close')}
+            </Button>
+            <Button
+              variant="primary"
+              disabled={bindSelection.length === 0 || bindCert.isPending}
+              loading={bindCert.isPending}
+              onClick={() => bindCert.mutate(bindSelection)}
+            >
+              {t('pages.sslGlobal.bindSites')}
+            </Button>
+          </div>
+        }
+      >
+        <div className="flex flex-col gap-2">
+          {sites.length === 0 ? (
+            <p className="text-[13px] text-fg-subtle">{t('pages.sslGlobal.bindEmpty')}</p>
+          ) : (
+            sites.map((s) => {
+              const bound = bindTarget?.bound_sites?.some((b) => b.id === s.id)
+              const owner = bindTarget?.site_id === s.id
+              const checked = bindSelection.includes(s.id) || bound
+              return (
+                <div
+                  key={s.id}
+                  className="flex items-center justify-between gap-2 rounded-md border border-line bg-elevated px-3 py-2"
+                >
+                  <label className="flex min-w-0 items-center gap-2">
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 accent-[var(--color-brand)]"
+                      disabled={!canWrite || bound || bindCert.isPending}
+                      checked={checked}
+                      onChange={(e) =>
+                        setBindSelection((prev) =>
+                          e.target.checked
+                            ? [...prev, s.id]
+                            : prev.filter((id) => id !== s.id),
+                        )
+                      }
+                    />
+                    <span className="min-w-0 truncate">
+                      <span className="pw-mono text-[13px] font-medium text-fg-strong">
+                        {s.domain}
+                      </span>
+                      <span className="ml-2 text-xs text-fg-subtle">{s.name}</span>
+                    </span>
+                  </label>
+                  {(bound || owner) && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="hover:text-fg-danger"
+                      disabled={!canWrite || unbindCert.isPending}
+                      onClick={() =>
+                        bindTarget &&
+                        unbindCert.mutate({ certId: bindTarget.id, siteId: s.id })
+                      }
+                    >
+                      <LinkBreak weight="duotone" className="h-4 w-4" />
+                      {t('pages.sslGlobal.unbind')}
+                    </Button>
+                  )}
+                </div>
+              )
+            })
+          )}
+          {bindError && (
+            <p
+              role="alert"
+              className="rounded-md border border-danger/40 bg-danger/8 px-3 py-2 text-[13px] text-fg-danger"
+            >
+              {bindError}
             </p>
           )}
         </div>

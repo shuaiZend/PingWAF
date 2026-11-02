@@ -488,6 +488,17 @@ export function SslPage() {
   const isCurrent = (cert: SslCertificate) =>
     !drafts?.https.self_signed && drafts?.https.certificate_id === cert.id
 
+  /**
+   * Source of the certificate for this site: owned (`site_id` is this site)
+   * or shared in — either flagged by the server's `relation` or visible as a
+   * binding that hits this site in `bound_sites`.
+   */
+  const isSharedCert = (cert: SslCertificate) =>
+    cert.relation === 'linked' ||
+    (cert.relation === undefined && cert.site_id !== siteId) ||
+    (cert.site_id !== siteId &&
+      (cert.bound_sites?.some((b) => b.id === siteId) ?? false))
+
   const columns: Column<SslCertificate>[] = [
     {
       key: 'domain',
@@ -514,7 +525,7 @@ export function SslPage() {
                   {t('pages.ssl.current')}
                 </Badge>
               )}
-              {c.relation === 'linked' && (
+              {isSharedCert(c) && (
                 <Badge tone="info" size="sm">
                   {t('pages.ssl.sharedBadge')}
                 </Badge>
@@ -1178,10 +1189,17 @@ export function SslPage() {
               <Detail
                 label={t('pages.ssl.relation')}
                 value={
-                  details.relation === 'linked'
+                  isSharedCert(details)
                     ? t('pages.ssl.groupLinked')
                     : t('pages.ssl.groupOwner')
                 }
+              />
+            )}
+            {details.bound_count !== undefined && (
+              <Detail
+                label={t('pages.sslGlobal.bindSites')}
+                value={(details.bound_sites ?? []).map((b) => b.domain).join(', ') || '—'}
+                mono
               />
             )}
             {details.warnings && details.warnings.length > 0 && (

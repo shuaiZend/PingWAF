@@ -322,7 +322,9 @@
   "pages": {
     "origin": {
       "poolNodes": "ノード",
-      "poolEmpty": "このプールにはノードがありません"
+      "poolEmpty": "このプールにはノードがありません",
+      "sniHostOption": "$host（クライアント Host）",
+      "sniHostHint": "クライアントの Host を SNI として使用します。オリジン証明書の検証を有効にする必要があります（verify_cert は false にできません）。"
     },
     "routes": {
       "stripPrefix": "プレフィックス除去",
@@ -2329,7 +2331,17 @@
       "dnsConfigLabel": "DNS プロバイダー認証情報",
       "dnsConfigHint": "プロバイダー API に渡すキーと値のペア（例: token、access_key_id、access_key_secret）。`endpoint` を指定すると API ホストを上書きします。",
       "dnsConfigRegionRequired": "Huawei Cloud は `region`（例: cn-north-4）が必要です。dns.<region>.myhuaweicloud.com エンドポイントを生成します。",
-      "multiSiteNote": "証明書は作成時に 1 つのサイトに紐付ける必要があります（サーバー仕様）。他のサイトは各 SSL ページの「共有証明書」からこの証明書を再利用でき、いつでも解除できます。"
+      "multiSiteNote": "証明書は作成時に 1 つのサイトに紐付ける必要があります（サーバー仕様）。他のサイトは各 SSL ページの「共有証明書」からこの証明書を再利用でき、いつでも解除できます。",
+      "unbound": "未バインド",
+      "bindSites": "サイトにバインド",
+      "bindDialogTitle": "証明書をサイトにバインド",
+      "bindEmpty": "バインド可能なサイトがありません。",
+      "unbindBlocked": "このサイトは現在この証明書を使用中です。先に切り替えてください。",
+      "unbind": "バインド解除",
+      "noSiteOption": "今はバインドしない（後でバインド）",
+      "domainHint": "証明書がカバーするホスト名（複数可、カンマ区切り）",
+      "acmeNeedsSite": "ACME 申請にはサイトの選択が必要です。",
+      "boundCount": "{{count}} サイトにバインド済み"
     },
     "blockedIps": {
       "title": "IP ブラックリスト",

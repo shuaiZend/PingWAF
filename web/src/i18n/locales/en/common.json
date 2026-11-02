@@ -322,7 +322,9 @@
   "pages": {
     "origin": {
       "poolNodes": "nodes",
-      "poolEmpty": "No nodes in this pool"
+      "poolEmpty": "No nodes in this pool",
+      "sniHostOption": "$host (client Host)",
+      "sniHostHint": "Uses the client Host as SNI; origin certificate verification must stay on (verify_cert cannot be false)."
     },
     "routes": {
       "stripPrefix": "Strip prefix",
@@ -2329,7 +2331,17 @@
       "dnsConfigLabel": "DNS provider credentials",
       "dnsConfigHint": "Key–value pairs passed to the provider API (e.g. token, access_key_id, access_key_secret). An `endpoint` entry overrides the API host.",
       "dnsConfigRegionRequired": "Huawei Cloud needs a `region` entry (e.g. cn-north-4); it builds the dns.<region>.myhuaweicloud.com endpoint.",
-      "multiSiteNote": "A certificate is created bound to one site. Other sites can reuse it from their SSL page via “Shared certificates”, and can unbind it at any time."
+      "multiSiteNote": "A certificate is created bound to one site. Other sites can reuse it from their SSL page via “Shared certificates”, and can unbind it at any time.",
+      "unbound": "Unbound",
+      "bindSites": "Bind sites",
+      "bindDialogTitle": "Bind certificate to sites",
+      "bindEmpty": "No sites available to bind.",
+      "unbindBlocked": "This site is still serving the certificate — switch it first.",
+      "unbind": "Unbind",
+      "noSiteOption": "Don't bind yet (bind later)",
+      "domainHint": "Hostnames covered by the certificate (multiple, comma-separated)",
+      "acmeNeedsSite": "ACME issuance requires selecting a site first.",
+      "boundCount": "{{count}} site(s) bound"
     },
     "blockedIps": {
       "title": "IP Blacklist",

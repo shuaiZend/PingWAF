@@ -12,6 +12,7 @@ import type {
   PaginationQuery,
   SslCertificate,
   SslSettings,
+  BindCertificateRequest,
   UpdateSslRequest,
   UpdateSslSettingsRequest,
 } from './types'
@@ -88,8 +89,11 @@ export const sslApi = {
 
   summary: () => apiClient.get<CertificateSummary>('/certificates/summary'),
 
-  /** Uploads a certificate, or applies for one, on a site's behalf. */
-  createGlobal: (data: CreateSslRequest & { site_id: string }) =>
+  /**
+   * Uploads a certificate, or applies for one, on a site's behalf. Without
+   * `site_id` the certificate is stored unbound (ACME requires a site).
+   */
+  createGlobal: (data: CreateSslRequest) =>
     apiClient.post<SslCertificate>('/certificates', data),
 
   updateGlobal: (id: string, data: UpdateSslRequest) =>
@@ -99,6 +103,23 @@ export const sslApi = {
 
   renewGlobal: (id: string) =>
     apiClient.post<RenewalAck>(`/certificates/${id}/renew`),
+
+  /* ── Certificate bindings (one certificate, many sites) ───────────── */
+
+  /**
+   * Binds an existing certificate to a site; 200 + the certificate on
+   * success, 400 when the certificate does not cover the site's hostnames
+   * (the message lists them), 409 when the site already owns it.
+   */
+  bind: (certId: string, data: BindCertificateRequest) =>
+    apiClient.post<SslCertificate>(`/certificates/${certId}/bindings`, data),
+
+  /**
+   * Removes one binding; 204, 404 when there is no such binding, 409 while
+   * the certificate is the site's currently selected TLS choice.
+   */
+  unbind: (certId: string, siteId: string) =>
+    apiClient.delete<void>(`/certificates/${certId}/bindings/${siteId}`),
 
   /* ── Certificate events ──────────────────────────────────────────── */
   listCertEvents: (certId: string, query: CertificateEventListQuery = {}) =>

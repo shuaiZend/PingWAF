@@ -322,7 +322,9 @@
   "pages": {
     "origin": {
       "poolNodes": "个节点",
-      "poolEmpty": "池内暂无节点"
+      "poolEmpty": "池内暂无节点",
+      "sniHostOption": "$host（客户端 Host）",
+      "sniHostHint": "使用客户端 Host 作为 SNI，需开启证书校验（verify_cert 不能为 false）。"
     },
     "routes": {
       "stripPrefix": "去除前缀",
@@ -2329,7 +2331,17 @@
       "dnsConfigLabel": "DNS 服务商凭据",
       "dnsConfigHint": "以键值对形式传给服务商 API（如 token、access_key_id、access_key_secret）；填写 `endpoint` 可覆盖默认 API 地址。",
       "dnsConfigRegionRequired": "华为云需要填写 `region`（如 cn-north-4），将生成 dns.<region>.myhuaweicloud.com 端点。",
-      "multiSiteNote": "证书创建时必须绑定一个站点（后端要求）。其它站点可在各自 SSL 页通过「共享证书」复用该证书，并可随时解绑。"
+      "multiSiteNote": "证书创建时必须绑定一个站点（后端要求）。其它站点可在各自 SSL 页通过「共享证书」复用该证书，并可随时解绑。",
+      "unbound": "未绑定",
+      "bindSites": "绑定站点",
+      "bindDialogTitle": "将证书绑定到站点",
+      "bindEmpty": "暂无可绑定的站点。",
+      "unbindBlocked": "该站点正在使用此证书，请先切换。",
+      "unbind": "解绑",
+      "noSiteOption": "先不绑定（稍后绑定站点）",
+      "domainHint": "证书覆盖的主机名（可多个，逗号分隔）",
+      "acmeNeedsSite": "ACME 申请需要先选择站点。",
+      "boundCount": "已绑定 {{count}} 个站点"
     },
     "blockedIps": {
       "title": "IP 黑名单",

@@ -46,6 +46,11 @@ export function PoolDialog({
   )
   const [error, setError] = useState<string | null>(null)
 
+  // `$host` forwards the client's Host header as the SNI; the server rejects
+  // it when the pool skips origin certificate verification (400).
+  const sniHost = form.httpsOrigin && form.sni.trim().toLowerCase() === '$host'
+  const sniHostBlocked = sniHost && form.verifyCert === 'skip'
+
   const save = useMutation({
     mutationFn: (data: { id?: string; create?: CreatePoolRequest; update?: UpdatePoolRequest }) =>
       data.id
@@ -96,8 +101,15 @@ export function PoolDialog({
         setError(t('pages.basic.errors.sniTooLong'))
         return
       }
-      if (sni === '$host' || sni.includes('://') || sni.includes(':')) {
-        setError(t('pages.basic.errors.sniInvalid'))
+      // `$host` is the literal the server resolves to the client Host at
+      // request time; it requires origin certificate verification.
+      if (sni !== '$host') {
+        if (sni.includes('://') || sni.includes(':')) {
+          setError(t('pages.basic.errors.sniInvalid'))
+          return
+        }
+      } else if (verifyCertPayload(form.verifyCert) === false) {
+        setError(t('pages.origin.sniHostHint'))
         return
       }
     }
@@ -156,7 +168,12 @@ export function PoolDialog({
           <Button variant="ghost" onClick={onClose} disabled={save.isPending}>
             {t('common.cancel')}
           </Button>
-          <Button variant="primary" onClick={submit} loading={save.isPending}>
+          <Button
+            variant="primary"
+            onClick={submit}
+            loading={save.isPending}
+            disabled={sniHostBlocked}
+          >
             {editing ? t('common.save') : t('common.create')}
           </Button>
         </>
@@ -195,15 +212,37 @@ export function PoolDialog({
           description={t('pages.basic.httpsOriginHint')}
         />
         {form.httpsOrigin && (
-          <Input
-            label={t('pages.basic.sni')}
-            value={form.sni}
-            placeholder="origin.example.com"
-            hint={t('pages.basic.sniHint')}
-            prefixIcon={<Lock weight="duotone" />}
-            onChange={(e) => setForm((f) => ({ ...f, sni: e.target.value }))}
-            required
-          />
+          <>
+            <div className="flex items-start gap-2">
+              <Input
+                label={t('pages.basic.sni')}
+                value={form.sni}
+                placeholder="origin.example.com"
+                hint={sniHost ? t('pages.origin.sniHostHint') : t('pages.basic.sniHint')}
+                prefixIcon={<Lock weight="duotone" />}
+                onChange={(e) => setForm((f) => ({ ...f, sni: e.target.value }))}
+                required
+              />
+              <Button
+                size="sm"
+                variant="secondary"
+                type="button"
+                className="mt-[26px] shrink-0"
+                title={t('pages.origin.sniHostHint')}
+                onClick={() => setForm((f) => ({ ...f, sni: '$host' }))}
+              >
+                $host
+              </Button>
+            </div>
+            {sniHostBlocked && (
+              <p
+                role="alert"
+                className="rounded-md border border-danger/40 bg-danger/8 px-3 py-2 text-[13px] text-fg-danger"
+              >
+                {t('pages.origin.sniHostHint')}
+              </p>
+            )}
+          </>
         )}
         {/* Always visible — a hidden field read as "the option is gone".
             Disabled while the origin is HTTP: without SNI there is no TLS

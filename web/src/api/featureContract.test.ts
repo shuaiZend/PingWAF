@@ -229,3 +229,72 @@ describe('upstream host validation', () => {
     expect(isValidUpstreamHost('example.com:8443')).toBe(true)
   })
 })
+
+/** 证书一证多站：site_id 可空、bound_sites/bound_count、绑定接口契约。 */
+describe('certificate unbound / multi-site binding contract', () => {
+  it('SslCertificate.site_id is nullable and carries bound_sites / bound_count', () => {
+    const src = read('src/api/types.ts')
+    expect(src).toMatch(/site_id: string \| null/)
+    expect(src).toMatch(/bound_sites\?: CertificateBinding\[\]/)
+    expect(src).toMatch(/bound_count\?: number/)
+    expect(src).toMatch(/export interface CertificateBinding \{/)
+    expect(src).toContain('id: string')
+    expect(src).toContain('domain: string')
+  })
+
+  it('CreateSslRequest.site_id is optional/null so uploads may go unbound', () => {
+    const src = read('src/api/types.ts')
+    expect(src).toMatch(/export interface BindCertificateRequest \{[\s\S]*?site_id: string/)
+    const ssl = read('src/api/ssl.ts')
+    expect(ssl).toContain('createGlobal: (data: CreateSslRequest)')
+    expect(ssl).toContain("apiClient.post<SslCertificate>(`/certificates/${certId}/bindings`")
+    expect(ssl).toContain("apiClient.delete<void>(`/certificates/${certId}/bindings/${siteId}`)")
+  })
+
+  it('GlobalSslPage omits site_id (and activate) when no site is selected, blocks ACME without one', () => {
+    const src = read('src/pages/GlobalSslPage.tsx')
+    // 选空站点时不发送 site_id，也不发送 activate（未绑定 + activate 是 400）。
+    expect(src).toContain('...(siteId ? { site_id: siteId } : {})')
+    expect(src).toContain('...(siteId ? { activate: form.activate } : {})')
+    // ACME 无站点：提交按钮禁用 + 就地提示。
+    expect(src).toContain('disabled={form.mode === \'acme\' && !form.siteId}')
+    expect(src).toContain("t('pages.sslGlobal.acmeNeedsSite')")
+    // 未绑定徽标（warning tone）。
+    expect(src).toContain("t('pages.sslGlobal.unbound')")
+  })
+
+  it('locales carry the binding and no-site keys in every language', () => {
+    for (const lang of ['en', 'zh', 'ja']) {
+      const parsed = JSON.parse(read(`src/i18n/locales/${lang}/common.json`)) as {
+        pages: {
+          sslGlobal: Record<string, string>
+          origin: Record<string, string>
+        }
+      }
+      for (const key of [
+        'unbound', 'bindSites', 'bindDialogTitle', 'bindEmpty', 'unbindBlocked',
+        'noSiteOption', 'domainHint', 'acmeNeedsSite',
+      ]) {
+        expect(parsed.pages.sslGlobal[key], `${lang}.sslGlobal.${key}`).toBeTruthy()
+      }
+      expect(parsed.pages.origin.sniHostOption).toBeTruthy()
+      expect(parsed.pages.origin.sniHostHint).toBeTruthy()
+    }
+  })
+})
+
+/** 池 SNI `$host` 契约：允许字面量，且 verify_cert=false 必须被前端拦截。 */
+describe('pool SNI $host contract', () => {
+  it('PoolDialog allows $host and blocks it with verify_cert=false', () => {
+    const src = read('src/pages/sites/basic/PoolDialog.tsx')
+    // $host 不再落入 sniInvalid；仅当 verify_cert=false 时拦截。
+    expect(src).toContain("sni !== '$host'")
+    expect(src).toMatch(/verifyCertPayload\(form\.verifyCert\) === false/)
+    // 选择 $host 且 skip 时：提交按钮禁用 + 就地提示。
+    expect(src).toContain('sniHostBlocked')
+    expect(src).toContain('disabled={sniHostBlocked}')
+    expect(src).toContain("t('pages.origin.sniHostHint')")
+    // 快捷按钮存在。
+    expect(src).toContain("sni: '$host'")
+  })
+})
