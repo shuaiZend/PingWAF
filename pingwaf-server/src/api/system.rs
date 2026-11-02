@@ -176,6 +176,16 @@ pub struct AgentNode {
     pub status: String,
     /// CPU load of the node, in percent. `None` = no sample retained.
     pub cpu_percent: Option<f64>,
+    /// Where [`Self::cpu_percent`] came from: `probe`, `heartbeat` or `none`.
+    ///
+    /// The two sources are not the same measurement, so the figure is not
+    /// self-explanatory. A probe sample is a 5-second interval delta; the
+    /// heartbeat value only became one in 0.28.3 — before that it is an average
+    /// since boot, which a long-running edge dilutes towards zero and which a
+    /// client cannot tell apart from a genuinely idle node. Shipping the label
+    /// lets a consumer say which figure it is showing, and makes an agent that
+    /// has not been upgraded visible instead of silently mixed into the fleet.
+    pub cpu_source: String,
     /// Memory in use on the node, in bytes. `None` = no sample retained.
     ///
     /// Kept under its original name for the console; it carries the same value
@@ -209,7 +219,7 @@ pub struct AgentNode {
 /// This is the single place that decides how an observed value becomes an
 /// [`AgentNode`] field, so the mapping is testable without a database.
 ///
-/// Two sources feed it, always in this order:
+/// Two sources feed it:
 ///
 /// 1. the counters of the last heartbeat, retained in [`AgentRegistry`] while
 ///    the stream is open — at most one heartbeat interval old, and the only
@@ -217,15 +227,40 @@ pub struct AgentNode {
 /// 2. the newest stored samples — `host_samples` for CPU/memory, the
 ///    `pingwaf_active_connections` gauge in `agent_metrics` for the connection
 ///    count — which is all an offline agent has.
-#[derive(Debug, Clone, Default, PartialEq)]
+///
+/// The live report is preferred field by field with one deliberate exception:
+/// CPU is decided by [`pick_cpu`], which takes the probe sample whenever there
+/// is one, because only that figure is an interval delta on every agent version.
+#[derive(Debug, Clone, PartialEq)]
 pub struct NodeCounters {
     pub cpu_percent: Option<f64>,
+    /// Which source [`Self::cpu_percent`] was taken from — see [`pick_cpu`].
+    /// [`CPU_SOURCE_NONE`] whenever the value itself is `None`, so the pair
+    /// never claims a source for a figure that is not there.
+    pub cpu_source: &'static str,
     /// Memory in use on the node, in bytes.
     pub used_memory_bytes: Option<u64>,
     /// RAM the node has, in bytes, when the retained probe sample carries it.
     pub total_memory_bytes: Option<u64>,
     pub connections: Option<u64>,
     pub rps: Option<u64>,
+}
+
+impl Default for NodeCounters {
+    fn default() -> Self {
+        // Hand-written rather than derived so the CPU label starts at `none`
+        // instead of the empty string: an agent with no sample at all must
+        // report `cpu_source: "none"`, the same word the field documents for
+        // "neither source carried a reading".
+        Self {
+            cpu_percent: None,
+            cpu_source: CPU_SOURCE_NONE,
+            used_memory_bytes: None,
+            total_memory_bytes: None,
+            connections: None,
+            rps: None,
+        }
+    }
 }
 
 async fn nodes(
@@ -327,17 +362,61 @@ async fn agent_nodes(
         .collect())
 }
 
+/// `cpu_source` when the reported figure is a probe sample.
+const CPU_SOURCE_PROBE: &str = "probe";
+/// `cpu_source` when the reported figure is the live heartbeat's.
+const CPU_SOURCE_HEARTBEAT: &str = "heartbeat";
+/// `cpu_source` when neither source carried a reading.
+const CPU_SOURCE_NONE: &str = "none";
+
+/// Chooses the CPU figure the node view reports, and names its source.
+///
+/// Probe samples are interval deltas and therefore comparable across agent
+/// versions; the heartbeat value is a since-boot average on agents that
+/// predate 0.28.3. Prefer the probe, fall back to the heartbeat.
+///
+/// "Comparable" is the whole point. `host_samples.cpu_usage_percent` is a
+/// 5-second delta whichever agent shipped it, so it means the same thing on
+/// every node of the fleet; the heartbeat became one only in 0.28.3, and an
+/// older agent still reports `total_busy / total_since_boot`, which a
+/// long-running edge dilutes towards zero. Mixing the two into one column is
+/// what made an un-upgraded node look idle, so the fresh-looking-but-diluted
+/// value is no longer allowed to win: the probe is the answer whenever it
+/// exists, and the heartbeat only covers a node that has not been sampled yet
+/// (fresh registration, or a deployment that ships no probe samples).
+///
+/// A non-finite reading is not a reading: `NaN`/`±inf` are dropped here, where
+/// the choice is made, so the returned label can never name a source for a
+/// value the caller then has to discard.
+fn pick_cpu(
+    probe: Option<f64>,
+    heartbeat: Option<f64>,
+) -> (Option<f64>, &'static str) {
+    let usable = |value: Option<f64>| value.filter(|value| value.is_finite());
+    if let Some(value) = usable(probe) {
+        return (Some(value), CPU_SOURCE_PROBE);
+    }
+    if let Some(value) = usable(heartbeat) {
+        return (Some(value), CPU_SOURCE_HEARTBEAT);
+    }
+    (None, CPU_SOURCE_NONE)
+}
+
 /// Precedence between the two sources of [`NodeCounters`].
 ///
-/// A live value wins field by field: it is at most one heartbeat old, where the
-/// stored sample can be a minute old (probe samples are persisted once a
-/// minute) or days old for an offline agent. The stored sample still answers
-/// for what a live report cannot express:
+/// A live value wins field by field, with CPU as the one exception. The live
+/// report is at most one heartbeat old, where the stored sample can be a minute
+/// old (probe samples are persisted once a minute) or days old for an offline
+/// agent. The stored sample still answers for what a live report cannot express:
 ///
-/// * CPU and memory are plain numbers on the wire, so `0` cannot be told apart
-///   from "the agent could not read it". A zero memory reading therefore falls
-///   back to the stored sample — showing `0` bytes would render as a node with
-///   no memory at all — while a zero connection/RPS count is kept, an idle edge
+/// * CPU is decided by [`pick_cpu`], which prefers the stored probe sample: it
+///   is the delta-comparable figure, the heartbeat one is a since-boot average
+///   on agents older than 0.28.3. Memory, connections and RPS keep the live
+///   value, as before.
+/// * Memory is a plain number on the wire, so `0` cannot be told apart from
+///   "the agent could not read it". A zero memory reading therefore falls back
+///   to the stored sample — showing `0` bytes would render as a node with no
+///   memory at all — while a zero connection/RPS count is kept, an idle edge
 ///   being a real state.
 /// * `total_memory_bytes` only ever comes from a probe sample or the
 ///   registration row, never from the heartbeat.
@@ -348,10 +427,11 @@ fn merge_counters(
     let Some(live) = live else {
         return stored.clone();
     };
+    let (cpu_percent, cpu_source) =
+        pick_cpu(stored.cpu_percent, Some(live.cpu_percent));
     NodeCounters {
-        cpu_percent: Some(live.cpu_percent)
-            .filter(|value| value.is_finite())
-            .or(stored.cpu_percent),
+        cpu_percent,
+        cpu_source,
         used_memory_bytes: (live.memory_bytes > 0)
             .then_some(live.memory_bytes)
             .or(stored.used_memory_bytes),
@@ -367,13 +447,22 @@ fn agent_node(
     counters: &NodeCounters,
     sites: u64,
 ) -> AgentNode {
+    // A NaN would serialise as `null` anyway; dropping it here keeps the
+    // struct free of a value nothing can compare. The label follows the value:
+    // a counter set assembled by hand with a non-finite reading reports `none`
+    // rather than naming a source for a figure that is not on the wire.
+    let cpu_percent = counters.cpu_percent.filter(|value| value.is_finite());
+    let cpu_source = if cpu_percent.is_some() {
+        counters.cpu_source
+    } else {
+        CPU_SOURCE_NONE
+    };
     AgentNode {
         id: row.id,
         name: row.hostname.clone(),
         status: row.status.clone(),
-        // A NaN would serialise as `null` anyway; dropping it here keeps the
-        // struct free of a value nothing can compare.
-        cpu_percent: counters.cpu_percent.filter(|value| value.is_finite()),
+        cpu_percent,
+        cpu_source: cpu_source.to_string(),
         memory_bytes: counters.used_memory_bytes,
         used_memory_bytes: counters.used_memory_bytes,
         // The probe's newest reading is the same `MemTotal` registration
@@ -426,7 +515,12 @@ async fn latest_samples(
     let mut out = HashMap::with_capacity(ids.len());
     for row in latest_rows(db, LATEST_SAMPLES_SQL, ids, Vec::new()).await? {
         let agent_id = required::<Uuid>(&row, "agent_id")?;
-        let cpu_percent = optional::<f64>(&row, "cpu_usage_percent")?;
+        // The stored sample *is* the probe, so it is labelled and sanity-checked
+        // by the same function that later decides between it and the heartbeat:
+        // one place owns both the precedence and the `probe`/`heartbeat`/`none`
+        // vocabulary, and a non-finite stored reading never becomes a value.
+        let (cpu_percent, cpu_source) =
+            pick_cpu(optional::<f64>(&row, "cpu_usage_percent")?, None);
         // The columns are signed bigints; a negative count is a corrupt
         // sample, not a byte total, so it reads as unknown.
         let used_memory_bytes = optional::<i64>(&row, "memory_used_bytes")?
@@ -437,6 +531,7 @@ async fn latest_samples(
             agent_id,
             NodeCounters {
                 cpu_percent,
+                cpu_source,
                 used_memory_bytes,
                 total_memory_bytes,
                 ..Default::default()
@@ -809,6 +904,7 @@ mod tests {
         let mut row = inventory_row("edge-1", "online", Some(seen));
         let counters = NodeCounters {
             cpu_percent: Some(12.5),
+            cpu_source: CPU_SOURCE_PROBE,
             used_memory_bytes: Some(3 << 30),
             total_memory_bytes: Some(8 << 30),
             connections: Some(17),
@@ -820,6 +916,7 @@ mod tests {
         assert_eq!(node.name, "edge-1");
         assert_eq!(node.status, "online");
         assert_eq!(node.cpu_percent, Some(12.5));
+        assert_eq!(node.cpu_source, "probe");
         assert_eq!(node.memory_bytes, Some(3 << 30));
         assert_eq!(node.used_memory_bytes, Some(3 << 30));
         assert_eq!(node.total_memory_bytes, Some(8 << 30));
@@ -831,6 +928,7 @@ mod tests {
 
         let json = serde_json::to_value(&node).expect("serialises");
         assert_eq!(json["cpu_percent"], serde_json::json!(12.5));
+        assert_eq!(json["cpu_source"], serde_json::json!("probe"));
         assert_eq!(json["memory_bytes"], serde_json::json!(3u64 << 30));
         assert_eq!(json["used_memory_bytes"], serde_json::json!(3u64 << 30));
         assert_eq!(json["total_memory_bytes"], serde_json::json!(8u64 << 30));
@@ -872,26 +970,80 @@ mod tests {
             assert!(json[field].is_null(), "{field} must be null, not 0");
         }
         assert_eq!(json["sites"], serde_json::json!(0));
+        // No figure, no source: the label never names `probe`/`heartbeat` for a
+        // value the console renders as a dash.
+        assert_eq!(json["cpu_source"], serde_json::json!("none"));
     }
 
     /// A NaN sample (a platform whose CPU counters are unusable) is reported
-    /// as unknown rather than as a number nothing can compare.
+    /// as unknown rather than as a number nothing can compare — and the label
+    /// follows it to `none`, so `cpu_source` can never promise a figure that is
+    /// not there.
     #[test]
     fn non_finite_cpu_is_reported_as_unknown() {
         let row = inventory_row("edge-3", "online", None);
         let counters = NodeCounters {
             cpu_percent: Some(f64::NAN),
+            cpu_source: CPU_SOURCE_PROBE,
             ..Default::default()
         };
-        assert_eq!(agent_node(&row, &counters, 0).cpu_percent, None);
+        let node = agent_node(&row, &counters, 0);
+        assert_eq!(node.cpu_percent, None);
+        assert_eq!(node.cpu_source, "none");
     }
 
-    /// The live heartbeat is the fresher source and wins field by field; the
-    /// stored sample still answers for what the heartbeat cannot say.
+    /// R7: the probe is the comparable figure — a 5-second delta on every agent
+    /// version — so it outranks the heartbeat whenever one exists.
     #[test]
-    fn live_heartbeat_counters_win_over_the_stored_sample() {
+    fn pick_cpu_prefers_the_probe_sample() {
+        assert_eq!(pick_cpu(Some(12.5), Some(90.0)), (Some(12.5), "probe"));
+        // "Comparable" is the rule, not "smaller": a busy probe reading still
+        // outranks a diluted since-boot average.
+        assert_eq!(pick_cpu(Some(80.0), Some(4.0)), (Some(80.0), "probe"));
+    }
+
+    /// No sample yet — a fresh registration, or a deployment that ships no
+    /// probe samples — falls back to the heartbeat, labelled so the console can
+    /// tell the two apart.
+    #[test]
+    fn pick_cpu_falls_back_to_the_heartbeat() {
+        assert_eq!(pick_cpu(None, Some(42.25)), (Some(42.25), "heartbeat"));
+    }
+
+    /// Neither source: no figure and `none` — never `0`, which would render as
+    /// an idle node, and never a source for a value that is not there.
+    #[test]
+    fn pick_cpu_reports_none_without_a_reading() {
+        assert_eq!(pick_cpu(None, None), (None, "none"));
+        // A non-finite reading is not a reading: it is skipped, not reported as
+        // a number nothing can compare.
+        assert_eq!(pick_cpu(Some(f64::NAN), None), (None, "none"));
+        assert_eq!(
+            pick_cpu(Some(f64::INFINITY), Some(7.5)),
+            (Some(7.5), "heartbeat")
+        );
+    }
+
+    /// The figure is passed through untouched: the node view reports the
+    /// sample's own precision and never rounds it for display.
+    #[test]
+    fn pick_cpu_keeps_the_samples_precision() {
+        let sample = 12.345_678_901_234_5_f64;
+        let (value, source) = pick_cpu(Some(sample), Some(1.0));
+        assert_eq!(source, "probe");
+        assert_eq!(value.map(f64::to_bits), Some(sample.to_bits()));
+    }
+
+    /// R7: CPU comes from the probe even when a live heartbeat is present — the
+    /// stored sample is an interval delta on every agent version, the heartbeat
+    /// figure is a since-boot average before 0.28.3 and would drag the column
+    /// down for an un-upgraded edge. Every other field keeps the live value,
+    /// which is the fresher source.
+    #[test]
+    fn the_probe_cpu_wins_while_the_heartbeat_supplies_the_rest() {
         let stored = NodeCounters {
             cpu_percent: Some(3.0),
+            cpu_source: CPU_SOURCE_PROBE,
             used_memory_bytes: Some(2 << 30),
             total_memory_bytes: Some(8 << 30),
             connections: Some(1),
@@ -905,7 +1057,13 @@ mod tests {
         };
 
         let merged = merge_counters(&stored, Some(live));
-        assert_eq!(merged.cpu_percent, Some(42.5));
+        assert_eq!(
+            merged.cpu_percent,
+            Some(3.0),
+            "the probe delta outranks the heartbeat figure: the latter is a \
+             since-boot average on an agent that predates 0.28.3"
+        );
+        assert_eq!(merged.cpu_source, "probe");
         assert_eq!(merged.used_memory_bytes, Some(3 << 30));
         assert_eq!(
             merged.total_memory_bytes,
@@ -914,6 +1072,18 @@ mod tests {
         );
         assert_eq!(merged.connections, Some(17));
         assert_eq!(merged.rps, Some(130), "RPS exists only in the live report");
+
+        // A node whose probe samples have not landed yet — a fresh
+        // registration, or a deployment that ships none — still gets a figure,
+        // and the label says which one it is.
+        let unsampled = NodeCounters {
+            used_memory_bytes: Some(2 << 30),
+            total_memory_bytes: Some(8 << 30),
+            ..Default::default()
+        };
+        let merged = merge_counters(&unsampled, Some(live));
+        assert_eq!(merged.cpu_percent, Some(42.5));
+        assert_eq!(merged.cpu_source, "heartbeat");
 
         // A zero memory reading means "could not read it", not "a node with no
         // memory": the stored sample answers instead. An idle edge reporting
@@ -936,11 +1106,15 @@ mod tests {
     fn stored_sample_is_used_without_a_live_heartbeat() {
         let stored = NodeCounters {
             cpu_percent: Some(3.0),
+            cpu_source: CPU_SOURCE_PROBE,
             used_memory_bytes: Some(2 << 30),
             total_memory_bytes: Some(8 << 30),
             connections: Some(1),
             rps: None,
         };
+        // The offline path hands the counters through untouched, label
+        // included: an offline node still reports the probe figure it was last
+        // sampled with.
         assert_eq!(merge_counters(&stored, None), stored);
         assert_eq!(
             merge_counters(&NodeCounters::default(), None),
@@ -982,6 +1156,9 @@ mod tests {
             "name",
             "status",
             "cpu_percent",
+            // R7: the source travels with the figure, so a consumer can tell a
+            // probe delta from a pre-0.28.3 since-boot average.
+            "cpu_source",
             "memory_bytes",
             "used_memory_bytes",
             "total_memory_bytes",

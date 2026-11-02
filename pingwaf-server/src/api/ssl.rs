@@ -722,6 +722,48 @@ fn attach_bindings(
     response.bound_sites = sites;
 }
 
+/// Decorates one certificate that was just read back from the database with
+/// the two derived fields every write endpoint returns: the advisory
+/// [`CertificateResponse::warnings`] and the [`BoundSiteRef`] list.
+///
+/// The two endpoints that grant a share — `POST /certificates/{id}/bindings`
+/// and `POST /sites/{site_id}/certificate-links` — both call this, including on
+/// their already-linked path, so a retried request answers with the same shape
+/// as the first one instead of a narrower row. `relation` is deliberately *not*
+/// set here: it describes the caller's point of view (the site it asked about)
+/// and each endpoint decides it on its own.
+///
+/// Costs up to three reads — the owner's hostnames, the links, and the
+/// hostnames of the linked sites — and no errors of its own: the helpers
+/// degrade, because a decoration must never fail a write that already
+/// committed.
+async fn decorate_certificate(
+    state: &AppState,
+    certificate: site_certificates::Model,
+) -> CertificateResponse {
+    let served = site_hostname_index(
+        state,
+        std::iter::once(certificate.site_id).flatten(),
+    )
+    .await;
+    // One map for one certificate: `bound_count` counts the *other* sites, so
+    // the owner has to travel with the id or the owner's own backfilled link
+    // row (migration 85) would be counted as a share.
+    let owners = HashMap::from([(certificate.id, certificate.site_id)]);
+    let bound =
+        bound_sites_index(state, std::iter::once(certificate.id), &owners)
+            .await;
+
+    let mut response = CertificateResponse::from(certificate);
+    response.warnings = Some(certificate_warnings_for(
+        &served,
+        response.site_id.unwrap_or_default(),
+        &response.domain,
+    ));
+    attach_bindings(&mut response, &bound, &owners);
+    response
+}
+
 /// Longest single hostname a certificate row may name. A DNS name is at most
 /// 253 characters (RFC 1035), and one wildcard label still fits inside it.
 const MAX_SINGLE_HOSTNAME_LEN: usize = 253;
@@ -1009,6 +1051,16 @@ struct LinkCertificateRequest {
 }
 
 /// `POST /api/v1/sites/{site_id}/certificate-links`
+///
+/// Grants this site the right to serve another site's certificate.
+///
+/// Idempotent, exactly like the certificate-side `POST
+/// /certificates/{id}/bindings`: a link that already exists is the state the
+/// caller asked for, not an error, so a duplicate answers `200` with the same
+/// decorated row instead of a conflict — a retried request (a flaky network, a
+/// double click, a retrying client) must not read as a failure. The one
+/// conflict kept is **ownership**, checked first: a site cannot "link" the
+/// certificate it already owns, because that grant would mean nothing.
 async fn link_certificate(
     State(state): State<AppState>,
     current: AuthUser,
@@ -1047,9 +1099,20 @@ async fn link_certificate(
         .await?
         .is_some();
     if exists {
-        return Err(ApiError::Conflict(
-            "certificate already linked to this site".to_string(),
-        ));
+        // The grant is already in place: the target state is reached, so this
+        // is the same success the certificate-side endpoint reports, not a
+        // `409`. The certificate row loaded above is reused — the idempotent
+        // path costs the three decoration reads below and never a second
+        // `find_by_id`.
+        let owned_here = certificate.site_id == Some(site.id);
+        let mut response = decorate_certificate(&state, certificate).await;
+        // Owner first, then the share — the same precedence the certificate
+        // list applies. Ownership returned `409` above, so this branch only
+        // ever reports `linked`; the rule stays explicit so the field cannot
+        // drift if that check is ever relaxed.
+        response.relation =
+            if owned_here { "owner" } else { "linked" }.to_string();
+        return Ok(Json(response).into_response());
     }
 
     certificate_links::ActiveModel {
@@ -1060,7 +1123,16 @@ async fn link_certificate(
     .insert(&state.db)
     .await?;
 
-    let mut response = CertificateResponse::from(certificate);
+    // The site's bundle now carries the PEM, so its agents have to re-pull -
+    // the same side effect the certificate-side bindings endpoint performs.
+    // Without it a share created here would reach the edge only on the next
+    // unrelated configuration change.
+    touch_site(&state, site.id).await?;
+    notify_config_changed(&state, site.id, Some(&current.email)).await;
+
+    // Same decorated shape as the idempotent branch and as every other
+    // certificate response, so a caller cannot tell the two paths apart.
+    let mut response = decorate_certificate(&state, certificate).await;
     response.relation = "linked".to_string();
     Ok((StatusCode::CREATED, Json(response)).into_response())
 }
@@ -2434,9 +2506,11 @@ pub struct BindCertificateRequest {
 ///   endpoint.
 ///
 /// Idempotent: binding twice returns the same `200` instead of a conflict, so a
-/// retried request is not an error. (The site-scoped
-/// `POST /sites/{id}/certificate-links` keeps reporting the duplicate; it is the
-/// site's own view and a re-link there means the operator expected a change.)
+/// retried request is not an error. The site-scoped `POST
+/// /sites/{id}/certificate-links` answers a duplicate the same way and decorates
+/// its row through the same helper ([`decorate_certificate`]), so the two
+/// endpoints cannot disagree about what "already bound" looks like; only the
+/// ownership clash is a `409` on either of them.
 async fn bind_certificate(
     State(state): State<AppState>,
     current: AuthUser,
@@ -2500,22 +2574,7 @@ async fn bind_certificate(
     touch_site(&state, site.id).await?;
     notify_config_changed(&state, site.id, Some(&current.email)).await;
 
-    let served = site_hostname_index(
-        &state,
-        std::iter::once(certificate.site_id).flatten(),
-    )
-    .await;
-    let owners = HashMap::from([(target, certificate.site_id)]);
-    let bound =
-        bound_sites_index(&state, std::iter::once(target), &owners).await;
-    let mut response = CertificateResponse::from(certificate);
-    response.warnings = Some(certificate_warnings_for(
-        &served,
-        response.site_id.unwrap_or_default(),
-        &response.domain,
-    ));
-    attach_bindings(&mut response, &bound, &owners);
-    Ok(Json(response))
+    Ok(Json(decorate_certificate(&state, certificate).await))
 }
 
 /// `DELETE /api/v1/certificates/{cert_id}/bindings/{site_id}`
