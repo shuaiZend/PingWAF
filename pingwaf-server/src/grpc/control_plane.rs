@@ -2339,6 +2339,32 @@ async fn insert_access_chunks(
     Ok(())
 }
 
+/// Inserts security-event rows in the same bounded chunks as access logs.
+async fn insert_event_chunks(
+    db: &DatabaseConnection,
+    mut rows: Vec<security_event::ActiveModel>,
+) -> Result<(), Status> {
+    while rows.len() > LOG_INSERT_CHUNK {
+        let tail = rows.split_off(LOG_INSERT_CHUNK);
+        if let Err(err) =
+            security_event::Entity::insert_many(rows).exec(db).await
+        {
+            tracing::error!(error = %err, "failed to persist security events");
+            return Err(db_status(err));
+        }
+        rows = tail;
+    }
+    if !rows.is_empty() {
+        if let Err(err) =
+            security_event::Entity::insert_many(rows).exec(db).await
+        {
+            tracing::error!(error = %err, "failed to persist security events");
+            return Err(db_status(err));
+        }
+    }
+    Ok(())
+}
+
 /// Writes the accumulated rows, clearing both buffers.
 async fn flush(
     db: &DatabaseConnection,
@@ -2357,12 +2383,7 @@ async fn flush(
         let _timer = pingwaf_profiler::timed_method(
             pingwaf_profiler::Method::DbPersistEvents,
         );
-        if let Err(err) =
-            security_event::Entity::insert_many(rows).exec(db).await
-        {
-            tracing::error!(error = %err, "failed to persist security events");
-            return Err(db_status(err));
-        }
+        insert_event_chunks(db, rows).await?;
     }
     Ok(())
 }

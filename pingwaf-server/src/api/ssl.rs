@@ -9,9 +9,11 @@ use axum::routing::get;
 use axum::Json;
 use axum::Router;
 use chrono::{DateTime, Utc};
+use sea_orm::sea_query::Expr;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, Condition, ConnectionTrait, EntityTrait,
-    PaginatorTrait, QueryFilter, QueryOrder, Set, TransactionTrait,
+    FromQueryResult, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
+    Select, Set, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -44,6 +46,89 @@ pub(crate) mod cert_status {
     pub fn is_valid(status: &str) -> bool {
         matches!(status, ACTIVE | PENDING | EXPIRED | FAILED)
     }
+}
+
+/// Columns the certificate list endpoints serialize, without the PEM blobs.
+/// A page of 50 certificates would otherwise load 50 private keys only to
+/// compute two booleans; the presence flags are derived in SQL.
+#[derive(Debug, FromQueryResult)]
+struct CertificateListRow {
+    id: Uuid,
+    site_id: Option<Uuid>,
+    domain: String,
+    issuer: Option<String>,
+    not_before: Option<DateTime<Utc>>,
+    expires_at: Option<DateTime<Utc>>,
+    auto_renew: bool,
+    acme_email: Option<String>,
+    acme_challenge_type: String,
+    acme_dns_provider: Option<String>,
+    acme_dns_config: Option<serde_json::Value>,
+    status: String,
+    failure_reason: Option<String>,
+    has_certificate: bool,
+    has_private_key: bool,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+impl From<CertificateListRow> for CertificateResponse {
+    fn from(row: CertificateListRow) -> Self {
+        Self {
+            id: row.id,
+            site_id: row.site_id,
+            domain: row.domain,
+            issuer: row.issuer,
+            not_before: row.not_before,
+            expires_at: row.expires_at,
+            auto_renew: row.auto_renew,
+            acme_email: row.acme_email,
+            acme_challenge_type: row.acme_challenge_type,
+            acme_dns_provider: row.acme_dns_provider,
+            acme_dns_config: row.acme_dns_config,
+            status: row.status,
+            relation: owner_relation(),
+            bound_sites: Vec::new(),
+            bound_count: 0,
+            failure_reason: row.failure_reason,
+            has_certificate: row.has_certificate,
+            has_private_key: row.has_private_key,
+            warnings: None,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+        }
+    }
+}
+
+/// The projection shared by both certificate list endpoints.
+fn certificate_list_query() -> Select<site_certificates::Entity> {
+    site_certificates::Entity::find()
+        .select_only()
+        .columns([
+            site_certificates::Column::Id,
+            site_certificates::Column::SiteId,
+            site_certificates::Column::Domain,
+            site_certificates::Column::Issuer,
+            site_certificates::Column::NotBefore,
+            site_certificates::Column::ExpiresAt,
+            site_certificates::Column::AutoRenew,
+            site_certificates::Column::AcmeEmail,
+            site_certificates::Column::AcmeChallengeType,
+            site_certificates::Column::AcmeDnsProvider,
+            site_certificates::Column::AcmeDnsConfig,
+            site_certificates::Column::Status,
+            site_certificates::Column::FailureReason,
+            site_certificates::Column::CreatedAt,
+            site_certificates::Column::UpdatedAt,
+        ])
+        .column_as(
+            Expr::cust("cert_pem IS NOT NULL AND cert_pem <> ''"),
+            "has_certificate",
+        )
+        .column_as(
+            Expr::cust("key_pem IS NOT NULL AND key_pem <> ''"),
+            "has_private_key",
+        )
 }
 
 /// Public certificate representation (never exposes the private key).
@@ -803,9 +888,10 @@ async fn list_certificates(
             condition.add(site_certificates::Column::Id.is_in(linked_ids));
     }
 
-    let paginator = site_certificates::Entity::find()
+    let paginator = certificate_list_query()
         .filter(condition)
         .order_by_desc(site_certificates::Column::CreatedAt)
+        .into_model::<CertificateListRow>()
         .paginate(&state.db, pagination.limit());
 
     let total = paginator.num_items().await?;
@@ -985,9 +1071,10 @@ async fn list_available_certificates(
             condition.add(site_certificates::Column::Id.is_not_in(linked_ids));
     }
 
-    let paginator = site_certificates::Entity::find()
+    let paginator = certificate_list_query()
         .filter(condition)
         .order_by_desc(site_certificates::Column::CreatedAt)
+        .into_model::<CertificateListRow>()
         .paginate(&state.db, pagination.limit());
     let total = paginator.num_items().await?;
     let rows = paginator.fetch_page(pagination.index()).await?;
@@ -1752,9 +1839,10 @@ async fn list_all_certificates(
         condition = condition.add(site_certificates::Column::Status.eq(status));
     }
 
-    let paginator = site_certificates::Entity::find()
+    let paginator = certificate_list_query()
         .filter(condition)
         .order_by_desc(site_certificates::Column::CreatedAt)
+        .into_model::<CertificateListRow>()
         .paginate(&state.db, pagination.limit());
 
     let total = paginator.num_items().await?;
