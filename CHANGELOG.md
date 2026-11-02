@@ -8,6 +8,15 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.32.9] — 2026-11-02
+
+### Security
+
+- **`pulldown-cmark` 0.13.5 -> 0.13.6** for RUSTSEC-2026-0433 (quadratic
+  parsing of nested image wikilinks, high). It is a transitive build
+  dependency (prost-build -> tonic-prost-build); the lockfile update clears
+  `cargo audit`.
+
 ## [PingWAF 0.32.8] — 2026-11-02
 
 ### Fixed
