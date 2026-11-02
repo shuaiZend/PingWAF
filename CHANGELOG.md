@@ -8,6 +8,21 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.32.10] — 2026-11-02
+
+### Fixed
+
+- **Editing a site's certificate no longer reports it as unbound.** The
+  site-scoped `PUT /sites/{id}/certificates/{id}` returned `bound_sites: []`
+  and `bound_count: 0` while every other certificate response carries them,
+  so the panel showed an unbound certificate immediately after an edit.
+- **Cloning a site no longer writes owner self-links.** The clone copied the
+  source's link rows, producing a link from the new site to its own
+  certificate. Ownership is the certificate row's `site_id`; the link only
+  restated it (and made owners look shared before the read paths filtered
+  them). A grant on someone else's certificate is that owner's
+  authorisation, so it is not cloned either.
+
 ## [PingWAF 0.32.9] — 2026-11-02
 
 ### Security
