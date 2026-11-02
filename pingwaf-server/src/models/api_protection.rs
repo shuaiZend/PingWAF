@@ -35,6 +35,14 @@ pub mod api_protection_settings {
         pub waf_enabled: bool,
         /// `block` or `monitor`; monitor only records matches.
         pub waf_mode: String,
+        /// Read the client from `trusted_header` when the peer is trusted.
+        pub trust_proxy_headers: bool,
+        /// Lower-case forwarded header, e.g. `x-forwarded-for`.
+        pub trusted_header: String,
+        /// Trust the nearest proxy (last entry) instead of the first.
+        pub trust_last_hop: bool,
+        /// Peer addresses allowed to supply the forwarded header.
+        pub trusted_proxy_ranges: Vec<String>,
         pub updated_at: DateTimeUtc,
     }
 

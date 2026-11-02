@@ -2103,6 +2103,10 @@ interface ApiProtectionDraft {
   groupId: string
   wafEnabled: boolean
   wafMode: string
+  trustProxyHeaders: boolean
+  trustedHeader: string
+  trustLastHop: boolean
+  trustedProxyRangesText: string
 }
 
 function apiProtectionDraft(view: ApiProtectionView): ApiProtectionDraft {
@@ -2114,6 +2118,10 @@ function apiProtectionDraft(view: ApiProtectionView): ApiProtectionDraft {
     groupId: view.ip_allowlist_group_id ?? '',
     wafEnabled: view.waf_enabled,
     wafMode: view.waf_mode,
+    trustProxyHeaders: view.trust_proxy_headers,
+    trustedHeader: view.trusted_header,
+    trustLastHop: view.trust_last_hop,
+    trustedProxyRangesText: view.trusted_proxy_ranges.join('\n'),
   }
 }
 
@@ -2171,6 +2179,11 @@ function ApiProtectionCard({ canWrite }: { canWrite: boolean }) {
     .map((line) => line.trim())
     .filter(Boolean)
 
+  const trustedProxyRanges = (draft?.trustedProxyRangesText ?? '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+
   const group = groups.data?.items.find((g) => g.id === draft?.groupId)
   // A disabled group contributes nothing to the effective allowlist.
   const groupEntries = group?.enabled ? group.ip_ranges.length : 0
@@ -2184,6 +2197,10 @@ function ApiProtectionCard({ canWrite }: { canWrite: boolean }) {
     ip_allowlist_group_id: draft?.groupId ?? '',
     waf_enabled: draft?.wafEnabled,
     waf_mode: draft?.wafMode,
+    trust_proxy_headers: draft?.trustProxyHeaders,
+    trusted_header: draft?.trustedHeader,
+    trust_last_hop: draft?.trustLastHop,
+    trusted_proxy_ranges: trustedProxyRanges,
   })
 
   const save = useMutation({
@@ -2342,6 +2359,43 @@ function ApiProtectionCard({ canWrite }: { canWrite: boolean }) {
                 options={wafModes}
                 disabled={!canWrite || !draft.wafEnabled}
                 onChange={(e) => patch({ wafMode: e.target.value })}
+              />
+            </div>
+
+            <div className="flex flex-col gap-4 border-t border-line pt-4">
+              <Switch
+                checked={draft.trustProxyHeaders}
+                disabled={!canWrite}
+                onCheckedChange={(value) => patch({ trustProxyHeaders: value })}
+                label={t('pages.settings.apiProtectionTrustProxy')}
+                description={t('pages.settings.apiProtectionTrustProxyHint')}
+              />
+              <div className="grid gap-4 sm:grid-cols-2">
+                <Input
+                  label={t('pages.settings.apiProtectionTrustedHeader')}
+                  value={draft.trustedHeader}
+                  disabled={!canWrite || !draft.trustProxyHeaders}
+                  onChange={(e) => patch({ trustedHeader: e.target.value })}
+                />
+                <div className="flex items-end pb-1">
+                  <Switch
+                    checked={draft.trustLastHop}
+                    disabled={!canWrite || !draft.trustProxyHeaders}
+                    onCheckedChange={(value) => patch({ trustLastHop: value })}
+                    label={t('pages.settings.apiProtectionTrustLastHop')}
+                    description={t('pages.settings.apiProtectionTrustLastHopHint')}
+                  />
+                </div>
+              </div>
+              <Textarea
+                label={t('pages.settings.apiProtectionTrustedRanges')}
+                hint={t('pages.settings.apiProtectionTrustedRangesHint')}
+                mono
+                rows={3}
+                value={draft.trustedProxyRangesText}
+                placeholder={'10.0.0.0/8\n203.0.113.10'}
+                disabled={!canWrite || !draft.trustProxyHeaders}
+                onChange={(e) => patch({ trustedProxyRangesText: e.target.value })}
               />
             </div>
 

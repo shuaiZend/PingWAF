@@ -28,25 +28,9 @@ import {
   BODY_STAGE_TIMEOUT_MIN,
   normaliseBodyStageTimeout,
 } from '@/lib/bodyStageTimeout'
-
-type ProtectionTab = 'managed' | 'custom' | 'cc' | 'paths'
+import { parseTab, type ProtectionTab } from '@/lib/protectionTab'
 
 /** Body-stage inspection budget — constants come from `@/lib/bodyStageTimeout`. */
-
-const PROTECTION_TABS: ProtectionTab[] = ['managed', 'custom', 'cc']
-
-/** Pre-0.22 tab values, still accepted in links and normalized on load. */
-const LEGACY_TABS: Record<string, ProtectionTab> = {
-  settings: 'managed',
-  rules: 'custom',
-}
-
-function parseTab(value: string | null): ProtectionTab {
-  if (value && LEGACY_TABS[value]) return LEGACY_TABS[value]
-  return PROTECTION_TABS.includes(value as ProtectionTab)
-    ? (value as ProtectionTab)
-    : 'managed'
-}
 
 function SectionHeading({ title, hint }: { title: string; hint?: string }) {
   return (

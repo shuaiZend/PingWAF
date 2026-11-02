@@ -1281,6 +1281,13 @@ export interface ApiProtectionSettings {
   waf_enabled: boolean
   /** `block` or `monitor`; monitor only records matches. */
   waf_mode: ApiProtectionWafMode | string
+  /** Read the client from `trusted_header` when the peer is trusted. */
+  trust_proxy_headers: boolean
+  trusted_header: string
+  /** Trust the nearest proxy (last XFF entry) instead of the first. */
+  trust_last_hop: boolean
+  /** Peer addresses allowed to supply the forwarded header. */
+  trusted_proxy_ranges: string[]
   updated_at: string
 }
 
@@ -1302,6 +1309,10 @@ export interface UpdateApiProtectionRequest {
   ip_allowlist_group_id?: string | null
   waf_enabled?: boolean
   waf_mode?: ApiProtectionWafMode | string
+  trust_proxy_headers?: boolean
+  trusted_header?: string
+  trust_last_hop?: boolean
+  trusted_proxy_ranges?: string[]
   /** Applies a change even when it excludes the calling connection. */
   force?: boolean
 }

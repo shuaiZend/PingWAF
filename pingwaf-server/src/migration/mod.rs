@@ -93,6 +93,7 @@ pub mod m20240101_000085_site_certificate_links;
 pub mod m20240101_000086_site_path_exceptions;
 pub mod m20240101_000087_error_page_scope;
 pub mod m20240101_000088_heartbeat_indexes;
+mod m20240101_000089_api_protection_trust;
 
 use sea_orm_migration::prelude::*;
 
@@ -201,6 +202,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20240101_000086_site_path_exceptions::Migration),
             Box::new(m20240101_000087_error_page_scope::Migration),
             Box::new(m20240101_000088_heartbeat_indexes::Migration),
+            Box::new(m20240101_000089_api_protection_trust::Migration),
         ]
     }
 }
@@ -212,7 +214,7 @@ mod tests {
     #[test]
     fn migrations_are_ordered_and_unique() {
         let migrations = Migrator::migrations();
-        assert_eq!(migrations.len(), 88);
+        assert_eq!(migrations.len(), 89);
         let names: Vec<String> =
             migrations.iter().map(|m| m.name().to_owned()).collect();
         let mut sorted = names.clone();

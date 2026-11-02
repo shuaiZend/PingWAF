@@ -2228,7 +2228,14 @@
       "passkeySwitchHint": "关闭后登录页不再提供 Passkey 登录，也无法绑定新的 Passkey；已绑定的凭据会保留，重新开启后即可恢复使用。",
       "passkeySwitchDescription": "部署级总开关。Passkey 的绑定与管理在右上角\"账户设置\"中。",
       "passkeySwitchOn": "已启用 Passkey 登录。",
-      "passkeySwitchOff": "已禁用 Passkey 登录。"
+      "passkeySwitchOff": "已禁用 Passkey 登录。",
+      "apiProtectionTrustProxy": "信任反向代理头",
+      "apiProtectionTrustProxyHint": "当 TCP 对端位于下方受信范围时，访问日志与 WAF 使用转发头中的客户端 IP。",
+      "apiProtectionTrustedHeader": "转发头名称",
+      "apiProtectionTrustLastHop": "信任最近一跳代理",
+      "apiProtectionTrustLastHopHint": "读取最后一个头值（最近代理），避免客户端伪造第一个值。",
+      "apiProtectionTrustedRanges": "受信代理范围",
+      "apiProtectionTrustedRangesHint": "每行一个地址或 CIDR；留空表示不信任任何对端。"
     },
     "geo": {
       "title": "地域限制",

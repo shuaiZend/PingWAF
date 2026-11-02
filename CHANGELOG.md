@@ -8,6 +8,26 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [Unreleased]
+
+### Fixed
+
+- **Path-exceptions tab opens again.** `paths` was missing from the tab parser's
+  accepted list, so every click wrote `?tab=paths` and the next render fell back
+  to `managed`. The list now includes it and a pure-function test pins the
+  legacy/unknown fallbacks.
+- **Cloned sites keep reverse-proxy trust.** The clone no longer resets
+  `trust_proxy_headers`, `trusted_header`, `trust_last_hop`,
+  `trusted_proxy_ranges` and `trusted_proxy_group_ids`; it remains paused so an
+  operator can confirm the new network path before enabling it.
+
+### Added
+
+- **Control-plane reverse-proxy trust.** `api_protection_settings` now accepts
+  trusted proxy ranges, a forwarded header and first/last-hop selection; the
+  9080 access log and WAF use the forwarded client IP only when the TCP peer is
+  in those ranges. Migration `000089`.
+
 ## [PingWAF 0.32.4] — 2026-11-01
 
 ### Added

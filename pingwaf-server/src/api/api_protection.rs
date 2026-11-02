@@ -83,6 +83,14 @@ pub struct UpdateApiProtectionRequest {
     #[serde(default, deserialize_with = "deserialize_optional_uuid")]
     pub ip_allowlist_group_id: Option<Option<Uuid>>,
     #[serde(default)]
+    pub trust_proxy_headers: Option<bool>,
+    #[serde(default)]
+    pub trusted_header: Option<String>,
+    #[serde(default)]
+    pub trust_last_hop: Option<bool>,
+    #[serde(default)]
+    pub trusted_proxy_ranges: Option<Vec<String>>,
+    #[serde(default)]
     pub waf_enabled: Option<bool>,
     #[serde(default)]
     pub waf_mode: Option<String>,
@@ -132,6 +140,10 @@ fn writable(
         ip_allowlist_group_id: Set(row.ip_allowlist_group_id),
         waf_enabled: Set(row.waf_enabled),
         waf_mode: Set(row.waf_mode),
+        trust_proxy_headers: Set(row.trust_proxy_headers),
+        trusted_header: Set(row.trusted_header),
+        trust_last_hop: Set(row.trust_last_hop),
+        trusted_proxy_ranges: Set(row.trusted_proxy_ranges),
         updated_at: Set(row.updated_at),
     }
 }
@@ -205,6 +217,40 @@ async fn update(
             }
         }
         prospective.ip_allowlist_group_id = group_id;
+    }
+    if let Some(enabled) = payload.trust_proxy_headers {
+        prospective.trust_proxy_headers = enabled;
+    }
+    if let Some(header) = payload.trusted_header {
+        let header = header.trim().to_ascii_lowercase();
+        if header.is_empty()
+            || header.len() > 64
+            || !header.bytes().all(|b| b.is_ascii_graphic())
+        {
+            return Err(ApiError::BadRequest(
+                "trusted_header must be a non-empty HTTP header name (max 64 ASCII characters)"
+                    .to_string(),
+            ));
+        }
+        prospective.trusted_header = header;
+    }
+    if let Some(last_hop) = payload.trust_last_hop {
+        prospective.trust_last_hop = last_hop;
+    }
+    if let Some(ranges) = payload.trusted_proxy_ranges {
+        let ranges: Vec<String> = ranges
+            .into_iter()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect();
+        let (_, invalid) = self_protection::Allowlist::parse(&ranges);
+        if !invalid.is_empty() {
+            return Err(ApiError::BadRequest(format!(
+                "invalid trusted proxy entries (expected an address or CIDR): {}",
+                invalid.join(", ")
+            )));
+        }
+        prospective.trusted_proxy_ranges = ranges;
     }
     if let Some(enabled) = payload.waf_enabled {
         prospective.waf_enabled = enabled;
@@ -373,6 +419,10 @@ mod tests {
             ip_allowlist_group_id: None,
             waf_enabled: true,
             waf_mode: waf_mode::BLOCK.to_string(),
+            trust_proxy_headers: false,
+            trusted_header: "x-forwarded-for".to_string(),
+            trust_last_hop: true,
+            trusted_proxy_ranges: Vec::new(),
             updated_at: Utc::now(),
         }
     }

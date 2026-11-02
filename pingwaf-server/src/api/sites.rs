@@ -1538,6 +1538,30 @@ fn clone_pool(
     }
 }
 
+/// Builds the clone's own site row. Only identity and lifecycle fields are
+/// rewritten: the source's cache/WAF/rewrite settings and its reverse-proxy
+/// trust configuration travel with the clone. The clone is paused so it never
+/// mirrors traffic until an operator confirms the network path.
+fn clone_site_row(
+    source: &site::Model,
+    new_id: Uuid,
+    user_id: Uuid,
+    name: String,
+    domain: String,
+    alternate_domains: Vec<String>,
+    timestamp: DateTime<Utc>,
+) -> site::ActiveModel {
+    let mut active: site::ActiveModel = source.clone().into();
+    active.id = Set(new_id);
+    active.user_id = Set(user_id);
+    active.name = Set(name);
+    active.domain = Set(domain);
+    active.alternate_domains = Set(alternate_domains);
+    active.status = Set(site_status::PAUSED.to_string());
+    active.created_at = Set(timestamp);
+    active
+}
+
 async fn clone_site(
     State(state): State<AppState>,
     current: AuthUser,
@@ -1574,26 +1598,15 @@ async fn clone_site(
     let timestamp = Utc::now();
     let txn = state.db.begin().await?;
 
-    let mut active: site::ActiveModel = source.clone().into();
-    active.id = Set(new_id);
-    active.user_id = Set(current.id);
-    active.name = Set(user_name);
-    active.domain = Set(domain.clone());
-    active.alternate_domains = Set(alternate_domains);
-    // Paused: a clone that starts serving immediately would silently double
-    // the traffic the source site receives.
-    active.status = Set(site_status::PAUSED.to_string());
-    // Forwarded-header trust is a property of where the site sits, not of its
-    // rules: carrying it over would let the clone read an X-Forwarded-For the
-    // source's proxy path supplies but the clone's does not, which spoofs the
-    // client IP that access rules, rate limits and audit logs key on.
-    active.trust_proxy_headers = Set(false);
-    active.trusted_header =
-        Set(crate::models::trusted_header::DEFAULT.to_string());
-    active.trust_last_hop = Set(true);
-    active.trusted_proxy_ranges = Set(Vec::new());
-    active.trusted_proxy_group_ids = Set(Vec::new());
-    active.created_at = Set(timestamp);
+    let active = clone_site_row(
+        &source,
+        new_id,
+        current.id,
+        user_name,
+        domain.clone(),
+        alternate_domains,
+        timestamp,
+    );
     let model = active.insert(&txn).await.map_err(map_domain_conflict)?;
 
     // Upstream pools first: nodes and routes reference them by id, so the
@@ -5031,5 +5044,54 @@ mod tests {
         assert_eq!(clone_pool(&pool_ids, mapped, fallback), (mapped, true));
         let foreign = Uuid::new_v4();
         assert_eq!(clone_pool(&pool_ids, foreign, fallback), (fallback, false));
+    }
+    #[test]
+    fn clone_row_preserves_reverse_proxy_trust() {
+        let timestamp = Utc::now();
+        let group_id = Uuid::new_v4();
+        let source = site::Model {
+            id: Uuid::new_v4(),
+            user_id: Uuid::new_v4(),
+            name: "source".to_string(),
+            domain: "source.example.com".to_string(),
+            alternate_domains: vec!["alt.example.com".to_string()],
+            status: "active".to_string(),
+            plan: "free".to_string(),
+            cache_quota_mb: 1024,
+            cache_max_file_size_mb: Some(64),
+            cache_type_limits_mb: None,
+            cache_type_policy: None,
+            trust_proxy_headers: true,
+            trusted_header: "x-real-ip".to_string(),
+            trust_last_hop: false,
+            failover_policy: "inherit".to_string(),
+            trusted_proxy_ranges: vec!["10.0.0.0/8".to_string()],
+            trusted_proxy_group_ids: vec![group_id],
+            origin_verify_cert: Some(true),
+            downstream_timeout_secs: 30,
+            response_replace: None,
+            created_at: timestamp,
+            updated_at: timestamp,
+        };
+
+        let clone = clone_site_row(
+            &source,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "clone".to_string(),
+            "clone.example.com".to_string(),
+            Vec::new(),
+            timestamp,
+        );
+
+        assert!(clone.trust_proxy_headers.unwrap());
+        assert!(!clone.trust_last_hop.unwrap());
+        assert_eq!(clone.trusted_proxy_group_ids.unwrap(), vec![group_id]);
+        assert_eq!(
+            clone.trusted_proxy_ranges.unwrap(),
+            vec!["10.0.0.0/8".to_string()]
+        );
+        assert_eq!(clone.trusted_header.unwrap(), "x-real-ip");
+        assert_eq!(clone.status.unwrap(), site_status::PAUSED);
     }
 }

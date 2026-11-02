@@ -2228,7 +2228,14 @@
       "passkeySwitchHint": "When off, the login form no longer offers passkeys and new passkeys cannot be bound. Existing credentials are kept and work again once re-enabled.",
       "passkeySwitchDescription": "Deployment-wide switch. Passkey binding and management live under \"Account settings\" in the top-right menu.",
       "passkeySwitchOn": "Passkey sign-in enabled.",
-      "passkeySwitchOff": "Passkey sign-in disabled."
+      "passkeySwitchOff": "Passkey sign-in disabled.",
+      "apiProtectionTrustProxy": "Trust reverse proxy headers",
+      "apiProtectionTrustProxyHint": "Use the forwarded header for the access-log and WAF client IP when the TCP peer is in the trusted ranges below.",
+      "apiProtectionTrustedHeader": "Forwarded header",
+      "apiProtectionTrustLastHop": "Trust the nearest proxy",
+      "apiProtectionTrustLastHopHint": "Read the last header entry (nearest proxy) instead of the first, which the client can spoof.",
+      "apiProtectionTrustedRanges": "Trusted proxy ranges",
+      "apiProtectionTrustedRangesHint": "One address or CIDR per line. An empty list trusts no peer."
     },
     "geo": {
       "title": "Geo Restrictions",

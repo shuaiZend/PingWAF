@@ -941,6 +941,14 @@ claude mcp add --transport http pingwaf https://waf.example.com:9080/mcp \
 
 Read-only credentials see only the read tools; administrators with a `write` key may also call `set_observation_mode` and `set_site_status`. The endpoint sits behind the same API protection as the console (access log, IP allowlist, WAF), so it obeys whatever **Settings → API protection** allows.
 
+When the console is behind a load balancer or reverse proxy, enable **Settings →
+API protection → Trust reverse proxy headers**, name the forwarded header
+(`x-forwarded-for` by default), and list the proxy addresses/CIDRs under
+**Trusted proxy ranges**. The 9080 access log and WAF then record the client
+address from that header; the IP allowlist deliberately keeps using the TCP
+peer so a spoofed header cannot widen access. An empty range list trusts no
+peer, even with the switch on.
+
 ## Config Versions
 
 **Config versions** in the sidebar records a version of the configuration on

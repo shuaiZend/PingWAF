@@ -183,6 +183,12 @@ pub struct ProtectionPolicy {
     pub access_log_enabled: bool,
     pub allowlist_enabled: bool,
     pub allowlist: Allowlist,
+    /// Read the client from `trusted_header` when the TCP peer is in
+    /// `trusted_proxies`. The allowlist deliberately keeps using the peer.
+    pub trust_proxy_headers: bool,
+    pub trusted_header: String,
+    pub trust_last_hop: bool,
+    pub trusted_proxies: Allowlist,
     /// Built on the first request that needs it. The engine is immutable for
     /// a given blocking mode, so deferring construction avoids compiling the
     /// full managed-rule automaton in every process that never receives an
@@ -202,6 +208,11 @@ impl Default for ProtectionPolicy {
             access_log_enabled: false,
             allowlist_enabled: false,
             allowlist: Allowlist::default(),
+            trust_proxy_headers: false,
+            trusted_header: crate::models::trusted_header::X_FORWARDED_FOR
+                .to_string(),
+            trust_last_hop: true,
+            trusted_proxies: Allowlist::default(),
             waf: OnceLock::new(),
             waf_enabled: false,
             waf_blocking: false,
@@ -294,6 +305,12 @@ pub async fn load_settings(
         ip_allowlist_group_id: Set(None),
         waf_enabled: Set(false),
         waf_mode: Set(waf_mode::BLOCK.to_string()),
+        trust_proxy_headers: Set(false),
+        trusted_header: Set(
+            crate::models::trusted_header::X_FORWARDED_FOR.to_string()
+        ),
+        trust_last_hop: Set(true),
+        trusted_proxy_ranges: Set(Vec::new()),
         updated_at: Set(now),
     };
     let ignore_conflict =
@@ -418,11 +435,23 @@ pub async fn refresh(
     let settings = load_settings(db).await?;
     let allowlist = effective_allowlist(db, &settings).await?;
     let waf_blocking = settings.waf_mode == waf_mode::BLOCK;
+    let (trusted_proxies, invalid) =
+        Allowlist::parse(&settings.trusted_proxy_ranges);
+    if !invalid.is_empty() {
+        tracing::warn!(
+            entries = ?invalid,
+            "ignoring invalid control-plane trusted proxy ranges"
+        );
+    }
 
     Ok(ProtectionPolicy {
         access_log_enabled: settings.access_log_enabled,
         allowlist_enabled: settings.ip_allowlist_enabled,
         allowlist,
+        trust_proxy_headers: settings.trust_proxy_headers,
+        trusted_header: settings.trusted_header,
+        trust_last_hop: settings.trust_last_hop,
+        trusted_proxies,
         waf: OnceLock::new(),
         waf_enabled: settings.waf_enabled,
         waf_blocking,
@@ -643,7 +672,8 @@ pub async fn access_log(
             .insert(HeaderName::from_static(REQUEST_ID_HEADER), value);
     }
 
-    let enabled = state.protection.policy().access_log_enabled;
+    let policy = state.protection.policy();
+    let enabled = policy.access_log_enabled;
     // Identity is decoded before the request moves on; the body never needs
     // it, so this stays on the cheap side of the middleware.
     let (user_id, user_email) = if enabled {
@@ -667,8 +697,8 @@ pub async fn access_log(
         "http"
     };
     let protocol = format!("{:?}", request.version());
-    let client_ip = peer_addr(&request)
-        .map(|addr| addr.ip().to_string())
+    let client_ip = client_ip(&request, &policy)
+        .map(|ip| ip.to_string())
         .unwrap_or_default();
 
     let mut response = next.run(request).await;
@@ -781,6 +811,41 @@ const SENSITIVE_QUERY_KEYS: [&str; 6] = [
     "password",
 ];
 
+/// Resolves the client address for logs and the WAF. The TCP peer is used
+/// unless the request came from a configured trusted proxy and the configured
+/// forwarded header carries a parseable address.
+fn client_ip(
+    request: &Request,
+    policy: &ProtectionPolicy,
+) -> Option<std::net::IpAddr> {
+    let peer = peer_addr(request)?.ip();
+    if !policy.trust_proxy_headers
+        || policy.trusted_proxies.is_empty()
+        || !policy.trusted_proxies.contains(&peer)
+    {
+        return Some(peer);
+    }
+    let raw = request.headers().get(policy.trusted_header.as_str())?;
+    forwarded_ip(raw.to_str().ok()?, policy.trust_last_hop, peer)
+}
+
+/// Picks the client address from a comma-separated forwarded header. Invalid
+/// entries are skipped; a header with no usable address falls back to the peer.
+fn forwarded_ip(
+    raw: &str,
+    last_hop: bool,
+    peer: std::net::IpAddr,
+) -> Option<std::net::IpAddr> {
+    let mut addresses = raw
+        .split(',')
+        .filter_map(|value| value.trim().parse::<std::net::IpAddr>().ok());
+    if last_hop {
+        addresses.next_back().or(Some(peer))
+    } else {
+        addresses.next().or(Some(peer))
+    }
+}
+
 /// Replaces the value of known-sensitive query parameters with `[redacted]`.
 fn redact_query(query: &str) -> String {
     query
@@ -826,8 +891,8 @@ pub async fn waf_guard(
 
     // Read the connection facts before the request is split: `Parts` is not
     // cloneable, so this is the last chance to look at the extensions.
-    let client_ip = peer_addr(&request)
-        .map(|addr| addr.ip().to_string())
+    let client_ip = client_ip(&request, &policy)
+        .map(|ip| ip.to_string())
         .unwrap_or_default();
     let scheme = if request
         .extensions()
@@ -973,7 +1038,7 @@ mod tests {
 }
 #[cfg(test)]
 mod control_plane_waf_tests {
-    use super::control_plane_waf;
+    use super::{control_plane_waf, forwarded_ip};
 
     #[test]
     fn control_plane_engine_is_reused_per_mode() {
@@ -983,5 +1048,22 @@ mod control_plane_waf_tests {
 
         let monitor = control_plane_waf(false);
         assert!(!std::sync::Arc::ptr_eq(&blocking, &monitor));
+    }
+    #[test]
+    fn forwarded_ip_prefers_the_requested_hop_and_skips_garbage() {
+        let peer: std::net::IpAddr = "10.0.0.9".parse().unwrap();
+        assert_eq!(
+            forwarded_ip("203.0.113.7, 10.0.0.2", true, peer),
+            Some("10.0.0.2".parse().unwrap())
+        );
+        assert_eq!(
+            forwarded_ip("203.0.113.7, 10.0.0.2", false, peer),
+            Some("203.0.113.7".parse().unwrap())
+        );
+        assert_eq!(
+            forwarded_ip("not-an-ip, 10.0.0.2", false, peer),
+            Some("10.0.0.2".parse().unwrap())
+        );
+        assert_eq!(forwarded_ip("garbage", false, peer), Some(peer));
     }
 }

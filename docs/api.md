@@ -615,10 +615,12 @@ checkbox before it will send the request; API callers should apply the same
 care (the clone is created **paused**, so nothing serves until it is enabled
 deliberately). Two things still do not survive the copy unchanged:
 
-- Forwarded-header trust (`trust_proxy_headers`, `trusted_proxy_ranges`,
-  `trusted_proxy_group_ids`, `trust_last_hop`) is reset to the defaults: it
-  describes where the site sits, and inheriting it would let the clone read an
-  `X-Forwarded-For` its own proxy path does not supply.
+- Forwarded-header trust (`trust_proxy_headers`, `trusted_header`,
+  `trusted_proxy_ranges`, `trusted_proxy_group_ids`, `trust_last_hop`) is
+  copied with the site. The clone is created **paused**; confirm that the
+  clone's network path really supplies the copied forwarded header before
+  enabling it, otherwise the edge will read a client IP the clone path does
+  not control.
 - The OIDC callback still names the source domain (`redirect_url`, or the
   callback derived from the request `Host`), so the identity provider keeps
   sending logins back to the source until the provider registration is
@@ -3605,6 +3607,10 @@ shown below.
   "ip_allowlist_group_id": null,
   "waf_enabled": false,
   "waf_mode": "block",
+  "trust_proxy_headers": false,
+  "trusted_header": "x-forwarded-for",
+  "trust_last_hop": true,
+  "trusted_proxy_ranges": [],
   "updated_at": "2026-10-03T00:00:00Z",
   "effective_allowlist_entries": 0
 }
@@ -3638,6 +3644,10 @@ request.
   "ip_allowlist_group_id": "uuid",
   "waf_enabled": true,
   "waf_mode": "monitor",
+  "trust_proxy_headers": true,
+  "trusted_header": "x-forwarded-for",
+  "trust_last_hop": true,
+  "trusted_proxy_ranges": ["10.0.0.0/8"],
   "force": false
 }
 ```
@@ -3651,6 +3661,10 @@ request.
 | `ip_allowlist_group_id` | string | Reference an `ip_groups` row; `""` clears the reference; omit or `null` to keep it. |
 | `waf_enabled` | bool | Inspect API requests with the embedded WAF engine. |
 | `waf_mode` | string | `block` or `monitor`; monitor only records matches (they show up as `observed_waf`). |
+| `trust_proxy_headers` | bool | Use `trusted_header` for the access-log/WAF client IP when the TCP peer is in `trusted_proxy_ranges`. |
+| `trusted_header` | string | Lower-case forwarded header name, max 64 ASCII characters. Default `x-forwarded-for`. |
+| `trust_last_hop` | bool | Read the last header value (nearest proxy) instead of the first. |
+| `trusted_proxy_ranges` | string[] | Addresses/CIDRs allowed to supply the forwarded header; empty trusts no peer. |
 | `force` | bool | Apply a change the lockout guard below would refuse. |
 
 Validation failures return `400`: an unparsable allowlist entry, a retention
