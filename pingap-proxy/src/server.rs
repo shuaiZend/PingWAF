@@ -24,7 +24,12 @@ use async_trait::async_trait;
 use bstr::ByteSlice;
 use bytes::Bytes;
 use bytes::BytesMut;
+use flate2::read::GzDecoder;
 use http::StatusCode;
+use http::header::{
+    ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_LENGTH, ETAG, TRANSFER_ENCODING,
+    VARY,
+};
 use pingap_acme::handle_lets_encrypt;
 use pingap_certificate::CertificateProvider;
 use pingap_certificate::{GlobalCertificate, TlsSettingParams};
@@ -36,9 +41,9 @@ use pingap_core::LocationInstance;
 use pingap_core::PluginProvider;
 use pingap_core::new_internal_error;
 use pingap_core::{
-    CompressionStat, Ctx, PluginStep, RequestPluginResult,
-    ResponseBodyPluginResult, ResponsePluginResult, ensure_client_ip,
-    get_cache_key, get_host,
+    CompressionStat, Ctx, HTTP_HEADER_TRANSFER_CHUNKED, ModifyResponseBody,
+    PluginStep, RequestPluginResult, ResponseBodyPluginResult,
+    ResponsePluginResult, ensure_client_ip, get_cache_key, get_host,
 };
 use pingap_core::{HTTP_HEADER_NAME_X_REQUEST_ID, get_digest_detail};
 use pingap_location::LocationProvider;
@@ -80,13 +85,14 @@ use pingora::upstreams::peer::{HttpPeer, Peer};
 use scopeguard::defer;
 use snafu::Snafu;
 use std::any::Any;
+use std::io::{ErrorKind, Read};
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::Sender;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// Access-log lines dropped because the async logger channel was full.
 static ACCESS_LOG_DROPPED: AtomicU64 = AtomicU64::new(0);
@@ -210,6 +216,11 @@ pub struct Server {
 
     /// Whether to enable server-timing header
     enable_server_timing: bool,
+
+    /// `Accept-Encoding` value injected on the requests that carry none.
+    /// `None` disables the injection (an empty
+    /// `[basic] upstream_accept_encoding`).
+    upstream_accept_encoding: Option<&'static str>,
 
     // downstream read timeout
     downstream_read_timeout: Option<Duration>,
@@ -484,6 +495,16 @@ impl Server {
             })?;
             Some(Arc::new(p))
         };
+        // Read once here rather than per request: `[basic]` is a process-wide
+        // setting, and every other field of this struct is snapshotted the
+        // same way (a config change rebuilds the server).
+        let upstream_accept_encoding = parse_upstream_accept_encoding(
+            ctx.config_manager
+                .get_current_config()
+                .basic
+                .upstream_accept_encoding
+                .as_deref(),
+        );
         let s = Server {
             name: conf.name.clone(),
             admin: conf.admin,
@@ -518,6 +539,7 @@ impl Server {
             #[cfg(feature = "tracing")]
             prometheus,
             enable_server_timing: conf.enable_server_timing,
+            upstream_accept_encoding,
             modules: conf.modules.clone(),
             downstream_read_timeout: conf.downstream_read_timeout,
             downstream_write_timeout: conf.downstream_write_timeout,
@@ -1443,6 +1465,71 @@ impl Server {
         ctx.plugins = Some(plugins);
         result
     }
+
+    /// Undoes the origin's gzip encoding for a response the proxy asked to be
+    /// compressed on behalf of a client that cannot decode it.
+    ///
+    /// Runs before the `UpstreamResponse` plugins and long before every body
+    /// hook, so a `sub_filter` in the chain classifies this response as
+    /// plaintext: `Content-Encoding` is already gone when it looks.
+    fn apply_upstream_gzip_fallback(
+        &self,
+        ctx: &mut Ctx,
+        upstream_response: &mut ResponseHeader,
+    ) {
+        if should_decode_gzip(ctx, upstream_response) {
+            decode_headers(upstream_response);
+            ctx.upstream_gzip_decoded = true;
+            ctx.add_modify_body_handler(
+                GZIP_DECODE_HANDLER,
+                Box::new(GzipBodyDecoder::new()),
+            );
+            debug!(
+                target: LOG_TARGET,
+                "decoding the origin gzip body for a client without accept-encoding"
+            );
+            return;
+        }
+        // Worth a line only when the proxy asked for the encoding itself: from
+        // then on the client has no way to read what the origin sent, and the
+        // reason is in the encoding it chose.
+        if ctx.upstream_accept_encoding_injected
+            && !ctx.client_accepts_gzip
+            && let Some(encoding) = upstream_response
+                .headers
+                .get(CONTENT_ENCODING)
+                .and_then(|value| value.to_str().ok())
+        {
+            debug!(
+                target: LOG_TARGET,
+                encoding, "origin encoding is left untouched"
+            );
+        }
+    }
+
+    /// Drives the gzip fallback body handler.
+    ///
+    /// Deliberately called before the body plugins: the plaintext a
+    /// `sub_filter` is going to rewrite has to exist first, whichever step
+    /// that plugin was configured for.
+    fn handle_upstream_gzip_decode(
+        &self,
+        session: &Session,
+        ctx: &mut Ctx,
+        body: &mut Option<Bytes>,
+        end_of_stream: bool,
+    ) -> pingora::Result<()> {
+        // After a 101 the connection carries the upgraded protocol, not an HTTP
+        // body - the same guard `handle_response_body_plugin` applies.
+        if !ctx.upstream_gzip_decoded || session.was_upgraded() {
+            return Ok(());
+        }
+        if let Some(decoder) = ctx.get_modify_body_handler(GZIP_DECODE_HANDLER)
+        {
+            decoder.handle(session, body, end_of_stream)?;
+        }
+        Ok(())
+    }
 }
 
 #[inline]
@@ -1456,6 +1543,298 @@ fn get_upstream_with_variables(
         .and_then(|var_name| ctx.get_variable(var_name))
         .unwrap_or(upstream);
     upstreams.get(key)
+}
+
+/// Ctx key of the body handler that undoes the origin's gzip encoding.
+const GZIP_DECODE_HANDLER: &str = "_upstream_gzip_decode_";
+
+/// Largest plaintext a single response may be decoded into. A body that would
+/// expand past it is left as it arrived and logged instead: a few kilobytes of
+/// gzip can describe gigabytes, and the response is not worth a memory lever
+/// (the same bound, and for the same reason, as the sub-filter's buffer).
+const MAX_GZIP_DECODE_BYTES: usize = 8 * 1024 * 1024;
+
+/// Step the decompressor reads in, so a large plaintext is assembled from
+/// bounded pieces instead of one oversized allocation.
+const GZIP_DECODE_CHUNK: usize = 64 * 1024;
+
+/// Parses `[basic] upstream_accept_encoding` into the value to inject.
+///
+/// Unset and `gzip` both mean "inject `Accept-Encoding: gzip`" - the default -
+/// and the empty string switches the injection off. Validation rejects every
+/// other value; a config that never went through it still must not inject an
+/// encoding the proxy cannot undo, so an unknown value disables the feature
+/// rather than reaching an origin.
+fn parse_upstream_accept_encoding(value: Option<&str>) -> Option<&'static str> {
+    match value {
+        None => Some("gzip"),
+        Some("") => None,
+        Some(value) if value.eq_ignore_ascii_case("gzip") => Some("gzip"),
+        Some(value) => {
+            warn!(
+                target: LOG_TARGET,
+                value,
+                "unsupported upstream accept encoding, no encoding is injected"
+            );
+            None
+        },
+    }
+}
+
+/// Whether the client's `Accept-Encoding` (when it sent one) allows gzip.
+///
+/// `q=0` excludes the token and every other weight accepts it. `*` is not read
+/// as gzip: it would allow it, but a client that took `*` also accepts the
+/// plaintext, so the conservative reading never costs anything but a decode.
+fn accepts_gzip(value: Option<&http::HeaderValue>) -> bool {
+    let Some(raw) = value.and_then(|value| value.to_str().ok()) else {
+        return false;
+    };
+    raw.split(',').any(|part| {
+        let mut segments = part.split(';');
+        let name = segments.next().unwrap_or_default().trim();
+        if !(name.eq_ignore_ascii_case("gzip")
+            || name.eq_ignore_ascii_case("x-gzip"))
+        {
+            return false;
+        }
+        !segments.any(|segment| {
+            let segment = segment.trim();
+            segment
+                .get(..2)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("q="))
+                && segment[2..].trim().parse::<f32>().is_ok_and(|q| q <= 0.0)
+        })
+    })
+}
+
+/// Whether the proxy should add `Accept-Encoding: gzip` to the request it
+/// sends upstream: the client named no encoding at all (missing header or an
+/// empty one) and the message is one that can carry an encoded body.
+///
+/// A client that named any encoding, `identity` included, is taken at its
+/// word. `HEAD` has no body to encode, a `Range` request asks for a slice of
+/// the origin's bytes (a byte range of a gzip stream is useless to a client
+/// that cannot decode it), and `Upgrade` / `CONNECT` turn the exchange into
+/// another protocol or a tunnel, where a body encoding has no meaning - the
+/// WebSocket key covers the HTTP/2 handshake, which carries no `Upgrade`.
+fn should_inject_accept_encoding(
+    method: &http::Method,
+    headers: &http::HeaderMap,
+) -> bool {
+    if method == http::Method::HEAD || method == http::Method::CONNECT {
+        return false;
+    }
+    if headers.contains_key(http::header::RANGE)
+        || headers.contains_key(http::header::UPGRADE)
+        || headers.contains_key(http::header::SEC_WEBSOCKET_KEY)
+    {
+        return false;
+    }
+    match headers
+        .get(ACCEPT_ENCODING)
+        .and_then(|value| value.to_str().ok())
+    {
+        // Absent, or present but empty: the client said nothing.
+        None => true,
+        Some(value) => value.trim().is_empty(),
+    }
+}
+
+/// Whether `headers` claim a body encoding of plain gzip (or its historical
+/// `x-gzip` alias).
+fn is_gzip(headers: &http::HeaderMap) -> bool {
+    headers
+        .get(CONTENT_ENCODING)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .is_some_and(|value| {
+            value.eq_ignore_ascii_case("gzip")
+                || value.eq_ignore_ascii_case("x-gzip")
+        })
+}
+
+/// Whether a declared length already rules the body out for decoding.
+fn exceeds_decode_cap(headers: &http::HeaderMap) -> bool {
+    headers
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<usize>().ok())
+        .is_some_and(|size| size > MAX_GZIP_DECODE_BYTES)
+}
+
+/// Whether this response is one the proxy owes the client in plaintext: the
+/// origin compressed it because the proxy asked, the client cannot decode it,
+/// and the encoding is one the proxy can undo.
+fn should_decode_gzip(ctx: &Ctx, header: &ResponseHeader) -> bool {
+    if !ctx.upstream_accept_encoding_injected || ctx.client_accepts_gzip {
+        return false;
+    }
+    // 1xx and 204/304 carry no body, and a 206 is a slice of the origin's
+    // representation whose framing the proxy must not touch.
+    let status = header.status;
+    if status.is_informational() || matches!(status.as_u16(), 204 | 304 | 206) {
+        return false;
+    }
+    is_gzip(&header.headers) && !exceeds_decode_cap(&header.headers)
+}
+
+/// Rewrites the response headers so they describe the plaintext the proxy is
+/// about to emit instead of the gzip body the origin sent.
+fn decode_headers(header: &mut ResponseHeader) {
+    // The body is plaintext from here on, and its length is only known once
+    // the decode finishes.
+    header.remove_header(&CONTENT_ENCODING);
+    header.remove_header(&CONTENT_LENGTH);
+    // Digests of the compressed body can no longer be correct, and an entity
+    // tag describing it is not a strong validator for the plaintext: weaken it
+    // (`W/`) instead of dropping it so conditional requests keep working.
+    header.remove_header("Content-MD5");
+    header.remove_header("Digest");
+    if let Some(etag) = header
+        .headers
+        .get(ETAG)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+        && !etag.starts_with("W/")
+        && let Ok(value) = http::HeaderValue::from_str(&format!("W/{etag}"))
+    {
+        let _ = header.insert_header(ETAG, value);
+    }
+    // Which body a cache may reuse now depends on what the client can decode.
+    match header
+        .headers
+        .get(VARY)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+    {
+        None => {
+            let _ = header.insert_header(
+                VARY,
+                http::HeaderValue::from_static("Accept-Encoding"),
+            );
+        },
+        Some(vary) => {
+            let has = vary.split(',').any(|part| {
+                part.trim().eq_ignore_ascii_case("accept-encoding")
+            });
+            if !has
+                && let Ok(value) = http::HeaderValue::from_str(&format!(
+                    "{vary}, Accept-Encoding"
+                ))
+            {
+                let _ = header.insert_header(VARY, value);
+            }
+        },
+    }
+    // Length unknown: chunk the body rather than fall back to closing the
+    // connection to mark its end.
+    let _ = header.insert_header(
+        TRANSFER_ENCODING,
+        HTTP_HEADER_TRANSFER_CHUNKED.1.clone(),
+    );
+}
+
+/// Body handler that turns an origin's gzip response back into the plaintext
+/// the client can read, for a request the proxy itself asked to be compressed.
+///
+/// The compressed bytes are held until the stream ends because the rewritten
+/// headers have already gone out by then: keeping the origin bytes in hand is
+/// what lets a failed decode fall back to them unchanged instead of leaving a
+/// half-decoded body on the wire. Buffering is bounded by
+/// [`MAX_GZIP_DECODE_BYTES`], and a body that crosses it while streaming is
+/// forwarded from that point on as it arrived.
+struct GzipBodyDecoder {
+    /// Compressed bytes received so far.
+    buffer: BytesMut,
+    /// Set once decoding has been given up: every later chunk is forwarded
+    /// untouched, so one response pays for one log line and never for a second
+    /// attempt.
+    passthrough: bool,
+}
+
+impl GzipBodyDecoder {
+    fn new() -> Self {
+        Self {
+            buffer: BytesMut::new(),
+            passthrough: false,
+        }
+    }
+
+    /// Decodes `raw` into plaintext, or `None` when the stream cannot be
+    /// decoded or would expand past [`MAX_GZIP_DECODE_BYTES`].
+    fn decode(raw: &[u8]) -> Option<Bytes> {
+        let mut decoder = GzDecoder::new(raw);
+        let mut plaintext = Vec::new();
+        let mut chunk = [0u8; GZIP_DECODE_CHUNK];
+        loop {
+            match decoder.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(size) => {
+                    if plaintext.len() + size > MAX_GZIP_DECODE_BYTES {
+                        return None;
+                    }
+                    plaintext.extend_from_slice(&chunk[..size]);
+                },
+                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                Err(_) => return None,
+            }
+        }
+        Some(Bytes::from(plaintext))
+    }
+}
+
+impl ModifyResponseBody for GzipBodyDecoder {
+    fn handle(
+        &mut self,
+        _session: &Session,
+        body: &mut Option<Bytes>,
+        end_of_stream: bool,
+    ) -> pingora::Result<()> {
+        if self.passthrough {
+            return Ok(());
+        }
+        if let Some(data) = body.take() {
+            self.buffer.extend_from_slice(&data);
+        }
+        if !end_of_stream {
+            // A chunked response declares no length, so the cap is enforced as
+            // the chunks arrive: what is already buffered goes out exactly as
+            // it came and the rest is forwarded untouched, rather than letting
+            // the buffer grow with the body.
+            if self.buffer.len() > MAX_GZIP_DECODE_BYTES {
+                let size = self.buffer.len();
+                warn!(
+                    target: LOG_TARGET,
+                    size,
+                    "origin gzip body exceeded the decode cap; forwarding it unchanged"
+                );
+                self.passthrough = true;
+                *body = Some(self.buffer.split().freeze());
+            }
+            return Ok(());
+        }
+        let raw = self.buffer.split().freeze();
+        match Self::decode(&raw) {
+            Some(plaintext) => {
+                *body = Some(plaintext);
+            },
+            None => {
+                warn!(
+                    target: LOG_TARGET,
+                    size = raw.len(),
+                    "failed to decode the origin gzip body; forwarding it unchanged"
+                );
+                self.passthrough = true;
+                *body = Some(raw);
+            },
+        }
+        Ok(())
+    }
+
+    fn name(&self) -> &str {
+        GZIP_DECODE_HANDLER
+    }
 }
 
 #[async_trait]
@@ -1787,6 +2166,26 @@ impl ProxyHttp for Server {
         debug!(target: LOG_TARGET, "--> upstream request filter");
         defer!(debug!(target: LOG_TARGET, "<-- upstream request filter"););
         set_append_proxy_headers(session, ctx, upstream_response);
+        // Record what the client asked for *before* touching the header: the
+        // response path needs both facts (was the encoding the proxy's own
+        // request, and can the client decode it) to know whether it owes the
+        // client a plaintext body.
+        let client = session.req_header();
+        ctx.client_accepts_gzip =
+            accepts_gzip(client.headers.get(ACCEPT_ENCODING));
+        if let Some(encoding) = self.upstream_accept_encoding
+            && should_inject_accept_encoding(&client.method, &client.headers)
+        {
+            // Injected on the copy of the request that goes upstream, never on
+            // the session's own header: the access log, the cache key and the
+            // plugins keep seeing the client's request.
+            let _ = upstream_response.insert_header(ACCEPT_ENCODING, encoding);
+            ctx.upstream_accept_encoding_injected = true;
+            debug!(
+                target: LOG_TARGET,
+                encoding, "inject accept-encoding for upstream"
+            );
+        }
         // Route-level path rewriting (`strip_prefix` / `rewrite_path`). This
         // runs on the copy of the request header pingora sends upstream —
         // `proxy_1to1` / `proxy_to_h2_upstream` re-clone it for every attempt —
@@ -2060,6 +2459,9 @@ impl ProxyHttp for Server {
     ) -> pingora::Result<()> {
         debug!(target: LOG_TARGET, "--> upstream response filter");
         defer!(debug!(target: LOG_TARGET, "<-- upstream response filter"););
+        // Ahead of the plugins: whatever they do with the response, the gzip
+        // fallback decides first whether this body reaches the client encoded.
+        self.apply_upstream_gzip_fallback(ctx, upstream_response);
         self.handle_upstream_response_plugin(session, ctx, upstream_response)?;
         #[cfg(feature = "tracing")]
         inject_telemetry_headers(ctx, upstream_response);
@@ -2101,6 +2503,9 @@ impl ProxyHttp for Server {
     ) -> pingora::Result<Option<std::time::Duration>> {
         debug!(target: LOG_TARGET, "--> upstream response body filter");
         defer!(debug!(target: LOG_TARGET, "<-- upstream response body filter"););
+
+        // Ahead of the plugins: they have to see the plaintext this produces.
+        self.handle_upstream_gzip_decode(session, ctx, body, end_of_stream)?;
 
         self.handle_upstream_response_body_plugin(
             session,
@@ -3979,5 +4384,377 @@ value = 'proxy_set_headers = ["name:value"]'
             public_error_message("SomethingNew"),
             "Internal Server Error"
         );
+    }
+
+    /// Builds a request header with `headers` installed.
+    fn request_header_with(
+        method: &str,
+        headers: &[(&'static str, &'static str)],
+    ) -> RequestHeader {
+        let mut header = req_header_for(method, "/");
+        for (name, value) in headers {
+            header.insert_header(*name, *value).expect("valid header");
+        }
+        header
+    }
+
+    /// Injecting is the whole point of the feature, and every skipped case is
+    /// one where a compressed body would be wrong or unusable.
+    #[test]
+    fn accept_encoding_is_injected_only_when_the_client_named_none() {
+        let inject =
+            |method: &str, headers: &[(&'static str, &'static str)]| {
+                let header = request_header_with(method, headers);
+                should_inject_accept_encoding(&header.method, &header.headers)
+            };
+
+        // No header at all, or an empty one: the client asked for nothing.
+        assert!(inject("GET", &[]));
+        assert!(inject("POST", &[("accept-encoding", "")]));
+        assert!(inject("GET", &[("accept-encoding", "  ")]));
+        // A client that named any encoding is taken at its word.
+        assert!(!inject("GET", &[("accept-encoding", "gzip")]));
+        assert!(!inject("GET", &[("accept-encoding", "identity")]));
+        assert!(!inject("GET", &[("accept-encoding", "br, gzip")]));
+        // No body to encode, no body to decode it for.
+        assert!(!inject("HEAD", &[]));
+        assert!(!inject("CONNECT", &[]));
+        // A byte range of a gzip stream is useless to a client that cannot
+        // decode it, and a tunnel has no body encoding.
+        assert!(!inject("GET", &[("range", "bytes=0-99")]));
+        assert!(!inject("GET", &[("upgrade", "websocket")]));
+        assert!(!inject("GET", &[("sec-websocket-key", "dGhlIHNhbXBsZQ==")]));
+    }
+
+    /// `q=0` excludes the token, the rest of the weights accept it.
+    #[test]
+    fn gzip_is_read_out_of_the_client_accept_encoding() {
+        let accepts = |raw: &str| {
+            accepts_gzip(Some(
+                &http::HeaderValue::from_str(raw).expect("valid header value"),
+            ))
+        };
+        assert!(accepts("gzip"));
+        assert!(accepts("GZIP"));
+        assert!(accepts("x-gzip"));
+        assert!(accepts("br, gzip"));
+        assert!(accepts("gzip;q=0.5"));
+        assert!(!accepts("gzip;q=0"));
+        assert!(!accepts("gzip; q=0.0"));
+        assert!(!accepts("br"));
+        assert!(!accepts("*"));
+        assert!(!accepts(""));
+        assert!(!accepts_gzip(None));
+    }
+
+    /// The config value decides whether anything is injected at all.
+    #[test]
+    fn upstream_accept_encoding_config_is_parsed_conservatively() {
+        // Unset is the documented default.
+        assert_eq!(Some("gzip"), parse_upstream_accept_encoding(None));
+        assert_eq!(Some("gzip"), parse_upstream_accept_encoding(Some("gzip")));
+        assert_eq!(Some("gzip"), parse_upstream_accept_encoding(Some("GZIP")));
+        // The empty string is the off switch.
+        assert_eq!(None, parse_upstream_accept_encoding(Some("")));
+        // A value that never went through the config validation still cannot
+        // make the proxy inject an encoding it cannot undo.
+        assert_eq!(None, parse_upstream_accept_encoding(Some("br")));
+        assert_eq!(None, parse_upstream_accept_encoding(Some("gzip, br")));
+    }
+
+    /// Only a gzip body the proxy asked for reaches a client that cannot
+    /// decode it.
+    #[test]
+    fn gzip_fallback_applies_only_to_an_injected_gzip_body() {
+        let header = |status: u16, encoding: &str| {
+            let mut header =
+                ResponseHeader::build(status, None).expect("the header builds");
+            header
+                .insert_header("Content-Encoding", encoding)
+                .expect("valid encoding");
+            header
+        };
+        let injected = Ctx {
+            upstream_accept_encoding_injected: true,
+            ..Ctx::new()
+        };
+        assert!(should_decode_gzip(&injected, &header(200, "gzip")));
+        assert!(should_decode_gzip(&injected, &header(200, "x-gzip")));
+
+        // Nothing was injected: the origin's encoding is the client's own.
+        assert!(!should_decode_gzip(&Ctx::new(), &header(200, "gzip")));
+        // The client can decode it: pass it through untouched.
+        let client_gzip = Ctx {
+            upstream_accept_encoding_injected: true,
+            client_accepts_gzip: true,
+            ..Ctx::new()
+        };
+        assert!(!should_decode_gzip(&client_gzip, &header(200, "gzip")));
+        // Encodings this proxy cannot undo.
+        assert!(!should_decode_gzip(&injected, &header(200, "br")));
+        assert!(!should_decode_gzip(&injected, &header(200, "gzip, br")));
+        // Bodies that must keep the origin's framing.
+        assert!(!should_decode_gzip(&injected, &header(206, "gzip")));
+        assert!(!should_decode_gzip(&injected, &header(304, "gzip")));
+        assert!(!should_decode_gzip(&injected, &header(204, "gzip")));
+        // A declared length over the cap is refused before the headers go out.
+        let mut big = header(200, "gzip");
+        big.insert_header(
+            "Content-Length",
+            (MAX_GZIP_DECODE_BYTES + 1).to_string(),
+        )
+        .expect("valid length");
+        assert!(!should_decode_gzip(&injected, &big));
+    }
+
+    /// After the rewrite the headers describe the plaintext: no encoding, no
+    /// stale length or digest, a weak validator, `chunked` and a `Vary` that
+    /// tells caches which body they stored.
+    #[test]
+    fn decode_headers_describe_the_plaintext() {
+        let mut header = ResponseHeader::build(200, None).expect("builds");
+        header.insert_header("Content-Encoding", "gzip").unwrap();
+        header.insert_header("Content-Length", "123").unwrap();
+        header.insert_header("ETag", "\"abc123\"").unwrap();
+        header.insert_header("Content-MD5", "ZGVhZGJlZg==").unwrap();
+        header.insert_header("Digest", "sha-256=x").unwrap();
+        header.insert_header("Vary", "User-Agent").unwrap();
+        decode_headers(&mut header);
+
+        assert!(header.headers.get(CONTENT_ENCODING).is_none());
+        assert!(header.headers.get(CONTENT_LENGTH).is_none());
+        assert!(header.headers.get("Content-MD5").is_none());
+        assert!(header.headers.get("Digest").is_none());
+        assert_eq!(
+            header
+                .headers
+                .get(ETAG)
+                .and_then(|value| value.to_str().ok()),
+            Some("W/\"abc123\""),
+            "the entity tag is weakened"
+        );
+        assert_eq!(
+            header
+                .headers
+                .get(TRANSFER_ENCODING)
+                .and_then(|value| value.to_str().ok()),
+            Some("chunked")
+        );
+        assert_eq!(
+            header
+                .headers
+                .get(VARY)
+                .and_then(|value| value.to_str().ok()),
+            Some("User-Agent, Accept-Encoding"),
+            "the origin's Vary is kept and extended"
+        );
+
+        // An already weak tag is left alone, and an existing
+        // `Accept-Encoding` in `Vary` is not duplicated.
+        let mut header = ResponseHeader::build(200, None).expect("builds");
+        header.insert_header("ETag", "W/\"abc\"").unwrap();
+        header.insert_header("Vary", "Accept-Encoding").unwrap();
+        decode_headers(&mut header);
+        assert_eq!(
+            header
+                .headers
+                .get(ETAG)
+                .and_then(|value| value.to_str().ok()),
+            Some("W/\"abc\"")
+        );
+        assert_eq!(
+            header
+                .headers
+                .get(VARY)
+                .and_then(|value| value.to_str().ok()),
+            Some("Accept-Encoding")
+        );
+
+        // A response without `Vary` gains one.
+        let mut header = ResponseHeader::build(200, None).expect("builds");
+        decode_headers(&mut header);
+        assert_eq!(
+            header
+                .headers
+                .get(VARY)
+                .and_then(|value| value.to_str().ok()),
+            Some("Accept-Encoding")
+        );
+    }
+
+    /// The header rewrite and the body handler are installed together, and
+    /// only for the response that needs them.
+    #[test]
+    fn fallback_decoder_is_registered_for_a_client_that_cannot_decode() {
+        let server = new_server();
+        let mut header = ResponseHeader::build(200, None).expect("builds");
+        header.insert_header("Content-Encoding", "gzip").unwrap();
+
+        let mut ctx = Ctx {
+            upstream_accept_encoding_injected: true,
+            ..Ctx::new()
+        };
+        server.apply_upstream_gzip_fallback(&mut ctx, &mut header);
+        assert!(ctx.upstream_gzip_decoded);
+        assert!(
+            ctx.get_modify_body_handler(GZIP_DECODE_HANDLER).is_some(),
+            "the body handler has to be registered, the headers alone are not \
+             enough"
+        );
+        assert!(header.headers.get(CONTENT_ENCODING).is_none());
+
+        // A client that can decode gzip gets the origin bytes untouched and no
+        // handler at all.
+        let mut header = ResponseHeader::build(200, None).expect("builds");
+        header.insert_header("Content-Encoding", "gzip").unwrap();
+        header.insert_header("Content-Length", "42").unwrap();
+        let mut ctx = Ctx {
+            upstream_accept_encoding_injected: true,
+            client_accepts_gzip: true,
+            ..Ctx::new()
+        };
+        server.apply_upstream_gzip_fallback(&mut ctx, &mut header);
+        assert!(!ctx.upstream_gzip_decoded);
+        assert!(ctx.get_modify_body_handler(GZIP_DECODE_HANDLER).is_none());
+        assert_eq!(
+            header
+                .headers
+                .get(CONTENT_ENCODING)
+                .and_then(|value| value.to_str().ok()),
+            Some("gzip"),
+            "a decodable client keeps the zero-decompression path"
+        );
+    }
+
+    /// Compresses `data` with gzip, what an origin would send.
+    fn gzip(data: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut encoder = flate2::write::GzEncoder::new(
+            Vec::new(),
+            flate2::Compression::default(),
+        );
+        encoder.write_all(data).expect("the fixture compresses");
+        encoder.finish().expect("the fixture compresses")
+    }
+
+    /// A `Session` the body handler ignores; the trait only takes one for
+    /// plugins that read the request.
+    fn body_session() -> Session {
+        Session::new_h1(Box::new(Builder::new().build()))
+    }
+
+    /// Runs the handler over `chunks`, the last one at end of stream, and
+    /// returns what reached the client.
+    fn decode_body(
+        decoder: &mut GzipBodyDecoder,
+        chunks: &[(bytes::Bytes, bool)],
+    ) -> Vec<bytes::Bytes> {
+        let session = body_session();
+        let mut emitted = Vec::new();
+        for (chunk, end_of_stream) in chunks {
+            let mut body = Some(chunk.clone());
+            decoder
+                .handle(&session, &mut body, *end_of_stream)
+                .expect("the body is handled");
+            if let Some(data) = body {
+                emitted.push(data);
+            }
+        }
+        emitted
+    }
+
+    /// The origin's gzip body reaches the client as the plaintext it wraps,
+    /// whether it arrives in one piece or in several.
+    #[test]
+    fn gzip_body_is_decoded_into_plaintext() {
+        let raw = gzip(b"pingwaf gzip fallback");
+        let mut decoder = GzipBodyDecoder::new();
+        let emitted = decode_body(
+            &mut decoder,
+            &[(bytes::Bytes::copy_from_slice(&raw), true)],
+        );
+        assert_eq!(
+            vec![bytes::Bytes::from_static(b"pingwaf gzip fallback")],
+            emitted
+        );
+
+        // Chunked: nothing is emitted before the stream ends, and the decoded
+        // plaintext still arrives whole.
+        let raw = gzip(&vec![b'a'; 300 * 1024]);
+        let mut decoder = GzipBodyDecoder::new();
+        let chunks: Vec<(bytes::Bytes, bool)> = raw
+            .chunks(64 * 1024)
+            .enumerate()
+            .map(|(index, chunk)| {
+                let end = index + 1 == raw.chunks(64 * 1024).count();
+                (bytes::Bytes::copy_from_slice(chunk), end)
+            })
+            .collect();
+        let emitted = decode_body(&mut decoder, &chunks);
+        assert_eq!(1, emitted.len(), "one body goes out at the end");
+        assert_eq!(300 * 1024, emitted[0].len());
+        assert!(emitted[0].iter().all(|byte| *byte == b'a'));
+    }
+
+    /// A body that claims gzip but does not decode reaches the client exactly
+    /// as it arrived, and the handler never tries again.
+    #[test]
+    fn corrupt_gzip_body_is_forwarded_unchanged() {
+        let raw = vec![0xde, 0xad, 0xbe, 0xef, 0x00, 0xff];
+        let mut decoder = GzipBodyDecoder::new();
+        let emitted = decode_body(
+            &mut decoder,
+            &[(bytes::Bytes::copy_from_slice(&raw), true)],
+        );
+        assert_eq!(vec![bytes::Bytes::copy_from_slice(&raw)], emitted);
+        assert!(decoder.passthrough, "the failure is latched");
+
+        // Every later chunk is forwarded untouched, end of stream included.
+        let emitted = decode_body(
+            &mut decoder,
+            &[(bytes::Bytes::from_static(b"tail"), true)],
+        );
+        assert_eq!(vec![bytes::Bytes::from_static(b"tail")], emitted);
+    }
+
+    /// A gzip body that would expand past the cap is forwarded compressed:
+    /// the cap is what stops a few kilobytes of gzip from becoming a memory
+    /// lever.
+    #[test]
+    fn gzip_body_over_the_decode_cap_is_forwarded_unchanged() {
+        let raw = gzip(&vec![0u8; MAX_GZIP_DECODE_BYTES + 1024]);
+        assert!(
+            raw.len() < MAX_GZIP_DECODE_BYTES,
+            "the fixture must fit the buffer cap to isolate the decoded one"
+        );
+        let mut decoder = GzipBodyDecoder::new();
+        let emitted = decode_body(
+            &mut decoder,
+            &[(bytes::Bytes::copy_from_slice(&raw), true)],
+        );
+        assert_eq!(vec![bytes::Bytes::copy_from_slice(&raw)], emitted);
+        assert!(decoder.passthrough);
+    }
+
+    /// A chunked body with no `Content-Length` to check up front crosses the
+    /// cap while streaming: what is buffered goes out unchanged and every
+    /// later chunk is forwarded as it arrived.
+    #[test]
+    fn chunked_gzip_body_stops_decoding_at_the_cap() {
+        let mut decoder = GzipBodyDecoder::new();
+        let chunk = bytes::Bytes::from(vec![b'z'; 5 * 1024 * 1024]);
+        let emitted = decode_body(
+            &mut decoder,
+            &[(chunk.clone(), false), (chunk.clone(), false)],
+        );
+        assert!(decoder.passthrough, "the cap trips while streaming");
+        assert_eq!(1, emitted.len(), "the buffered bytes are handed back");
+        assert_eq!(10 * 1024 * 1024, emitted[0].len());
+
+        let emitted = decode_body(
+            &mut decoder,
+            &[(bytes::Bytes::from_static(b"tail"), true)],
+        );
+        assert_eq!(vec![bytes::Bytes::from_static(b"tail")], emitted);
     }
 }

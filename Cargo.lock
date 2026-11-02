@@ -4897,6 +4897,7 @@ dependencies = [
  "bytes",
  "cfg-if",
  "criterion",
+ "flate2",
  "http",
  "humantime",
  "itoa",

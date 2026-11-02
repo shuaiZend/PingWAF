@@ -1370,6 +1370,12 @@ pub struct BasicConf {
     /// unaffected (2026-10-18 audit: locations with no cap accept bodies of
     /// any size).
     pub client_max_body_size: Option<ByteSize>,
+    /// `Accept-Encoding` the proxy adds to the requests that carry none, so the
+    /// origin compresses what it sends back even when the client forgot to ask
+    /// for it. Only `gzip` (the default) and the empty string (off) are valid;
+    /// the proxy undoes the encoding before the response reaches a client that
+    /// cannot decode it.
+    pub upstream_accept_encoding: Option<String>,
     /// Error page template
     pub error_template: Option<String>,
     /// Path to PID file (default: /run/pingap.pid)
@@ -1525,6 +1531,19 @@ impl Validate for BasicConf {
             self.upstream_connect_offload_threadpools,
             self.upstream_connect_offload_thread_per_pool,
         )?;
+        // Only the one encoding the proxy can undo may be injected: anything
+        // else would be handed to a client that never asked for it and cannot
+        // decode it. The empty string is the off switch.
+        if let Some(value) = &self.upstream_accept_encoding
+            && !value.is_empty()
+            && !value.eq_ignore_ascii_case("gzip")
+        {
+            return Err(Error::Invalid {
+                message: format!(
+                    "upstream accept encoding only supports gzip or an empty value, got: {value}"
+                ),
+            });
+        }
         Ok(())
     }
 }
@@ -2988,6 +3007,36 @@ upstream_connect_offload_thread_per_pool = 8
             "Invalid error upstream connect offload threadpools and thread per pool should be set together",
             conf.validate().expect_err("").to_string()
         );
+    }
+
+    /// The proxy can only undo the one encoding it injects, so the config
+    /// accepts `gzip` and the empty (off) value and nothing else.
+    #[test]
+    fn test_basic_upstream_accept_encoding() {
+        // Unset keeps the documented default.
+        let conf = BasicConf::default();
+        assert_eq!(None, conf.upstream_accept_encoding);
+        assert_eq!(true, conf.validate().is_ok());
+
+        for value in ["", "gzip", "GZIP"] {
+            let conf = BasicConf {
+                upstream_accept_encoding: Some(value.to_string()),
+                ..Default::default()
+            };
+            assert_eq!(true, conf.validate().is_ok(), "{value} must validate");
+        }
+
+        for value in ["br", "zstd", "gzip, br", "deflate"] {
+            let conf = BasicConf {
+                upstream_accept_encoding: Some(value.to_string()),
+                ..Default::default()
+            };
+            let err = conf.validate().expect_err("").to_string();
+            assert!(
+                err.contains("upstream accept encoding"),
+                "{value} must be refused, got: {err}"
+            );
+        }
     }
 
     #[test]

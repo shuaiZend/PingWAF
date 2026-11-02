@@ -547,6 +547,16 @@ impl Plugin for SubFilter {
                 );
                 return Ok(ResponsePluginResult::Unchanged);
             };
+            // The proxy already decoded this body for a client that cannot
+            // handle gzip (`[basic] upstream_accept_encoding`): the bytes
+            // reaching the replacer are plaintext, whatever the header still
+            // said when this ran. The gzip branch would decompress them a
+            // second time.
+            let encoding = if ctx.upstream_gzip_decoded {
+                ContentEncoding::Plain
+            } else {
+                encoding
+            };
             // Oversized responses are passed through: the replacer buffers
             // the whole body and copies it once per rule.
             if let Some(value) =
@@ -936,6 +946,49 @@ mod tests {
             Some("gzip"),
             "the encoding is preserved: the body is recompressed"
         );
+    }
+
+    /// The proxy decodes an origin gzip body for a client that cannot read it
+    /// (`[basic] upstream_accept_encoding`). The replacer then works on
+    /// plaintext and must not decompress it a second time, even if the header
+    /// still claimed `gzip` when the plugin looked at it.
+    #[test]
+    fn a_body_the_proxy_already_decoded_takes_the_plaintext_path() {
+        // One real rule, so the plaintext path and the gzip one are told
+        // apart by their output rather than by internals.
+        let mut conf = PluginConf::default();
+        conf.insert(
+            "filters".to_string(),
+            toml::Value::Array(vec![toml::Value::String(
+                "sub_filter 'Google' 'PingWAF' g".to_string(),
+            )]),
+        );
+        let plugin = SubFilter::new(&conf).expect("the conf parses");
+        let mut session = test_session();
+        let mut ctx = Ctx::new();
+        ctx.upstream_gzip_decoded = true;
+        // The header still says gzip, which is exactly the case the flag is
+        // there to override.
+        let mut header = header_with_encoding("gzip");
+        tokio::runtime::Runtime::new()
+            .expect("the test runtime starts")
+            .block_on(plugin.handle_response(
+                &mut session,
+                &mut ctx,
+                &mut header,
+            ))
+            .expect("the response is handled");
+
+        // Plaintext in, substituted plaintext out: the gzip branch would have
+        // failed to decode and emitted the input unchanged.
+        let handler = ctx
+            .get_modify_body_handler(PLUGIN_ID)
+            .expect("the replacer is registered");
+        let mut body = Some(Bytes::from_static(b"Hello Google"));
+        handler
+            .handle(&session, &mut body, true)
+            .expect("the body is handled");
+        assert_eq!(body, Some(Bytes::from_static(b"Hello PingWAF")));
     }
 
     /// An already-weak ETag is not double-weakened.

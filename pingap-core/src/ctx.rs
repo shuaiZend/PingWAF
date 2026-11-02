@@ -499,6 +499,20 @@ pub struct Ctx {
     pub timing: Timing,
     /// State related to the current request.
     pub state: RequestState,
+    /// `true` when the proxy added `Accept-Encoding: gzip` to the request it
+    /// sent upstream because the client sent none (`[basic]
+    /// upstream_accept_encoding`). It is the record of a request the origin
+    /// only compressed on the proxy's behalf: a gzip body coming back from it
+    /// is one the proxy owes the client in plaintext.
+    pub upstream_accept_encoding_injected: bool,
+    /// `true` when the client's own `Accept-Encoding` allows gzip. The origin's
+    /// gzip body is then forwarded exactly as it arrived, with no decoding.
+    pub client_accepts_gzip: bool,
+    /// `true` once the proxy has taken over an origin gzip body on behalf of a
+    /// client that cannot decode it: the response headers no longer carry
+    /// `Content-Encoding` and the body is (being) turned into plaintext.
+    /// Response-body plugins read it to stay out of their own gzip branch.
+    pub upstream_gzip_decoded: bool,
     /// Cache-related information. Boxed behind an `Option`: most requests
     /// never touch the cache, and a `None` costs a pointer instead of the
     /// whole struct on every `Ctx`.
