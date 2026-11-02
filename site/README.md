@@ -141,6 +141,27 @@ Screenshots are committed, so the site build never needs a browser. They are
 imported through `src/data/screenshots.ts` and emitted as AVIF/WebP at build
 time — never put them in `public/`.
 
+## README animations
+
+Two animated WebP files back the repository READMEs:
+
+| Asset | Size | Scene |
+| --- | --- | --- |
+| `asset/readme-architecture.webp` | 1000×560 | `architecture` — request, block, safe traffic and the gRPC stream between agents and the control plane |
+| `asset/readme-effectiveness.webp` | 1000×400 | `effectiveness` — interception bars, full-corpus calibre with the effective figure marked |
+
+```bash
+node site/scripts/render-readme-animations.mjs                     # both scenes
+node site/scripts/render-readme-animations.mjs --only=architecture # one scene
+```
+
+The script renders an inline HTML scene with pure CSS keyframes, pauses every
+animation and steps `currentTime` frame by frame (12 fps × 8 s = 96 frames), then
+encodes with ffmpeg's `libwebp_anim` (`-loop 0`). Playwright is reused from
+`e2e/` and the locally installed Chrome is preferred (`PW_CHANNEL` overrides the
+channel); no npm dependency is added. Intermediate PNGs stay in a temp directory
+and are removed on exit, so only the two WebP files are committed.
+
 ## Build
 
 ```bash

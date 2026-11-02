@@ -36,34 +36,7 @@ A single **control plane** defines sites, rules and policies; one or many **data
 
 ## 🏗️ Architecture
 
-```mermaid
-graph TB
-    Client[Client / Browser]
-
-    subgraph ControlPlane["Control Plane (pingwaf server)"]
-        Dashboard[Embedded Dashboard + REST API :9080]
-        GRPC[gRPC ControlPlane service :9090]
-        PG[(PostgreSQL 14+)]
-        ES[(Elasticsearch - optional)]
-    end
-
-    subgraph DataPlane["Data Plane (pingwaf agents)"]
-        AgentA[Edge Agent A :80 / :443]
-        AgentB[Edge Agent B :80 / :443]
-    end
-
-    Origin[Origin / Upstream servers]
-
-    Client -->|HTTP / HTTPS| AgentA
-    Client -->|HTTP / HTTPS| AgentB
-    AgentA <-->|gRPC bidi streams| GRPC
-    AgentB <-->|gRPC bidi streams| GRPC
-    Dashboard --> PG
-    GRPC --> PG
-    GRPC --> ES
-    AgentA -->|safe traffic| Origin
-    AgentB -->|safe traffic| Origin
-```
+<img src="./asset/readme-architecture.webp" alt="PingWAF architecture: clients reach edge agents over HTTP/HTTPS; each agent streams rules and telemetry with the control plane over a gRPC bidirectional stream; only clean traffic continues to the origin" width="1000">
 
 The control plane and the data plane talk over the `ControlPlane` gRPC service (defined in [`control_plane.proto`](./pingwaf-proto/proto/control_plane.proto)) with seven RPCs:
 
@@ -134,6 +107,8 @@ The control plane and the data plane talk over the `ControlPlane` gRPC service (
 ---
 
 ## 📊 Measured effectiveness
+
+<img src="./asset/readme-effectiveness.webp" alt="Interception on the blazehttp corpus: PingWAF 93.8 % full-corpus (96.6 % effective, 0.06 % false positives) against ModSecurity PL4 94.61 %, SafeLine 76.17 %, ModSecurity PL1 69.74 % and Cloudflare 10.70 %" width="1000">
 
 Measured on the public [blazehttp](https://github.com/chaitin/blazehttp) corpus
 (33 877 raw HTTP requests: 658 malicious / 33 219 benign), replayed

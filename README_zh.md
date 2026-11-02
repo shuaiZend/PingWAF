@@ -36,34 +36,7 @@
 
 ## 🏗️ 架构概览
 
-```mermaid
-graph TB
-    Client[客户端 / 浏览器]
-
-    subgraph ControlPlane["控制面 (pingwaf server)"]
-        Dashboard[内嵌控制台 + REST API :9080]
-        GRPC[gRPC ControlPlane 服务 :9090]
-        PG[(PostgreSQL 14+)]
-        ES[(Elasticsearch - 可选)]
-    end
-
-    subgraph DataPlane["数据面 (pingwaf agents)"]
-        AgentA[边缘 Agent A :80 / :443]
-        AgentB[边缘 Agent B :80 / :443]
-    end
-
-    Origin[源站 / 上游服务]
-
-    Client -->|HTTP / HTTPS| AgentA
-    Client -->|HTTP / HTTPS| AgentB
-    AgentA <-->|gRPC 双向流| GRPC
-    AgentB <-->|gRPC 双向流| GRPC
-    Dashboard --> PG
-    GRPC --> PG
-    GRPC --> ES
-    AgentA -->|安全流量| Origin
-    AgentB -->|安全流量| Origin
-```
+<img src="./asset/readme-architecture.webp" alt="PingWAF 架构：客户端经 HTTP/HTTPS 接入边缘 Agent；每个 Agent 通过 gRPC 双向流与控制面同步规则与遥测；只有干净流量继续到源站" width="1000">
 
 控制面与数据面通过 `ControlPlane` gRPC 服务通信（定义于 [`control_plane.proto`](./pingwaf-proto/proto/control_plane.proto)），共包含 7 个 RPC：
 
@@ -134,6 +107,8 @@ graph TB
 ---
 
 ## 📊 实测效果
+
+<img src="./asset/readme-effectiveness.webp" alt="blazehttp 语料上的拦截率对比：PingWAF 全量口径 93.8%（有效口径 96.6%，误报 0.06%）对比 ModSecurity PL4 94.61%、SafeLine 76.17%、ModSecurity PL1 69.74%、Cloudflare 10.70%" width="1000">
 
 基于公开的 [blazehttp](https://github.com/chaitin/blazehttp) 样本库（33 877 条原始 HTTP 报文：恶意 658 / 正常 33 219），对 release 构建逐字节回放实测。拦截数按 WAF 判决面统计——403 拦截页与 503 质询页；"正常流量受影响"同样计入两者，质询不会被藏进"拦截"数字里。
 
