@@ -42,7 +42,6 @@ const siteId = "site_demo0001";
 const VIEWPORT = { width: 1440, height: 900 };
 
 const SHOTS = [
-  { key: "dashboard", path: "/dashboard" },
   { key: "sites", path: "/sites" },
   { key: "login", path: "/login", anonymous: true },
   { key: "waf", path: `/sites/${siteId}/security/protection` },

@@ -22,11 +22,8 @@ const intro = {
       { icon: "shield-check", text: "SQLi · XSS · RCE · パストラバーサル" },
       { icon: "refresh", text: "ルールは数秒で反映" },
     ],
-    shot: {
-      key: "dashboard",
-      url: "localhost:9080/dashboard",
-      caption: "組み込みコンソールでトラフィック・攻撃・エージェントの状態を確認。",
-      alt: "PingWAF のダッシュボード。リクエスト分析、攻撃傾向、エージェント状態を表示",
+    visual: {
+      alt: "PingWAF コンソールのアニメーション。リアルタイムのリクエスト、ブロックされた攻撃、エージェント状態、キャッシュヒット率、トラフィック波形を表示",
     },
   },
   proof: [

@@ -22,11 +22,8 @@ const intro = {
       { icon: "shield-check", text: "SQLi · XSS · RCE · 路径穿越" },
       { icon: "refresh", text: "规则秒级下发" },
     ],
-    shot: {
-      key: "dashboard",
-      url: "localhost:9080/dashboard",
-      caption: "内嵌控制台里的流量、攻击与 Agent 健康度。",
-      alt: "PingWAF 控制台仪表盘，展示请求分析、攻击趋势与 Agent 状态",
+    visual: {
+      alt: "PingWAF 控制台动画：实时请求量、被拦截的攻击、Agent 健康度、缓存命中率与流量曲线",
     },
   },
   proof: [

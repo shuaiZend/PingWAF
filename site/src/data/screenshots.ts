@@ -7,7 +7,6 @@ import bot from "../assets/screenshots/bot.png";
 import caching from "../assets/screenshots/caching.png";
 import cc from "../assets/screenshots/cc.png";
 import configVersions from "../assets/screenshots/configVersions.png";
-import dashboard from "../assets/screenshots/dashboard.png";
 import installInteractive from "../assets/screenshots/install-interactive.png";
 import installSuccess from "../assets/screenshots/install-success.png";
 import installCompose from "../assets/screenshots/install-compose.png";
@@ -25,7 +24,6 @@ import waf from "../assets/screenshots/waf.png";
  * Content files reference screenshots by key only.
  */
 export const SCREENSHOT_IMAGES: Record<ScreenshotKey, ImageMetadata> = {
-  dashboard,
   sites,
   login,
   waf,

@@ -25,7 +25,6 @@ export function docPath(slug: DocSlug): string {
 
 /** Screenshots captured from the real dashboard by `npm run capture`. */
 export const SCREENSHOT_KEYS = [
-  "dashboard",
   "sites",
   "login",
   "waf",
@@ -87,7 +86,11 @@ export interface IntroContent {
     secondary: LinkRef;
     stats: Array<{ value: string; label: string }>;
     pills: Array<{ icon: IconName; text: string }>;
-    shot: Shot;
+    /**
+     * The hero visual is an animated control-plane scene rather than a
+     * screenshot; only its accessibility label is localised.
+     */
+    visual: { alt: string };
   };
   proof: Array<{ value: string; label: string; note: string }>;
   architecture: {

@@ -234,10 +234,18 @@ for (const locale of LOCALES) {
   }
 
   const intro = (await loadModule(locale, "intro")) as
-    | { capabilities: { items: Array<{ link?: LinkLike }> }; hero: { shot: unknown }; showcase: { shots: unknown[] }; architecture: { link: LinkLike } }
+    | {
+        capabilities: { items: Array<{ link?: LinkLike }> };
+        hero: { visual?: { alt?: string } };
+        showcase: { shots: unknown[] };
+        architecture: { link: LinkLike };
+      }
     | null;
   if (intro) {
-    checkShot(locale, "intro.hero.shot", intro.hero.shot as { key?: string });
+    const heroAlt = intro.hero?.visual?.alt;
+    if (typeof heroAlt !== "string" || heroAlt.trim() === "") {
+      fail(`${locale}:intro.hero.visual.alt — accessibility label missing`);
+    }
     intro.showcase.shots.forEach((shot, index) =>
       checkShot(locale, `intro.showcase.shots.${index}`, shot as { key?: string }),
     );

@@ -22,11 +22,8 @@ const intro = {
       { icon: "shield-check", text: "SQLi · XSS · RCE · traversal" },
       { icon: "refresh", text: "Règles propagées en secondes" },
     ],
-    shot: {
-      key: "dashboard",
-      url: "localhost:9080/dashboard",
-      caption: "Trafic, attaques et santé des agents dans la console intégrée.",
-      alt: "Tableau de bord PingWAF avec analyses de requêtes, tendances d'attaque et état des agents",
+    visual: {
+      alt: "Animation de la console PingWAF : requêtes en direct, attaques bloquées, état des agents, taux de cache et courbe de trafic",
     },
   },
   proof: [

@@ -709,6 +709,9 @@ p {
 
 .hero__media {
   position: relative;
+  width: 100%;
+  max-width: 620px;
+  margin-inline: auto;
 }
 
 .hero__media::after {
@@ -742,13 +745,15 @@ p {
 }
 
 .float-pill--top {
-  top: -16px;
-  right: 18px;
+  top: -14px;
+  left: -18px;
+  right: auto;
 }
 
 .float-pill--bottom {
-  bottom: -16px;
-  left: 16px;
+  bottom: -14px;
+  right: -16px;
+  left: auto;
 }
 
 .float-pill strong {
@@ -762,6 +767,358 @@ p {
 
 .float-pill--bottom .icon {
   color: var(--color-bg-brand);
+}
+
+/* ============================================================
+   Hero visual (homepage)
+   Inline SVG control-plane scene rendered by
+   `src/components/home/HeroVisual.astro`. Kept in the global stylesheet on
+   purpose: as a component-scoped block it exceeded Vite's inline threshold
+   and cost the homepage a second blocking CSS request.
+   ============================================================ */
+.hero-visual {
+  margin: 0;
+  position: relative;
+}
+
+.hero-visual__canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 640 / 400;
+  overflow: hidden;
+  font-family: var(--site-font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------------------------------------------------------- palette */
+.hv-grid-line {
+  stroke: var(--site-grid-line);
+  stroke-width: 1;
+}
+
+.hv-grid {
+  opacity: 0.55;
+}
+
+.hv-glow-1 {
+  stop-color: var(--color-bg-brand);
+  stop-opacity: 0.16;
+}
+
+.hv-glow-2 {
+  stop-color: var(--color-bg-brand);
+  stop-opacity: 0.04;
+}
+
+.hv-glow-3 {
+  stop-color: var(--color-bg-brand);
+  stop-opacity: 0;
+}
+
+.hv-area-1 {
+  stop-color: var(--color-bg-brand);
+  stop-opacity: 0.16;
+}
+
+.hv-area-2 {
+  stop-color: var(--color-bg-brand);
+  stop-opacity: 0;
+}
+
+.hv-scan-1,
+.hv-scan-3 {
+  stop-color: var(--color-bg-brand);
+  stop-opacity: 0;
+}
+
+.hv-scan-2 {
+  stop-color: var(--color-bg-brand);
+  stop-opacity: 0.07;
+}
+
+.hv-fade-1 {
+  stop-color: var(--color-bg-elevated);
+  stop-opacity: 0;
+}
+
+.hv-fade-2 {
+  stop-color: var(--color-bg-elevated);
+  stop-opacity: 1;
+}
+
+/* ---------------------------------------------------------- surfaces */
+.hv-card {
+  fill: var(--color-bg-elevated);
+  stroke: var(--color-border-line);
+  stroke-width: 1;
+  filter: drop-shadow(0 1px 2px rgba(16, 16, 16, 0.06))
+    drop-shadow(0 10px 24px rgba(16, 16, 16, 0.06));
+}
+
+.hv-rule {
+  stroke: var(--color-border-line);
+  stroke-width: 1;
+  opacity: 0.9;
+}
+
+/* ---------------------------------------------------------- type */
+.hv-label {
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  fill: var(--color-text-subtle);
+}
+
+.hv-value {
+  font-size: 24px;
+  font-weight: 650;
+  letter-spacing: -0.03em;
+  fill: var(--color-text-strong);
+}
+
+.hv-sub,
+.hv-foot {
+  font-size: 9.5px;
+  fill: var(--color-text-subtle);
+}
+
+.hv-row-time {
+  font-size: 9px;
+  fill: var(--color-text-subtle);
+  opacity: 0.85;
+}
+
+.hv-row-rule {
+  font-size: 10.5px;
+  fill: var(--color-text-default);
+}
+
+.hv-badge {
+  fill: var(--color-bg-danger);
+  opacity: 0.12;
+}
+
+.hv-badge-text {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  fill: var(--color-text-danger);
+  text-anchor: middle;
+}
+
+.hv-spark,
+.hv-trend {
+  stroke: var(--color-bg-brand);
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0.55;
+}
+
+.hv-trend {
+  stroke: var(--color-bg-danger);
+  opacity: 0.7;
+}
+
+.hv-dot {
+  fill: var(--color-bg-success);
+}
+
+.hv-dot--danger {
+  fill: var(--color-bg-danger);
+}
+
+.hv-ring-track {
+  stroke: var(--color-border-line);
+  stroke-width: 5;
+  opacity: 0.9;
+}
+
+/* r=20 -> circumference 125.7; 65.3% -> 82.1 visible, offset 43.6 */
+.hv-ring-value {
+  stroke: var(--color-bg-brand);
+  stroke-width: 5;
+  stroke-linecap: round;
+  stroke-dasharray: 125.7;
+  stroke-dashoffset: 43.6;
+}
+
+.hv-wave-line {
+  fill: none;
+  stroke: var(--color-bg-brand);
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0.85;
+}
+
+.hv-wave-area {
+  fill: url(#hv-area);
+}
+
+/* ---------------------------------------------------------- motion
+ * Every duration divides the 16s master loop, so nothing drifts out of
+ * phase. Base rules already hold the settled frame for reduced motion.
+ */
+.hv-value--tick {
+  opacity: 1;
+  animation: hv-tick 4s steps(1, end) infinite;
+}
+
+/* Opposite phase: while the primary reading is hidden the alternate shows. */
+.hv-value--alt {
+  opacity: 0;
+  animation: hv-tick 4s steps(1, end) infinite;
+  animation-delay: -2s;
+}
+
+@keyframes hv-tick {
+  0%,
+  49.9% {
+    opacity: 1;
+  }
+
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+
+.hv-dot {
+  animation: hv-pulse 2s ease-in-out infinite;
+}
+
+@keyframes hv-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.hv-flow {
+  animation: hv-flow 16s var(--site-ease) infinite;
+}
+
+@keyframes hv-flow {
+  0%,
+  20% {
+    transform: translateY(0);
+  }
+
+  25%,
+  45% {
+    transform: translateY(-28px);
+  }
+
+  50%,
+  70% {
+    transform: translateY(-56px);
+  }
+
+  75%,
+  95% {
+    transform: translateY(-84px);
+  }
+
+  100% {
+    transform: translateY(-112px);
+  }
+}
+
+.hv-ring-value {
+  animation: hv-ring 8s ease-in-out infinite;
+}
+
+@keyframes hv-ring {
+  0%,
+  100% {
+    stroke-dashoffset: 43.6;
+  }
+
+  35% {
+    stroke-dashoffset: 33;
+  }
+
+  65% {
+    stroke-dashoffset: 38;
+  }
+}
+
+.hv-wave {
+  animation: hv-wave 8s linear infinite;
+}
+
+@keyframes hv-wave {
+  from {
+    transform: translateX(0);
+  }
+
+  to {
+    transform: translateX(-200px);
+  }
+}
+
+.hv-scan {
+  opacity: 0;
+  animation: hv-scan 16s linear infinite;
+}
+
+@keyframes hv-scan {
+  0% {
+    transform: translateX(0);
+    opacity: 0;
+  }
+
+  2% {
+    opacity: 1;
+  }
+
+  16% {
+    transform: translateX(840px);
+    opacity: 0;
+  }
+
+  100% {
+    transform: translateX(840px);
+    opacity: 0;
+  }
+}
+
+/* Scrolling scan band intersecting a filtered card forces per-frame
+   * recomposition; mobile GPUs feel it, desktop does not.
+   * Keep this override inside the hero section: a rule for `.hv-card` added
+   * later in the Responsive block would silently win on specificity. */
+@media (max-width: 860px) {
+  .hv-card {
+    filter: none;
+  }
+}
+
+/* `animation: none` here and the global `animation-duration: 0.001ms` reset in
+ * the Responsive block are complementary, not duplicates: this block wins on
+ * specificity for hero descendants. The two `display: none` rules below have no
+ * equivalent elsewhere — dropping them breaks the settled frame. */
+@media (prefers-reduced-motion: reduce) {
+  .hero-visual__canvas *,
+  .hero-visual__canvas *::before,
+  .hero-visual__canvas *::after {
+    animation: none !important;
+  }
+
+  .hv-scan {
+    display: none;
+  }
+
+  /* Rows 5-9 repeat rows 1-4 so the scroll loops seamlessly; with motion
+   * stopped they read as duplicate entries, so the settled frame shows four. */
+  .hv-flow > g:nth-child(n + 5) {
+    display: none;
+  }
 }
 
 /* ============================================================

@@ -1,0 +1,195 @@
+---
+/**
+ * Hero visual: a live control-plane console rendered as one inline SVG.
+ *
+ * Why inline: only inline markup can inherit the site's CSS custom properties,
+ * so the scene follows `html[data-theme]` with zero JavaScript and no extra
+ * network request. Animation is pure CSS `@keyframes` (no SMIL) so that the
+ * global `prefers-reduced-motion` reset governs every moving part. All rules
+ * live in `src/styles/global.css` under "Hero visual (homepage)".
+ *
+ * Every animated property has its settled value in the base rule: with motion
+ * reduced, the scene renders as a complete, readable frame instead of a blank
+ * or half-drawn one.
+ */
+interface Props {
+  /** Localised description announced to assistive technology. */
+  alt: string;
+}
+
+const { alt } = Astro.props;
+
+/**
+ * Decorative telemetry. Identifiers stay untranslated, and rows 5-9 repeat the
+ * first four so the scrolling list loops without a visible jump.
+ */
+const attacks = [
+  { time: "12:04:07", rule: "SQLi" },
+  { time: "12:04:11", rule: "XSS" },
+  { time: "12:04:16", rule: "RCE" },
+  { time: "12:04:22", rule: "traversal" },
+  { time: "12:04:27", rule: "SQLi" },
+  { time: "12:04:31", rule: "XSS" },
+  { time: "12:04:36", rule: "RCE" },
+  { time: "12:04:42", rule: "traversal" },
+  { time: "12:04:47", rule: "SQLi" },
+];
+
+/**
+ * One 200-unit slice of the traffic waveform. Four slices (800 units) cover the
+ * 592-unit visible strip plus the 200-unit scroll offset without exposing a gap.
+ */
+const wave =
+  "M0 32 C14 28 24 20 38 22 C52 24 62 34 76 32 C90 30 100 18 114 20 C128 22 140 32 154 30 C168 28 180 24 200 32";
+const waveSlices = [0, 1, 2, 3];
+---
+<figure class="hero-visual">
+  <svg
+    class="hero-visual__canvas"
+    viewBox="0 0 640 400"
+    role="img"
+    aria-label={alt}
+    preserveAspectRatio="xMidYMid meet"
+  >
+    <defs>
+      <pattern id="hv-grid" width="32" height="32" patternUnits="userSpaceOnUse">
+        <path class="hv-grid-line" d="M32 0H0V32" fill="none" />
+      </pattern>
+      <radialGradient id="hv-glow" cx="50%" cy="0%" r="72%">
+        <stop class="hv-glow-1" offset="0%" />
+        <stop class="hv-glow-2" offset="58%" />
+        <stop class="hv-glow-3" offset="100%" />
+      </radialGradient>
+      <linearGradient id="hv-area" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="68">
+        <stop class="hv-area-1" offset="0%" />
+        <stop class="hv-area-2" offset="100%" />
+      </linearGradient>
+      <linearGradient id="hv-scan" x1="0" y1="0" x2="1" y2="0">
+        <stop class="hv-scan-1" offset="0%" />
+        <stop class="hv-scan-2" offset="50%" />
+        <stop class="hv-scan-3" offset="100%" />
+      </linearGradient>
+      <linearGradient id="hv-fade" x1="0" y1="0" x2="0" y2="1">
+        <stop class="hv-fade-1" offset="0%" />
+        <stop class="hv-fade-2" offset="100%" />
+      </linearGradient>
+      <clipPath id="hv-flow-clip">
+        <rect x="384" y="64" width="240" height="152" />
+      </clipPath>
+    </defs>
+
+    <g aria-hidden="true">
+      <rect class="hv-grid" width="640" height="400" fill="url(#hv-grid)" />
+      <ellipse class="hv-glow" cx="520" cy="-40" rx="300" ry="220" fill="url(#hv-glow)" />
+
+      <!-- Requests -->
+      <g>
+        <rect class="hv-card" x="16" y="24" width="172" height="104" rx="10" />
+        <text class="hv-label" x="32" y="48">REQUESTS</text>
+        <text class="hv-value hv-value--tick" x="32" y="82">184.3K</text>
+        <text class="hv-value hv-value--alt" x="32" y="82">184.6K</text>
+        <text class="hv-sub" x="32" y="106">7.4K unique IPs</text>
+        <path
+          class="hv-spark"
+          d="M118 56 L126 48 L134 51 L142 40 L150 44 L158 36"
+          fill="none"
+        />
+      </g>
+
+      <!-- Blocked -->
+      <g>
+        <rect class="hv-card" x="200" y="24" width="172" height="104" rx="10" />
+        <text class="hv-label" x="216" y="48">BLOCKED</text>
+        <text class="hv-value hv-value--tick" x="216" y="82">1.3K</text>
+        <text class="hv-value hv-value--alt" x="216" y="82">1.31K</text>
+        <text class="hv-sub" x="216" y="106">213 attackers</text>
+        <path class="hv-trend" d="M340 56 L348 46 L352 50 L360 38" fill="none" />
+        <circle class="hv-dot hv-dot--danger" cx="356" cy="40" r="3" />
+      </g>
+
+      <!-- Agents -->
+      <g>
+        <rect class="hv-card" x="16" y="140" width="172" height="104" rx="10" />
+        <text class="hv-label" x="32" y="164">AGENTS</text>
+        <circle class="hv-dot" cx="86" cy="160" r="3.5" />
+        <text class="hv-value" x="32" y="198">1/2</text>
+        <text class="hv-sub" x="32" y="222">1 online · gRPC</text>
+      </g>
+
+      <!-- Cache hit rate -->
+      <g>
+        <rect class="hv-card" x="200" y="140" width="172" height="104" rx="10" />
+        <text class="hv-label" x="216" y="164">CACHE HIT</text>
+        <text class="hv-value hv-value--tick" x="216" y="198">65.3%</text>
+        <text class="hv-value hv-value--alt" x="216" y="198">65.8%</text>
+        <text class="hv-sub" x="216" y="222">120.5K cached</text>
+        <g transform="rotate(-90 336 194)">
+          <circle class="hv-ring-track" cx="336" cy="194" r="20" fill="none" />
+          <circle class="hv-ring-value" cx="336" cy="194" r="20" fill="none" />
+        </g>
+      </g>
+
+      <!-- Live attacks -->
+      <g>
+        <rect class="hv-card" x="384" y="24" width="240" height="220" rx="10" />
+        <text class="hv-label" x="400" y="48">LIVE ATTACKS</text>
+        <circle class="hv-dot hv-dot--danger" cx="600" cy="44" r="3.5" />
+        <line class="hv-rule" x1="384" x2="624" y1="60" y2="60" />
+
+        <g clip-path="url(#hv-flow-clip)">
+          <g class="hv-flow">
+            {
+              attacks.map((attack, index) => (
+                <g transform={`translate(0 ${83 + index * 28})`}>
+                  <text class="hv-row-time" x="400" y="0">
+                    {attack.time}
+                  </text>
+                  <text class="hv-row-rule" x="450" y="0">
+                    {attack.rule}
+                  </text>
+                  <rect class="hv-badge" x="558" y="-11" width="50" height="16" rx="4" />
+                  <text class="hv-badge-text" x="583" y="0">
+                    BLOCKED
+                  </text>
+                </g>
+              ))
+            }
+          </g>
+        </g>
+        <rect
+          class="hv-flow-fade"
+          x="384"
+          y="190"
+          width="240"
+          height="26"
+          fill="url(#hv-fade)"
+        />
+
+        <line class="hv-rule" x1="384" x2="624" y1="224" y2="224" />
+        <text class="hv-foot" x="400" y="236">gRPC · 7 RPC · demo stream</text>
+      </g>
+
+      <!-- Traffic strip -->
+      <g>
+        <rect class="hv-card" x="16" y="268" width="608" height="108" rx="10" />
+        <text class="hv-label" x="32" y="292">REQUESTS / SECOND</text>
+        <text class="hv-foot" x="608" y="292" text-anchor="end">p50 43 ms</text>
+        <line class="hv-rule" x1="16" x2="624" y1="304" y2="304" />
+        <g transform="translate(32 312)">
+          <g class="hv-wave">
+            {
+              waveSlices.map((slice) => (
+                <g transform={`translate(${slice * 200} 0)`}>
+                  <path class="hv-wave-area" d={`${wave} L200 68 L0 68 Z`} />
+                  <path class="hv-wave-line" d={wave} />
+                </g>
+              ))
+            }
+          </g>
+        </g>
+      </g>
+
+      <rect class="hv-scan" x="-200" y="0" width="200" height="400" fill="url(#hv-scan)" />
+    </g>
+  </svg>
+</figure>
