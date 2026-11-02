@@ -493,7 +493,9 @@ mod tests {
         // path, not a leaked repository directory.
         assert!(!evaluate(
             &rule.expression,
-            &path_ctx("/safeline/xray/blob/master/.github/PULL_REQUEST_TEMPLATE.md")
+            &path_ctx(
+                "/safeline/xray/blob/master/.github/PULL_REQUEST_TEMPLATE.md"
+            )
         ));
         for path in ["/.github/workflows/ci.yml", "/.gitignore", "/.envrc"] {
             assert!(
@@ -501,7 +503,13 @@ mod tests {
                 "{path} is a public or ordinary path, not a dotfile probe"
             );
         }
-        for path in ["/.git/config", "/.git", "/.env", "/.env.local", "/.svn/entries"] {
+        for path in [
+            "/.git/config",
+            "/.git",
+            "/.env",
+            "/.env.local",
+            "/.svn/entries",
+        ] {
             assert!(
                 evaluate(&rule.expression, &path_ctx(path)),
                 "{path} should still match the dotfile rule"
