@@ -313,7 +313,7 @@ const install = {
     id: "troubleshooting",
     eyebrow: "故障排查",
     title: "安装没有顺利收尾时",
-    lead: "支持中最常见的四类失败，以及定位各自问题所需的命令。",
+    lead: "支持中最常见的五类失败，以及定位各自问题所需的命令。",
     items: [
       {
         q: "安装器连不上 PostgreSQL",
@@ -330,6 +330,10 @@ const install = {
       {
         q: "systemd 服务启动失败",
         a: "用 journalctl -u pingwaf -e 查看单元日志，并检查 /etc/pingwaf/pingwaf.toml。没有 reload 机制：任何修改都通过 systemctl restart pingwaf 应用，之后用 systemctl status pingwaf 确认。",
+      },
+      {
+        q: "容器启动失败，报 \"bind() failed on 0.0.0.0:443\" / Permission denied",
+        a: "镜像已在构建时为二进制授予 CAP_NET_BIND_SERVICE，因此在默认桥接模式下，非特权用户 pingwaf 用普通 docker run 或 docker compose up -d 即可绑定 80/443。如果仍然失败，说明运行时剥离了文件能力——加上 --cap-add=NET_BIND_SERVICE（仓库自带的 compose 文件已设置 cap_add 兜底），或切换到 host 网络 network_mode: host（此时必须同时注释掉 ports: 与 networks:；9080/9090 将直接监听宿主机）。可用 docker exec pingwaf getcap /usr/local/bin/pingwaf（预期输出 cap_net_bind_service=ep）和 docker exec pingwaf id -u（非零）验证。完整说明：https://github.com/shuaiZend/PingWAF/blob/main/docs/deployment.md#binding-ports-80443-in-containers",
       },
     ],
   },

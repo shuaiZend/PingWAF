@@ -176,7 +176,7 @@ graph TB
 
 ### 方式 A —— Docker Compose（推荐）
 
-仓库内置的 [`docker-compose.yml`](./docker-compose.yml) 会以 `all-in-one` 模式连同 PostgreSQL 一起启动 PingWAF，默认拉取 GHCR 预构建镜像（`ghcr.io/shuaizend/pingwaf:latest`）：
+仓库内置的 [`docker-compose.yml`](./docker-compose.yml) 会以 `all-in-one` 模式连同 PostgreSQL 一起启动 PingWAF，默认拉取 GHCR 预构建镜像（`ghcr.io/shuaizend/pingwaf:latest`）。镜像已为二进制预置绑定 80/443 的能力（`setcap`），无需 root 与额外参数；若运行环境屏蔽文件能力（如 `no-new-privileges`、rootless Docker），加 `--cap-add=NET_BIND_SERVICE` 或改用 host 网络，详见 [docs/deployment.md](./docs/deployment.md#binding-ports-80443-in-containers)：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/deploy/compose/install.sh | bash

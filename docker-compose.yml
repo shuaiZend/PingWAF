@@ -25,9 +25,18 @@ services:
     # matches agents by hostname + API key, so a changing container-ID
     # hostname would register a fresh offline ghost on every redeploy.
     hostname: pingwaf
+    # ── Networking: bridge + port mapping by default ─────────────────────────
+    # Opt into host networking by uncommenting `network_mode: host` below.
+    # Use it when the proxy must see the real client IP, or when 80/443 cannot
+    # be published on the host (already owned, or mapped elsewhere). Compose
+    # refuses port publishing together with host networking, and refuses
+    # `network_mode: host` together with a `networks:` entry, so comment out
+    # BOTH blocks when switching. 9080/9090 then listen directly on the host —
+    # firewall them accordingly.
+    # network_mode: host
     ports:
-      # Host-side ports are overridable via .env without touching the compose
-      # file; the container-side ports stay fixed.
+      # Default (bridge) path. Host-side ports are overridable via .env
+      # without touching the compose file; container-side ports stay fixed.
       - "${PINGWAF_HTTP_PORT:-80}:80"       # HTTP traffic (proxied)
       - "${PINGWAF_HTTPS_PORT:-443}:443"    # HTTPS traffic (proxied)
       - "${PINGWAF_ADMIN_PORT:-9080}:9080"  # Admin dashboard + REST API
@@ -65,6 +74,10 @@ services:
       - pingwaf-data:/var/lib/pingwaf
       - pingwaf-certs:/etc/pingwaf/certs
     cap_add:
+      # The image already carries CAP_NET_BIND_SERVICE as a file capability, so
+      # 80/443 bind without this. Keep it for runtimes that strip file
+      # capabilities: no-new-privileges, rootless Docker, some PodSecurity
+      # defaults. Both paths are complementary, not alternatives.
       - NET_BIND_SERVICE
     restart: unless-stopped
     healthcheck:
@@ -73,6 +86,7 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+    # Comment this out together with `ports:` when enabling `network_mode: host`.
     networks:
       - pingwaf-net
 

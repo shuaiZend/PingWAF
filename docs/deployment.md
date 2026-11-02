@@ -48,6 +48,70 @@ or replaced (**Settings → Control plane HTTPS**). Set `TLS_SANS` to the hostna
 you use if it is not `localhost`.  
 Default credentials: `admin@pingwaf.local` / value of `$ADMIN_PASSWORD`
 
+### Binding Ports 80/443 in Containers
+
+The data plane listens on 80/443 and, inside the image, runs as the
+unprivileged `pingwaf` user. Binding a port below 1024 therefore needs
+`CAP_NET_BIND_SERVICE`; without it the proxy panics during startup:
+
+```
+thread 'Pingora HTTP Proxy Service' panicked at …/pingora-core-0.9.0/src/services/listening.rs:293:14:
+Failed to build listeners: … PermissionDenied … bind() failed on 0.0.0.0:443
+```
+
+Images built from this repository grant that capability to the binary at build
+time (`setcap cap_net_bind_service=+ep /usr/local/bin/pingwaf`, asserted with
+`getcap` in the build), so `docker compose up -d` and a plain `docker run` both
+bind 80/443 without running as root.
+
+File capabilities are ignored when the runtime policy forbids them. In that case
+grant the capability at runtime instead:
+
+| Symptom / environment | Fix |
+|---|---|
+| `Permission denied` on `0.0.0.0:443` with this compose file | The capability was stripped from the image, or a bind mount replaced the binary: check `getcap`, and keep the `cap_add: [NET_BIND_SERVICE]` entry the compose file already ships |
+| `--security-opt no-new-privileges`, rootless Docker, hardened Kubernetes | File capabilities do not apply; add the runtime capability — `--cap-add=NET_BIND_SERVICE`, or `securityContext.capabilities.add: ["NET_BIND_SERVICE"]` |
+| `address already in use` | Not a capability problem: the host port is taken. Change `PINGWAF_HTTP_PORT` / `PINGWAF_HTTPS_PORT`, or switch to host networking (below) |
+
+Check a running container:
+
+```bash
+docker exec pingwaf getcap /usr/local/bin/pingwaf
+# /usr/local/bin/pingwaf cap_net_bind_service=ep
+docker exec pingwaf id -u
+# non-zero (the system user allocated by useradd -r) — never root
+```
+
+#### Host networking
+
+`docker-compose.yml` ships a commented-out `network_mode: host`. Host mode is
+the right choice when the proxy must see the real client IP without PROXY
+protocol, or when 80/443 cannot be published on the host at all. It changes the
+port semantics:
+
+- `ports:` must be removed: Compose refuses to publish ports together with
+  host networking (`conflicting options: port publishing and the container type
+  network mode`). The container binds the host's 80/443 directly.
+- `networks:` must be commented out as well — Compose rejects
+  `network_mode: host` together with a `networks` entry.
+- 9080 (dashboard + REST API) and 9090 (gRPC) listen directly on the host, so
+  restrict them with the host firewall.
+
+```yaml
+services:
+  pingwaf:
+    network_mode: host
+    # ports: …    # must be removed: Compose rejects publishing ports in host mode
+    # networks: … # must be removed: Compose rejects both together
+```
+
+Host mode does not bypass the capability check: the process still runs as
+`pingwaf` and relies on the file capability (or `--cap-add`).
+
+The systemd path solves the same problem a different way — the unit grants
+`AmbientCapabilities=CAP_NET_BIND_SERVICE`; see
+[Manual Installation](#manual-installation-binary--systemd).
+
 ### Environment Variables (docker-compose)
 
 | Variable | Default | Description |

@@ -187,7 +187,11 @@ tables, the cross-vendor comparison with Cloudflare / SafeLine / ModSecurity
 
 The official installer downloads the bundled [`docker-compose.yml`](./docker-compose.yml),
 writes a private `.env` and starts PingWAF in `all-in-one` mode with PostgreSQL
-(GHCR image, named volumes for data and certificates). No clone and no root:
+(GHCR image, named volumes for data and certificates). No clone and no root.
+Images ship with `CAP_NET_BIND_SERVICE` already set on the binary, so 80/443 bind
+without extra flags; if your runtime strips file capabilities, add
+`--cap-add=NET_BIND_SERVICE` or use host networking — see
+[docs/deployment.md](./docs/deployment.md#binding-ports-80443-in-containers):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/deploy/compose/install.sh | bash

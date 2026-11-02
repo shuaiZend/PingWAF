@@ -325,7 +325,7 @@ const install = {
     id: "troubleshooting",
     eyebrow: "トラブルシューティング",
     title: "インストールがきれいに終わらないとき",
-    lead: "サポートで最もよく見られる 4 つの失敗と、それぞれを特定するためのコマンド。",
+    lead: "サポートで最もよく見られる 5 つの失敗と、それぞれを特定するためのコマンド。",
     items: [
       {
         q: "インストーラーが PostgreSQL に接続できない",
@@ -342,6 +342,10 @@ const install = {
       {
         q: "systemd サービスが起動しない",
         a: "journalctl -u pingwaf -e でユニットのログを確認し、/etc/pingwaf/pingwaf.toml を見直してください。リロードはありません。変更は systemctl restart pingwaf で適用し、その後 systemctl status pingwaf で確認します。",
+      },
+      {
+        q: "コンテナの起動が \"bind() failed on 0.0.0.0:443\" / Permission denied で失敗する",
+        a: "イメージはビルド時にバイナリへ CAP_NET_BIND_SERVICE を付与済みのため、デフォルトのブリッジモードでは非特権ユーザー pingwaf が通常の docker run や docker compose up -d で 80/443 をバインドできます。それでも失敗する場合は、実行環境がファイル能力を剥奪しています — --cap-add=NET_BIND_SERVICE を追加するか（同梱の compose ファイルにはすでに cap_add が設定されています）、host ネットワーク network_mode: host に切り替えてください（その場合は ports: と networks: の両方をコメントアウトし、9080/9090 はホスト上で直接リッスンします）。docker exec pingwaf getcap /usr/local/bin/pingwaf（cap_net_bind_service=ep と表示されるはずです）と docker exec pingwaf id -u（非ゼロ）で確認できます。詳細：https://github.com/shuaiZend/PingWAF/blob/main/docs/deployment.md#binding-ports-80443-in-containers",
       },
     ],
   },

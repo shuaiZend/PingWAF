@@ -8,6 +8,23 @@
 # (symbols kept so perf-record/perf-report can resolve frames). Keep the two
 # files in lockstep —
 # the layer structure must stay identical apart from the profile flag.
+#
+# Runtime contract — ports and capabilities:
+# The runtime stage grants CAP_NET_BIND_SERVICE to the binary as a *file*
+# capability, so the unprivileged `pingwaf` user (USER below) can bind 80/443
+# under plain `docker run`, Kubernetes, or a hand-written compose file. Default
+# networking is bridge + explicit port mapping.
+#
+# If startup still fails with
+#   bind() failed on 0.0.0.0:443 … Permission denied
+# the file capability did not survive the runtime policy (no-new-privileges,
+# rootless Docker, a read-only bind mount over the binary, some PodSecurity
+# defaults). Add the capability at runtime instead:
+#   docker run --cap-add=NET_BIND_SERVICE …
+#   compose:  cap_add: [NET_BIND_SERVICE]
+# or share the host network namespace with `--network host` / compose
+# `network_mode: host` (port mapping no longer applies). See
+# docs/deployment.md → "Binding Ports 80/443 in Containers".
 
 # ─── Stage 1: Frontend ───────────────────────────────────────────────────────
 # Base images pull from mirror.gcr.io (a Docker Hub mirror that does not
@@ -164,6 +181,7 @@ FROM mirror.gcr.io/library/debian:trixie-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
+    libcap2-bin \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -r -m -s /usr/sbin/nologin pingwaf \
     && mkdir -p /etc/pingwaf /var/lib/pingwaf \
@@ -178,6 +196,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /app/target/release/pingwaf /usr/local/bin/pingwaf
 COPY pingwaf.toml /etc/pingwaf/pingwaf.toml
+
+# Bind 80/443 as the unprivileged user below: the file capability travels with
+# the binary, so no runtime flag is required. The assertion fails the build
+# instead of shipping an image that panics on startup with
+# `bind() failed on 0.0.0.0:443`. Must stay after the COPY (a later COPY would
+# replace the file and drop the xattr) and before USER.
+RUN setcap cap_net_bind_service=+ep /usr/local/bin/pingwaf \
+    && getcap /usr/local/bin/pingwaf | grep -q cap_net_bind_service
 
 EXPOSE 80 443 9080 9090
 

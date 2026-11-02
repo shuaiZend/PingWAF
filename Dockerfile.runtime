@@ -5,12 +5,22 @@
 # ubuntu-latest (glibc 2.39); bookworm (glibc 2.36) is too old.
 # mirror.gcr.io = Google's mirror of the same Docker Hub image;
 # GHA runners hit Docker Hub's anonymous pull limit (429) intermittently.
+#
+# Runtime contract — ports and capabilities: identical to Dockerfile. The
+# binary carries CAP_NET_BIND_SERVICE as a file capability so USER pingwaf can
+# bind 80/443; if a security policy strips it, add `--cap-add=NET_BIND_SERVICE`
+# or use host networking. See docs/deployment.md → "Binding Ports 80/443 in
+# Containers".
 FROM mirror.gcr.io/library/debian:trixie-slim
 
 # SYNC: keep in lockstep with Dockerfile / ci.yml / release.yml
+# procps provides pgrep for the agent branch of the health check below; the
+# source-built images use a single curl probe and do not need it.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
+    libcap2-bin \
+    procps \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -r -m -s /usr/sbin/nologin pingwaf \
     && mkdir -p /etc/pingwaf /var/lib/pingwaf \
@@ -25,6 +35,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY pingwaf /usr/local/bin/pingwaf
 COPY pingwaf.toml /etc/pingwaf/pingwaf.toml
+
+# Same contract as Dockerfile: file capability after the COPY, verified at
+# build time so a stripped image fails here rather than at startup.
+RUN setcap cap_net_bind_service=+ep /usr/local/bin/pingwaf \
+    && getcap /usr/local/bin/pingwaf | grep -q cap_net_bind_service
 
 EXPOSE 80 443 9080 9090
 

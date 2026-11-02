@@ -325,7 +325,7 @@ const install = {
     id: "troubleshooting",
     eyebrow: "Solución de problemas",
     title: "Cuando la instalación no termina limpia",
-    lead: "Los cuatro fallos más frecuentes en soporte y el comando que identifica cada uno.",
+    lead: "Los cinco fallos más frecuentes en soporte y el comando que identifica cada uno.",
     items: [
       {
         q: "El instalador no puede conectar con PostgreSQL",
@@ -342,6 +342,10 @@ const install = {
       {
         q: "El servicio de systemd no arranca",
         a: "Inspecciona el registro de la unidad con journalctl -u pingwaf -e y revisa /etc/pingwaf/pingwaf.toml. No hay recarga: aplica cualquier cambio con systemctl restart pingwaf y comprueba después con systemctl status pingwaf.",
+      },
+      {
+        q: "El contenedor no arranca con \"bind() failed on 0.0.0.0:443\" / Permission denied",
+        a: "La imagen ya otorga CAP_NET_BIND_SERVICE al binario en tiempo de compilación, por lo que el usuario sin privilegios pingwaf puede enlazar 80/443 en modo puente con un simple docker run o docker compose up -d. Si sigue fallando, el runtime eliminó las capacidades de archivo — añade --cap-add=NET_BIND_SERVICE (el archivo compose incluido ya define cap_add) o cambia a red host network_mode: host (en ese caso comenta ports: y networks:; 9080/9090 escucharán directamente en el host). Verifica con docker exec pingwaf getcap /usr/local/bin/pingwaf (debe mostrar cap_net_bind_service=ep) y docker exec pingwaf id -u (distinto de cero). Detalles completos: https://github.com/shuaiZend/PingWAF/blob/main/docs/deployment.md#binding-ports-80443-in-containers",
       },
     ],
   },
