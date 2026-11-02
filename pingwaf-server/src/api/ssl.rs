@@ -50,7 +50,7 @@ pub(crate) mod cert_status {
 #[derive(Debug, Serialize)]
 pub struct CertificateResponse {
     pub id: Uuid,
-    pub site_id: Uuid,
+    pub site_id: Option<Uuid>,
     pub domain: String,
     pub issuer: Option<String>,
     pub not_before: Option<DateTime<Utc>>,
@@ -650,12 +650,12 @@ async fn list_certificates(
         .map(|row| {
             let owner = row.site_id;
             let mut response = CertificateResponse::from(row);
-            if owner != id {
+            if owner != Some(id) {
                 response.relation = "linked".to_string();
             }
             response.warnings = Some(certificate_warnings_for(
                 &served,
-                response.site_id,
+                response.site_id.unwrap_or_default(),
                 &response.domain,
             ));
             response
@@ -702,14 +702,17 @@ async fn link_certificate(
                     payload.certificate_id
                 ))
             })?;
-    if certificate.site_id == site.id {
+    if certificate.site_id == Some(site.id) {
         return Err(ApiError::Conflict(
             "certificate already belongs to this site".to_string(),
         ));
     }
     // Linking grants the right to serve another site's certificate, so the
     // caller must be able to read the owning site as well.
-    load_site_read(&state.db, certificate.site_id, &current).await?;
+    let owner = certificate.site_id.ok_or_else(|| {
+        ApiError::BadRequest("certificate is not bound to any site".to_string())
+    })?;
+    load_site_read(&state.db, owner, &current).await?;
 
     let exists = certificate_links::Entity::find()
         .filter(certificate_links::Column::SiteId.eq(site.id))
@@ -813,7 +816,7 @@ async fn list_available_certificates(
     let served = site_hostname_index(
         &state,
         rows.iter()
-            .map(|row| row.site_id)
+            .filter_map(|row| row.site_id)
             .chain(std::iter::once(id)),
     )
     .await;
@@ -824,7 +827,7 @@ async fn list_available_certificates(
             response.relation = "available".to_string();
             response.warnings = Some(certificate_warnings_for(
                 &served,
-                response.site_id,
+                response.site_id.unwrap_or_default(),
                 &response.domain,
             ));
             response
@@ -931,7 +934,7 @@ async fn insert_certificate<C: ConnectionTrait>(
     let timestamp = Utc::now();
     let model = site_certificates::ActiveModel {
         id: Set(Uuid::new_v4()),
-        site_id: Set(site_id),
+        site_id: Set(Some(site_id)),
         domain: Set(domain),
         cert_pem: Set(payload.cert_pem),
         key_pem: Set(payload.key_pem),
@@ -967,7 +970,7 @@ async fn announce_certificate_created(
     write_cert_event(
         &state.db,
         model.id,
-        model.site_id,
+        model.site_id.unwrap_or_default(),
         "created",
         format!(
             "Certificate for {} created (status: {})",
@@ -976,14 +979,16 @@ async fn announce_certificate_created(
         None,
     )
     .await;
-    if let Err(err) = touch_site(state, model.site_id).await {
+    if let Err(err) = touch_site(state, model.site_id.unwrap_or_default()).await
+    {
         tracing::warn!(
             cert_id = %model.id,
             error = %err,
             "could not touch the site after certificate creation"
         );
     }
-    notify_config_changed(state, model.site_id, actor).await;
+    notify_config_changed(state, model.site_id.unwrap_or_default(), actor)
+        .await;
 }
 
 /// `GET /api/v1/sites/{site_id}/certificates/{cert_id}`
@@ -1001,7 +1006,7 @@ async fn show_certificate(
     let mut response = CertificateResponse::from(row);
     response.warnings = Some(certificate_warnings_for(
         &served,
-        response.site_id,
+        response.site_id.unwrap_or_default(),
         &response.domain,
     ));
     Ok(Json(response))
@@ -1421,17 +1426,19 @@ async fn list_all_certificates(
     // their certificates are already filtered out above.
     let served = site_hostname_index(
         &state,
-        rows.iter().map(|row| row.site_id).chain(requested),
+        rows.iter().filter_map(|row| row.site_id).chain(requested),
     )
     .await;
     let items: Vec<CertificateWithSite> = rows
         .into_iter()
         .map(|row| {
-            let (site_domain, site_name) =
-                sites.get(&row.site_id).cloned().unwrap_or_default();
+            let (site_domain, site_name) = row
+                .site_id
+                .and_then(|id| sites.get(&id).cloned())
+                .unwrap_or_default();
             let warnings = certificate_warnings_for(
                 &served,
-                row.site_id,
+                row.site_id.unwrap_or_default(),
                 row.domain.as_str(),
             );
             let mut certificate = CertificateResponse::from(row);
@@ -1500,13 +1507,23 @@ async fn show_global_certificate(
 ) -> Result<Json<CertificateResponse>, ApiError> {
     let target = parse_uuid(&cert_id, "certificate id")?;
     let row = find_certificate_by_id(&state, target).await?;
-    load_site_read(&state.db, row.site_id, &current).await?;
+    load_site_read(
+        &state.db,
+        row.site_id.ok_or_else(|| {
+            ApiError::BadRequest(
+                "certificate is not bound to any site".to_string(),
+            )
+        })?,
+        &current,
+    )
+    .await?;
     let served =
-        site_hostname_index(&state, std::iter::once(row.site_id)).await;
+        site_hostname_index(&state, std::iter::once(row.site_id).flatten())
+            .await;
     let mut response = CertificateResponse::from(row);
     response.warnings = Some(certificate_warnings_for(
         &served,
-        response.site_id,
+        response.site_id.unwrap_or_default(),
         &response.domain,
     ));
     Ok(Json(response))
@@ -1524,7 +1541,16 @@ async fn update_global_certificate(
     update_certificate(
         State(state),
         current,
-        Path((row.site_id.to_string(), cert_id)),
+        Path((
+            row.site_id
+                .ok_or_else(|| {
+                    ApiError::BadRequest(
+                        "certificate is not bound to any site".to_string(),
+                    )
+                })?
+                .to_string(),
+            cert_id,
+        )),
         payload,
     )
     .await
@@ -1541,7 +1567,16 @@ async fn delete_global_certificate(
     delete_certificate(
         State(state),
         current,
-        Path((row.site_id.to_string(), cert_id)),
+        Path((
+            row.site_id
+                .ok_or_else(|| {
+                    ApiError::BadRequest(
+                        "certificate is not bound to any site".to_string(),
+                    )
+                })?
+                .to_string(),
+            cert_id,
+        )),
     )
     .await
 }
@@ -1557,7 +1592,16 @@ async fn renew_global_certificate(
     renew_certificate(
         State(state),
         current,
-        Path((row.site_id.to_string(), cert_id)),
+        Path((
+            row.site_id
+                .ok_or_else(|| {
+                    ApiError::BadRequest(
+                        "certificate is not bound to any site".to_string(),
+                    )
+                })?
+                .to_string(),
+            cert_id,
+        )),
     )
     .await
 }
@@ -1680,7 +1724,16 @@ async fn list_certificate_events(
 ) -> Result<Json<Page<CertificateEventResponse>>, ApiError> {
     let target = parse_uuid(&cert_id, "certificate id")?;
     let row = find_certificate_by_id(&state, target).await?;
-    load_site_read(&state.db, row.site_id, &current).await?;
+    load_site_read(
+        &state.db,
+        row.site_id.ok_or_else(|| {
+            ApiError::BadRequest(
+                "certificate is not bound to any site".to_string(),
+            )
+        })?,
+        &current,
+    )
+    .await?;
 
     let pagination = query.pagination.normalise();
     let mut condition = Condition::all()

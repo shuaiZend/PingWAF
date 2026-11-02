@@ -71,7 +71,10 @@ async fn scan(db: &DatabaseConnection) {
         let Some(kind) = classify(expires_at, now, warn_days) else {
             continue;
         };
-        let key = alert_key(row.site_id, expires_at);
+        // An unbound certificate has no owner site; the nil UUID keeps the
+        // alert key stable instead of dropping the warning.
+        let site_id = row.site_id.unwrap_or_default();
+        let key = alert_key(site_id, expires_at);
         if ALERTED
             .lock()
             .map(|mut set| {
@@ -97,15 +100,15 @@ async fn scan(db: &DatabaseConnection) {
                         "The certificate for '{}' (site {}) expired at {}. \
                      Renew it or replace it to keep TLS working.",
                         row.domain,
-                        row.site_id,
+                        site_id,
                         expires_at.format("%Y-%m-%d %H:%M UTC"),
                     ),
                     details: Some(serde_json::json!({
-                        "site_id": row.site_id.to_string(),
+                        "site_id": site_id.to_string(),
                         "domain": row.domain,
                         "expires_at": expires_at.to_rfc3339(),
                     })),
-                    dedup_key: Some(alert_key(row.site_id, expires_at)),
+                    dedup_key: Some(alert_key(site_id, expires_at)),
                 })
                 .await
             },
@@ -121,16 +124,16 @@ async fn scan(db: &DatabaseConnection) {
                         "The certificate for '{}' (site {}) expires at {}. \
                      Renewal should happen automatically; verify it works.",
                         row.domain,
-                        row.site_id,
+                        site_id,
                         expires_at.format("%Y-%m-%d %H:%M UTC"),
                     ),
                     details: Some(serde_json::json!({
-                        "site_id": row.site_id.to_string(),
+                        "site_id": site_id.to_string(),
                         "domain": row.domain,
                         "expires_at": expires_at.to_rfc3339(),
                         "warn_days": warn_days,
                     })),
-                    dedup_key: Some(alert_key(row.site_id, expires_at)),
+                    dedup_key: Some(alert_key(site_id, expires_at)),
                 })
                 .await
             },

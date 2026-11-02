@@ -1721,7 +1721,7 @@ async fn clone_site(
         let old_id = row.id;
         let mut node: site_certificates::ActiveModel = row.into();
         node.id = Set(Uuid::new_v4());
-        node.site_id = Set(new_id);
+        node.site_id = Set(Some(new_id));
         node.created_at = Set(timestamp);
         node.updated_at = Set(timestamp);
         let inserted = node.insert(&txn).await?;

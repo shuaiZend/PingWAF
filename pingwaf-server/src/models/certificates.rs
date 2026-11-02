@@ -14,7 +14,9 @@ pub mod site_certificates {
     pub struct Model {
         #[sea_orm(primary_key, auto_increment = false)]
         pub id: Uuid,
-        pub site_id: Uuid,
+        /// Owning site. `None` for a certificate uploaded before it was bound
+        /// anywhere (`site_certificate_links` grants use without ownership).
+        pub site_id: Option<Uuid>,
         pub domain: String,
         #[sea_orm(column_type = "Text")]
         pub cert_pem: Option<String>,

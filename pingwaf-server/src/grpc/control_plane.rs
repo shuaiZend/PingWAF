@@ -1334,10 +1334,12 @@ async fn persist_site_certificates(
     };
     let mut current_by_site: CertStateBySite = HashMap::new();
     for row in current {
-        current_by_site
-            .entry(row.site_id)
-            .or_default()
-            .push((row.status, row.expires_at));
+        if let Some(site_id) = row.site_id {
+            current_by_site
+                .entry(site_id)
+                .or_default()
+                .push((row.status, row.expires_at));
+        }
     }
 
     for (site_id, certificate_id, row_status, expires_at) in targets {
@@ -1718,8 +1720,8 @@ async fn sweep_stale_pending_certificates(db: &DatabaseConnection) {
             continue;
         }
         tracing::info!(
-            %cert_id,
-            %site_id,
+            cert_id = ?cert_id,
+            site_id = ?site_id,
             "stale pending certificate marked failed"
         );
         // Best-effort, like every certificate event: recording must never
@@ -1727,7 +1729,7 @@ async fn sweep_stale_pending_certificates(db: &DatabaseConnection) {
         let event = certificate_events::ActiveModel {
             id: Set(Uuid::new_v4()),
             certificate_id: Set(Some(cert_id)),
-            site_id: Set(Some(site_id)),
+            site_id: Set(site_id),
             event_type: Set("issuance_failed".to_string()),
             message: Set(detail),
             details: Set(None),
