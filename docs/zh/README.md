@@ -23,7 +23,8 @@
 | 文档 | 内容 |
 | --- | --- |
 | [waf-test-plan.md](waf-test-plan.md) | WAF 测试方案——分层模型、blazehttp 用例选取与组织、矩阵、口径、验收门槛 |
-| [waf-test-report.md](waf-test-report.md) | 当前版本的实测效果——拦截率、误报、回归结论与限制 |
+| [waf-test-report.md](waf-test-report.md) | 面向用户的实测结果报告——拦截率、误报率、横向对比 |
+| [waf-test-report-internal.md](waf-test-report-internal.md) | 维护者配套说明——分母、逐样本归因、回归证据、限制与待办 |
 | [waf-benchmark-report.md](../waf-benchmark-report.md) | 逐轮基准数据附录——P0 → P14 迭代史、分类表与语义门取舍理由 |
 | [waf-engine-review.md](../waf-engine-review.md) | 引擎复盘与设计记录——每个检测器为何存在、为哪种失败形态而建 |
 

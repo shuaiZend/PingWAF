@@ -25,7 +25,8 @@ centrally-controlled Web Application Firewall built on
 | Document | What you'll find |
 | --- | --- |
 | [waf-test-plan.md](./waf-test-plan.md) | WAF test plan — layered model, blazehttp suite selection and organisation, matrix, calibres, acceptance gates |
-| [waf-test-report.md](./waf-test-report.md) | Measured effectiveness of the current release — interception, false positives, regression results, limits |
+| [waf-test-report.md](./waf-test-report.md) | Results-only effectiveness report for users — interception, false positives, cross-vendor comparison |
+| [waf-test-report-internal.md](./waf-test-report-internal.md) | Maintainer companion — denominators, per-sample attribution, regression evidence, limits, open work |
 | [waf-benchmark-report.md](./waf-benchmark-report.md) | Per-round benchmark appendix — P0 → P14 iteration history, per-category tables, semantic-gate rationale |
 | [waf-engine-review.md](./waf-engine-review.md) | Engine review and design record — why each detector exists and which failure it was built for |
 

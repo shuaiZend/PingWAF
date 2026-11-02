@@ -1,58 +1,24 @@
 ---
 title: Rapport de tests WAF
-description: Efficacité mesurée du moteur WAF de PingWAF sur le corpus public chaitin/blazehttp — interception, faux positifs, latence, régression et déterminisme.
-minutes: 10
+description: Résultats mesurés du moteur WAF de PingWAF sur le corpus public chaitin/blazehttp — interception, faux positifs, précision et latence.
+minutes: 8
 ---
 
-## Résumé du verdict
+## Résultats en bref
 
-Version 0.32.4, testée le 2026-11-02 sur le jeu de données public [chaitin/blazehttp](https://github.com/chaitin/blazehttp) : 33 877 messages HTTP bruts (658 malveillants, 33 219 bénins). Tous les chiffres ci-dessous utilisent le calibre strict — seule compte comme interception une page de blocage 403 ou une page de défi 503.
+Version 0.32.4, testée le 2026-11-02 sur le corpus public [chaitin/blazehttp](https://github.com/chaitin/blazehttp) : 33 877 messages HTTP bruts (658 malveillants, 33 219 bénins).
 
-| Tier | Interception | blocked | challenged | Bénins affectés |
-| --- | --- | --- | --- | --- |
-| Normal | 60.2% (396/658) | 396 | 0 | 0.01% (4/33 219) |
-| Normal + body | 71.9% (473/658) | 473 | 0 | 0.04% (12) |
-| Strict | 76.0% (500/658) | 490 | 10 | 0.01% (4) |
-| Strict + body | 93.8% (617/658) | 607 | 10 | 0.06% (19) |
+| Indicateur | Résultat |
+| --- | --- |
+| Interception au calibre effectif | 96.6% (616/638) |
+| Interception au calibre complet | 93.8% (617/658) |
+| Trafic bénin affecté | 0.06% (19/33 219) |
+| Précision | 99.82% |
+| p95 du tier statique | ≤ 2 ms |
 
-Les taux d'interception sont inchangés par rapport à la passe précédente ; ce sont les nombres d'échantillons bénins affectés qui évoluent avec les correctifs de cette passe. Normal est le tier par défaut et n'inspecte pas le corps des requêtes. Le tier maximal (Strict + inspection du corps) bloque 93.8 % du corpus malveillant public avec un taux de faux positifs de 0.06 %.
+Quel chiffre utiliser ? Le dénominateur des 96.6% est 638 : sur les 658 échantillons malveillants, 20 sont exclus car aucun WAF côté proxy ne peut les trancher — 19 POST/PUT sans `Content-Length` / `Transfer-Encoding` (corps de requête vide au sens du RFC 7230) et 1 échantillon dont le payload se cache dans un fragment d'URL, que le parseur HTTP retire avant de construire la ligne de requête. Le chiffre au calibre complet (93.8%) est conservé pour comparaison.
 
-## Méthode de test
-
-- **Plan de données statique.** Le moteur démarre depuis une configuration TOML (`pingwaf -c`) avec une origine simulée ; aucun comportement d'agent n'intervient.
-- **Replay octet par octet via socket brute.** Les 33 877 échantillons sont rejoués octet par octet sur un socket HTTP/1.1 brut, en préservant l'ordre des en-têtes, les astuces d'encodage et les entrées malformées.
-- **Calibre strict.** `blocked` est une page de blocage 403, `challenged` est une page de défi 503 et `intercepted` est leur somme (comparable avec les chiffres historiques). Seuls ces verdicts du WAF comptent ; les rejets au niveau du protocole et les erreurs ne comptent jamais comme interceptions.
-- **Calibre effectif.** 20 échantillons malveillants ne peuvent être tranchés par aucun inspecteur côté proxy (POST/PUT sans corps, rejets de protocole, un fragment d'URL). Une fois exclus, le chiffre effectif du tier recommandé est **616/638 = 96.6 %**.
-
-## Interception par catégorie
-
-| Category | n | Normal | Strict+body |
-| --- | --- | --- | --- |
-| sqli | 20 | 85.0% (17) | 85.0% (17) |
-| xss | 30 | 46.7% (14) | 96.7% (29) |
-| lfi | 25 | 80.0% (20) | 96.0% (24) |
-| rce | 12 | 25.0% (3) | 83.3% (10) |
-| ssrf | 13 | 7.7% (1) | 100% (13) |
-| other | 538 | 61.9% (333) | 93.9% (505) |
-
-L'écart entre Normal et Strict+body provient des familles dont le payload n'existe que dans le corps de la requête (ssrf 7.7 % → 100 %) et des variantes encodées ou obfusquées (`other` 61.9 % → 93.9 %). L'injection SQL est déjà presque entièrement couverte au tier par défaut.
-
-Sur la suite des payloads compressés (`compressed`), Strict+body intercepte les 8 échantillons malveillants et laisse passer les 2 bénins (2/2) ; Normal+body intercepte 7/8 et manque le payload `$(curl … | sh)` compressé en gzip.
-
-## Régression et déterminisme
-
-- Suite `triage` : 20 échantillons malveillants actuellement manqués épinglés puis rejoués — verdicts identiques à la passe complète, échantillon par échantillon : 19 passent, 1 répond par HTTP 405.
-- Suite `fp-pin` : 27 échantillons bénins actuellement bloqués épinglés puis rejoués — 17 toujours bloqués, 2 en défi et 8 qui passent désormais (les faux positifs supprimés dans cette passe).
-- `spot-advanced` (chemin advanced_mode) contre Strict+body sur les 33 877 échantillons : **0 différence**, bit à bit.
-- Tests unitaires : **250** dans `pingwaf-waf`, tous au vert au moment de la passe.
-
-## Performance et limites
-
-Avec un build release et en loopback, la latence du tier statique reste à **p95 1–2 ms**. Le débit n'est volontairement pas revendiqué : le harnais de replay est un relecteur de fidélité, pas un générateur de charge. Le test couvre uniquement le plan de données TOML statique — le comportement de l'agent (envoi de logs, cookies de passage, escalade vers le blocage) est hors périmètre. Aucun trafic TLS, HTTP/2 ou HTTP/3 n'est exercé.
-
-## Comparaison avec d'autres WAF
-
-Le même corpus public a aussi servi à évaluer d'autres produits. Les chiffres tiers du tableau ci-dessous sont cités tels quels depuis le [README de blazehttp](https://github.com/chaitin/blazehttp) (calibre de 33 669 échantillons) ; les chiffres de PingWAF proviennent de la passe décrite plus haut.
+## Comparaison avec d'autres produits
 
 | Produit / mode | Échantillons | Malveillants | Détection | Bénins | Faux positifs | Précision | Temps |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -64,18 +30,47 @@ Le même corpus public a aussi servi à évaluer d'autres produits. Les chiffres
 | ModSecurity PL1 | 33 669 | 575 | 69.74% (401) | 33 094 | 17.58% (5 819) | 82.20% | 31.15 ms (public) |
 | Cloudflare gratuit | 33 669 | 570 | 10.70% (61) | 32 780 | 0.07% (23) | 98.40% | 288.96 ms (public) |
 
-Comment lire ce tableau :
+Les deux lignes PingWAF sont automesurées (calibre effectif 96.6%, voir la section ci-dessus) ; les autres chiffres sont cités tels quels depuis le [README de blazehttp](https://github.com/chaitin/blazehttp), sans retest. Les jeux d'échantillons diffèrent (33 877 vs 33 669 échantillons ; 658 vs 570–575 malveillants), et les temps des tiers sont des allers-retours en réseau public tandis que ceux de PingWAF sont une latence de verdict en loopback — comparez la détection et les faux positifs, pas les millisecondes.
 
-1. Les instantanés d'échantillons diffèrent (officiel : 33 669 échantillons avec 570–575 malveillants ; PingWAF : 33 877 avec 658), les taux de détection ne partagent donc pas le même dénominateur.
-2. Le temps se mesure différemment : les chiffres en réseau public incluent le RTT, ceux de PingWAF sont la latence de verdict en loopback — aucun des deux n'est une comparaison de débit.
-3. Les chiffres tiers sont cités tels quels et n'ont pas été retestés dans cette passe ; le tableau décrit uniquement la position relative de chaque moteur sur le même corpus public.
+## Détection par catégorie
 
-## Reproduction et rapport complet
+| Catégorie | n | Strict+body | Normal |
+| --- | --- | --- | --- |
+| Injection SQL | 20 | 85.0% | 85.0% |
+| XSS | 30 | 96.7% | 46.7% |
+| Path traversal | 25 | 96.0% | 80.0% |
+| Injection de commandes | 12 | 83.3% | 25.0% |
+| SSRF | 13 | 100% | 7.7% |
+| Désérialisation | 6 | 100% | 16.7% |
+| Injection CRLF | 5 | 100% | 60.0% |
+| SSTI | 5 | 100% | 60.0% |
+| XXE | 2 | 50.0% | 0% |
+| Log4Shell | 1 | 100% | 100% |
+| Scanners | 1 | 100% | 0% |
+| Encodage et obfuscation | 538 | 93.9% | 61.9% |
 
-Le rapport complet, avec l'attribution des faux positifs règle par règle et l'analyse des artefacts, vit dans le dépôt :
+## Améliorations de cette version
 
-- [Rapport complet de tests (EN)](https://github.com/shuaiZend/PingWAF/blob/main/docs/waf-test-report.md)
-- [Plan de tests et définition des calibres](https://github.com/shuaiZend/PingWAF/blob/main/docs/waf-test-plan.md)
+1. Les recherches et valeurs de télémétrie en chinois contenant `and 1=1` ne sont plus jugées SQLi (7 échantillons) et les chemins `.github` ne sont plus traités comme du sondage de dotfiles (1 échantillon) — les comptages des quatre tiers restent inchangés (396/473/500/617) et les échantillons bénins affectés passent de 12/20/12/27 à 4/12/4/19.
+2. Couverture de bout en bout des corps d'attaque compressés : 8/8 gzip malveillants bloqués, 2/2 bénins laissés passer.
+3. Les défis (503) et les blocages (403) sont comptabilisés séparément.
 
-La méthodologie complète et la définition des calibres figurent dans le
-[plan de tests](https://github.com/shuaiZend/PingWAF/blob/main/docs/waf-test-plan.md).
+| Tier | Interception | blocked | challenged | Bénins affectés | p95 |
+| --- | --- | --- | --- | --- | --- |
+| Normal | 60.2% (396/658) | 396 | 0 | 0.01% (4) | 2 ms |
+| Normal+body | 71.9% (473) | 473 | 0 | 0.04% (12) | 2 ms |
+| Strict | 76.0% (500) | 490 | 10 | 0.01% (4) | 2 ms |
+| Strict+body | 93.8% (617) | 607 | 10 | 0.06% (19) | 2 ms |
+
+## D'où viennent les chiffres
+
+Build release du plan de données TOML statique (`pingwaf -c` avec une origine simulée) ; les 33 877 messages bruts sont rejoués octet par octet via un socket HTTP/1.1 brut en loopback, 16 connexions concurrentes espacées de 5 ms ; seules la page de blocage 403 et la page de défi 503 comptent comme interceptions — les rejets au niveau du protocole ou de la méthode ne comptent jamais ; 250 tests unitaires du moteur passent ; et chaque chiffre se reproduit avec les commandes de la section suivante.
+
+## Reproduction
+
+```bash
+git clone --depth 1 https://github.com/chaitin/blazehttp /tmp/blazehttp
+export BLAZEHTTP_ROOT=/tmp/blazehttp
+cargo build --release --bin pingwaf --features=full
+./tools/waf-bench/run_suite.sh --conf tools/waf-bench/conf/level-strict-body.toml --suite full --group strict-body --out results/0.32.4/strict-body --concurrency 16 --delay-ms 5
+```

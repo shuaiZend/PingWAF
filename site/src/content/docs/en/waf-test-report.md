@@ -1,58 +1,24 @@
 ---
 title: WAF test report
-description: Measured effectiveness of the PingWAF WAF engine on the chaitin/blazehttp corpus — interception, false positives, latency, regression and determinism.
-minutes: 10
+description: Measured results of the PingWAF WAF engine on the chaitin/blazehttp public corpus — interception, false positives, accuracy and latency.
+minutes: 8
 ---
 
-## Verdict summary
+## Results at a glance
 
-Version 0.32.4, tested on 2026-11-02 against the public [chaitin/blazehttp](https://github.com/chaitin/blazehttp) dataset: 33 877 raw HTTP messages (658 malicious, 33 219 benign). Every figure below uses the strict calibre — only a 403 block page or a 503 challenge page counts as an interception.
+Version 0.32.4, tested on 2026-11-02 against the public [chaitin/blazehttp](https://github.com/chaitin/blazehttp) corpus: 33 877 raw HTTP messages (658 malicious, 33 219 benign).
 
-| Tier | Interception | blocked | challenged | Benign affected |
-| --- | --- | --- | --- | --- |
-| Normal | 60.2% (396/658) | 396 | 0 | 0.01% (4/33 219) |
-| Normal + body | 71.9% (473/658) | 473 | 0 | 0.04% (12) |
-| Strict | 76.0% (500/658) | 490 | 10 | 0.01% (4) |
-| Strict + body | 93.8% (617/658) | 607 | 10 | 0.06% (19) |
+| Metric | Result |
+| --- | --- |
+| Effective-calibre interception | 96.6% (616/638) |
+| Full-calibre interception | 93.8% (617/658) |
+| Benign traffic affected | 0.06% (19/33 219) |
+| Accuracy | 99.82% |
+| Static-tier p95 | ≤ 2 ms |
 
-Interception rates are unchanged from the previous round; the benign-affected counts moved with this round's fixes. Normal is the default tier and does not inspect request bodies. The top tier (Strict + body inspection) blocks 93.8% of the public malicious corpus at a 0.06% false-positive rate.
+Which number should you use? The 96.6% denominator is 638: 20 of the 658 malicious samples are excluded because no proxy-side WAF can decide them — 19 POST/PUT requests with no `Content-Length` / `Transfer-Encoding` (an empty request body under RFC 7230) and 1 sample whose payload hides in a URL fragment, which the HTTP parser strips before building the request line. The full-calibre figure (93.8%) is kept for reference.
 
-## Test method
-
-- **Static data plane.** The engine runs from a TOML configuration (`pingwaf -c`) with a mock origin, so no agent behaviour is involved.
-- **Raw-socket replay.** Each of the 33 877 samples is replayed byte for byte through a raw HTTP/1.1 socket, preserving header order, encoding tricks and malformed input.
-- **Strict calibre.** `blocked` is an HTTP 403 block page, `challenged` is an HTTP 503 challenge page, and `intercepted` is their sum (comparable with historical figures). Only these WAF verdicts count; protocol-layer rejections and errors are never counted as interceptions.
-- **Effective calibre.** 20 malicious samples cannot be decided by any proxy-side inspector (body-less POST/PUT, protocol rejections, one URL fragment). Excluding them, the effective figure for the recommended tier is **616/638 = 96.6%**.
-
-## Interception by category
-
-| Category | n | Normal | Strict+body |
-| --- | --- | --- | --- |
-| sqli | 20 | 85.0% (17) | 85.0% (17) |
-| xss | 30 | 46.7% (14) | 96.7% (29) |
-| lfi | 25 | 80.0% (20) | 96.0% (24) |
-| rce | 12 | 25.0% (3) | 83.3% (10) |
-| ssrf | 13 | 7.7% (1) | 100% (13) |
-| other | 538 | 61.9% (333) | 93.9% (505) |
-
-The gap between Normal and Strict+body is carried by families whose payload lives in the request body (ssrf 7.7% → 100%) and by encoded or obfuscated variants (`other` 61.9% → 93.9%). SQL injection is already caught almost entirely at the default tier.
-
-On the compressed-payload suite (`compressed`), Strict+body intercepts all 8 malicious samples and passes both benign ones (2/2); Normal+body intercepts 7/8, missing the gzip-compressed `$(curl … | sh)` payload.
-
-## Regression and determinism
-
-- `triage` suite: 20 currently-missed malicious samples pinned and replayed — verdicts identical to the full run, sample by sample: 19 passed, 1 answered with HTTP 405.
-- `fp-pin` suite: 27 currently-blocked benign samples pinned and replayed — 17 still blocked, 2 challenged, and 8 now pass (the false positives removed in this round).
-- `spot-advanced` (advanced_mode path) vs Strict+body across all 33 877 samples: **0 differences**, bit for bit.
-- Unit tests: **250** in `pingwaf-waf`, all green at the time of the run.
-
-## Performance and limitations
-
-Static-tier latency stays at **p95 1–2 ms** on loopback with a release build. Throughput is deliberately not claimed: the replay harness is a fidelity replayer, not a load generator. The test covers the static TOML data plane only — agent behaviour (log shipping, clearance cookies, auto-block escalation) is out of scope. No TLS, HTTP/2 or HTTP/3 traffic is exercised.
-
-## Comparison with other WAFs
-
-The same public corpus has been used to benchmark other products as well. The third-party figures below are quoted as-is from the [blazehttp README](https://github.com/chaitin/blazehttp) (33 669-sample calibre); the PingWAF figures come from the run described above.
+## Comparison with other products
 
 | Product / mode | Samples | Malicious | Detection rate | Benign | False positives | Accuracy | Time |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -64,19 +30,47 @@ The same public corpus has been used to benchmark other products as well. The th
 | ModSecurity PL1 | 33 669 | 575 | 69.74% (401) | 33 094 | 17.58% (5 819) | 82.20% | 31.15 ms (public) |
 | Cloudflare free | 33 669 | 570 | 10.70% (61) | 32 780 | 0.07% (23) | 98.40% | 288.96 ms (public) |
 
-How to read this table:
+The PingWAF rows are self-measured (effective calibre 96.6%, see the section above); the remaining figures are quoted as-is from the [blazehttp README](https://github.com/chaitin/blazehttp) and were not re-tested. The sample sets differ (33 877 vs 33 669 samples; 658 vs 570–575 malicious), and third-party timings are public-network round trips while PingWAF figures are loopback verdict latency — compare detection and false positives, not milliseconds.
 
-1. The sample snapshots differ (official: 33 669 samples with 570–575 malicious; PingWAF: 33 877 with 658 malicious), so the detection rates do not share the same denominator.
-2. Latency is measured differently: public-network figures include RTT, while PingWAF figures are loopback verdict latency — neither is a throughput comparison.
-3. Third-party numbers are quoted as-is and were not re-tested in this round; the table only describes the relative position of each engine on the same public corpus.
+## Detection by category
 
-## Reproducing and the full report
+| Category | n | Strict+body | Normal |
+| --- | --- | --- | --- |
+| SQL injection | 20 | 85.0% | 85.0% |
+| XSS | 30 | 96.7% | 46.7% |
+| Path traversal | 25 | 96.0% | 80.0% |
+| Command injection | 12 | 83.3% | 25.0% |
+| SSRF | 13 | 100% | 7.7% |
+| Deserialization | 6 | 100% | 16.7% |
+| CRLF injection | 5 | 100% | 60.0% |
+| SSTI | 5 | 100% | 60.0% |
+| XXE | 2 | 50.0% | 0% |
+| Log4Shell | 1 | 100% | 100% |
+| Scanners | 1 | 100% | 0% |
+| Encoding & obfuscation | 538 | 93.9% | 61.9% |
 
-The complete report, with rule-level false-positive attribution and the artefact analysis, lives in the repository:
+## What changed in this round
 
-- [Full test report (EN)](https://github.com/shuaiZend/PingWAF/blob/main/docs/waf-test-report.md)
-- [完整测试报告（中文）](https://github.com/shuaiZend/PingWAF/blob/main/docs/zh/waf-test-report.md)
-- [Test plan and calibres](https://github.com/shuaiZend/PingWAF/blob/main/docs/waf-test-plan.md)
+1. Chinese search and telemetry values containing `and 1=1` are no longer judged as SQLi (7 samples), and `.github` paths are no longer treated as dotfile probes (1 sample) — the four tier counts are unchanged (396/473/500/617) while benign samples affected drop from 12/20/12/27 to 4/12/4/19.
+2. End-to-end coverage of compressed attack bodies: all 8 malicious gzip payloads blocked, both benign ones passed (2/2).
+3. Challenges (503) and blocks (403) are now counted separately.
 
-The full methodology and calibre definitions are in the
-[test plan](https://github.com/shuaiZend/PingWAF/blob/main/docs/waf-test-plan.md).
+| Tier | Interception | blocked | challenged | Benign affected | p95 |
+| --- | --- | --- | --- | --- | --- |
+| Normal | 60.2% (396/658) | 396 | 0 | 0.01% (4) | 2 ms |
+| Normal+body | 71.9% (473) | 473 | 0 | 0.04% (12) | 2 ms |
+| Strict | 76.0% (500) | 490 | 10 | 0.01% (4) | 2 ms |
+| Strict+body | 93.8% (617) | 607 | 10 | 0.06% (19) | 2 ms |
+
+## Where the numbers come from
+
+A release build of the static TOML data plane (`pingwaf -c` with a mock origin); the 33 877 raw messages are replayed byte for byte over a raw HTTP/1.1 socket on loopback, 16 concurrent connections with 5 ms spacing; only the 403 block page and the 503 challenge page count as interceptions — protocol-layer and method-level rejections never count; 250 engine unit tests pass; and every figure is reproducible with the commands below.
+
+## Reproducing
+
+```bash
+git clone --depth 1 https://github.com/chaitin/blazehttp /tmp/blazehttp
+export BLAZEHTTP_ROOT=/tmp/blazehttp
+cargo build --release --bin pingwaf --features=full
+./tools/waf-bench/run_suite.sh --conf tools/waf-bench/conf/level-strict-body.toml --suite full --group strict-body --out results/0.32.4/strict-body --concurrency 16 --delay-ms 5
+```
