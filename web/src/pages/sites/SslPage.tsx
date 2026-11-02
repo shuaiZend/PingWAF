@@ -249,8 +249,15 @@ export function SslPage() {
   const [shareOpen, setShareOpen] = useState(false)
   const [pendingUnlink, setPendingUnlink] = useState(false)
   const [howToShareOpen, setHowToShareOpen] = useState(false)
-  /** Set when removing a share hit a 409: the certificate is still selected. */
-  const [unlinkConflict, setUnlinkConflict] = useState(false)
+  /**
+   * Set to the certificate id when removing a share hit a 409: the
+   * certificate is still selected. Kept as an id (not a boolean) so the
+   * highlight is a derived value — switching to another certificate (via
+   * save or clear) makes it disappear on its own.
+   */
+  const [unlinkConflictCertId, setUnlinkConflictCertId] = useState<string | null>(null)
+  const unlinkConflict =
+    unlinkConflictCertId !== null && unlinkConflictCertId === drafts?.https.certificate_id
   const clearCertRef = useRef<HTMLDivElement | null>(null)
 
   const certsQuery = useQuery({
@@ -349,12 +356,12 @@ export function SslPage() {
       )
       void queryClient.invalidateQueries({ queryKey: sslKeys.site(siteId) })
     },
-    onError: (e) => {
+    onError: (e, certId) => {
       // 409 — this site still serves the shared certificate; point at the
       // clear button inline instead of only toasting.
       if (e instanceof ApiError && e.status === 409) {
         setPendingDelete(null)
-        setUnlinkConflict(true)
+        setUnlinkConflictCertId(certId)
         clearCertRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
         toast.error(t('pages.ssl.unlinkFailed'), e.message)
         return
@@ -372,7 +379,7 @@ export function SslPage() {
         prev ? { ...prev, https: { ...prev.https, certificate_id: null } } : prev,
       )
       setPendingUnlink(false)
-      setUnlinkConflict(false)
+      setUnlinkConflictCertId(null)
       toast.success(t('pages.ssl.certificateCleared'))
     },
     onError: (e) =>
@@ -403,6 +410,10 @@ export function SslPage() {
       setProtocolsError(null)
       // The CA is never echoed back — drop the pasted copy once it is stored.
       if (scope === 'mtls' && payload.mtls_client_ca) setClientCa('')
+      // Switching the certificate (or clearing it) resolves a pending
+      // unlink-409 highlight; the derived flag would also drop it, but the
+      // stored id should not linger for a re-selected certificate.
+      if (scope === 'https') setUnlinkConflictCertId(null)
       toast.success(t('pages.ssl.settingsSaved'))
     },
   })

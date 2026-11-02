@@ -2358,7 +2358,8 @@
       "goToSiteSsl": "サイトの SSL ページへ",
       "deleteBlockedServing": "使用中：",
       "deleteBlockedLinked": "共有先：",
-      "goHandle": "対応する"
+      "goHandle": "対応する",
+      "usageUnavailable": "証明書の使用状況を確認できませんでした。削除の前にサイトの SSL ページで確認してください。"
     },
     "blockedIps": {
       "title": "IP ブラックリスト",

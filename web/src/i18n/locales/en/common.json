@@ -2358,7 +2358,8 @@
       "goToSiteSsl": "Go to site SSL page",
       "deleteBlockedServing": "In use by:",
       "deleteBlockedLinked": "Shared with:",
-      "goHandle": "Go fix it"
+      "goHandle": "Go fix it",
+      "usageUnavailable": "Could not confirm where this certificate is used. Go to the site SSL page to check before deleting."
     },
     "blockedIps": {
       "title": "IP Blacklist",

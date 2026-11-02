@@ -2358,7 +2358,8 @@
       "goToSiteSsl": "前往站点 SSL 页",
       "deleteBlockedServing": "正在使用：",
       "deleteBlockedLinked": "已共享给：",
-      "goHandle": "前往处理"
+      "goHandle": "前往处理",
+      "usageUnavailable": "无法确认证书使用情况，请先到站点 SSL 页检查。"
     },
     "blockedIps": {
       "title": "IP 黑名单",

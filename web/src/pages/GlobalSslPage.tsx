@@ -183,12 +183,25 @@ export function GlobalSslPage() {
   })
   const bindUsage: CertificateUsage | undefined = bindUsageQuery.data
   const deleteUsage = deleteUsageQuery.data
-  // A certificate any site currently serves, or that is still shared, cannot
-  // be deleted: the confirm button becomes a "go handle it" pointer instead.
+  // Conservative delete guard: while `usage` is loading or failed we cannot
+  // prove the certificate is unused, so treat it as blocked instead of
+  // letting a delete through to a 409. `bound_sites` from the list row is a
+  // fallback signal when the usage query has not resolved yet.
   const deleteBlocked = Boolean(
-    deleteUsage &&
-      (deleteUsage.serving_sites.length > 0 || deleteUsage.linked_sites.length > 0),
+    pendingDelete === null ||
+      deleteUsageQuery.isPending ||
+      deleteUsageQuery.isError ||
+      (pendingDelete?.bound_sites?.length ?? 0) > 0 ||
+      (deleteUsage &&
+        (deleteUsage.serving_sites.length > 0 || deleteUsage.linked_sites.length > 0)),
   )
+  /** First blocking site to navigate to when the confirm turns into "go handle". */
+  const firstBlockingSite =
+    deleteUsage?.serving_sites[0] ??
+    deleteUsage?.linked_sites[0] ??
+    (pendingDelete?.bound_sites?.length
+      ? pendingDelete.bound_sites[0]
+      : undefined)
   const filtersActive = Boolean(siteFilter || statusFilter)
 
   const invalidate = () => {
@@ -250,23 +263,24 @@ export function GlobalSslPage() {
 
   /**
    * One request per newly selected site, collected independently — a single
-   * failure must not abort the batch. Successes invalidate, failures stay in
-   * the dialog's result area.
+   * failure must not abort the batch. Requests run **serially** so each site
+   * triggers at most one config touch / agent push at a time instead of N
+   * concurrent config bumps. Successes invalidate, failures stay in the
+   * dialog's result area.
    */
   const bindCert = useMutation({
     mutationFn: async (ids: string[]) => {
       const target = bindTarget
       if (!target) return { target: null, results: [] as BindAttempt[] }
-      const results = await Promise.all(
-        ids.map(async (siteId): Promise<BindAttempt> => {
-          try {
-            await sslApi.bind(target.id, { site_id: siteId })
-            return { siteId, ok: true }
-          } catch (e) {
-            return { siteId, ok: false, error: bindFailMessage(e) }
-          }
-        }),
-      )
+      const results: BindAttempt[] = []
+      for (const siteId of ids) {
+        try {
+          await sslApi.bind(target.id, { site_id: siteId })
+          results.push({ siteId, ok: true })
+        } catch (e) {
+          results.push({ siteId, ok: false, error: bindFailMessage(e) })
+        }
+      }
       return { target, results }
     },
     onSuccess: ({ target, results }) => {
@@ -1154,7 +1168,9 @@ export function GlobalSslPage() {
                 bindUsage?.owner?.id === s.id || bindTarget?.site_id === s.id
               const linked =
                 (bindUsage?.linked_sites ?? []).some((b) => b.id === s.id) ||
-                (bindTarget?.bound_sites ?? []).some((b) => b.id === s.id)
+                // Fallback (usage unavailable): the owner site must not be
+                // counted as linked, or it would get an unbind button.
+                (!owner && (bindTarget?.bound_sites ?? []).some((b) => b.id === s.id))
               // Owner rows are pinned; bound rows are checked but unbindable;
               // everything else is a fresh checkbox.
               const checked = owner || linked || bindSelection.includes(s.id)
@@ -1266,13 +1282,23 @@ export function GlobalSslPage() {
       <ConfirmDialog
         open={pendingDelete !== null}
         onClose={() => setPendingDelete(null)}
-        onConfirm={() => pendingDelete && deleteCert.mutate(pendingDelete.id)}
+        onConfirm={() => {
+          if (!pendingDelete) return
+          if (deleteBlocked) {
+            // "Go handle it": jump to the first blocking site instead of
+            // deleting; the confirm button is never disabled for this branch.
+            if (firstBlockingSite) navigate(`/sites/${firstBlockingSite.id}/ssl`)
+            setPendingDelete(null)
+            return
+          }
+          deleteCert.mutate(pendingDelete.id)
+        }}
         title={t('pages.ssl.deleteTitle')}
         description={t('pages.ssl.deleteDescription')}
         confirmLabel={
           deleteBlocked ? t('pages.sslGlobal.goHandle') : t('common.delete')
         }
-        disabled={deleteBlocked}
+        disabled={deleteCert.isPending}
         loading={deleteCert.isPending}
       >
         {pendingDelete && (
@@ -1281,6 +1307,16 @@ export function GlobalSslPage() {
               <Globe weight="duotone" className="h-4 w-4 shrink-0 text-fg-subtle" />
               <span className="pw-mono text-fg">{pendingDelete.domain}</span>
             </div>
+            {/* Usage query failed: we cannot prove the certificate is unused,
+                so the delete stays blocked with an explainer. */}
+            {deleteUsageQuery.isError && (
+              <div
+                role="alert"
+                className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-[13px] text-fg-warning"
+              >
+                {t('pages.sslGlobal.usageUnavailable')}
+              </div>
+            )}
             {/* Blocked delete: show the sites that pin the certificate, each
                 clickable so the operator can go fix it there. */}
             {deleteBlocked && (

@@ -42,12 +42,13 @@ describe('certificate bind / unbind / delete UI contract', () => {
     expect(page).toContain('bindTarget.bound_count')
   })
 
-  it('batch bind collects per-site results and never aborts on the first failure', () => {
-    // 逐站提交：Promise.all + 每站 try/catch 收集 BindAttempt，而非顺序 await。
+  it('batch bind collects per-site results serially and never aborts on the first failure', () => {
+    // 逐站提交：串行 for-of（每站触发一次配置递增/agent 推送），每站
+    // try/catch 收集 BindAttempt，失败不中断批量。
     expect(page).toContain('interface BindAttempt {')
     expect(page).toContain('ok: boolean')
-    expect(page).toMatch(/await Promise\.all\(\s*\n\s*ids\.map\(async \(siteId\): Promise<BindAttempt>/)
-    expect(page).not.toMatch(/for \(const siteId of ids\) \{\s*\n\s*await/)
+    expect(page).toMatch(/for \(const siteId of ids\) \{\s*\n\s*try \{/)
+    expect(page).not.toContain('Promise.all')
     // 有失败：保持打开 + 结果区列出「域名 — 原因」；全部成功才关闭。
     expect(page).toContain('failures.length === 0')
     expect(page).toContain("t('pages.sslGlobal.batchFailed'")
@@ -60,11 +61,17 @@ describe('certificate bind / unbind / delete UI contract', () => {
     expect(page).toMatch(/navigate\(`\/sites\/\$\{s\.id\}\/ssl`\)/)
   })
 
-  it('delete 409 guidance: blocked confirm button and clickable site list', () => {
-    expect(page).toMatch(
-      /deleteUsage\.serving_sites\.length > 0 \|\| deleteUsage\.linked_sites\.length > 0/,
-    )
-    expect(page).toContain('disabled={deleteBlocked}')
+  it('delete 409 guidance: blocked confirm navigates to the first blocking site', () => {
+    // 保守删除保护：usage 不可用（加载中/失败/回退 bound_sites）也视为 blocked。
+    expect(page).toMatch(/deleteUsage\.serving_sites\.length > 0 \|\| deleteUsage\.linked_sites\.length > 0/)
+    expect(page).toMatch(/deleteUsageQuery\.isError/)
+    expect(page).toMatch(/deleteUsageQuery\.isPending/)
+    expect(page).toContain("t('pages.sslGlobal.usageUnavailable')")
+    // blocked 分支的确认是跳转，不是删除；按钮不被 disabled，loading 仍生效。
+    expect(page).toMatch(/onConfirm=\{\(\) => \{\s*\n\s*if \(!pendingDelete\) return\s*\n\s*if \(deleteBlocked\) \{/)
+    expect(page).toMatch(/navigate\(`\/sites\/\$\{firstBlockingSite\.id\}\/ssl`\)/)
+    expect(page).not.toContain('disabled={deleteBlocked}')
+    expect(page).toContain('disabled={deleteCert.isPending}')
     expect(page).toContain("t('pages.sslGlobal.goHandle')")
     expect(page).toContain("t('pages.sslGlobal.deleteBlockedServing')")
     expect(page).toContain("t('pages.sslGlobal.deleteBlockedLinked')")
@@ -86,9 +93,12 @@ describe('site SSL page shared-certificate contract', () => {
     expect(src).toMatch(/disabled=\{!canWrite \|\| renew\.isPending \|\| c\.relation === 'linked'\}/)
   })
 
-  it('remove-share 409 scrolls to and highlights the clear-certificate button', () => {
+  it('remove-share 409 highlights the clear-certificate button only while that cert stays selected', () => {
     expect(src).toContain('e instanceof ApiError && e.status === 409')
-    expect(src).toContain('setUnlinkConflict(true)')
+    // 派生值：冲突证书被切换（save/clear）后红色高亮自动消失。
+    expect(src).toContain('unlinkConflictCertId !== null && unlinkConflictCertId === drafts?.https.certificate_id')
+    expect(src).toContain('setUnlinkConflictCertId(certId)')
+    expect(src).toContain('setUnlinkConflictCertId(null)')
     expect(src).toContain('clearCertRef.current?.scrollIntoView(')
     expect(src).toContain("t('pages.ssl.clearFirst')")
     expect(src).toContain('ring-2 ring-danger/60')
@@ -104,7 +114,7 @@ describe('certificate flow i18n keys exist in every language', () => {
       for (const key of [
         'ownerBadge', 'ownerLine', 'notShared', 'sharedCount', 'batchResult',
         'batchFailed', 'goToSiteSsl', 'unbindInUse', 'deleteBlockedServing',
-        'deleteBlockedLinked', 'goHandle',
+        'deleteBlockedLinked', 'goHandle', 'usageUnavailable',
       ]) {
         expect(parsed.pages.sslGlobal[key], `${lang}.sslGlobal.${key}`).toBeTruthy()
       }
