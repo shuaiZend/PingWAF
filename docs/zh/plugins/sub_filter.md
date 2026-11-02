@@ -64,6 +64,10 @@ plugins = ["rewriteLinks"]
 
 插件无法往返处理的编码——`br`、`zstd`、多值（如 `gzip, br`）或其他未知值——响应完全不改动（正文与响应头均原样透传），并记录一条 debug 日志。
 
+### 代理层解压在先
+
+代理可能在插件链运行**之前**就已解压上游的 gzip 响应：它会替未发送 `Accept-Encoding` 的客户端注入 `Accept-Encoding: gzip`（`[basic] upstream_accept_encoding`，默认开启），并为这些客户端撤销该编码。此时 `sub_filter` 看到的已是明文，与响应头是否仍写着 gzip 无关——代理的已解压标记会让插件走明文分支，正文不会被二次解压。
+
 ## 使用说明
 
 - **整段响应体先缓冲到内存**再替换。请用 `path` 与 `status_codes` 收窄范围，远离大文件或流式端点。

@@ -141,7 +141,7 @@ An origin pool is a set of origin nodes sharing one load-balancing algorithm and
 |-------|-------------|
 | Pool name | Label for the pool (e.g., "primary") |
 | Load balancing | `Round robin` or a hash algorithm (see below) |
-| SNI hostname | Non-empty enables **HTTPS to origin**; must be a bare hostname covered by the origin certificate (`$host` is not supported) |
+| SNI hostname | Non-empty enables **HTTPS to origin**. A bare hostname covered by the origin certificate, or `$host` to send each request's client `Host` (port stripped, lowercased) as the TLS SNI — useful when the upstream is a virtual host and the site's domains match the `Host` headers. `$host` requires origin certificate verification to be enabled: a pool that turns verification off is rejected with `$host requires origin certificate verification` |
 | Verify origin certificate | Whether an HTTPS origin's certificate is validated. Unset inherits the site default (SSL page's origin certificate check) and then the global setting from the console's system settings; `true` requires a certificate that validates against the system trust store (or the pool's own CA); `false` accepts any certificate and is not recommended. |
 
 Load-balancing algorithms:
@@ -169,6 +169,14 @@ and internal-PKI origins keep working. Turn the global default on once every
 origin presents a certificate the proxy can chain to a trust store (a private
 CA counts; upload it to the pool), pin the site default for a whole site, and
 leave per-pool overrides unset unless a specific origin cannot comply.
+
+> **`$host` SNI needs this switch on.** A pool using `$host` lets the client
+> choose the name the origin certificate must cover, so origin certificate
+> verification is the only thing that can reject an intercepted origin. A
+> pool that pins verification off together with `$host` is refused
+> (`$host requires origin certificate verification`), and turning
+> verification off at site or global level quietly drops the same guarantee
+> for every `$host` pool.
 
 ### Routes
 
@@ -467,6 +475,32 @@ Provide:
 - Private key (PEM format)
 - Domain names covered
 
+### Upload without a site, bind later
+
+Administrators can upload a certificate **without** naming a site — useful
+when the PEM is already in hand and the same certificate (a wildcard or a
+multi-hostname SAN certificate) will serve several sites. The row lands
+**unbound**: no site owns it, nothing serves it, and its status follows its
+own validity dates. From there:
+
+1. **Upload** — `POST /api/v1/certificates` with `domain`, `cert_pem` and
+   `key_pem` (no `site_id`).
+2. **Bind each site** — `POST /api/v1/certificates/{id}/bindings` with
+   `{"site_id": "…"}`. Binding fails with `400` when the certificate does not
+   cover the site's hostnames (the uncovered **site** names are listed; extra
+   SANs on the certificate are fine), with `409` when the site already owns
+   the certificate, and is idempotent — binding twice changes nothing.
+3. **Unbind** — `DELETE /api/v1/certificates/{id}/bindings/{site_id}`, refused
+   with `409` while the certificate is the site's current TLS selection.
+
+Every certificate response shows the result as `bound_sites` / `bound_count`.
+Unbound certificates cannot use ACME — issuance and renewal run on the edge,
+driven by the site that carries the certificate — and deleting a certificate
+that still has bindings is refused with `409`; once nothing is bound, it
+deletes immediately. The site-scoped alternative stays available: link from
+the site's SSL settings picker (see
+[Sharing certificates between sites](#sharing-certificates-between-sites)).
+
 ### SSL Settings
 
 ```
@@ -511,6 +545,12 @@ appear in the same picker marked as shared.
   certificate (`certificate is the site's current TLS certificate; clear or
   replace it first`) — otherwise the site would silently lose HTTPS. Clear the
   certificate selection (or pick another one) first.
+- **Fallback serving**: a site that has not selected a certificate and has no
+  inline PEM, ACME order or self-signed certificate serves the linked
+  certificate that covers the most of its hostnames automatically — one that
+  covers none is skipped with a warning rather than served. The injected
+  certificate never renews anything: ACME stays off for a site serving a
+  certificate it does not own.
 
 **Why the owner model matters:** renewals, ACME bookkeeping and configuration
 backups are tied to the owning site, so a certificate is renewed once and

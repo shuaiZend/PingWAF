@@ -478,6 +478,38 @@ Typical use: a pool of origins behind one address that route by
 `Host` (virtual hosts, multi-tenant origins) — set `upstream_host` to the
 name the origin expects instead of asking every client to send it.
 
+## Origin gzip (`upstream_accept_encoding`)
+
+By default the proxy injects `Accept-Encoding: gzip` into requests it sends
+to origins when the **client sent no `Accept-Encoding`**. The switch is the
+`[basic] upstream_accept_encoding` key of the generated proxy configuration
+(default `gzip`; set it to `""` to disable the injection, and no other value
+is accepted — validation rejects anything but `gzip` and the empty string).
+
+The injection is skipped when the client explicitly said `identity`, and for
+messages that cannot carry an encoded body: `HEAD`, requests with a `Range`
+header, and `Upgrade`/`CONNECT` exchanges (the WebSocket key header covers
+the HTTP/2 handshake).
+
+What happens to a compressed origin response depends on the client:
+
+- **The client supports gzip** — the origin's compressed response is passed
+  through untouched.
+- **The client cannot decode gzip** — the proxy decompresses the body and
+  serves the plaintext: `Content-Encoding` and `Content-Length` are removed,
+  the response becomes chunked, a strong `ETag` is weakened,
+  `Content-MD5`/`Digest` are dropped and `Vary` gains `Accept-Encoding`.
+- Decompression is capped at **8 MiB** of plaintext (compression-bomb
+  protection). Over the cap, or on a decompression failure, the original
+  compressed bytes are passed through as-is and a warning is logged.
+
+Two interactions worth knowing:
+
+- The decompression runs **before** body-rewriting plugins, so a `sub_filter`
+  in the chain sees plaintext and behaves as if the origin never compressed.
+- The `compression` plugin does not compress a second time: it only triggers
+  for clients that advertise the encoding.
+
 ## Release & Build Constraints
 
 Facts worth knowing before you build, ship or debug a release — the
@@ -585,10 +617,9 @@ curl -k -X POST https://localhost:9080/api/v1/sites/{site_id}/certificates \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "name": "my-cert",
-    "certificate": "-----BEGIN CERTIFICATE-----\n...",
-    "private_key": "-----BEGIN PRIVATE KEY-----\n...",
-    "domains": ["example.com", "*.example.com"]
+    "domain": "example.com",
+    "cert_pem": "-----BEGIN CERTIFICATE-----\n...",
+    "key_pem": "-----BEGIN PRIVATE KEY-----\n..."
   }'
 ```
 
@@ -624,6 +655,17 @@ agent's generated configuration now states **strict verification**
 (`origin_verify_cert = true`) instead of leaving the setting unset — see the
 [upgrade notes](#upgrade-procedure) for the 502 this can produce on
 self-signed-origin deployments.
+
+**`$host` SNI depends on this switch staying on.** An origin pool may set its
+SNI to `$host`, which sends each request's client `Host` as the TLS SNI — the
+client then effectively chooses the name the origin certificate must cover,
+and origin certificate verification is the only backstop against an
+intercepted origin. A pool that pins `verify_cert: false` together with
+`sni = "$host"` is rejected by the API
+(`400 "$host requires origin certificate verification"`); leaving
+`verify_cert` unset follows the cascade, so turning verification off at site
+or global level removes the same guarantee for every `$host` pool. Keep the
+effective cascade value at verification-on wherever `$host` pools are used.
 
 ### Control-Plane Certificate (dashboard)
 
@@ -1031,6 +1073,16 @@ error-page `scope` migration) existed but was never registered in the
 migration runner, so it now runs on the next startup of installations that
 never received it. Both are additive; migrations run automatically on
 startup.
+
+**Migration 90 makes `site_certificates.site_id` nullable** so a certificate
+can be uploaded before it is bound to a site — and then serve several (see
+[unbound certificates](./api.md#unbound-certificates)). It is additive:
+existing rows keep their site and behave exactly as before. The `down`
+migration refuses to run while unbound rows exist
+(`cannot restore NOT NULL: unbind-free certificates exist; bind or delete
+them first`) rather than deleting them — a rollback must not destroy PEM
+material you uploaded and have not bound yet. Bind or delete any unbound
+certificates before rolling back past this release.
 
 **Origin verification defaults to strict when unset — self-signed origins
 return 502.** The agent's generated configuration now states

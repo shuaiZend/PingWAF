@@ -23,10 +23,74 @@ verbatim for reference and attribution, and is not maintained here.
 
 ### Added
 
+- **Origin pools can send the client's `Host` as the SNI (`sni = "$host"`).**
+  A TLS pool whose SNI was a fixed hostname now accepts `$host`: the proxy
+  sends each request's `Host` — port stripped, lowercased; a route's
+  `upstream_host` override wins when set — as the TLS SNI, so one pool can
+  front an origin that serves several virtual hosts. A `Host` that cannot be
+  a TLS name (an IP literal, missing or malformed) resolves to no SNI and is
+  rejected by origin certificate validation; a `Host` outside the site's
+  domains is still used but warned about. Because the client thereby picks
+  the name the origin certificate must cover, verification is the only
+  backstop: a pool pinning `verify_cert: false` together with `sni: "$host"`
+  is refused with `400 "$host requires origin certificate verification"`, and
+  switching verification off at site or global level drops the same
+  guarantee — keep it on wherever `$host` pools run. Plaintext pools have no
+  SNI semantics at all.
+- **Certificates can be uploaded without a site, and one certificate can be
+  bound to several sites from the certificate itself.** `POST /certificates`
+  now accepts an upload with `site_id` omitted (`domain` and the PEM pair
+  stay mandatory): the row lands **unbound** — `site_id: null`,
+  `bound_sites: []`, `bound_count: 0`, status read from its own validity
+  dates, nothing serves it — and `POST /certificates/{id}/bindings`
+  (`{"site_id": …}`) attaches sites afterwards. Binding checks that the
+  certificate covers the site's hostnames (uncovered **site** hostnames are
+  listed in the `400`; extra SANs on the certificate do not block), refuses
+  the owning site with `409`, and is idempotent.
+  `DELETE /certificates/{id}/bindings/{site_id}` removes a grant (`204`),
+  refused with `409` while the certificate is that site's current TLS
+  selection. Deleting a certificate that still has bindings is a `409`
+  (`certificate is bound to site(s) …; unbind it there first`); an unbound
+  one deletes with `204`. Every certificate response now carries
+  `bound_sites` / `bound_count` and a nullable `site_id`. The data plane
+  keeps its fallback: a site with no own material (no selection, inline PEM,
+  ACME order or self-signed certificate) serves the linked certificate
+  covering the most of its hostnames, with `acme_enabled = false` so a site
+  never renews a certificate it does not own; certificate updates and
+  deletions push to the owner plus every linked site. Migration
+  `m20240101_000090_certificate_site_optional` makes
+  `site_certificates.site_id` nullable; its `down` refuses to run while
+  unbound rows exist rather than destroying uploaded PEM material. Unbound
+  rows cannot do ACME — issuance and renewal run on the edge for the site
+  that carries the certificate, so `POST /certificates` refuses an ACME
+  request without a site and `POST /certificates/{id}/renew` answers `400`
+  until the row is bound.
 - **Control-plane reverse-proxy trust.** `api_protection_settings` now accepts
   trusted proxy ranges, a forwarded header and first/last-hop selection; the
   9080 access log and WAF use the forwarded client IP only when the TCP peer is
   in those ranges. Migration `000089`.
+
+### Changed
+
+- **The proxy now asks origins for gzip when the client said nothing.** A
+  request whose client sent no `Accept-Encoding` gets
+  `Accept-Encoding: gzip` injected before it reaches the upstream
+  (`[basic] upstream_accept_encoding`, default `gzip`; `""` disables the
+  injection and nothing else is accepted) — previously the origin decided on
+  its own what a client without an encoding preference would receive. The
+  injection is skipped for `identity`, `HEAD`, `Range` and
+  `Upgrade`/`CONNECT` requests. A client that supports gzip gets the origin's
+  compressed response untouched; a client that cannot decode it now gets the
+  **plaintext**: the proxy decompresses (capped at 8 MiB — compression-bomb
+  protection; over the cap or on failure the original bytes pass through as-is
+  with a warning) and rewrites the headers (`Content-Encoding` and
+  `Content-Length` removed, chunked, strong `ETag` weakened,
+  `Content-MD5`/`Digest` dropped, `Vary` gains `Accept-Encoding`). Previously
+  such a client could be handed an encoded body it had no way to read. The
+  decompression runs before the body-rewriting plugins, so `sub_filter` sees
+  plaintext and never decompresses twice, and the `compression` plugin does
+  not compress a second time (it only triggers for clients that advertise the
+  encoding).
 
 ## [PingWAF 0.32.4] — 2026-11-01
 

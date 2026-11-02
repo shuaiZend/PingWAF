@@ -742,6 +742,10 @@ Create an origin pool.
 
 `lb_algorithm` accepts `round_robin`, `random`, `least_connections` or `hash:<type>[:<key>]` with type in `ip`, `url`, `path` (no key) or `header`, `cookie`, `query` (key required). A non-empty `sni` enables TLS to the origin.
 
+`sni` takes a concrete hostname or the marker **`$host`**, which makes the SNI follow each request: the proxy sends the client's `Host` header — port stripped, lowercased; a route's [upstream_host override](#upstream-host-override-upstream_host) override wins when set — as the TLS SNI, so one pool can front an origin that serves several virtual hosts (best when the site's domains and the `Host` headers actually agree). A `Host` that cannot be a TLS name — an IP literal, missing or malformed — resolves to **no SNI**, so origin certificate validation rejects the connection; a `Host` that is not one of the site's domains is still used but logged. `sni: ""` stays a plaintext pool with no SNI semantics at all.
+
+`$host` requires origin certificate verification to be enabled. Because the client thereby chooses the name the origin certificate must cover, that validation is the only backstop against an intercepted origin: a pool that pins `verify_cert: false` together with `sni: "$host"` is refused with `400 "$host requires origin certificate verification"` (leaving `verify_cert` unset is accepted and follows the cascade below, so switching verification off at site or global level removes the same guarantee — keep it on where `$host` pools run).
+
 `verify_cert` is tri-state: `true` requires the origin's certificate to validate against the system trust store or the pool's own CA, `false` accepts any certificate (not recommended), and `null` — the default — defers first to the site-level `origin_verify_cert` default and, when that is also unset, to [the global `/settings/origin` value](#get-settingsorigin). Only meaningful when `sni` is set.
 
 ### PUT /sites/{site_id}/upstream-pools/{pool_id}
@@ -979,8 +983,10 @@ authorisation to serve the certificate on another site.
 ### Certificate sharing
 
 A certificate row can serve more than one site: one wildcard or multi-SAN
-certificate, several edges. The owner stays in `site_certificates.site_id`; the
-`site_certificate_links` table records which other sites may serve it. The
+certificate, several edges. The owner stays in `site_certificates.site_id` and
+may be **null** — a certificate uploaded without a site is
+[unbound](#unbound-certificates) until it is attached; the
+`site_certificate_links` table records which sites may serve it. The
 endpoints below manage those links.
 
 ### GET /sites/{site_id}/certificate-links
@@ -1099,18 +1105,135 @@ would leave `site_ssl.certificate_id` dangling and the site would silently stop
 serving a certificate. Clear the selection (`clear_certificate`) or pick another
 certificate first.
 
-Shares (`site_certificate_links`) are removed together with the certificate;
-other sites that only linked it lose the ability to select it.
+A certificate with `site_certificate_links` rows (bindings) is refused with
+`409 certificate is bound to site(s) …; unbind it there first` — other sites
+still serve this PEM, so the grants must be removed explicitly
+([DELETE /certificates/{cert_id}/bindings/{site_id}](#delete-certificatescert_idbindingssite_id))
+before the delete can go through.
+
+### Unbound certificates
+
+Every certificate response carries `site_id` (now nullable), `bound_sites` and
+`bound_count`:
+
+```json
+{
+  "id": "uuid",
+  "site_id": null,
+  "bound_sites": [{"id": "uuid", "domain": "a.example.com"}],
+  "bound_count": 1,
+  "domain": "example.com"
+}
+```
+
+`bound_sites` lists every site that may serve the certificate (id + domain, so
+the console renders the list without a second request per row); `bound_count`
+is its length. A certificate uploaded without a site is **unbound**:
+`site_id` is `null`, `bound_sites` is empty and `bound_count` is `0` — the
+fields are always present, so "checked, nothing bound" is distinguishable from
+a missing field — and its `status` follows its own validity dates, because no
+edge serves it and therefore no edge report corrects the status.
+
+Restrictions on an unbound row:
+
+- **No ACME.** Issuance and renewal run on the edge, driven by the
+  configuration of the site that carries the certificate. `POST /certificates`
+  without a site answers `400` to an ACME request (`an ACME certificate needs
+  a site_id: issuance runs on the edge for the site that carries it — upload
+  the PEM instead, or name the site`), and
+  `POST /certificates/{cert_id}/renew` answers `400` until the row is bound
+  (`certificate is not bound to any site; bind it before triggering an ACME
+  renewal`).
+- **No `activate: true`.** Turning HTTPS on is a per-site setting, so the
+  create call answers `400` (`activate requires site_id: turning HTTPS on is
+  a per-site setting`). Upload, bind, then activate per site.
+- **Deleting is a plain `204`** — nothing serves it, so nothing can break;
+  see [DELETE /certificates/{cert_id}](#delete-certificatescert_id).
+
+### POST /certificates
+
+Upload a certificate **without** naming a site (administrators). The body is
+the manual-upload shape — `domain` and the PEM pair are mandatory; `site_id`
+is simply omitted:
+
+```json
+{
+  "domain": "example.com",
+  "cert_pem": "-----BEGIN CERTIFICATE-----\n...",
+  "key_pem": "-----BEGIN PRIVATE KEY-----\n..."
+}
+```
+
+**Response (201):** the saved unbound certificate — `site_id: null` and an
+empty `warnings` array (coverage is measured against a site's hostnames, and
+nothing is bound yet). Attach sites with
+[POST /certificates/{cert_id}/bindings](#post-certificatescert_idbindings).
+Updates work on an unbound row too (a wrong domain or a rotated PEM can be
+fixed before anything serves it); only the ACME wildcard guard is skipped,
+since there is no site hostname set to compare against.
+
+### POST /certificates/{cert_id}/bindings
+
+Grant a site the right to serve the certificate
+(`{"site_id": "uuid"}`) — which is what puts the PEM into that site's
+data-plane configuration. The grant is the same `site_certificate_links` row
+the site-scoped [certificate link](#post-sitessite_idcertificate-links)
+creates; the certificate-first form exists so an uploaded-without-site
+certificate can be attached afterwards, and because a multi-SAN certificate
+is bound to several sites from one place.
+
+**Response (200):** the certificate with its bindings recomputed. Idempotent:
+binding the same site twice returns the same `200` instead of a conflict.
+
+**Errors:**
+
+| Status | When |
+|--------|------|
+| `400` | The certificate does not cover the site's hostnames: `certificate {id} (issued for {domain}) does not cover site hostname(s) …` lists the **site** hostnames the certificate cannot validate — binding one that cannot validate them would leave the site serving a TLS error it has no way to notice. Hostnames the certificate names beyond the site's are *not* an error (the same advisory warning the upload path reports), so a multi-SAN certificate binds to each site it covers. |
+| `404` | The certificate or the site does not exist, the caller cannot write the site, or — for a certificate another site owns — cannot read the owning site. |
+| `409` | The site already owns the certificate (`certificate already belongs to this site`). |
+
+### DELETE /certificates/{cert_id}/bindings/{site_id}
+
+Remove one site's grant; the certificate itself stays. The site falls back to
+whatever its own SSL settings provide — nothing, when it was relying on the
+link — so the change is pushed to its agents straight away.
+
+**Response:** `204`.
+
+**Errors:**
+
+| Status | When |
+|--------|------|
+| `409` | The certificate is the site's current TLS selection (`certificate is the site's current TLS certificate; clear or replace it first`) — removing the grant underneath would drop the PEM out of the configuration silently. Clear or replace the selection first. |
+| `404` | The site has no binding for this certificate (`certificate {id} is not bound to site {site_id}`). |
+
+### DELETE /certificates/{cert_id}
+
+Delete a certificate across sites. Two blockers, in this order — both `409`:
+
+1. a site still **selects** it in its SSL settings
+   (`certificate is selected by site(s) …; clear or replace it there first`);
+2. a **binding** still grants it to a site
+   (`certificate is bound to site(s) …; unbind it there first`) — that site's
+   data-plane configuration carries the PEM, so deleting would take its TLS
+   down.
+
+An unbound certificate (no owner, no bindings) deletes with `204` straight
+away.
 
 ### GET /certificates
 
 Certificate applications across every site the caller may see, newest first
 (paginated, optionally scoped with `site_id` and filtered with `status`). Each
 item is the certificate flattened together with its `site_id`/`site_domain`/
-`site_name`, and — like the per-site list — carries
-[`warnings`](#certificate-warnings) computed against the certificate's own
-site. Hostnames for the whole page are fetched in one query, so paging does not
-cost a lookup per row.
+`site_name` — empty for an
+[unbound](#unbound-certificates) certificate, which is what the console
+renders as "not bound yet" — plus
+[`bound_sites`/`bound_count`](#unbound-certificates), and — like the per-site
+list — carries [`warnings`](#certificate-warnings) computed against the
+certificate's own site. Hostnames for the whole page are fetched in one
+query, so paging does not cost a lookup per row.
 
 ### GET /certificates/{cert_id}
 

@@ -84,6 +84,16 @@ Encodings the plugin cannot round-trip — `br`, `zstd`, multi-value values
 such as `gzip, br`, or anything unknown — leave the response completely
 untouched (body *and* headers), and a debug line is logged.
 
+### Proxy-level decompression runs first
+
+The proxy may decompress an origin's gzip response **before** the plugin
+chain runs: it injects `Accept-Encoding: gzip` on behalf of clients that sent
+no `Accept-Encoding` (`[basic] upstream_accept_encoding`, on by default) and
+undoes the encoding for those clients. In that case `sub_filter` sees the
+plaintext, whatever the response header still said — the proxy's
+decoded-response flag makes the plugin take the plaintext branch, so the body
+is never decompressed twice.
+
 ## Usage notes
 
 - **The entire response body is buffered in memory** before substitution. Scope
