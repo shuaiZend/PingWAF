@@ -70,7 +70,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{Duration, Instant};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -673,6 +673,89 @@ fn host_name(host: &str) -> &str {
     split_host_port(host, 0).0
 }
 
+/// Why a `$host` SNI was refused or is suspicious. Neither variant blocks
+/// the request: the first sends no SNI so `verify_cert` decides, the second
+/// only warns because certificate verification still covers the origin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SniWarning {
+    /// The Host header is absent, malformed, or an IP literal.
+    InvalidHost,
+    /// The Host is a valid name but outside the site's domain set.
+    OutsideSite,
+}
+
+/// Whether `host` is a name a TLS stack can carry as SNI: a non-empty
+/// `[a-z0-9._-]` string of at most 255 bytes, with no empty label. Anything
+/// else (a scheme, a port, userinfo, whitespace, control bytes, non-ASCII)
+/// is a client-controlled header that must not reach the TLS layer.
+fn is_sni_hostname(host: &str) -> bool {
+    !host.is_empty()
+        && host.len() <= 255
+        && !host.starts_with('.')
+        && !host.ends_with('.')
+        && !host.contains("..")
+        && host.bytes().all(|b| {
+            b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_')
+        })
+}
+
+/// Case-insensitive membership of a lowercased host in the site's domain
+/// set. Entries may be exact domains or `*.suffix` wildcards; a wildcard
+/// covers subdomains only, mirroring how a site matches request hosts.
+fn site_is_known(host: &str, site_hosts: &[String]) -> bool {
+    site_hosts.iter().any(|pattern| {
+        let pattern = pattern.trim().trim_end_matches('.').to_ascii_lowercase();
+        match pattern.strip_prefix("*.") {
+            Some(suffix) => {
+                !suffix.is_empty()
+                    && host.len() > suffix.len()
+                    && host.ends_with(suffix)
+                    && host.as_bytes()[host.len() - suffix.len() - 1] == b'.'
+            },
+            None => host == pattern.as_str(),
+        }
+    })
+}
+
+/// Resolves the SNI a TLS peer presents to the origin.
+///
+/// # Security boundary
+///
+/// With `$host` the SNI follows the request, so it is chosen by the client.
+/// Origin certificate verification (`verify_cert`, cascaded pool -> site ->
+/// global) is then the *only* backstop: a client that names a host the
+/// origin's certificate does not cover must fail the handshake, never pass
+/// on the strength of the header alone. Unusable input (missing header,
+/// IP literal, invalid characters) therefore resolves to an empty SNI, so
+/// pingora sends no SNI and verification fails closed. A plaintext pool has
+/// no SNI semantics at all; the control plane rejects a non-empty `sni`
+/// for one at save time.
+///
+/// The returned marker is for the caller's `warn!`; it never blocks.
+fn resolve_sni(
+    configured: &str,
+    host_header: Option<&str>,
+    site_hosts: &[String],
+) -> (String, Option<SniWarning>) {
+    if configured != "$host" {
+        return (configured.to_string(), None);
+    }
+    let host = host_header
+        .map(str::trim)
+        .map(host_name)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    // An IP literal is not a name a certificate can be issued for, and
+    // sending one as SNI is rejected by TLS stacks (RFC 6066).
+    if !is_sni_hostname(&host) || host.parse::<IpAddr>().is_ok() {
+        return (String::new(), Some(SniWarning::InvalidHost));
+    }
+    if !site_hosts.is_empty() && !site_is_known(&host, site_hosts) {
+        return (host, Some(SniWarning::OutsideSite));
+    }
+    (host, None)
+}
+
 /// Resolves the configured address family into one three-valued choice.
 ///
 /// The three-value `address_family` spelling wins when the config carries
@@ -927,6 +1010,63 @@ impl Upstream {
         lb.select_with(key, self.lb_max_iterations, |_, _| true)
     }
 
+    /// The authority the client sent: `:authority` for HTTP/2, the `Host`
+    /// header for HTTP/1, with the port kept. `$host` SNI and the
+    /// transparent path both use it; the SNI resolver strips the port with
+    /// [`split_host_port`].
+    fn request_host(session: &Session) -> Option<&str> {
+        let req_header = session.req_header();
+        req_header
+            .uri
+            .authority()
+            .map(|authority| authority.as_str())
+            .or_else(|| {
+                req_header
+                    .headers
+                    .get(http::header::HOST)
+                    .and_then(|value| value.to_str().ok())
+            })
+            .filter(|host| !host.is_empty())
+    }
+
+    /// SNI for a peer from a static pool. `$host` follows the request's
+    /// Host; every other configured value is static. One helper keeps the
+    /// four selection strategies identical.
+    ///
+    /// SNI now varies per request, which makes origin certificate
+    /// verification the only backstop: a client that picks the name must
+    /// still be rejected by `verify_cert` when the origin's certificate
+    /// does not cover it. An unusable Host yields an empty SNI (fail
+    /// closed) instead of a client-controlled string. Plaintext pools have
+    /// no SNI semantics; the control plane rejects a non-empty SNI at save
+    /// time.
+    ///
+    /// The site's domain set is not reachable from this crate: the caller
+    /// only receives the [`Session`], and the compiled site context lives
+    /// in the data-plane layer. The `site_hosts` parameter is therefore
+    /// empty here, which skips the membership warning rather than guessing
+    /// the set.
+    fn static_peer_sni(&self, session: &Session) -> String {
+        let host = Self::request_host(session);
+        let (sni, warning) = resolve_sni(&self.sni, host, &[]);
+        match warning {
+            Some(SniWarning::InvalidHost) => warn!(
+                target: LOG_TARGET,
+                name = self.name.as_ref(),
+                host = host.unwrap_or_default(),
+                "`$host` SNI is not a usable DNS name; connecting without SNI"
+            ),
+            Some(SniWarning::OutsideSite) => warn!(
+                target: LOG_TARGET,
+                name = self.name.as_ref(),
+                host = sni.as_str(),
+                "`$host` SNI is outside the site's domain set"
+            ),
+            None => {},
+        }
+        sni
+    }
+
     /// Creates and configures a new HTTP peer for handling requests
     ///
     /// # Arguments
@@ -960,7 +1100,7 @@ impl Upstream {
             // For round-robin, use empty key since selection is sequential
             SelectionLb::RoundRobin(lb) => {
                 let backend = self.select_backend(lb, b"")?;
-                HttpPeer::new(backend, self.tls, self.sni.clone())
+                HttpPeer::new(backend, self.tls, self.static_peer_sni(session))
             },
             // Least connections: the selector orders backends by in-flight
             // requests; the chosen one is counted only on the request's first
@@ -971,18 +1111,18 @@ impl Upstream {
                 if count_processing {
                     inflight.acquire(&backend.addr.to_string());
                 }
-                HttpPeer::new(backend, self.tls, self.sni.clone())
+                HttpPeer::new(backend, self.tls, self.static_peer_sni(session))
             },
             // For random, use empty key since selection ignores it
             SelectionLb::Random(lb) => {
                 let backend = self.select_backend(lb, b"")?;
-                HttpPeer::new(backend, self.tls, self.sni.clone())
+                HttpPeer::new(backend, self.tls, self.static_peer_sni(session))
             },
             // For consistent hashing, generate hash value from request details
             SelectionLb::Consistent { lb, hash } => {
                 let value = hash.get_value(session, client_ip);
                 let backend = self.select_backend(lb, value.as_bytes())?;
-                HttpPeer::new(backend, self.tls, self.sni.clone())
+                HttpPeer::new(backend, self.tls, self.static_peer_sni(session))
             },
             // In transparent mode, use the request's host header
             SelectionLb::Transparent => {
@@ -1041,22 +1181,11 @@ impl Upstream {
         &self,
         session: &Session,
     ) -> Option<HttpPeer> {
-        let req_header = session.req_header();
         // The authority as the client sent it, port included: `:authority`
         // for HTTP/2, the `Host` header for HTTP/1. `get_host` strips the
         // port, which is right for routing but sent `Host: backend:8080`
         // to port 80 here.
-        let host = req_header
-            .uri
-            .authority()
-            .map(|authority| authority.as_str())
-            .or_else(|| {
-                req_header
-                    .headers
-                    .get(http::header::HOST)
-                    .and_then(|value| value.to_str().ok())
-            })
-            .filter(|host| !host.is_empty())?;
+        let host = Self::request_host(session)?;
         // use default port for transparent http/https
         let port = if self.tls { 443 } else { 80 };
         let addr = resolve_host(host, port, self.address_family).await?;
@@ -1464,9 +1593,10 @@ pub fn new_upstream_health_check_task(
 #[cfg(test)]
 mod tests {
     use super::{
-        AddressFamily, DEFAULT_LB_MAX_ITERATIONS, SelectionLb, Upstream,
-        UpstreamConf, UpstreamProvider, effective_family, host_name,
-        new_backends, new_load_balancer, resolve_host, split_host_port,
+        AddressFamily, DEFAULT_LB_MAX_ITERATIONS, SelectionLb, SniWarning,
+        Upstream, UpstreamConf, UpstreamProvider, effective_family, host_name,
+        new_backends, new_load_balancer, resolve_host, resolve_sni,
+        split_host_port,
     };
     use crate::new_ahash_upstreams;
     use crate::upstream::{frequency_millis, milli_frequencies};
@@ -1737,6 +1867,39 @@ mod tests {
         assert_eq!(value, up.processing.load(Ordering::Relaxed));
     }
 
+    /// A static pool configured with `$host` builds its peer from the
+    /// request's Host: lowercased, port stripped, and empty (no SNI) when
+    /// the Host is an IP literal or otherwise unusable.
+    #[tokio::test]
+    async fn test_static_pool_host_sni() {
+        let peer_for = async |host: &str| {
+            let input_header =
+                format!("GET /vicanso/pingap HTTP/1.1\r\nHost: {host}\r\n\r\n");
+            let mock_io = Builder::new().read(input_header.as_bytes()).build();
+            let mut session = Session::new_h1(Box::new(mock_io));
+            session.read_request().await.unwrap();
+            let up = Upstream::new(
+                "static-host",
+                &UpstreamConf {
+                    addrs: vec!["192.168.1.1:8001".to_string()],
+                    sni: Some("$host".to_string()),
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+            let mut client_ip = None;
+            up.new_http_peer(&session, &mut client_ip, true)
+                .await
+                .unwrap()
+        };
+        assert_eq!(
+            "origin.example.com",
+            peer_for("Origin.Example.COM:8443").await.sni
+        );
+        assert_eq!("", peer_for("127.0.0.1:8443").await.sni);
+    }
+
     #[tokio::test]
     async fn test_upstream_peer_max_h2_streams() {
         let input_header =
@@ -1988,6 +2151,121 @@ mod tests {
         // a bare IPv6 literal is not a name:port
         assert_eq!(("::1", 80), split_host_port("::1", 80));
         assert_eq!("example.com", host_name("example.com:8080"));
+    }
+
+    /// A configured value is passed through untouched, including the empty
+    /// string that means "plaintext origin".
+    #[test]
+    fn test_resolve_sni_static_value() {
+        let no_sites: &[String] = &[];
+        assert_eq!(
+            ("cdn.example.com".to_string(), None),
+            resolve_sni(
+                "cdn.example.com",
+                Some("client.example.com"),
+                no_sites
+            )
+        );
+        assert_eq!(
+            (String::new(), None),
+            resolve_sni("", Some("client.example.com"), no_sites)
+        );
+        // `$host` is the only special spelling; a value that merely
+        // contains it stays static.
+        assert_eq!(
+            ("x$host".to_string(), None),
+            resolve_sni("x$host", Some("client.example.com"), no_sites)
+        );
+    }
+
+    /// `$host` follows the request: port stripped, whitespace trimmed and
+    /// the name lowercased before it reaches the TLS stack.
+    #[test]
+    fn test_resolve_sni_host_header_forms() {
+        let no_sites: &[String] = &[];
+        for (input, expected) in [
+            ("example.com", "example.com"),
+            ("Example.COM:8443", "example.com"),
+            ("  API.Example.COM  ", "api.example.com"),
+            ("[2001:db8::1]:443", ""),
+        ] {
+            let (sni, warning) = resolve_sni("$host", Some(input), no_sites);
+            assert_eq!(expected, sni, "{input:?}");
+            if expected.is_empty() {
+                assert_eq!(Some(SniWarning::InvalidHost), warning, "{input:?}");
+            } else {
+                assert_eq!(None, warning, "{input:?}");
+            }
+        }
+    }
+
+    /// Missing, malformed and IP-literal hosts fall back to no SNI, so
+    /// origin certificate verification is what decides the handshake.
+    #[test]
+    fn test_resolve_sni_rejects_unusable_host() {
+        let no_sites: &[String] = &[];
+        for host in [
+            None,
+            Some(""),
+            Some("   "),
+            Some("127.0.0.1"),
+            Some("127.0.0.1:8080"),
+            Some("[::1]:443"),
+            Some("::1"),
+            Some("bad host.example.com"),
+            Some("example.com/path"),
+            Some("user@example.com"),
+            Some("example..com"),
+            Some(".example.com"),
+        ] {
+            assert_eq!(
+                (String::new(), Some(SniWarning::InvalidHost)),
+                resolve_sni("$host", host, no_sites),
+                "{host:?}"
+            );
+        }
+    }
+
+    /// A host outside the site's domain set only warns: the SNI is kept and
+    /// certificate verification still gates the connection.
+    #[test]
+    fn test_resolve_sni_site_hosts_membership() {
+        let site_hosts = [
+            "example.com".to_string(),
+            "*.internal.example.com".to_string(),
+        ];
+        assert_eq!(
+            ("example.com".to_string(), None),
+            resolve_sni("$host", Some("EXAMPLE.COM"), &site_hosts)
+        );
+        assert_eq!(
+            ("api.internal.example.com".to_string(), None),
+            resolve_sni("$host", Some("api.internal.example.com"), &site_hosts)
+        );
+        // A wildcard covers subdomains only, not the bare suffix.
+        assert_eq!(
+            (
+                "internal.example.com".to_string(),
+                Some(SniWarning::OutsideSite)
+            ),
+            resolve_sni("$host", Some("internal.example.com"), &site_hosts)
+        );
+        assert_eq!(
+            (
+                "other.example.net".to_string(),
+                Some(SniWarning::OutsideSite)
+            ),
+            resolve_sni("$host", Some("other.example.net"), &site_hosts)
+        );
+        // The static spelling is not checked against the site.
+        assert_eq!(
+            ("cdn.example.net".to_string(), None),
+            resolve_sni(
+                "cdn.example.net",
+                Some("other.example.net"),
+                &site_hosts
+            )
+        );
     }
 
     #[tokio::test]

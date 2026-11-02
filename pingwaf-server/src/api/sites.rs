@@ -2359,7 +2359,13 @@ async fn create_pool(
     let address_family =
         normalize_address_family(payload.address_family.as_deref())?
             .unwrap_or_else(|| ADDRESS_FAMILY_AUTO.to_string());
-    validate_pool(&name, &lb_algorithm, sni.as_deref(), &address_family)?;
+    validate_pool(
+        &name,
+        &lb_algorithm,
+        sni.as_deref(),
+        payload.verify_cert,
+        &address_family,
+    )?;
 
     let mut health_check = PoolHealthCheck::default_values();
     health_check.enabled = payload.health_check_enabled.unwrap_or(false);
@@ -2444,6 +2450,30 @@ async fn update_pool(
     health_check.apply_update(&payload);
     health_check.validate()?;
 
+    // Effective values: the shared validator must see exactly what the
+    // UPDATE is about to store. It used to run after `active.update()`, so
+    // a rejected combination was already persisted and every later edit
+    // kept failing on a row the API itself had written.
+    let next_name =
+        non_empty(&payload.name).unwrap_or_else(|| row.name.clone());
+    let next_lb_algorithm = non_empty(&payload.lb_algorithm)
+        .unwrap_or_else(|| row.lb_algorithm.clone());
+    let next_sni = match payload.sni.as_deref() {
+        Some(sni) => non_empty(&Some(sni.to_string())),
+        None => row.sni.clone(),
+    };
+    let next_verify_cert = payload.verify_cert.unwrap_or(row.verify_cert);
+    let next_address_family =
+        normalize_address_family(payload.address_family.as_deref())?
+            .unwrap_or_else(|| row.address_family.clone());
+    validate_pool(
+        &next_name,
+        &next_lb_algorithm,
+        next_sni.as_deref(),
+        next_verify_cert,
+        &next_address_family,
+    )?;
+
     let mut active: site_upstream_pools::ActiveModel = row.into();
     if let Some(name) = non_empty(&payload.name) {
         active.name = Set(name);
@@ -2451,19 +2481,17 @@ async fn update_pool(
     if let Some(lb_algorithm) = non_empty(&payload.lb_algorithm) {
         active.lb_algorithm = Set(lb_algorithm.clone());
     }
-    if let Some(sni) = payload.sni.as_deref() {
+    if payload.sni.is_some() {
         // `Some("")` clears the SNI and disables origin TLS.
-        active.sni = Set(non_empty(&Some(sni.to_string())));
+        active.sni = Set(next_sni);
     }
-    if let Some(verify_cert) = payload.verify_cert {
+    if payload.verify_cert.is_some() {
         // `None` clears the column: the pool goes back to following the
         // deployment default.
-        active.verify_cert = Set(verify_cert);
+        active.verify_cert = Set(next_verify_cert);
     }
-    if let Some(address_family) =
-        normalize_address_family(payload.address_family.as_deref())?
-    {
-        active.address_family = Set(address_family);
+    if payload.address_family.is_some() {
+        active.address_family = Set(next_address_family);
     }
     active.health_check_enabled = Set(health_check.enabled);
     active.health_check_path = Set(health_check.path);
@@ -2474,12 +2502,6 @@ async fn update_pool(
     active.health_check_healthy_threshold = Set(health_check.healthy_threshold);
 
     let updated = active.update(&state.db).await?;
-    validate_pool(
-        &updated.name,
-        &updated.lb_algorithm,
-        updated.sni.as_deref(),
-        &updated.address_family,
-    )?;
 
     tracing::info!(site_id = %id, pool = %target, "origin pool updated");
     touch_site(&state, id).await?;
@@ -3041,10 +3063,22 @@ fn is_valid_lb_algorithm(value: &str) -> bool {
 }
 
 /// Validates the fields shared by pool create/update.
+///
+/// # Security boundary
+///
+/// A non-empty `sni` is what makes the pool TLS. `$host` makes the SNI
+/// follow each request, so the client chooses the name the origin
+/// certificate must cover: origin certificate verification (`verify_cert`,
+/// cascaded pool -> site -> global) is the only backstop, and a pool that
+/// pins `verify_cert = false` may not opt into `$host`. `None` follows the
+/// deployment default and is allowed here; a deployment that disables that
+/// default gives the backstop up. A plaintext pool (empty `sni`) has no
+/// SNI semantics at all.
 fn validate_pool(
     name: &str,
     lb_algorithm: &str,
     sni: Option<&str>,
+    verify_cert: Option<bool>,
     address_family: &str,
 ) -> Result<(), ApiError> {
     // Rejects anything the data plane would have to guess at; a stored value
@@ -3070,15 +3104,26 @@ fn validate_pool(
             ));
         }
         if sni == "$host" {
-            return Err(ApiError::BadRequest(
-                "sni cannot be '$host'; static origin pools need a concrete \
-                 hostname"
-                    .to_string(),
-            ));
+            // The whole value is the marker; there is no concrete host to
+            // check. Verification is the only thing that can reject a
+            // client-chosen name, so a pool pinning it off is a 400.
+            if verify_cert == Some(false) {
+                return Err(ApiError::BadRequest(
+                    "$host requires origin certificate verification"
+                        .to_string(),
+                ));
+            }
+            return Ok(());
         }
         if sni.contains("://") || sni.contains(':') {
             return Err(ApiError::BadRequest(
                 "sni must be a bare hostname without scheme or port"
+                    .to_string(),
+            ));
+        }
+        if sni.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            return Err(ApiError::BadRequest(
+                "sni must not contain whitespace or control characters"
                     .to_string(),
             ));
         }
@@ -3696,6 +3741,50 @@ mod tests {
         .expect("deserialization is not the validator");
         assert!(normalize_address_family(invalid.address_family.as_deref())
             .is_err());
+    }
+
+    /// `$host` is a TLS pool whose SNI follows the request; it is accepted
+    /// only when the pool does not pin origin verification off. Concrete
+    /// hostnames keep their previous behaviour.
+    #[test]
+    fn pool_host_sni_requires_origin_verification() {
+        let pool = |sni: Option<&str>, verify_cert: Option<bool>| {
+            validate_pool("origin", "round_robin", sni, verify_cert, "auto")
+        };
+
+        // `None` follows the deployment default and is accepted.
+        pool(Some("$host"), None).expect("global verification default");
+        pool(Some("$host"), Some(true)).expect("verification pinned on");
+
+        let err = pool(Some("$host"), Some(false))
+            .expect_err("`$host` with verification off must be a 400");
+        assert!(matches!(
+            err,
+            ApiError::BadRequest(ref message)
+                if message == "$host requires origin certificate verification"
+        ));
+
+        // Concrete hostnames are unchanged: shape checks still apply, and a
+        // plaintext pool stays valid even with verification pinned off.
+        pool(Some("origin.example.com"), None).expect("concrete sni");
+        pool(Some("origin.example.com"), Some(false))
+            .expect("a concrete sni may pin verification off");
+        pool(Some(""), Some(false)).expect("plaintext pool");
+        pool(None, Some(false)).expect("plaintext pool");
+
+        for invalid in [
+            "https://origin.example.com",
+            "origin.example.com:443",
+            "origin example.com",
+            "origin\texample.com",
+        ] {
+            let err = pool(Some(invalid), Some(true))
+                .expect_err("invalid sni must be a 400");
+            assert!(
+                matches!(err, ApiError::BadRequest(_)),
+                "{invalid:?} must be a 400, got {err:?}"
+            );
+        }
     }
 
     /// `list_pools` returns each pool with its nodes inlined under
