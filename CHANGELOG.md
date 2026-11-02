@@ -8,6 +8,21 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.32.8] — 2026-11-02
+
+### Fixed
+
+- **An owner's self-link no longer counts as a share, and no longer blocks a
+  delete.** Migration 85 wrote a link row for every site that had already
+  selected a certificate, so an owner serving its own certificate carried a
+  link to itself: the console reported "shared with 1 site" for a certificate
+  nobody else used, and `DELETE /certificates/{id}` answered 409 naming that
+  owner — a site the bind dialog deliberately hides an unbind button for, so
+  the delete had no way forward. `bound_sites`/`bound_count`,
+  `usage.linked_sites` and the delete guard now skip the self-link;
+  `serving_sites` keeps it, because an owner selecting its own certificate is
+  a genuine serving site. Stored rows are left untouched.
+
 ## [PingWAF 0.32.7] — 2026-11-02
 
 ### Added
