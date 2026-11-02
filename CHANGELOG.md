@@ -82,8 +82,10 @@ verbatim for reference and attribution, and is not maintained here.
   `Upgrade`/`CONNECT` requests. A client that supports gzip gets the origin's
   compressed response untouched; a client that cannot decode it now gets the
   **plaintext**: the proxy decompresses (capped at 8 MiB — compression-bomb
-  protection; over the cap or on failure the original bytes pass through as-is
-  with a warning) and rewrites the headers (`Content-Encoding` and
+  protection; over the cap or on failure the response is terminated with a
+  connection error rather than handing the compressed bytes over as
+  plaintext, because the headers were already rewritten) and rewrites the
+  headers (`Content-Encoding` and
   `Content-Length` removed, chunked, strong `ETag` weakened,
   `Content-MD5`/`Digest` dropped, `Vary` gains `Accept-Encoding`). Previously
   such a client could be handed an encoded body it had no way to read. The

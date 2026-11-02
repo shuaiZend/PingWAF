@@ -2728,7 +2728,7 @@
       "httpsOrigin": "回源使用 HTTPS",
       "httpsOriginHint": "通过 TLS 连接源站，需要源站证书对应的主机名。",
       "sni": "SNI 主机名",
-      "sniHint": "源站证书覆盖的主机名，不能使用 $host",
+      "sniHint": "源站证书覆盖的主机名",
       "verifyCert": "回源证书校验",
       "verifyCertHint": "「跟随站点设置」会先看本站点的「源站证书校验」（SSL 页），站点未指定时再随「设置 → 回源 TLS 校验」；在此显式指定后，本池固定使用该取值。",
       "verifyCertMode": {

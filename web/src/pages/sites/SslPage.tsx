@@ -489,15 +489,13 @@ export function SslPage() {
     !drafts?.https.self_signed && drafts?.https.certificate_id === cert.id
 
   /**
-   * Source of the certificate for this site: owned (`site_id` is this site)
-   * or shared in — either flagged by the server's `relation` or visible as a
-   * binding that hits this site in `bound_sites`.
+   * Source of the certificate for this site: shared in via the server's
+   * `relation` flag, or a foreign row (owned by another site). A link row on
+   * the owner's own certificate does not make it shared.
    */
   const isSharedCert = (cert: SslCertificate) =>
     cert.relation === 'linked' ||
-    (cert.relation === undefined && cert.site_id !== siteId) ||
-    (cert.site_id !== siteId &&
-      (cert.bound_sites?.some((b) => b.id === siteId) ?? false))
+    (cert.site_id != null && cert.site_id !== siteId)
 
   const columns: Column<SslCertificate>[] = [
     {

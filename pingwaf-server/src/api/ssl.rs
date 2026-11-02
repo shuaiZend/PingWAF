@@ -822,7 +822,12 @@ async fn list_certificates(
         .map(|row| {
             let owner = row.site_id;
             let mut response = CertificateResponse::from(row);
-            if owner != Some(id) {
+            // Owner first: the owner also has a `site_certificate_links` row
+            // (backfilled for the selected certificate), but it is still the
+            // owner — only genuinely foreign rows are `linked`.
+            if owner == Some(id) {
+                response.relation = "owner".to_string();
+            } else {
                 response.relation = "linked".to_string();
             }
             response.warnings = Some(certificate_warnings_for(

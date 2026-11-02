@@ -502,6 +502,9 @@ What happens to a compressed origin response depends on the client:
 - Decompression is capped at **8 MiB** of plaintext (compression-bomb
   protection). Over the cap, or on a decompression failure, the original
   compressed bytes are passed through as-is and a warning is logged.
+- Decompressed responses carry `Vary: Accept-Encoding`; a cache whose
+  `vary_headers` allowlist omits `accept-encoding` will treat them as
+  uncacheable.
 
 Two interactions worth knowing:
 

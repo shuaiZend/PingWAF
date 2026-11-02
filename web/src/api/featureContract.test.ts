@@ -242,6 +242,18 @@ describe('certificate unbound / multi-site binding contract', () => {
     expect(src).toContain('domain: string')
   })
 
+  it('SslPage.isSharedCert: owner cert with a self link is not shared; foreign cert is', () => {
+    const src = read('src/pages/sites/SslPage.tsx')
+    // H4: relation 非法或 site_id 属于别的站点才算共享；自有证书的
+    // bound_sites 含本站（自身 link 行）不得触发共享。
+    expect(src).toMatch(/isSharedCert = \(cert: SslCertificate\) =>\s*\n\s*cert\.relation === 'linked' \|\|\s*\n\s*\(cert\.site_id != null && cert\.site_id !== siteId\)/)
+    const def = src.slice(
+      src.indexOf('isSharedCert = (cert: SslCertificate) =>'),
+      src.indexOf('const columns:'),
+    )
+    expect(def).not.toContain('bound_sites')
+  })
+
   it('CreateSslRequest.site_id is optional/null so uploads may go unbound', () => {
     const src = read('src/api/types.ts')
     expect(src).toMatch(/export interface BindCertificateRequest \{[\s\S]*?site_id: string/)

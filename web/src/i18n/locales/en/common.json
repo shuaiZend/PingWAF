@@ -2728,7 +2728,7 @@
       "httpsOrigin": "HTTPS to origin",
       "httpsOriginHint": "Connect to the origin over TLS; requires the hostname on its certificate.",
       "sni": "SNI hostname",
-      "sniHint": "Hostname covered by the origin certificate; $host is not supported",
+      "sniHint": "Hostname covered by the origin certificate",
       "verifyCert": "Origin certificate check",
       "verifyCertHint": "\"Follow the site setting\" first checks this site's origin certificate check (SSL page), then falls back to Settings → Origin TLS verification; pinning a value here fixes it for this pool.",
       "verifyCertMode": {
