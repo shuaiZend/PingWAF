@@ -1465,8 +1465,16 @@ async fn update_certificate(
     // not against the payload alone: an update that only replaces the PEM
     // still has to surface a hostname mismatch introduced earlier.
     let warnings = certificate_warnings(site.id, &site, &updated.domain);
+    let owner = updated.site_id;
     let mut response = CertificateResponse::from(updated);
     response.warnings = Some(warnings);
+    // Same decorations as every other certificate response: an update returns
+    // the row, so it has to describe its shares too (the panel renders this
+    // object in place and would otherwise show "unbound" after an edit).
+    let owners = std::collections::HashMap::from([(target, owner)]);
+    let bound =
+        bound_sites_index(&state, std::iter::once(target), &owners).await;
+    attach_bindings(&mut response, &bound, &owners);
     Ok(Json(response))
 }
 

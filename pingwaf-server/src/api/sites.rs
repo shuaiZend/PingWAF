@@ -1728,31 +1728,12 @@ async fn clone_site(
         cert_ids.insert(old_id, inserted.id);
     }
 
-    // Only grants on certificates the source site owns are cloned. A grant
-    // that merely shared another site's certificate is that owner's
-    // authorisation; extending it to the clone would give the new site access
-    // no owner approved.
-    let links = certificate_links::Entity::find()
-        .filter(certificate_links::Column::SiteId.eq(source_id))
-        .all(&txn)
-        .await?;
-    for link in links {
-        let Some(certificate_id) = cert_ids.get(&link.certificate_id).copied()
-        else {
-            tracing::warn!(
-                certificate_id = %link.certificate_id,
-                "clone: skipping a shared certificate grant the source site does not own"
-            );
-            continue;
-        };
-        certificate_links::ActiveModel {
-            site_id: Set(new_id),
-            certificate_id: Set(certificate_id),
-            linked_at: Set(timestamp),
-        }
-        .insert(&txn)
-        .await?;
-    }
+    // No grant rows are cloned. A source site's certificates are copied with
+    // the clone as their owner (site_id on the row), which is the ownership
+    // relation itself - the link row a clone would add only restates it (and
+    // used to make an owner look shared). A grant that merely shared another
+    // site's certificate is that owner's authorisation and must not extend to
+    // the clone, so there is nothing to copy either way.
 
     // TLS material travels with the site: the clone serves the same
     // certificate and protocol switches until an operator changes them. The
