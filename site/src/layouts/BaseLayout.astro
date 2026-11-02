@@ -9,6 +9,7 @@ import {
   localePersistScript,
   themeInitScript,
 } from "../i18n/utils";
+import { SEO_KEYWORDS, pageKindFor } from "../i18n/seo";
 import { t } from "../i18n/ui";
 import "../styles/global.css";
 
@@ -21,9 +22,25 @@ interface Props {
   /** Absolute or site-relative social image; defaults to `og.png`. */
   image?: string;
   noindex?: boolean;
+  /** Page-specific search terms. Technical identifiers stay untranslated. */
+  keywords?: readonly string[];
+  /** Additional Schema.org nodes appended to the page graph. */
+  structuredData?: Array<Record<string, unknown>>;
+  /** Visible-breadcrumb trail, mirrored as a BreadcrumbList node. */
+  breadcrumbs?: Array<{ name: string; path: string }>;
 }
 
-const { locale, path, title, description, image, noindex = false } = Astro.props;
+const {
+  locale,
+  path,
+  title,
+  description,
+  image,
+  noindex = false,
+  keywords,
+  structuredData,
+  breadcrumbs,
+} = Astro.props;
 const meta = LOCALE_META[locale];
 const ui = t(locale);
 // Non-indexable pages (404) must not advertise canonical or hreflang targets
@@ -36,20 +53,79 @@ const social =
     import.meta.env.SITE ?? "https://pingwaf.example.com",
   ).toString();
 const isLanding = path === "/" && locale === DEFAULT_LOCALE;
+/* Page kind comes from the route so no page can forget its keywords. */
+const effectiveKeywords = keywords ?? SEO_KEYWORDS[locale][pageKindFor(path)];
+
+/* Structured data ---------------------------------------------------------
+ * One @graph per page keeps a single <script> and lets crawlers resolve the
+ * Organization -> WebSite -> WebPage chain by @id instead of guessing. Page
+ * specific nodes (SoftwareApplication, TechArticle, CollectionPage) arrive
+ * through the `structuredData` prop.
+ */
+const siteRoot = (import.meta.env.SITE ?? "https://pingwaf.example.com").replace(/\/$/, "");
+const organizationId = `${siteRoot}/#organization`;
+const websiteId = `${siteRoot}/#website`;
+
+const organizationLd = {
+  "@type": "Organization",
+  "@id": organizationId,
+  name: "PingWAF",
+  url: siteRoot,
+  logo: `${siteRoot}/apple-touch-icon.png`,
+  sameAs: ["https://github.com/shuaiZend/PingWAF"],
+};
+
+const websiteLd = {
+  "@type": "WebSite",
+  "@id": websiteId,
+  name: "PingWAF",
+  url: siteRoot,
+  inLanguage: meta.htmlLang,
+  publisher: { "@id": organizationId },
+};
+
+const webPageLd = {
+  "@type": "WebPage",
+  ...(canonical ? { "@id": `${canonical}#webpage`, url: canonical } : {}),
+  name: title,
+  description,
+  inLanguage: meta.htmlLang,
+  isPartOf: { "@id": websiteId },
+};
+
+const breadcrumbLd =
+  canonical && breadcrumbs && breadcrumbs.length > 0
+    ? {
+        "@type": "BreadcrumbList",
+        "@id": `${canonical}#breadcrumb`,
+        itemListElement: breadcrumbs.map((crumb, index) => ({
+          "@type": "ListItem",
+          position: index + 1,
+          name: crumb.name,
+          item: absoluteUrl(crumb.path, locale),
+        })),
+      }
+    : null;
 
 const jsonLd = {
   "@context": "https://schema.org",
-  "@type": "SoftwareApplication",
-  name: "PingWAF",
-  applicationCategory: "SecurityApplication",
-  operatingSystem: "Linux",
-  description:
-    "Distributed, centrally controlled Web Application Firewall built on pingap and Cloudflare Pingora.",
-  url: "https://github.com/shuaiZend/PingWAF",
-  codeRepository: "https://github.com/shuaiZend/PingWAF",
-  license: "https://www.apache.org/licenses/LICENSE-2.0",
-  offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
+  "@graph": [
+    organizationLd,
+    websiteLd,
+    webPageLd,
+    ...(breadcrumbLd ? [breadcrumbLd] : []),
+    ...(structuredData ?? []),
+  ],
 };
+
+/**
+ * The graph now carries content-layer copy, so `<` is escaped: a stray
+ * `</script>` in a translation must not terminate the tag or inject markup.
+ */
+const jsonLdPayload = JSON.stringify(jsonLd)
+  .replace(/</g, "\\u003c")
+  .replace(/\u2028/g, "\\u2028")
+  .replace(/\u2029/g, "\\u2029");
 ---
 <!doctype html>
 <html lang={meta.htmlLang} dir={meta.dir} data-theme="light">
@@ -58,6 +134,8 @@ const jsonLd = {
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{title}</title>
     <meta name="description" content={description} />
+    <meta name="keywords" content={effectiveKeywords.join(", ")} />
+    <meta name="author" content="PingWAF" />
     {canonical && <link rel="canonical" href={canonical} />}
     {
       !noindex && (
@@ -69,7 +147,7 @@ const jsonLd = {
         </>
       )
     }
-    {noindex && <meta name="robots" content="noindex,nofollow" />}
+    <meta name="robots" content={noindex ? "noindex,nofollow" : "index,follow,max-image-preview:large"} />
 
     <link rel="icon" type="image/svg+xml" href={`${import.meta.env.BASE_URL}favicon.svg`} />
     <link rel="apple-touch-icon" href={`${import.meta.env.BASE_URL}apple-touch-icon.png`} />
@@ -83,6 +161,15 @@ const jsonLd = {
     {canonical && <meta property="og:url" content={canonical} />}
     <meta property="og:image" content={social} />
     <meta property="og:image:alt" content="PingWAF console" />
+    {
+      !image && (
+        <>
+          <meta property="og:image:width" content="1200" />
+          <meta property="og:image:height" content="630" />
+          <meta property="og:image:type" content="image/png" />
+        </>
+      )
+    }
     <meta property="og:locale" content={meta.ogLocale} />
     {
       alternates(path)
@@ -95,10 +182,11 @@ const jsonLd = {
     <meta name="twitter:title" content={title} />
     <meta name="twitter:description" content={description} />
     <meta name="twitter:image" content={social} />
+    <meta name="twitter:image:alt" content="PingWAF console" />
 
     <script is:inline set:html={themeInitScript()} />
     {isLanding && <script is:inline set:html={localeDetectScript()} />}
-    <script type="application/ld+json" set:html={JSON.stringify(jsonLd)} />
+    <script type="application/ld+json" set:html={jsonLdPayload} />
   </head>
 
   <body data-path={path} data-locale={locale}>

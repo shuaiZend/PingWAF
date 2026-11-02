@@ -10,11 +10,11 @@ const { showcase } = Astro.props;
 /** Third item sits centred on its own row so all three read at the same size. */
 const spanFor = (index: number) => (index === 2 ? "showcase__item--center" : "");
 ---
-<section class="section">
+<section class="section" id="showcase" aria-labelledby="showcase-title">
   <div class="container">
     <div class="section__head reveal">
       <p class="eyebrow">{showcase.eyebrow}</p>
-      <h2 class="title">{showcase.title}</h2>
+      <h2 class="title" id="showcase-title">{showcase.title}</h2>
       <p class="lead">{showcase.lead}</p>
     </div>
 

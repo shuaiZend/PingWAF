@@ -15,12 +15,33 @@ interface Props {
 
 const { locale } = Astro.props;
 const { intro } = getContent(locale);
+
+const appLd = {
+  "@type": "SoftwareApplication",
+  name: "PingWAF",
+  applicationCategory: "SecurityApplication",
+  operatingSystem: "Linux",
+  description:
+    "Distributed, centrally controlled Web Application Firewall built on pingap and Cloudflare Pingora.",
+  url: "https://github.com/shuaiZend/PingWAF",
+  codeRepository: "https://github.com/shuaiZend/PingWAF",
+  license: "https://www.apache.org/licenses/LICENSE-2.0",
+  offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
+  featureList: [
+    "Semantic WAF engine",
+    "CC and bot defense",
+    "Automatic ACME TLS",
+    "Edge caching",
+    "gRPC control plane",
+  ],
+};
 ---
 <BaseLayout
   locale={locale}
   path="/"
   title={intro.meta.title}
   description={intro.meta.description}
+  structuredData={[appLd]}
 >
   <Hero locale={locale} hero={intro.hero} />
 

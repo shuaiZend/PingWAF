@@ -27,11 +27,11 @@ const { features } = getContent(locale);
     </div>
   </header>
 
-  <section class="section section--tight" id="metrics">
+  <section class="section section--tight" id="metrics" aria-labelledby="metrics-title">
     <div class="container">
       <div class="section__head reveal">
         <p class="eyebrow">{features.metrics.eyebrow}</p>
-        <h2 class="title">{features.metrics.title}</h2>
+        <h2 class="title" id="metrics-title">{features.metrics.title}</h2>
         <p class="lead">{features.metrics.lead}</p>
       </div>
 
@@ -69,13 +69,14 @@ const { features } = getContent(locale);
         <section
           class:list={["feature-section", { "feature-section--reverse": index % 2 === 1 }]}
           id={group.id}
+          aria-labelledby={`${group.id}-title`}
         >
           <div class="feature__body reveal">
             <p class="feature__kicker">
               <Icon name={group.icon} />
               {group.kicker}
             </p>
-            <h2 class="feature__title">{group.title}</h2>
+            <h2 class="feature__title" id={`${group.id}-title`}>{group.title}</h2>
             <p class="feature__lead">{group.lead}</p>
             <ul class="feature__points">
               {group.points.map((point) => (
@@ -92,10 +93,10 @@ const { features } = getContent(locale);
       ))
     }
 
-    <section class="section" id="verdicts">
+    <section class="section" id="verdicts" aria-labelledby="verdicts-title">
       <div class="section__head reveal">
         <p class="eyebrow">{features.verdicts.eyebrow}</p>
-        <h2 class="title">{features.verdicts.title}</h2>
+        <h2 class="title" id="verdicts-title">{features.verdicts.title}</h2>
         <p class="lead">{features.verdicts.lead}</p>
       </div>
 

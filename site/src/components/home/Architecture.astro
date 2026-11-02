@@ -12,11 +12,11 @@ interface Props {
 const { locale, architecture } = Astro.props;
 const { lanes, links } = architecture.diagram;
 ---
-<section class="section" id="architecture">
+<section class="section" id="architecture" aria-labelledby="architecture-title">
   <div class="container arch">
     <div class="reveal">
       <p class="eyebrow">{architecture.eyebrow}</p>
-      <h2 class="title">{architecture.title}</h2>
+      <h2 class="title" id="architecture-title">{architecture.title}</h2>
       <p class="lead">{architecture.lead}</p>
 
       <div class="arch__points">

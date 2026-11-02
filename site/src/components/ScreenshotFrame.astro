@@ -54,7 +54,7 @@ const image = SCREENSHOT_IMAGES[shot.key];
       alt={shot.alt}
       loading={priority ? "eager" : "lazy"}
       decoding={priority ? "sync" : "async"}
-      fetchpriority={priority ? "high" : "auto"}
+      {...(priority ? { fetchpriority: "high" } : {})}
       class="shot__img"
     />
   </a>

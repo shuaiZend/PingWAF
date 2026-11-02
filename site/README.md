@@ -28,6 +28,7 @@ screenshots are real captures of `web/dist` and are optimised at build time.
 | `src/content/schema.ts` | **The content contract** — every locale implements these shapes |
 | `src/content/index.ts` | Discovers locale modules at build time (no shared registry file) |
 | `src/i18n/` | Locale list, UI strings, path helpers, detection/theme scripts |
+| `src/i18n/seo.ts` | Per-page keyword lists (`SEO_KEYWORDS`, five locales × six page kinds) and the route → page kind map (`pageKindFor`) used by `BaseLayout` |
 | `src/styles/` | Design tokens copied from the dashboard plus portal layout |
 | `src/assets/screenshots/` | Console screenshots, consumed through `astro:assets` |
 | `src/data/screenshots.ts` | The only place that maps a screenshot key to a file |
@@ -65,9 +66,30 @@ npm run verify       # content contract + type check + build + link audit
 - Long-form pages live in `src/content/docs/<locale>/<slug>.md` with
   `title`, `description` and `minutes` frontmatter. Slugs are defined once in
   `src/content/schema.ts` (`DOC_SLUGS`), which also drives routes and the sidebar.
+- When a new page kind is introduced, add its keyword list to every locale in
+  `SEO_KEYWORDS` (`src/i18n/seo.ts`). Routes that `pageKindFor` does not
+  recognise fall back to the `home` keywords.
 - Internal links are locale-less paths (`/features/`, `/docs/api/`) and are
   resolved with `href()` / `resolveLink()` so the deployment base and locale
   prefix are never dropped. Absolute URLs pass through untouched.
+
+## SEO metadata
+
+Titles and descriptions come from `src/content/<locale>/*.ts`; keywords come
+from `src/i18n/seo.ts`. `BaseLayout` derives the page kind from the route with
+`pageKindFor(path)` and takes the matching list from `SEO_KEYWORDS` (five
+locales × six page kinds), so a page gets keywords without passing any props —
+and a page can still override them with the `keywords` prop. `BaseLayout` also
+emits `meta robots` (`index,follow,max-image-preview:large`; `noindex` pages
+keep `noindex,nofollow`), `og:image:width/height/type`, `twitter:image:alt`
+and `meta author`.
+
+Structured data is one `<script type="application/ld+json">` per page with a
+`@graph` that always contains `Organization`, `WebSite` and `WebPage`, linked
+by `@id`. Page-level nodes are appended by the components themselves: the
+homepage (`HomePage.astro`) adds a `SoftwareApplication`, and documentation
+pages (`DocsLayout.astro`) add a `TechArticle` plus a `BreadcrumbList` that is
+built from the same visible breadcrumb trail shown in the docs shell.
 
 ## Adding a language
 
@@ -129,6 +151,15 @@ npm run preview    # serve dist locally at http://localhost:4321/
 `dist/` is a self-contained static bundle: HTML, hashed `/_astro/*` assets,
 `404.html`, `_headers` and `_redirects`. It is served from the domain root, so
 `base` is `/`; set `SITE_BASE=/something/` when auditing a sub-path deployment.
+
+The inline `pingwaf-preload-stylesheets` integration in `astro.config.mjs`
+runs at `astro:build:done` and rewrites every generated HTML file: a
+`<link rel="preload" as="style" … fetchpriority="high">` is inserted before
+each stylesheet link so the browser starts fetching CSS before parsing reaches
+it, and the redundant `fetchpriority="auto"` is stripped from `<img>` tags.
+The hook is idempotent — a stylesheet that already has a matching preload is
+left untouched — so re-running the build (or a manual post-processing pass)
+cannot duplicate tags.
 
 ## Deployment
 

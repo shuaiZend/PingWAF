@@ -1,5 +1,58 @@
 // @ts-check
+import { readdir, readFile, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "astro/config";
+
+/**
+ * Adds `<link rel="preload" as="style">` next to the stylesheet link that
+ * Astro emits. The template cannot do this itself: the hashed filename only
+ * exists after the build. Both links point at the same URL, so the browser
+ * downloads the CSS once — the preload just raises its priority.
+ */
+function preloadStylesheets() {
+  return {
+    name: "pingwaf-preload-stylesheets",
+    hooks: {
+      /** @param {{ dir: URL; logger: { info: (message: string) => void } }} params */
+      "astro:build:done": async ({ dir, logger }) => {
+        const root = fileURLToPath(dir);
+        let patched = 0;
+
+        /** @param {string} current */
+        const walk = async (current) => {
+          for (const entry of await readdir(current, { withFileTypes: true })) {
+            const full = path.join(current, entry.name);
+            if (entry.isDirectory()) {
+              await walk(full);
+              continue;
+            }
+            if (!entry.name.endsWith(".html")) continue;
+
+            const html = await readFile(full, "utf8");
+            // `fetchpriority="auto"` is the implicit default — dropping it keeps
+            // every img tag smaller without changing behaviour.
+            const trimmed = html.replace(/(<img\b[^>]*?)\s+fetchpriority="auto"/g, "$1");
+            const next = trimmed.replace(
+              /<link rel="stylesheet" href="([^"]+)">/g,
+              (match, href) =>
+                html.includes(`rel="preload" as="style" href="${href}"`)
+                  ? match
+                  : `<link rel="preload" as="style" href="${href}" fetchpriority="high">${match}`,
+            );
+            if (next !== html) {
+              await writeFile(full, next, "utf8");
+              patched += 1;
+            }
+          }
+        };
+
+        await walk(root);
+        logger.info(`preload hints injected into ${patched} page(s)`);
+      },
+    },
+  };
+}
 
 /**
  * PingWAF official portal.
@@ -35,6 +88,7 @@ export default defineConfig({
     inlineStylesheets: "auto",
   },
   prefetch: false,
+  integrations: [preloadStylesheets()],
   devToolbar: { enabled: false },
   markdown: {
     shikiConfig: {

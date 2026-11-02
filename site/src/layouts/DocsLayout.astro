@@ -7,7 +7,7 @@ import { getContent } from "../content";
 import { DOC_SLUGS, docPath, type DocSlug } from "../content/schema";
 import { href } from "../i18n/utils";
 import { t } from "../i18n/ui";
-import type { Locale } from "../i18n/config";
+import { LOCALE_META, type Locale } from "../i18n/config";
 
 interface Props {
   locale: Locale;
@@ -30,8 +30,29 @@ const next = index >= 0 && index < DOC_SLUGS.length - 1 ? DOC_SLUGS[index + 1] :
 const cardFor = (target: DocSlug) => docs.cards.find((card) => card.slug === target);
 const toc = headings.filter((heading) => heading.depth === 2 || heading.depth === 3);
 const editUrl = `https://github.com/shuaiZend/PingWAF/edit/main/site/src/content/docs/${locale}/${slug}.md`;
+
+const articleLd = {
+  "@type": "TechArticle",
+  headline: title,
+  description,
+  inLanguage: LOCALE_META[locale].htmlLang,
+  isPartOf: { "@type": "WebSite", name: "PingWAF" },
+  proficiencyLevel: "Expert",
+};
+const breadcrumbTrail = [
+  { name: ui.common.breadcrumbHome, path: "/" },
+  { name: ui.nav.docs, path: "/docs/" },
+  { name: title, path },
+];
 ---
-<BaseLayout locale={locale} path={path} title={`${title} — PingWAF`} description={description}>
+<BaseLayout
+  locale={locale}
+  path={path}
+  title={`${title} — PingWAF`}
+  description={description}
+  breadcrumbs={breadcrumbTrail}
+  structuredData={[articleLd]}
+>
   <div class="container docs">
     <aside class="docs__aside">
       <p class="docs__aside-title">{docs.sidebarLabel}</p>

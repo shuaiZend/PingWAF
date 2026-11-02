@@ -11,11 +11,11 @@ interface Props {
 
 const { locale, capabilities } = Astro.props;
 ---
-<section class="section section--recessed" id="capabilities">
+<section class="section section--recessed" id="capabilities" aria-labelledby="capabilities-title">
   <div class="container">
     <div class="section__head reveal">
       <p class="eyebrow">{capabilities.eyebrow}</p>
-      <h2 class="title">{capabilities.title}</h2>
+      <h2 class="title" id="capabilities-title">{capabilities.title}</h2>
       <p class="lead">{capabilities.lead}</p>
     </div>
 

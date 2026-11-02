@@ -66,6 +66,18 @@ for (const page of pages) {
     }
   }
 
+  // The build hook pairs every stylesheet with a preload hint at the same URL;
+  // assert the pairing so a broken hook cannot ship silently.
+  const stylesheets = [...html.matchAll(/<link rel="stylesheet" href="([^"]+)">/g)].map((m) => m[1]);
+  const preloads = new Set(
+    [...html.matchAll(/<link rel="preload" as="style" href="([^"]+)"/g)].map((m) => m[1]),
+  );
+  for (const href of stylesheets) {
+    if (!preloads.has(href)) {
+      errors.push(`${relative} — stylesheet ${href} has no matching preload hint`);
+    }
+  }
+
   const refs = [
     ...html.matchAll(/(?:href|src)="([^"]+)"/g),
     ...html.matchAll(/srcset="([^"]+)"/g).flatMap((match) =>

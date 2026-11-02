@@ -11,12 +11,12 @@ interface Props {
 
 const { locale, quickstart } = Astro.props;
 ---
-<section class="section section--recessed">
+<section class="section section--recessed" id="quickstart" aria-labelledby="quickstart-teaser-title">
   <div class="container">
     <div class="teaser">
       <div class="reveal">
         <p class="eyebrow">{quickstart.eyebrow}</p>
-        <h2 class="title--sm title">{quickstart.title}</h2>
+        <h2 class="title--sm title" id="quickstart-teaser-title">{quickstart.title}</h2>
         <p class="lead">{quickstart.lead}</p>
 
         <ol class="teaser__steps">
