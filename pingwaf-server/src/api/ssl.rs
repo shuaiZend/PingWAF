@@ -1,6 +1,6 @@
 //! SSL/TLS certificate management: upload, ACME issuance, renewal and settings.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -29,7 +29,7 @@ use crate::api::sites::{
 };
 use crate::api::state::AppState;
 use crate::api::validation::{validate_certificate_and_key, validate_pem_pair};
-use crate::auth::AuthUser;
+use crate::auth::{AdminUser, AuthUser};
 use crate::grpc::notify_config_changed;
 use crate::models::{
     acme_challenge, certificate_events, certificate_links, site,
@@ -837,6 +837,10 @@ pub fn routes() -> Router<AppState> {
                 .put(update_global_certificate)
                 .delete(delete_global_certificate),
         )
+        // Who owns, is shared with, and currently serves this certificate —
+        // one read that lets the bind / unbind / delete dialogs name the
+        // sites a `409` would otherwise only list as UUIDs.
+        .route("/certificates/{cert_id}/usage", get(certificate_usage))
         .route(
             "/certificates/{cert_id}/renew",
             axum::routing::post(renew_global_certificate),
@@ -1039,10 +1043,57 @@ async fn unlink_certificate(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// The filter behind [`list_available_certificates`].
+///
+/// "Available" here means **linkable**: the certificates this site could still
+/// add a `site_certificate_links` grant for. A certificate row has three
+/// possible origins, and only the third belongs to this endpoint:
+///
+/// | origin | `site_id` | listed here | which page shows it instead |
+/// |---|---|---|---|
+/// | the site's own | `= site_id` | no | `GET /sites/{id}/certificates` |
+/// | uploaded, not bound | `NULL` | no | `POST /certificates/{id}/bindings` |
+/// | another visible site's | `= other` | yes, until linked | this endpoint |
+///
+/// The two exclusions are not stylistic:
+///
+/// - the site's own certificate cannot be linked — `POST
+///   /sites/{id}/certificate-links` answers `409 certificate already belongs to
+///   this site` — and it is already in the site's own list;
+/// - an unbound certificate cannot be linked either (`400 certificate is not
+///   bound to any site`); it is attached through the certificate-side
+///   `POST /certificates/{id}/bindings`, which is what creates the link row in
+///   the first place;
+/// - a link row of this site *is* the grant, so listing that certificate again
+///   would only offer a second "link" that can produce a duplicate.
+///
+/// `site_id IS NOT NULL` is written out even though both other predicates
+/// already drop NULLs through SQL three-valued logic (`NULL <> x` and `NULL IN
+/// (…)` are `NULL`, not `TRUE`). Leaving that implicit is how a later rewrite
+/// of this condition re-admits every unbound certificate: it costs one clause
+/// and is a no-op today.
+fn available_certificate_condition(
+    site_id: Uuid,
+    visible_ids: Vec<Uuid>,
+    linked_ids: Vec<Uuid>,
+) -> Condition {
+    let mut condition = Condition::all()
+        .add(site_certificates::Column::SiteId.is_not_null())
+        .add(site_certificates::Column::SiteId.ne(site_id))
+        .add(site_certificates::Column::SiteId.is_in(visible_ids));
+    if !linked_ids.is_empty() {
+        condition =
+            condition.add(site_certificates::Column::Id.is_not_in(linked_ids));
+    }
+    condition
+}
+
 /// `GET /api/v1/sites/{site_id}/certificates/available`
 ///
 /// Certificates this site may link: owned by a site the caller can read, not
-/// owned by this site and not linked yet.
+/// owned by this site and not linked yet — the "shared certificates" picker.
+/// The filter and the reasoning behind each exclusion live in
+/// [`available_certificate_condition`].
 async fn list_available_certificates(
     State(state): State<AppState>,
     current: AuthUser,
@@ -1063,13 +1114,8 @@ async fn list_available_certificates(
         .collect();
 
     let visible_ids: Vec<Uuid> = sites.keys().copied().collect();
-    let mut condition = Condition::all()
-        .add(site_certificates::Column::SiteId.ne(id))
-        .add(site_certificates::Column::SiteId.is_in(visible_ids));
-    if !linked_ids.is_empty() {
-        condition =
-            condition.add(site_certificates::Column::Id.is_not_in(linked_ids));
-    }
+    let condition =
+        available_certificate_condition(id, visible_ids, linked_ids);
 
     let paginator = certificate_list_query()
         .filter(condition)
@@ -1790,11 +1836,14 @@ pub struct CertificateSummary {
     pub expiring_soon: usize,
 }
 
+/// Site id -> `(domain, name)`, the shape [`visible_sites`] returns.
+type VisibleSites = HashMap<Uuid, (String, String)>;
+
 /// Sites the caller may see, mapped to `(domain, name)`.
 async fn visible_sites(
     state: &AppState,
     current: &AuthUser,
-) -> Result<HashMap<Uuid, (String, String)>, ApiError> {
+) -> Result<VisibleSites, ApiError> {
     let mut condition = Condition::all();
     if !current.is_admin() {
         condition = condition.add(site::Column::UserId.eq(current.id));
@@ -2013,6 +2062,158 @@ async fn show_global_certificate(
     ));
     attach_bindings(&mut response, &bound);
     Ok(Json(response))
+}
+
+/// One site a certificate is shared with, plus whether that site currently
+/// serves it.
+///
+/// `selected` is the flag the console needs before it renders an "unlink"
+/// button: it is exactly the state [`unbind_certificate`] and
+/// [`delete_certificate_row`] refuse with a `409`.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct LinkedSiteRef {
+    pub id: Uuid,
+    pub domain: String,
+    pub selected: bool,
+}
+
+/// `GET /api/v1/certificates/{cert_id}/usage`.
+///
+/// The three relations a certificate can stand in, kept separate rather than
+/// merged into one "in use" list because each one blocks a different action
+/// with a different message: an `owner` is why binding the certificate to that
+/// site answers `409 certificate already belongs to this site`, a
+/// `linked_sites` entry is the grant `DELETE /bindings` removes, and a
+/// `serving_sites` entry is why deletion is refused until the site clears its
+/// TLS choice.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct CertificateUsageResponse {
+    /// `site_certificates.site_id`, or `null` for an unbound upload. `null`
+    /// also covers an owner site the caller cannot see: the certificate is
+    /// still readable, so the answer degrades in this field instead of 404ing.
+    pub owner: Option<BoundSiteRef>,
+    /// `site_certificate_links` rows of this certificate.
+    pub linked_sites: Vec<LinkedSiteRef>,
+    /// Sites whose `site_ssl.certificate_id` is this certificate.
+    pub serving_sites: Vec<BoundSiteRef>,
+}
+
+/// Assembles the usage answer from rows the caller has already loaded.
+///
+/// Query-free on purpose: the derivation — in particular `selected`, which is
+/// the condition the unbind and delete paths refuse on — is the part worth
+/// testing, and it must not depend on the *link* table to be right. A site can
+/// select a certificate whose grant row was never written (the site's own
+/// certificate, reached through `PUT /sites/{id}/ssl-settings`), so
+/// `serving_sites` is derived from `site_ssl` and `linked_sites` only carries
+/// the flag.
+///
+/// An id that does not resolve (a row deleted between two of the handler's
+/// queries) is skipped; an unresolvable **owner** is logged once and reported
+/// as `null`, matching how [`bound_sites_index`] treats a stale link.
+fn certificate_usage_snapshot(
+    owner: Option<Uuid>,
+    linked_ids: impl IntoIterator<Item = Uuid>,
+    serving_ids: impl IntoIterator<Item = Uuid>,
+    sites: &VisibleSites,
+) -> CertificateUsageResponse {
+    let serving: HashSet<Uuid> = serving_ids.into_iter().collect();
+
+    let owner = owner.and_then(|id| match sites.get(&id) {
+        Some((domain, _)) => Some(BoundSiteRef {
+            id,
+            domain: domain.clone(),
+        }),
+        None => {
+            tracing::warn!(
+                site_id = %id,
+                "certificate owner site is not visible; reporting no owner"
+            );
+            None
+        },
+    });
+
+    let mut linked_sites: Vec<LinkedSiteRef> = linked_ids
+        .into_iter()
+        .filter_map(|id| {
+            sites.get(&id).map(|(domain, _)| LinkedSiteRef {
+                id,
+                domain: domain.clone(),
+                selected: serving.contains(&id),
+            })
+        })
+        .collect();
+    let mut serving_sites: Vec<BoundSiteRef> = serving
+        .into_iter()
+        .filter_map(|id| {
+            sites.get(&id).map(|(domain, _)| BoundSiteRef {
+                id,
+                domain: domain.clone(),
+            })
+        })
+        .collect();
+
+    // Domain order, id as the tiebreaker. Neither `site_certificate_links` nor
+    // `site_ssl` has a natural order, and a list that reshuffles between two
+    // identical requests is noise in the console and in any diff of two
+    // responses.
+    linked_sites.sort_by(|a, b| a.domain.cmp(&b.domain).then(a.id.cmp(&b.id)));
+    serving_sites.sort_by(|a, b| a.domain.cmp(&b.domain).then(a.id.cmp(&b.id)));
+
+    CertificateUsageResponse {
+        owner,
+        linked_sites,
+        serving_sites,
+    }
+}
+
+/// `GET /api/v1/certificates/{cert_id}/usage`
+///
+/// Four queries, whatever the number of sites involved:
+///
+/// 1. the certificate row — [`find_certificate_by_id`], `site_id` is the owner;
+/// 2. `site_certificate_links` filtered on `certificate_id` — the grants;
+/// 3. `site_ssl` filtered on `certificate_id` — the sites that selected it,
+///    which is the `selected` flag and the first delete blocker in
+///    [`delete_certificate_row`];
+/// 4. the site rows — [`visible_sites`], one query that resolves the domains
+///    for 1–3 and doubles as the visibility oracle for the owner.
+///
+/// Administrator-only: every consumer is a dialog in front of a bind, unbind
+/// or delete, and all three mutate, which [`require_write`] already restricts
+/// to administrators. `visible_sites` is still scoped per caller, so the
+/// `owner == null` branch for an invisible site becomes real work the moment a
+/// read-only surface needs this and the extractor is switched to `AuthUser`.
+///
+/// [`require_write`]: crate::api::common::require_write
+async fn certificate_usage(
+    State(state): State<AppState>,
+    admin: AdminUser,
+    Path(cert_id): Path<String>,
+) -> Result<Json<CertificateUsageResponse>, ApiError> {
+    let target = parse_uuid(&cert_id, "certificate id")?;
+    let certificate = find_certificate_by_id(&state, target).await?;
+
+    let linked_ids = certificate_links::Entity::find()
+        .filter(certificate_links::Column::CertificateId.eq(target))
+        .all(&state.db)
+        .await?
+        .into_iter()
+        .map(|link| link.site_id);
+    let serving_ids = site_ssl::Entity::find()
+        .filter(site_ssl::Column::CertificateId.eq(target))
+        .all(&state.db)
+        .await?
+        .into_iter()
+        .map(|row| row.site_id);
+    let sites = visible_sites(&state, &admin).await?;
+
+    Ok(Json(certificate_usage_snapshot(
+        certificate.site_id,
+        linked_ids,
+        serving_ids,
+        &sites,
+    )))
 }
 
 /// `PUT /api/v1/certificates/{cert_id}`
@@ -3084,6 +3285,267 @@ mod tests {
                 &[]
             ),
             vec!["api.other.com".to_string(), "www.other.com".to_string()]
+        );
+    }
+
+    /* ── `GET /certificates/{id}/usage` ────────────────────────────── */
+
+    /// Builds the `(domain, name)` index `visible_sites` returns. The site name
+    /// is irrelevant to the usage answer, so it mirrors the domain.
+    fn visible_index(entries: &[(Uuid, &str)]) -> VisibleSites {
+        entries
+            .iter()
+            .map(|(id, domain)| {
+                (*id, ((*domain).to_string(), (*domain).to_string()))
+            })
+            .collect()
+    }
+
+    /// An unbound certificate with no grants and no site serving it is an
+    /// empty answer — not a 404, and not a missing field. The console branches
+    /// on `owner === null` plus two empty arrays, so the wire shape is part of
+    /// the contract and is asserted literally.
+    #[test]
+    fn certificate_usage_of_an_unused_certificate_is_empty() {
+        let usage = certificate_usage_snapshot(
+            None,
+            Vec::new(),
+            Vec::new(),
+            &visible_index(&[]),
+        );
+        assert!(usage.owner.is_none());
+        assert!(usage.linked_sites.is_empty());
+        assert!(usage.serving_sites.is_empty());
+        assert_eq!(
+            serde_json::to_string(&usage).unwrap(),
+            r#"{"owner":null,"linked_sites":[],"serving_sites":[]}"#
+        );
+    }
+
+    /// `selected` is `site_ssl.certificate_id == cert` — exactly the state
+    /// `DELETE /certificates/{id}/bindings/{site}` and
+    /// `DELETE /certificates/{id}` refuse with a `409` — so it must come from
+    /// `site_ssl`, not from the presence of a link row.
+    #[test]
+    fn certificate_usage_marks_only_the_serving_link_as_selected() {
+        let owner = Uuid::new_v4();
+        let shared = Uuid::new_v4();
+        let idle = Uuid::new_v4();
+        let sites = visible_index(&[
+            (owner, "a.example.com"),
+            (shared, "b.example.com"),
+            (idle, "c.example.com"),
+        ]);
+
+        let usage = certificate_usage_snapshot(
+            Some(owner),
+            vec![idle, shared],
+            vec![shared],
+            &sites,
+        );
+
+        assert_eq!(
+            usage.owner,
+            Some(BoundSiteRef {
+                id: owner,
+                domain: "a.example.com".to_string(),
+            })
+        );
+        assert_eq!(
+            usage.linked_sites,
+            vec![
+                LinkedSiteRef {
+                    id: shared,
+                    domain: "b.example.com".to_string(),
+                    selected: true,
+                },
+                LinkedSiteRef {
+                    id: idle,
+                    domain: "c.example.com".to_string(),
+                    selected: false,
+                },
+            ]
+        );
+        // The same data, filtered on `selected`.
+        assert_eq!(
+            usage.serving_sites,
+            vec![BoundSiteRef {
+                id: shared,
+                domain: "b.example.com".to_string(),
+            }]
+        );
+    }
+
+    /// A site can select a certificate whose grant row was never written (its
+    /// own certificate via `PUT /sites/{id}/ssl-settings`), and that site
+    /// still blocks deletion. Deriving `serving_sites` from the link table
+    /// would report "nobody uses it" for exactly the case the delete dialog
+    /// has to explain.
+    #[test]
+    fn certificate_usage_reports_a_serving_site_without_a_link_row() {
+        let owner = Uuid::new_v4();
+        let sites = visible_index(&[(owner, "a.example.com")]);
+
+        let usage = certificate_usage_snapshot(
+            Some(owner),
+            Vec::new(),
+            vec![owner],
+            &sites,
+        );
+        assert!(usage.linked_sites.is_empty());
+        assert_eq!(
+            usage.serving_sites,
+            vec![BoundSiteRef {
+                id: owner,
+                domain: "a.example.com".to_string(),
+            }]
+        );
+
+        // ... and the mirrored case: a grant with no selection is linked only.
+        let usage = certificate_usage_snapshot(
+            Some(owner),
+            vec![owner],
+            Vec::new(),
+            &sites,
+        );
+        assert_eq!(
+            usage.linked_sites,
+            vec![LinkedSiteRef {
+                id: owner,
+                domain: "a.example.com".to_string(),
+                selected: false,
+            }]
+        );
+        assert!(usage.serving_sites.is_empty());
+    }
+
+    /// An owner outside the caller's visible set degrades to `null` instead of
+    /// failing the read (or 404ing a certificate that is perfectly readable)
+    /// and instead of inventing a domain-less entry the console cannot render.
+    #[test]
+    fn certificate_usage_ignores_an_owner_site_outside_the_visible_set() {
+        let owner = Uuid::new_v4();
+        let usage = certificate_usage_snapshot(
+            Some(owner),
+            vec![owner],
+            vec![owner],
+            &visible_index(&[]),
+        );
+        assert!(usage.owner.is_none());
+        assert!(usage.linked_sites.is_empty());
+        assert!(usage.serving_sites.is_empty());
+    }
+
+    /// Both arrays are ordered by domain so two identical requests return the
+    /// same body: `site_certificate_links` has no natural order and `site_ssl`
+    /// is only unique per site.
+    #[test]
+    fn certificate_usage_is_ordered_by_domain() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let c = Uuid::new_v4();
+        let sites = visible_index(&[
+            (a, "z.example.com"),
+            (b, "a.example.com"),
+            (c, "m.example.com"),
+        ]);
+
+        let usage =
+            certificate_usage_snapshot(None, vec![a, b, c], vec![c, a], &sites);
+        let linked: Vec<&str> = usage
+            .linked_sites
+            .iter()
+            .map(|s| s.domain.as_str())
+            .collect();
+        assert_eq!(
+            linked,
+            vec!["a.example.com", "m.example.com", "z.example.com"]
+        );
+        let serving: Vec<&str> = usage
+            .serving_sites
+            .iter()
+            .map(|s| s.domain.as_str())
+            .collect();
+        assert_eq!(serving, vec!["m.example.com", "z.example.com"]);
+    }
+
+    /* ── `GET /sites/{id}/certificates/available` filter ───────────── */
+
+    /// Renders the filter as the `site_certificates` query would run it.
+    /// Values are inlined as literals by the Postgres builder, so the clauses
+    /// can be asserted without depending on placeholder numbering.
+    fn available_condition_sql(
+        site_id: Uuid,
+        visible: Vec<Uuid>,
+        linked: Vec<Uuid>,
+    ) -> String {
+        use sea_orm::sea_query::{Alias, PostgresQueryBuilder, Query};
+
+        Query::select()
+            .column((Alias::new("site_certificates"), Alias::new("id")))
+            .from(Alias::new("site_certificates"))
+            .cond_where(available_certificate_condition(
+                site_id, visible, linked,
+            ))
+            .to_string(PostgresQueryBuilder)
+    }
+
+    /// The three origins of a certificate row, and which of them this endpoint
+    /// may offer. The site's own is already in its own list, an unbound upload
+    /// is attached through `POST /certificates/{id}/bindings`, and a grant
+    /// this site already holds is not "available" any more — only another
+    /// site's unlinked certificate is.
+    #[test]
+    fn available_condition_excludes_own_unbound_and_linked_certificates() {
+        let site = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let linked = Uuid::new_v4();
+
+        let sql =
+            available_condition_sql(site, vec![site, other], vec![linked]);
+
+        // Own certificates are dropped ...
+        assert!(
+            sql.contains(&format!(
+                "\"site_certificates\".\"site_id\" <> '{site}'"
+            )),
+            "{sql}"
+        );
+        // ... rows visible to the caller only ...
+        assert!(
+            sql.contains(&format!(
+                "\"site_certificates\".\"site_id\" IN ('{site}', '{other}')"
+            )),
+            "{sql}"
+        );
+        // ... and an already-held grant is not offered a second time.
+        assert!(
+            sql.contains(&format!(
+                "\"site_certificates\".\"id\" NOT IN ('{linked}')"
+            )),
+            "{sql}"
+        );
+        // Unbound uploads (`site_id IS NULL`) stay out. Written explicitly:
+        // `NULL <> x` and `NULL IN (…)` are NULL, so the two clauses above
+        // already exclude them, and this is the clause that keeps that true
+        // when either of them is rewritten.
+        assert!(
+            sql.contains("\"site_certificates\".\"site_id\" IS NOT NULL"),
+            "{sql}"
+        );
+    }
+
+    /// With no grants yet the `NOT IN` clause is omitted entirely — an
+    /// `IN ()`-shaped fragment is how an "empty list" turns into a query that
+    /// matches nothing.
+    #[test]
+    fn available_condition_omits_the_not_in_clause_without_links() {
+        let site = Uuid::new_v4();
+        let sql = available_condition_sql(site, vec![site], Vec::new());
+        assert!(!sql.contains("NOT IN"), "{sql}");
+        assert!(
+            sql.contains("\"site_certificates\".\"site_id\" IS NOT NULL"),
+            "{sql}"
         );
     }
 }
