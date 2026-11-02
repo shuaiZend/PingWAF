@@ -2045,9 +2045,21 @@ impl ProxyHttp for Server {
         // held twice while being released once, tilting the balance further
         // with every occurrence.
         let first_attempt = !ctx.upstream.processing_counted;
+        // The matched location's domain set, for the `$host` SNI membership
+        // warning: only this layer holds the compiled site. A request that
+        // matched no location keeps the historic no-warning behaviour.
+        let site_hosts = location
+            .as_ref()
+            .map(|location| location.site_hosts())
+            .unwrap_or_default();
         // Async: a transparent upstream resolves the request's host here.
         let Some(peer) = upstream
-            .new_http_peer(session, &mut ctx.conn.client_ip, first_attempt)
+            .new_http_peer(
+                session,
+                &mut ctx.conn.client_ip,
+                first_attempt,
+                site_hosts,
+            )
             .await
         else {
             return Err(no_available_upstream(ctx));

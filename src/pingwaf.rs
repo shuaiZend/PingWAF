@@ -1039,6 +1039,25 @@ fn cached_rules_to_pingap_config(
             hosts.join(",")
         };
 
+        // The site's own names, as the upstream SNI membership check wants
+        // them: trimmed, lowercased and de-duplicated. Only the configured
+        // domain and alternate domains are listed — never a derived spelling
+        // — so the warning fires exactly when the request's Host is not a
+        // name this site answers for.
+        let site_hosts: Vec<String> = {
+            let mut hosts =
+                Vec::with_capacity(1 + site.alternate_domains.len());
+            for host in
+                std::iter::once(&site.domain).chain(&site.alternate_domains)
+            {
+                let host = host.trim().to_ascii_lowercase();
+                if !host.is_empty() && !hosts.contains(&host) {
+                    hosts.push(host);
+                }
+            }
+            hosts
+        };
+
         // The generated AI files run first: a `robots.txt` request must be
         // answered before the WAF inspects (and possibly logs or blocks) it.
         let mut site_plugins =
@@ -1082,6 +1101,7 @@ fn cached_rules_to_pingap_config(
                     // less ranked below this catch-all `/` location and
                     // never matched. Pin it to the floor instead.
                     weight: Some(0),
+                    site_hosts: Some(site_hosts.clone()),
                     downstream_timeout_secs: Some(site_downstream_timeout_secs),
                     ..Default::default()
                 },
@@ -1151,6 +1171,17 @@ fn cached_rules_to_pingap_config(
                     // its virtual host answers instead of 404ing.
                     upstream_host: (!route.upstream_host.trim().is_empty())
                         .then(|| route.upstream_host.trim().to_string()),
+                    // Only a location that still serves this site's own
+                    // origin (no `upstream_host`) carries the site's host
+                    // list: a mirror route points at another vhost, so every
+                    // request would compare a foreign Host against this
+                    // site's names and raise a constant false OutsideSite
+                    // warning. An empty list means "no warning" there.
+                    site_hosts: if route.upstream_host.trim().is_empty() {
+                        Some(site_hosts.clone())
+                    } else {
+                        Some(Vec::new())
+                    },
                     downstream_timeout_secs: Some(site_downstream_timeout_secs),
                     plugins: Some(site_plugins.clone()),
                     ..Default::default()
@@ -3023,6 +3054,61 @@ mod tests {
             .get("site1_route_r2")
             .expect("plain route location");
         assert_eq!(loc.upstream_host, None, "unset keeps the client's Host");
+    }
+
+    /// `site_hosts` (the OutsideSite warning's allow-list) is only injected
+    /// where the location still serves this site's own origin: normal route
+    /// locations and the `/` fallback get the site's names, while a mirror
+    /// route (`upstream_host` set) points at a foreign vhost and must carry
+    /// an empty set — otherwise every mirrored request would warn.
+    #[test]
+    fn site_hosts_are_injected_only_for_own_origin_locations() {
+        let mut site = site_rules("site1", "mirror.example.com");
+        site.alternate_domains = vec!["  www.Mirror.Example.COM  ".to_string()];
+        let mut default_pool = pool("pool-a", vec![peer("172.17.53.244:5000")]);
+        default_pool.is_default = true;
+        site.upstreams = vec![default_pool];
+
+        let mut mirror = route("r1", "prefix", "/google", "pool-a");
+        mirror.upstream_host = "www.google.com".to_string();
+        let plain = route("r2", "prefix", "/api", "pool-a");
+        site.routes = vec![mirror, plain];
+
+        let config = cached_rules_to_pingap_config(
+            &one_site_cache(site),
+            Path::new("/tmp/pingwaf-test-cache"),
+        )
+        .expect("config should build");
+
+        let expected: Vec<String> = vec![
+            "mirror.example.com".to_string(),
+            "www.mirror.example.com".to_string(),
+        ];
+
+        // Normal route location: the site's own host list.
+        let loc = config
+            .locations
+            .get("site1_route_r2")
+            .expect("plain route location");
+        assert_eq!(loc.site_hosts.as_deref(), Some(&expected[..]));
+
+        // Mirror route location: empty set, so no OutsideSite warning.
+        let loc = config
+            .locations
+            .get("site1_route_r1")
+            .expect("mirror route location");
+        assert_eq!(
+            loc.site_hosts.as_deref(),
+            Some(&[][..]),
+            "a mirror route points at a foreign vhost and must not warn"
+        );
+
+        // The `/` fallback location serves the site's own origin: full list.
+        let loc = config
+            .locations
+            .get("site1_loc")
+            .expect("fallback location");
+        assert_eq!(loc.site_hosts.as_deref(), Some(&expected[..]));
     }
 
     /// D-6: a site's response replacement policy becomes a `sub_filter` plugin

@@ -1041,14 +1041,30 @@ impl Upstream {
     /// no SNI semantics; the control plane rejects a non-empty SNI at save
     /// time.
     ///
-    /// The site's domain set is not reachable from this crate: the caller
-    /// only receives the [`Session`], and the compiled site context lives
-    /// in the data-plane layer. The `site_hosts` parameter is therefore
-    /// empty here, which skips the membership warning rather than guessing
-    /// the set.
-    fn static_peer_sni(&self, session: &Session) -> String {
+    /// `site_hosts` is the matched `Location`'s domain set, passed in by
+    /// the caller: this crate cannot look it up itself, only the data-plane
+    /// layer owns the compiled site. An empty set disables the membership
+    /// warning rather than guessing it.
+    fn static_peer_sni(
+        &self,
+        session: &Session,
+        site_hosts: &[String],
+    ) -> String {
         let host = Self::request_host(session);
-        let (sni, warning) = resolve_sni(&self.sni, host, &[]);
+        let (sni, warning) = resolve_sni(&self.sni, host, site_hosts);
+        self.warn_sni(host, &sni, warning);
+        sni
+    }
+
+    /// Logs why a `$host` SNI was refused or is suspicious. Neither case
+    /// blocks the request: an unusable Host already resolved to an empty
+    /// SNI, and an outside-site name is still gated by `verify_cert`.
+    fn warn_sni(
+        &self,
+        host: Option<&str>,
+        sni: &str,
+        warning: Option<SniWarning>,
+    ) {
         match warning {
             Some(SniWarning::InvalidHost) => warn!(
                 target: LOG_TARGET,
@@ -1059,12 +1075,11 @@ impl Upstream {
             Some(SniWarning::OutsideSite) => warn!(
                 target: LOG_TARGET,
                 name = self.name.as_ref(),
-                host = sni.as_str(),
+                host = sni,
                 "`$host` SNI is outside the site's domain set"
             ),
             None => {},
         }
-        sni
     }
 
     /// Creates and configures a new HTTP peer for handling requests
@@ -1095,12 +1110,17 @@ impl Upstream {
         session: &Session,
         client_ip: &mut Option<String>,
         count_processing: bool,
+        site_hosts: &[String],
     ) -> Option<HttpPeer> {
         let mut p = match &self.lb {
             // For round-robin, use empty key since selection is sequential
             SelectionLb::RoundRobin(lb) => {
                 let backend = self.select_backend(lb, b"")?;
-                HttpPeer::new(backend, self.tls, self.static_peer_sni(session))
+                HttpPeer::new(
+                    backend,
+                    self.tls,
+                    self.static_peer_sni(session, site_hosts),
+                )
             },
             // Least connections: the selector orders backends by in-flight
             // requests; the chosen one is counted only on the request's first
@@ -1111,22 +1131,34 @@ impl Upstream {
                 if count_processing {
                     inflight.acquire(&backend.addr.to_string());
                 }
-                HttpPeer::new(backend, self.tls, self.static_peer_sni(session))
+                HttpPeer::new(
+                    backend,
+                    self.tls,
+                    self.static_peer_sni(session, site_hosts),
+                )
             },
             // For random, use empty key since selection ignores it
             SelectionLb::Random(lb) => {
                 let backend = self.select_backend(lb, b"")?;
-                HttpPeer::new(backend, self.tls, self.static_peer_sni(session))
+                HttpPeer::new(
+                    backend,
+                    self.tls,
+                    self.static_peer_sni(session, site_hosts),
+                )
             },
             // For consistent hashing, generate hash value from request details
             SelectionLb::Consistent { lb, hash } => {
                 let value = hash.get_value(session, client_ip);
                 let backend = self.select_backend(lb, value.as_bytes())?;
-                HttpPeer::new(backend, self.tls, self.static_peer_sni(session))
+                HttpPeer::new(
+                    backend,
+                    self.tls,
+                    self.static_peer_sni(session, site_hosts),
+                )
             },
             // In transparent mode, use the request's host header
             SelectionLb::Transparent => {
-                self.new_transparent_peer(session).await?
+                self.new_transparent_peer(session, site_hosts).await?
             },
         };
 
@@ -1180,6 +1212,7 @@ impl Upstream {
     async fn new_transparent_peer(
         &self,
         session: &Session,
+        site_hosts: &[String],
     ) -> Option<HttpPeer> {
         // The authority as the client sent it, port included: `:authority`
         // for HTTP/2, the `Host` header for HTTP/1. `get_host` strips the
@@ -1189,12 +1222,12 @@ impl Upstream {
         // use default port for transparent http/https
         let port = if self.tls { 443 } else { 80 };
         let addr = resolve_host(host, port, self.address_family).await?;
-        // Set SNI: either use host header ($host) or configured value
-        let sni = if self.sni == "$host" {
-            host_name(host).to_string()
-        } else {
-            self.sni.clone()
-        };
+        // The same resolution a static pool uses: `$host` follows the
+        // request (lowercased, port stripped), anything else is static. A
+        // name outside the site only warns; an unusable Host connects
+        // without SNI, exactly like the static path.
+        let (sni, warning) = resolve_sni(&self.sni, Some(host), site_hosts);
+        self.warn_sni(Some(host), &sni, warning);
         Some(HttpPeer::new(addr, self.tls, sni))
     }
 
@@ -1852,7 +1885,7 @@ mod tests {
         let mut client_ip = None;
         assert_eq!(
             true,
-            up.new_http_peer(&session, &mut client_ip, true)
+            up.new_http_peer(&session, &mut client_ip, true, &[])
                 .await
                 .is_some()
         );
@@ -1860,7 +1893,7 @@ mod tests {
         // A retry must not bump processing again
         assert_eq!(
             true,
-            up.new_http_peer(&session, &mut client_ip, false)
+            up.new_http_peer(&session, &mut client_ip, false, &[])
                 .await
                 .is_some()
         );
@@ -1889,7 +1922,7 @@ mod tests {
             )
             .unwrap();
             let mut client_ip = None;
-            up.new_http_peer(&session, &mut client_ip, true)
+            up.new_http_peer(&session, &mut client_ip, true, &[])
                 .await
                 .unwrap()
         };
@@ -1922,7 +1955,7 @@ mod tests {
         .unwrap();
         let mut client_ip = None;
         let peer = up
-            .new_http_peer(&session, &mut client_ip, true)
+            .new_http_peer(&session, &mut client_ip, true, &[])
             .await
             .unwrap();
         assert_eq!(100, peer.options.max_h2_streams);
@@ -1940,7 +1973,7 @@ mod tests {
         .unwrap();
         let mut client_ip = None;
         let peer = up
-            .new_http_peer(&session, &mut client_ip, true)
+            .new_http_peer(&session, &mut client_ip, true, &[])
             .await
             .unwrap();
         assert_eq!(1, peer.options.max_h2_streams);
@@ -1956,7 +1989,7 @@ mod tests {
         let new_peer = async |conf: UpstreamConf| {
             let up = Upstream::new("policy", &conf, None).unwrap();
             let mut client_ip = None;
-            up.new_http_peer(&session, &mut client_ip, true)
+            up.new_http_peer(&session, &mut client_ip, true, &[])
                 .await
                 .unwrap()
         };
@@ -2020,7 +2053,7 @@ mod tests {
         let new_peer = async |conf: UpstreamConf| {
             let up = Upstream::new("ca", &conf, None).unwrap();
             let mut client_ip = None;
-            up.new_http_peer(&session, &mut client_ip, true)
+            up.new_http_peer(&session, &mut client_ip, true, &[])
                 .await
                 .unwrap()
         };
@@ -2268,6 +2301,53 @@ mod tests {
         );
     }
 
+    /// A Host that is one of the site's names is the normal case: the SNI
+    /// follows the request and no warning is produced.
+    #[test]
+    fn test_resolve_sni_hit_in_site_hosts_has_no_warning() {
+        let site_hosts = ["example.com".to_string()];
+        assert_eq!(
+            ("example.com".to_string(), None),
+            resolve_sni("$host", Some("example.com:8443"), &site_hosts)
+        );
+    }
+
+    /// A well-formed Host outside the site keeps its SNI (certificate
+    /// verification still decides) but is reported.
+    #[test]
+    fn test_resolve_sni_miss_in_site_hosts_warns() {
+        let site_hosts = ["example.com".to_string()];
+        assert_eq!(
+            (
+                "attacker.example.net".to_string(),
+                Some(SniWarning::OutsideSite)
+            ),
+            resolve_sni("$host", Some("attacker.example.net"), &site_hosts)
+        );
+    }
+
+    /// No set (the historic behaviour, and every caller that has no site
+    /// context) means the membership check is skipped entirely.
+    #[test]
+    fn test_resolve_sni_empty_site_hosts_has_no_warning() {
+        let no_sites: &[String] = &[];
+        assert_eq!(
+            ("example.com".to_string(), None),
+            resolve_sni("$host", Some("example.com"), no_sites)
+        );
+    }
+
+    /// An IP literal Host falls back to an empty SNI even when it is listed
+    /// in the site set: RFC 6066 forbids an IP as SNI.
+    #[test]
+    fn test_resolve_sni_ip_host_is_invalid_even_in_site_hosts() {
+        let site_hosts = ["127.0.0.1".to_string()];
+        assert_eq!(
+            (String::new(), Some(SniWarning::InvalidHost)),
+            resolve_sni("$host", Some("127.0.0.1:8080"), &site_hosts)
+        );
+    }
+
     #[tokio::test]
     async fn test_resolve_host() {
         // An IP literal needs no lookup and keeps its own family even when
@@ -2337,18 +2417,23 @@ mod tests {
             .unwrap();
             assert_eq!(true, up.is_transparent());
             let mut client_ip = None;
-            up.new_http_peer(&session, &mut client_ip, true).await
+            up.new_http_peer(&session, &mut client_ip, true, &[]).await
         };
         let peer = peer_for("127.0.0.1:19999").await.unwrap();
         assert_eq!("127.0.0.1:19999", peer.address().to_string());
-        assert_eq!("127.0.0.1", peer.sni);
+        // An IP literal is not a name a certificate can carry: the
+        // transparent path resolves the SNI exactly like a static pool and
+        // connects without one (fail closed).
+        assert_eq!("", peer.sni);
         let peer = peer_for("[::1]:8443").await.unwrap();
         assert_eq!("[::1]:8443", peer.address().to_string());
+        assert_eq!("", peer.sni);
         // tls on (sni set), so the default port is 443
         let peer = peer_for("127.0.0.1").await.unwrap();
         assert_eq!("127.0.0.1:443", peer.address().to_string());
         let peer = peer_for("localhost").await.unwrap();
         assert_eq!(443, peer.address().as_inet().unwrap().port());
+        assert_eq!("localhost", peer.sni);
         assert_eq!(true, peer_for("nonexistent.invalid").await.is_none());
         assert_eq!(true, peer_for("example.com:notaport:1").await.is_none());
     }

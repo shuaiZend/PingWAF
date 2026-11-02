@@ -29,7 +29,7 @@ use pingora::proxy::Session;
 use regex::Regex;
 use regex::bytes::RegexBuilder;
 use std::borrow::Cow;
-use std::io::{Read, Write};
+use std::io::{Cursor, Read, Write};
 use std::sync::LazyLock;
 use tracing::{debug, warn};
 
@@ -139,7 +139,7 @@ fn parse_subs_filter(rule: &str) -> Option<SubFilterParams> {
 const MAX_SUB_FILTER_BYTES: usize = 8 * 1024 * 1024;
 
 /// The content encodings the replacer can transparently decompress, replace
-/// and recompress. Anything else (`br`, `zstd`, multi-value encodings, ...)
+/// and recompress. Anything else (multi-value encodings, `compress`, ...)
 /// makes the whole response pass through untouched.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 enum ContentEncoding {
@@ -150,6 +150,10 @@ enum ContentEncoding {
     Gzip,
     /// `deflate` (zlib wrapper; raw deflate is attempted as a fallback).
     Deflate,
+    /// `br` (Brotli, RFC 7932).
+    Brotli,
+    /// `zstd` (Zstandard, RFC 8878).
+    Zstd,
 }
 
 /// Classifies the `Content-Encoding` of a response.
@@ -171,7 +175,10 @@ fn classify_content_encoding(
         "" | "identity" => Some(ContentEncoding::Plain),
         "gzip" | "x-gzip" => Some(ContentEncoding::Gzip),
         "deflate" => Some(ContentEncoding::Deflate),
-        // `br`, `zstd`, multi-value (`gzip, br`) or anything unknown.
+        "br" => Some(ContentEncoding::Brotli),
+        "zstd" => Some(ContentEncoding::Zstd),
+        // Multi-value (`gzip, br`) or anything unknown: the bytes cannot be
+        // decoded independently, so the response is left untouched.
         _ => None,
     }
 }
@@ -300,7 +307,10 @@ impl ModifyResponseBody for SubFilterReplacer {
                 *body = Some(Bytes::from(data));
                 Ok(())
             },
-            ContentEncoding::Gzip | ContentEncoding::Deflate => {
+            ContentEncoding::Gzip
+            | ContentEncoding::Deflate
+            | ContentEncoding::Brotli
+            | ContentEncoding::Zstd => {
                 // Decompress, replace, recompress. Every failure path falls
                 // back to the original compressed bytes with their
                 // `Content-Encoding` intact: the client can always decode
@@ -317,18 +327,11 @@ impl ModifyResponseBody for SubFilterReplacer {
                     return Ok(());
                 };
                 // The decompressed cap guards against compression bombs: a
-                // few MiB of gzip can expand to gigabytes, so the plaintext
-                // is bounded by the same cap as the raw buffer.
-                if plaintext.len() > MAX_SUB_FILTER_BYTES {
-                    warn!(
-                        target: PLUGIN_ID,
-                        size = plaintext.len(),
-                        "decompressed body exceeded the sub-filter cap; \
-                         passing the compressed bytes through"
-                    );
-                    *body = Some(raw.freeze());
-                    return Ok(());
-                }
+                // few MiB of gzip can expand to gigabytes, so `decompress`
+                // bounds its output at `MAX_SUB_FILTER_BYTES + 1` and
+                // returns `None` once the cap is crossed — this branch is
+                // therefore unreachable, but the response is still handled
+                // the same way: the compressed bytes pass through intact.
                 let mut data = plaintext.clone();
                 self.apply_filters(&mut data);
                 if data == plaintext {
@@ -388,15 +391,39 @@ impl SubFilterReplacer {
     /// stream cannot be decoded. `deflate` is ambiguous in the wild, so the
     /// zlib-wrapped form is tried first and raw deflate second.
     fn decompress(&self, raw: &[u8]) -> Option<Vec<u8>> {
+        // 有界读取防压缩炸弹：先按上限 +1 读取，超过即放弃解压。
+        // `read_to_end` alone would inflate the whole stream into memory
+        // before any size check — a few KiB of gzip could expand to
+        // gigabytes — so every decoder is capped at `MAX_SUB_FILTER_BYTES
+        // + 1` bytes; anything past the cap returns `None` and the caller
+        // passes the original compressed bytes through.
         let decode = |decoder: &mut dyn Read| -> Option<Vec<u8>> {
             let mut plaintext = Vec::new();
-            decoder.read_to_end(&mut plaintext).ok().map(|_| plaintext)
+            decoder
+                .take(MAX_SUB_FILTER_BYTES as u64 + 1)
+                .read_to_end(&mut plaintext)
+                .ok()?;
+            if plaintext.len() > MAX_SUB_FILTER_BYTES {
+                return None;
+            }
+            Some(plaintext)
         };
         match self.encoding {
             ContentEncoding::Plain => Some(raw.to_vec()),
             ContentEncoding::Gzip => decode(&mut GzDecoder::new(raw)),
             ContentEncoding::Deflate => decode(&mut ZlibDecoder::new(raw))
                 .or_else(|| decode(&mut DeflateDecoder::new(raw))),
+            // A corrupt or truncated stream makes `read_to_end` fail; a
+            // `zstd` frame whose header cannot be parsed fails at
+            // `Decoder::new`. Both fall back to the original bytes.
+            ContentEncoding::Brotli => {
+                decode(&mut brotli::Decompressor::new(Cursor::new(raw), 4096))
+            },
+            ContentEncoding::Zstd => {
+                let mut decoder =
+                    zstd::stream::read::Decoder::new(Cursor::new(raw)).ok()?;
+                decode(&mut decoder)
+            },
         }
     }
     /// Recompresses the replaced plaintext with the same algorithm the body
@@ -415,6 +442,24 @@ impl SubFilterReplacer {
                 // encoding; the raw form was handled by the decoder above.
                 let mut encoder =
                     ZlibEncoder::new(Vec::new(), Compression::default());
+                encoder.write_all(plaintext)?;
+                encoder.finish()?
+            },
+            ContentEncoding::Brotli => {
+                // Quality 5 and the standard 22-bit window: the body is
+                // capped at 8 MiB, so a stronger setting buys little and
+                // costs CPU on every rewritten response.
+                let mut writer =
+                    brotli::CompressorWriter::new(Vec::new(), 4096, 5, 22);
+                writer.write_all(plaintext)?;
+                // `into_inner` flushes the final block into the sink; the
+                // explicit flush keeps that independent of the internals.
+                writer.flush()?;
+                writer.into_inner()
+            },
+            ContentEncoding::Zstd => {
+                let mut encoder =
+                    zstd::stream::write::Encoder::new(Vec::new(), 3)?;
                 encoder.write_all(plaintext)?;
                 encoder.finish()?
             },
@@ -534,10 +579,10 @@ impl Plugin for SubFilter {
         }
 
         if is_matched {
-            // Encodings the plugin cannot round-trip (`br`, `zstd`,
-            // multi-value) must pass through untouched: rewriting the
-            // headers would leave a response the client can still decode
-            // but whose bytes were never substituted anyway.
+            // Encodings the plugin cannot round-trip (multi-value, unknown)
+            // must pass through untouched: rewriting the headers would
+            // leave a response the client can still decode but whose bytes
+            // were never substituted anyway.
             let Some(encoding) =
                 classify_content_encoding(&upstream_response.headers)
             else {
@@ -766,6 +811,35 @@ mod tests {
         out
     }
 
+    fn brotli_compress(data: &[u8]) -> Vec<u8> {
+        let mut writer = brotli::CompressorWriter::new(Vec::new(), 4096, 5, 22);
+        writer.write_all(data).unwrap();
+        writer.flush().unwrap();
+        writer.into_inner()
+    }
+
+    fn brotli_decompress(data: &[u8]) -> Vec<u8> {
+        let mut decoder = brotli::Decompressor::new(Cursor::new(data), 4096);
+        let mut out = Vec::new();
+        decoder.read_to_end(&mut out).unwrap();
+        out
+    }
+
+    fn zstd_compress(data: &[u8]) -> Vec<u8> {
+        let mut encoder =
+            zstd::stream::write::Encoder::new(Vec::new(), 3).unwrap();
+        encoder.write_all(data).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    fn zstd_decompress(data: &[u8]) -> Vec<u8> {
+        let mut decoder =
+            zstd::stream::read::Decoder::new(Cursor::new(data)).unwrap();
+        let mut out = Vec::new();
+        decoder.read_to_end(&mut out).unwrap();
+        out
+    }
+
     /// Feeds the whole `raw` body through the replacer at end of stream.
     fn run(replacer: &mut SubFilterReplacer, raw: &[u8]) -> Bytes {
         let session = test_session();
@@ -854,13 +928,76 @@ mod tests {
             .expect("the response is handled")
     }
 
-    /// Encodings the plugin cannot round-trip must leave the response —
-    /// headers included — completely alone.
+    /// `br` and `zstd` are acknowledged and round-trip through the same
+    /// pipeline as gzip: decompressed, replaced and recompressed.
     #[test]
-    fn brotli_bodies_are_not_touched() {
+    fn brotli_bodies_are_decompressed_replaced_and_recompressed() {
+        let mut replacer = new_replacer("sub_filter 'Google' 'PingWAF' g");
+        replacer.encoding = ContentEncoding::Brotli;
+        let raw = brotli_compress(b"Hello Google");
+        let out = run(&mut replacer, &raw);
+        assert_ne!(out, raw, "the body is rewritten, not passed through");
+        assert_eq!(brotli_decompress(&out), b"Hello PingWAF");
+    }
+
+    #[test]
+    fn zstd_bodies_are_decompressed_replaced_and_recompressed() {
+        let mut replacer = new_replacer("sub_filter 'Google' 'PingWAF' g");
+        replacer.encoding = ContentEncoding::Zstd;
+        let raw = zstd_compress(b"Hello Google");
+        let out = run(&mut replacer, &raw);
+        assert_ne!(out, raw, "the body is rewritten, not passed through");
+        assert_eq!(zstd_decompress(&out), b"Hello PingWAF");
+    }
+
+    /// No rule hit: the origin `br` bytes go out byte-identical, so ETags
+    /// and digests of the origin body stay valid.
+    #[test]
+    fn brotli_without_matches_passes_through_byte_identical() {
+        let mut replacer = new_replacer("sub_filter 'Nomatch' 'PingWAF' g");
+        replacer.encoding = ContentEncoding::Brotli;
+        let raw = brotli_compress(b"Hello Google");
+        assert_eq!(run(&mut replacer, &raw), raw);
+    }
+
+    /// A body that claims zstd but is not decodable must reach the client
+    /// exactly as it arrived, `Content-Encoding` still claiming zstd.
+    #[test]
+    fn corrupt_zstd_is_passed_through_with_its_encoding() {
+        let mut replacer = new_replacer("sub_filter 'Google' 'PingWAF' g");
+        replacer.encoding = ContentEncoding::Zstd;
+        let raw = vec![0xde, 0xad, 0xbe, 0xef, 0x00, 0xff];
+        assert_eq!(run(&mut replacer, &raw), raw);
+    }
+
+    /// The classification itself: both spellings are case-insensitive and
+    /// tolerate surrounding whitespace, while a multi-value header is not a
+    /// single algorithm and must stay unsupported.
+    #[test]
+    fn br_and_zstd_encodings_are_classified() {
+        assert_eq!(
+            Some(ContentEncoding::Brotli),
+            classify_content_encoding(&header_with_encoding("BR").headers)
+        );
+        assert_eq!(
+            Some(ContentEncoding::Zstd),
+            classify_content_encoding(&header_with_encoding(" zstd ").headers)
+        );
+    }
+
+    /// A multi-value encoding (`gzip, br`) is a chain the replacer cannot
+    /// round-trip, so the response — headers included — is left alone.
+    #[test]
+    fn multi_value_encoding_stays_unsupported() {
+        assert_eq!(
+            None,
+            classify_content_encoding(
+                &header_with_encoding("gzip, br").headers
+            )
+        );
         let plugin =
             SubFilter::new(&PluginConf::default()).expect("the conf parses");
-        let mut header = header_with_encoding("br");
+        let mut header = header_with_encoding("gzip, br");
         let result = run_handle_response(&plugin, &mut header);
         assert_eq!(result, ResponsePluginResult::Unchanged);
         assert_eq!(
@@ -873,14 +1010,36 @@ mod tests {
         );
     }
 
-    /// A multi-value encoding (`gzip, br`) is equally unsupported.
+    /// 压缩炸弹：9 MiB 全零经 brotli 压缩后只有几十字节，但解压结果远超
+    /// 上限。有界读取会在读满 `MAX_SUB_FILTER_BYTES + 1` 时放弃，原样
+    /// 透传原始压缩字节，绝不把炸弹解压进内存。
     #[test]
-    fn multi_value_encoding_is_not_touched() {
-        let plugin =
-            SubFilter::new(&PluginConf::default()).expect("the conf parses");
-        let mut header = header_with_encoding("gzip, br");
-        let result = run_handle_response(&plugin, &mut header);
-        assert_eq!(result, ResponsePluginResult::Unchanged);
+    fn brotli_bomb_is_not_inflated_past_the_cap() {
+        let plaintext = vec![0u8; 9 * 1024 * 1024];
+        let raw = brotli_compress(&plaintext);
+        assert!(
+            raw.len() <= MAX_SUB_FILTER_BYTES,
+            "the compressed bytes must fit the cap for the test to isolate \
+             the decompressed check"
+        );
+        let mut replacer = new_replacer("sub_filter 'Nomatch' 'PingWAF' g");
+        replacer.encoding = ContentEncoding::Brotli;
+        assert_eq!(run(&mut replacer, &raw), raw);
+    }
+
+    /// 同上，zstd 版本：炸弹原样透传。
+    #[test]
+    fn zstd_bomb_is_not_inflated_past_the_cap() {
+        let plaintext = vec![0u8; 9 * 1024 * 1024];
+        let raw = zstd_compress(&plaintext);
+        assert!(
+            raw.len() <= MAX_SUB_FILTER_BYTES,
+            "the compressed bytes must fit the cap for the test to isolate \
+             the decompressed check"
+        );
+        let mut replacer = new_replacer("sub_filter 'Nomatch' 'PingWAF' g");
+        replacer.encoding = ContentEncoding::Zstd;
+        assert_eq!(run(&mut replacer, &raw), raw);
     }
 
     /// A compressed body whose plaintext would blow the cap falls back to

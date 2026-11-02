@@ -245,6 +245,13 @@ pub trait LocationInstance: Send + Sync {
     fn upstream_host(&self) -> Option<&HeaderValue> {
         None
     }
+    /// The site's own host names, when the caller knows them. The upstream
+    /// layer checks a client-chosen `$host` SNI against this set and warns
+    /// when it leaves it; the empty default keeps the check off for callers
+    /// that have no domain set (and for the historic behaviour).
+    fn site_hosts(&self) -> &[String] {
+        &[]
+    }
     /// Returns the client body size limit
     fn client_body_size_limit(&self) -> usize;
     /// Called when the request is received from the client

@@ -317,6 +317,7 @@ base64 = "0.23.1"
 bytes = "1.12.1"
 bytesize = { version = "2.7.0", features = ["serde"] }
 bollard = "0.21.1"
+brotli = "8"
 bstr = "1.13.1"
 dashmap = "6.2.1"
 cfg-if = "1.0.4"

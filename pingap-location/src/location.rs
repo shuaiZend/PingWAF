@@ -525,6 +525,12 @@ pub struct Location {
     /// Host header sent to the upstream; `None` keeps the client's Host.
     upstream_host: Option<HeaderValue>,
 
+    /// The site's own host names (`LocationConf::site_hosts`), normalised in
+    /// [`Location::new`]: trimmed, lowercased, empties dropped and duplicates
+    /// removed. The upstream layer checks a `$host` SNI against this set;
+    /// empty means "the caller did not say" and disables the check.
+    site_hosts: Vec<String>,
+
     /// Additional headers to append to proxied requests
     /// These are added without removing existing headers
     // pub proxy_add_headers: Option<Vec<HttpHeader>>,
@@ -701,6 +707,18 @@ impl Location {
                 },
             });
 
+        // The site's domain set, normalised once here so the request path
+        // never trims or lowercases it: trimmed, lowercased, blank entries
+        // dropped and duplicates removed. Wildcards (`*.example.com`) are
+        // kept as configured — the SNI check expands them.
+        let mut site_hosts: Vec<String> = Vec::new();
+        for host in conf.site_hosts.iter().flatten() {
+            let host = host.trim().to_ascii_lowercase();
+            if !host.is_empty() && !site_hosts.contains(&host) {
+                site_hosts.push(host);
+            }
+        }
+
         let location = Location {
             name: name.into(),
             key,
@@ -744,6 +762,7 @@ impl Location {
                 },
                 _ => None,
             },
+            site_hosts,
             // proxy_add_headers: format_headers(&conf.proxy_add_headers)?,
             // proxy_set_headers: format_headers(&conf.proxy_set_headers)?,
             client_max_body_size: conf
@@ -816,6 +835,13 @@ impl Location {
     #[inline]
     pub fn rewrite_path(&self) -> Option<&str> {
         self.rewrite_path.as_deref()
+    }
+
+    /// The site's own host names, normalised (trimmed, lowercased,
+    /// de-duplicated). Empty when no set was configured.
+    #[inline]
+    pub fn site_hosts(&self) -> &[String] {
+        &self.site_hosts
     }
 
     /// The prefix this location matches requests on: `Some` only for a prefix
@@ -1007,6 +1033,10 @@ impl LocationInstance for Location {
         self.upstream_host.as_ref()
     }
 
+    fn site_hosts(&self) -> &[String] {
+        Location::site_hosts(self)
+    }
+
     fn name(&self) -> &str {
         self.name.as_ref()
     }
@@ -1177,6 +1207,39 @@ mod tests {
             format!("{headers:?}")
         );
     }
+
+    /// The site's host set is normalised once when the location is built:
+    /// trimmed, lowercased, blank entries dropped and duplicates removed, so
+    /// the SNI membership check sees exactly the site's names.
+    #[test]
+    fn site_hosts_are_normalised() {
+        let location = Location::new(
+            "lo",
+            &LocationConf {
+                site_hosts: Some(vec![
+                    " Example.COM ".to_string(),
+                    "example.com".to_string(),
+                    "*.Example.com".to_string(),
+                    "".to_string(),
+                    "   ".to_string(),
+                ]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            &["example.com".to_string(), "*.example.com".to_string()],
+            location.site_hosts()
+        );
+        // Unknown stays empty rather than guessing a set.
+        assert!(
+            Location::new("lo", &LocationConf::default())
+                .unwrap()
+                .site_hosts()
+                .is_empty()
+        );
+    }
+
     #[test]
     fn test_new_path_selector() {
         let selector = PathSelector::new("").unwrap();

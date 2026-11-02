@@ -853,6 +853,14 @@ pub struct LocationConf {
     /// entry, so "which virtual host the origin sees" has one obvious knob.
     pub upstream_host: Option<String>,
 
+    /// The site's own host names (its domain plus its alternate domains), as
+    /// compiled by the control plane. The upstream layer checks a `$host`
+    /// SNI against this set and warns when it leaves it, so a client-chosen
+    /// Host outside the site is visible in the logs. Empty (or absent) means
+    /// "unknown" and keeps the historic behaviour of not warning.
+    #[serde(default)]
+    pub site_hosts: Option<Vec<String>>,
+
     /// Optional request match conditions ("name:value" for an exact value, or
     /// "name" for presence) on headers / query params / cookies respectively.
     /// The location matches only when path/host match AND every listed
@@ -925,6 +933,40 @@ pub struct LocationConf {
     pub remark: Option<String>,
 }
 
+/// Checks that `host` is a syntactically valid host name for
+/// [`LocationConf::site_hosts`]: dot-separated labels of letters, digits,
+/// hyphens and dots, where a hyphen may not lead or trail a label and no
+/// label may be empty. A wildcard is only allowed as the leading `*.`
+/// label. IP literals (v4, and `[v6]`) pass — they will not match the
+/// `Host` header in practice but are not malformed configs.
+pub fn is_valid_site_host(host: &str) -> bool {
+    if host.is_empty() || host.len() > 253 {
+        return false;
+    }
+    // The wildcard must be the entire first label: `*` alone or `*.`
+    // anywhere else is not a host name the warning can match.
+    let host = match host.strip_prefix("*.") {
+        Some(rest) => {
+            if rest.is_empty() {
+                return false;
+            }
+            rest
+        },
+        None => host,
+    };
+    // Reject characters no host name contains (path, port, scheme, IPv6
+    // without brackets, ...).
+    if host
+        .chars()
+        .any(|c| !(c.is_ascii_alphanumeric() || c == '.' || c == '-'))
+    {
+        return false;
+    }
+    host.split('.').all(|label| {
+        !label.is_empty() && !label.starts_with('-') && !label.ends_with('-')
+    })
+}
+
 impl LocationConf {
     /// Validates the location configuration:
     /// 1. Validates that headers are properly formatted as "name: value"
@@ -958,6 +1000,35 @@ impl LocationConf {
                          (no scheme, path or spaces)"
                     ),
                 });
+            }
+        }
+        // The site's domain set feeds the `$host` SNI membership warning.
+        // Each entry is a host name: wildcards (`*.example.com`) are allowed,
+        // whitespace and control bytes are not, so a malformed set cannot
+        // silently disable the check by never matching.
+        if let Some(hosts) = &self.site_hosts {
+            for host in hosts {
+                let host = host.trim();
+                if host.is_empty()
+                    || host.len() > 253
+                    || host.chars().any(|c| c.is_whitespace() || c.is_control())
+                {
+                    return Err(Error::Invalid {
+                        message: format!(
+                            "site_hosts entry '{host}' must be a host name \
+                             of 1 to 253 bytes without whitespace or \
+                             control characters"
+                        ),
+                    });
+                }
+                if !is_valid_site_host(host) {
+                    return Err(Error::Invalid {
+                        message: format!(
+                            "site_hosts entries must be hostnames (wildcards \
+                             allowed only as a leading `*.`), got '{host}'"
+                        ),
+                    });
+                }
             }
         }
         // The same parse the proxy applies when it builds the location, so
@@ -2702,6 +2773,98 @@ h1_upgrade = "preserve"
         conf.rewrite = Some(r"^/api /".to_string());
         let result = conf.validate_with_upstream(Some(&upstream_names));
         assert_eq!(true, result.is_ok());
+    }
+
+    /// `site_hosts` feeds the `$host` SNI membership warning, so an entry
+    /// that is not a host name would silently make the check never match.
+    /// Wildcards are legal entries; blank, over-long or whitespace/control
+    /// carrying ones are configuration errors.
+    #[test]
+    fn test_location_site_hosts_validation() {
+        let validate = |hosts: Vec<String>| {
+            LocationConf {
+                site_hosts: Some(hosts),
+                ..Default::default()
+            }
+            .validate()
+        };
+        assert!(validate(vec![]).is_ok());
+        // Positive matrix: plain hosts, wildcard leading label, hyphenated
+        // labels, single-label localhost and IP literals.
+        assert!(
+            validate(vec![
+                "example.com".to_string(),
+                "*.example.com".to_string(),
+                "a-b.example.com".to_string(),
+                "localhost".to_string(),
+                "127.0.0.1".to_string(),
+            ])
+            .is_ok()
+        );
+        // The boundary is inclusive: 253 bytes is a legal host name.
+        assert!(validate(vec![format!("a{}", "b".repeat(252))]).is_ok());
+        // Negative matrix: blanks, over-length, whitespace/control, empty
+        // labels, hyphens at label edges, a bare wildcard and URL-ish junk.
+        for bad in [
+            "".to_string(),
+            "   ".to_string(),
+            "exa mple.com".to_string(),
+            "exa\tmple.com".to_string(),
+            "exa\u{7f}mple.com".to_string(),
+            "a..b".to_string(),
+            "-x.com".to_string(),
+            "x-.com".to_string(),
+            "a.-b.com".to_string(),
+            "*".to_string(),
+            "example.com/*".to_string(),
+            "example.com:8443".to_string(),
+            "http://example.com".to_string(),
+            format!("a{}", "b".repeat(253)),
+        ] {
+            let err = validate(vec![bad.clone()])
+                .expect_err("the entry must be rejected");
+            assert!(
+                err.to_string().contains("site_hosts"),
+                "{bad:?} must fail with a site_hosts message, got: {err}"
+            );
+        }
+    }
+
+    /// The host-shape predicate behind the `site_hosts` check, exercised
+    /// directly so each rule is visible: wildcards only as a leading `*.`,
+    /// no empty labels, no leading/trailing hyphens, IP literals allowed.
+    #[test]
+    fn test_is_valid_site_host() {
+        use crate::is_valid_site_host;
+        for good in [
+            "example.com",
+            "*.example.com",
+            "a-b.example.com",
+            "localhost",
+            "127.0.0.1",
+            "a.b.c.d.example.com",
+        ] {
+            assert!(is_valid_site_host(good), "{good:?} must be accepted");
+        }
+        for bad in [
+            "",
+            ".",
+            "*",
+            "*.",
+            "a..b",
+            "-x.com",
+            "x-.com",
+            "a.-b.com",
+            "a-.b.com",
+            "ex aple.com",
+            "example.com/",
+            "example.com:8443",
+            "http://example.com",
+            "2001:db8::1",
+            &format!("a{}", "b".repeat(253)),
+        ] {
+            assert!(!is_valid_site_host(bad), "{bad:?} must be rejected");
+        }
     }
 
     /// A blank `rewrite_path` is a configuration error, not "unset": the

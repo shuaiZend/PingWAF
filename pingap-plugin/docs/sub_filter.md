@@ -61,10 +61,11 @@ of stream and emits the result.
 
 ### Compressed responses
 
-The plugin understands `Content-Encoding: gzip` (and `x-gzip`) and
+The plugin understands `Content-Encoding: gzip` (and `x-gzip`),
 `Content-Encoding: deflate` (zlib wrapper; raw deflate is attempted as a
-fallback). For those responses it decompresses the body, runs the filters on
-the plaintext, and recompresses with the same algorithm before emitting it:
+fallback), `Content-Encoding: br` (brotli) and `Content-Encoding: zstd`. For
+those responses it decompresses the body, runs the filters on the plaintext,
+and recompresses with the same algorithm before emitting it:
 
 - `Content-Encoding` is kept (the body is recompressed the same way it
   arrived), `Content-Length` is removed and the response is sent as
@@ -75,13 +76,18 @@ the plaintext, and recompresses with the same algorithm before emitting it:
   for other `Accept-Encoding` values).
 - **Cap: 8 MiB on the decompressed plaintext** (a few MiB of gzip can expand
   to gigabytes, so capping the raw bytes alone would not stop a compression
-  bomb). Above the cap, or when decompression fails, the original compressed
-  bytes are passed through as-is.
+  bomb). The read is bounded — each decoder is capped at the limit while
+  inflating — so an oversized stream is abandoned mid-decompression instead
+  of being fully inflated into memory first. Above the cap, when
+  decompression fails or when recompression fails, the original compressed
+  bytes are passed through as-is with their `Content-Encoding` kept.
 - **No rule matched:** the origin's compressed bytes are emitted verbatim —
-  byte-identical output, no recompression.
+  the body is byte-identical and is not recompressed. The response was still
+  taken over, so the header normalisation above (chunked, weak `ETag`,
+  `Vary: Accept-Encoding`, …) applies as usual.
 
-Encodings the plugin cannot round-trip — `br`, `zstd`, multi-value values
-such as `gzip, br`, or anything unknown — leave the response completely
+Encodings the plugin cannot round-trip — multi-value values such as
+`gzip, br`, or anything unknown — leave the response completely
 untouched (body *and* headers), and a debug line is logged.
 
 ### Proxy-level decompression runs first
