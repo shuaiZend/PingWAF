@@ -1,0 +1,91 @@
+---
+/**
+ * TLS scene — a certificate at 62/90 days of validity, the four-step ACME
+ * DNS-01 renewal timeline and the providers that can answer the challenge.
+ * Rules live in `global.css` under "Console scenes" (fragment merged from
+ * `src/styles/scenes-tls.css`).
+ */
+import SceneBackdrop from "./SceneBackdrop.astro";
+---
+<SceneBackdrop prefix="tls" />
+
+<!-- Certificate -->
+<g>
+  <rect class="sc-card" x="16" y="20" width="608" height="128" rx="10" />
+  <text class="sc-label" x="32" y="42">CERTIFICATE</text>
+  <g class="sc-badge sc-badge--ok sc-tls-valid" transform="translate(556 32)">
+    <rect width="36" height="17" rx="4" />
+    <text x="18" y="12" text-anchor="middle">VALID</text>
+  </g>
+  <text class="sc-tls-domain" x="32" y="76">example.com</text>
+  <text class="sc-sub" x="32" y="96">issued by Let's Encrypt · expires in 62 days</text>
+  <rect class="sc-tls-track" x="32" y="112" width="576" height="6" rx="3" />
+  <rect class="sc-tls-bar" x="32" y="112" width="397" height="6" rx="3" />
+  <text class="sc-sub" x="608" y="108" text-anchor="end">62 / 90</text>
+</g>
+
+<!-- ACME renewal timeline -->
+<g>
+  <rect class="sc-card" x="16" y="164" width="608" height="112" rx="10" />
+  <text class="sc-label" x="32" y="186">ACME RENEWAL</text>
+
+  <line class="sc-link" x1="97" x2="233" y1="216" y2="216" />
+  <line class="sc-link" x1="247" x2="393" y1="216" y2="216" />
+  <line class="sc-link" x1="407" x2="553" y1="216" y2="216" />
+
+  <g>
+    <circle class="sc-tls-halo sc-tls-slot-1" cx="90" cy="216" r="13" />
+    <circle class="sc-tls-node" cx="90" cy="216" r="7" />
+    <circle class="sc-tls-node-on sc-tls-slot-1" cx="90" cy="216" r="7" />
+    <text class="sc-mono" x="90" y="242" text-anchor="middle">DNS-01</text>
+    <text class="sc-sub" x="90" y="258" text-anchor="middle">provider</text>
+  </g>
+  <g>
+    <circle class="sc-tls-halo sc-tls-slot-2" cx="240" cy="216" r="13" />
+    <circle class="sc-tls-node" cx="240" cy="216" r="7" />
+    <circle class="sc-tls-node-on sc-tls-slot-2" cx="240" cy="216" r="7" />
+    <text class="sc-mono" x="240" y="242" text-anchor="middle">issue</text>
+    <text class="sc-sub" x="240" y="258" text-anchor="middle">30 s</text>
+  </g>
+  <g>
+    <circle class="sc-tls-halo sc-tls-slot-3" cx="400" cy="216" r="13" />
+    <circle class="sc-tls-node" cx="400" cy="216" r="7" />
+    <circle class="sc-tls-node-on sc-tls-slot-3" cx="400" cy="216" r="7" />
+    <text class="sc-mono" x="400" y="242" text-anchor="middle">deployed</text>
+    <text class="sc-sub" x="400" y="258" text-anchor="middle">agent push</text>
+  </g>
+  <g>
+    <circle class="sc-tls-halo sc-tls-slot-4" cx="560" cy="216" r="13" />
+    <circle class="sc-tls-node" cx="560" cy="216" r="7" />
+    <circle class="sc-tls-node-on sc-tls-slot-4" cx="560" cy="216" r="7" />
+    <text class="sc-mono" x="560" y="242" text-anchor="middle">rotated</text>
+    <text class="sc-sub" x="560" y="258" text-anchor="middle">60 days</text>
+  </g>
+</g>
+
+<!-- DNS-01 providers -->
+<g>
+  <rect class="sc-card" x="16" y="292" width="608" height="68" rx="10" />
+  <text class="sc-label" x="32" y="314">DNS-01 PROVIDERS</text>
+  <g class="sc-badge sc-badge--plain sc-tls-provider" transform="translate(32 324)">
+    <rect width="56" height="18" rx="4" />
+    <text x="28" y="12.5" text-anchor="middle">Aliyun</text>
+  </g>
+  <g class="sc-badge sc-badge--plain sc-tls-provider" transform="translate(96 324)">
+    <rect width="78" height="18" rx="4" />
+    <text x="39" y="12.5" text-anchor="middle">Cloudflare</text>
+  </g>
+  <g class="sc-badge sc-badge--plain sc-tls-provider" transform="translate(182 324)">
+    <rect width="62" height="18" rx="4" />
+    <text x="31" y="12.5" text-anchor="middle">DNSPod</text>
+  </g>
+  <g class="sc-badge sc-badge--plain sc-tls-provider" transform="translate(252 324)">
+    <rect width="96" height="18" rx="4" />
+    <text x="48" y="12.5" text-anchor="middle">Huawei Cloud</text>
+  </g>
+  <g class="sc-badge sc-badge--plain sc-tls-provider" transform="translate(356 324)">
+    <rect width="60" height="18" rx="4" />
+    <text x="30" y="12.5" text-anchor="middle">manual</text>
+  </g>
+  <text class="sc-sub" x="608" y="336" text-anchor="end">HSTS · mTLS · force HTTPS</text>
+</g>

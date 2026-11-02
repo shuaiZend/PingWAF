@@ -1,0 +1,96 @@
+---
+/**
+ * Access control scene — ordered IP/CIDR/ASN rules, a geo/ASN grid with
+ * flagged origins dimming out, and the per-identity rate limit.
+ * Rules live in `global.css` under "Console scenes".
+ */
+import SceneBackdrop from "./SceneBackdrop.astro";
+
+const rules = [
+  { cidr: "10.0.0.0/8", action: "BLOCK", tone: "danger", w: 56 },
+  { cidr: "203.0.113.0/24", action: "JS CHALLENGE", tone: "warn", w: 104 },
+  { cidr: "198.51.100.7", action: "ALLOW", tone: "ok", w: 56 },
+  { cidr: "AS13335", action: "ALLOW", tone: "ok", w: 56 },
+];
+
+/** 8×6 dot grid; flagged points get the dimming animation. */
+const flagged = new Set(["1-2", "4-0", "5-2", "2-3", "6-4", "0-4", "3-5"]);
+const dots: { x: number; y: number; flagged: boolean; dim: string }[] = [];
+let flaggedIndex = 0;
+for (let row = 0; row < 6; row++) {
+  for (let col = 0; col < 8; col++) {
+    const isFlagged = flagged.has(`${col}-${row}`);
+    dots.push({
+      x: 436 + col * 24,
+      y: 72 + row * 24,
+      flagged: isFlagged,
+      dim: isFlagged ? ` sc-access-dim--${++flaggedIndex}` : "",
+    });
+  }
+}
+---
+<SceneBackdrop prefix="access" />
+
+<!-- IP rules table -->
+<g>
+  <rect class="sc-card" x="16" y="20" width="380" height="340" rx="10" />
+  <text class="sc-label" x="32" y="44">IP RULES</text>
+  <text class="sc-sub" x="380" y="44" text-anchor="end">action</text>
+  <line class="sc-rule" x1="16" x2="396" y1="56" y2="56" />
+
+  {
+    rules.map((rule, index) => {
+      const top = 64 + index * 52;
+      return (
+        <g>
+          <rect
+            class={`sc-access-hl${index > 0 ? ` sc-access-hl--${index + 1}` : ""}`}
+            x="16"
+            y={top}
+            width="380"
+            height="52"
+          />
+          <text class="sc-mono" x="32" y={top + 31}>
+            {rule.cidr}
+          </text>
+          <g class={`sc-badge sc-badge--${rule.tone}`} transform={`translate(${380 - rule.w} ${top + 17})`}>
+            <rect width={rule.w} height="18" rx="4" />
+            <text x={rule.w / 2} y="12.5" text-anchor="middle">
+              {rule.action}
+            </text>
+          </g>
+        </g>
+      );
+    })
+  }
+
+  <line class="sc-rule" x1="16" x2="396" y1="312" y2="312" />
+  <text class="sc-sub" x="32" y="336">first match wins · CIDR + ASN aware</text>
+</g>
+
+<!-- Geo / ASN grid -->
+<g>
+  <rect class="sc-card" x="408" y="20" width="216" height="200" rx="10" />
+  <text class="sc-label" x="424" y="44">GEO · ASN</text>
+  {
+    dots.map((dot) =>
+      dot.flagged ? (
+        <circle class={`sc-dot--danger sc-access-dim${dot.dim}`} cx={dot.x} cy={dot.y} r="2.5" />
+      ) : (
+        <circle class="sc-dot" cx={dot.x} cy={dot.y} r="2.5" />
+      )
+    )
+  }
+</g>
+
+<!-- Rate limit -->
+<g>
+  <rect class="sc-card" x="408" y="232" width="216" height="128" rx="10" />
+  <text class="sc-label" x="424" y="256">RATE LIMIT</text>
+  <text class="sc-sub" x="424" y="276">per IP · path · ASN</text>
+
+  <text class="sc-value sc-access-tick" x="424" y="330">10</text>
+  <text class="sc-value sc-access-tick sc-access-tick--alt" x="424" y="330">13</text>
+  <text class="sc-sub" x="468" y="330">r/s</text>
+  <text class="sc-sub" x="424" y="352">burst 20</text>
+</g>

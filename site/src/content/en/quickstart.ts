@@ -133,9 +133,8 @@ const quickstart = {
         },
       ],
       note: "On Linux you can skip the build: curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh | sudo bash -s -- --mode all-in-one",
-      shot: {
-        key: "agents",
-        url: "localhost:9080/agents",
+      scene: {
+        id: "agents",
         caption: "A source build can run as the control plane, then enroll agents from the fleet page.",
         alt: "Agent fleet page listing enrolled edge agents and heartbeat state",
       },

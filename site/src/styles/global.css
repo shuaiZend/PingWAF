@@ -1122,6 +1122,993 @@ p {
 }
 
 /* ============================================================
+   Console scenes
+   Shared chrome for the inline SVG scenes rendered by
+   `src/components/scenes/SceneHost.astro` on the homepage showcase, the
+   features page and the quickstart source path. Per-scene rules follow the
+   shared classes below; nothing here is scoped to a single scene.
+   ============================================================ */
+.scene {
+  position: relative;
+  display: block;
+  margin: 0;
+  border: 1px solid var(--color-border-line);
+  border-radius: var(--radius-xl);
+  background: var(--color-bg-elevated);
+  overflow: hidden;
+  box-shadow: var(--site-shadow-card);
+}
+
+.scene__canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 640 / 400;
+  overflow: hidden;
+  font-family: var(--site-font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.scene__caption {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 11px 14px;
+  border-top: 1px solid var(--color-border-line);
+  background: var(--site-surface-inset);
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--color-text-subtle);
+}
+
+.scene__caption .icon {
+  width: 13px;
+  height: 13px;
+  margin-top: 2px;
+  color: var(--color-bg-brand);
+}
+
+/* ---------------------------------------------------------- backdrop */
+.sc-grid-line {
+  stroke: var(--site-grid-line);
+  stroke-width: 1;
+}
+
+.sc-grid {
+  opacity: 0.55;
+}
+
+.sc-glow-1 {
+  stop-color: var(--color-bg-brand);
+  stop-opacity: 0.14;
+}
+
+.sc-glow-2 {
+  stop-color: var(--color-bg-brand);
+  stop-opacity: 0.04;
+}
+
+.sc-glow-3 {
+  stop-color: var(--color-bg-brand);
+  stop-opacity: 0;
+}
+
+.sc-scan-1,
+.sc-scan-3 {
+  stop-color: var(--color-bg-brand);
+  stop-opacity: 0;
+}
+
+.sc-scan-2 {
+  stop-color: var(--color-bg-brand);
+  stop-opacity: 0.07;
+}
+
+/* ---------------------------------------------------------- surfaces */
+.sc-card {
+  fill: var(--color-bg-elevated);
+  stroke: var(--color-border-line);
+  stroke-width: 1;
+}
+
+.sc-link {
+  stroke: var(--color-border-fill);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+}
+
+.sc-rule {
+  stroke: var(--color-border-line);
+  stroke-width: 1;
+}
+
+/* ---------------------------------------------------------- type */
+.sc-label {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  fill: var(--color-text-subtle);
+}
+
+.sc-value {
+  font-size: 24px;
+  font-weight: 650;
+  letter-spacing: -0.03em;
+  fill: var(--color-text-strong);
+}
+
+.sc-sub {
+  font-size: 9px;
+  fill: var(--color-text-subtle);
+}
+
+.sc-mono {
+  font-size: 11px;
+  fill: var(--color-text-default);
+}
+
+.sc-code {
+  font-size: 10px;
+  fill: var(--color-text-default);
+}
+
+.sc-code--accent {
+  fill: var(--color-text-danger);
+}
+
+.sc-step {
+  font-size: 10px;
+  font-weight: 650;
+  fill: var(--color-bg-brand);
+}
+
+.sc-stage-name {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  fill: var(--color-text-strong);
+}
+
+.sc-verdict {
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  fill: var(--color-text-danger);
+}
+
+.sc-dot {
+  fill: var(--color-bg-success);
+}
+
+.sc-dot--danger {
+  fill: var(--color-bg-danger);
+}
+
+.sc-dot--warn {
+  fill: var(--color-bg-warning);
+}
+
+/* ---------------------------------------------------------- badges */
+.sc-badge text {
+  font-size: 8.5px;
+  letter-spacing: 0.04em;
+}
+
+.sc-badge--plain rect {
+  fill: var(--color-bg-recessed);
+  stroke: var(--color-border-line);
+  stroke-width: 1;
+}
+
+.sc-badge--plain text {
+  fill: var(--color-text-subtle);
+}
+
+.sc-badge--brand rect {
+  fill: var(--site-brand-soft);
+  stroke: var(--site-brand-line);
+  stroke-width: 1;
+}
+
+.sc-badge--brand text {
+  fill: var(--color-bg-brand);
+}
+
+.sc-badge--ok rect {
+  fill: var(--color-bg-success);
+  fill-opacity: 0.12;
+  stroke: var(--color-bg-success);
+  stroke-opacity: 0.3;
+  stroke-width: 1;
+}
+
+.sc-badge--ok text {
+  fill: var(--color-text-success);
+}
+
+.sc-badge--danger rect {
+  fill: var(--color-bg-danger);
+  fill-opacity: 0.12;
+  stroke: var(--color-bg-danger);
+  stroke-opacity: 0.3;
+  stroke-width: 1;
+}
+
+.sc-badge--danger text {
+  fill: var(--color-text-danger);
+}
+
+.sc-badge--warn rect {
+  fill: var(--color-bg-warning);
+  fill-opacity: 0.14;
+  stroke: var(--color-bg-warning);
+  stroke-opacity: 0.35;
+  stroke-width: 1;
+}
+
+.sc-badge--warn text {
+  fill: var(--color-text-default);
+}
+
+/* ---------------------------------------------------------- motion */
+.sc-scan {
+  opacity: 0;
+  animation: sc-scan 16s linear infinite;
+}
+
+@keyframes sc-scan {
+  0% {
+    transform: translateX(0);
+    opacity: 0;
+  }
+
+  2% {
+    opacity: 1;
+  }
+
+  16% {
+    transform: translateX(840px);
+    opacity: 0;
+  }
+
+  100% {
+    transform: translateX(840px);
+    opacity: 0;
+  }
+}
+
+/* ---------------------------------------------------------- waf scene */
+.sc-waf-payload {
+  fill: var(--color-text-danger);
+  animation: sc-waf-payload 4s ease-in-out infinite;
+}
+
+@keyframes sc-waf-payload {
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.55;
+  }
+}
+
+.sc-waf-stage {
+  animation: sc-waf-stage 8s steps(1) infinite;
+}
+
+.sc-waf-stage:nth-of-type(2) {
+  animation-delay: 1.2s;
+}
+
+.sc-waf-stage:nth-of-type(3) {
+  animation-delay: 2.4s;
+}
+
+.sc-waf-stage:nth-of-type(4) {
+  animation-delay: 3.6s;
+}
+
+@keyframes sc-waf-stage {
+  0%,
+  5% {
+    opacity: 0.45;
+  }
+
+  14%,
+  100% {
+    opacity: 1;
+  }
+}
+
+.sc-waf-link {
+  animation: sc-waf-link 8s steps(1) infinite;
+}
+
+.sc-waf-link:nth-of-type(2) {
+  animation-delay: 1.2s;
+}
+
+.sc-waf-link:nth-of-type(3) {
+  animation-delay: 2.4s;
+}
+
+@keyframes sc-waf-link {
+  0%,
+  12% {
+    stroke: var(--color-border-fill);
+  }
+
+  18%,
+  100% {
+    stroke: var(--color-bg-brand);
+  }
+}
+
+/* ---------------------------------------------------------- logs scene */
+.sc-row-time {
+  font-size: 9px;
+  fill: var(--color-text-subtle);
+  opacity: 0.85;
+}
+
+.sc-row-status {
+  font-size: 9.5px;
+  fill: var(--color-text-default);
+}
+
+.sc-logs-flow {
+  animation: sc-logs-flow 16s steps(6, end) infinite;
+}
+
+@keyframes sc-logs-flow {
+  from {
+    transform: translateY(0);
+  }
+
+  to {
+    transform: translateY(-240px);
+  }
+}
+
+.sc-logs-verdict {
+  animation: sc-logs-verdict 4s ease-in-out infinite;
+}
+
+@keyframes sc-logs-verdict {
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.6;
+  }
+}
+
+.sc-logs-copy {
+  animation: sc-logs-copy 8s ease-in-out infinite;
+}
+
+@keyframes sc-logs-copy {
+  0%,
+  70%,
+  100% {
+    opacity: 1;
+  }
+
+  80% {
+    opacity: 0.5;
+  }
+}
+
+.sc-bot-area-1 {
+  stop-color: var(--color-bg-brand);
+  stop-opacity: 0.14;
+}
+
+.sc-bot-area-2 {
+  stop-color: var(--color-bg-brand);
+  stop-opacity: 0;
+}
+
+.sc-bot-line {
+  fill: none;
+  stroke: var(--color-bg-brand);
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.sc-bot-area {
+  fill: url(#sc-bot-area);
+}
+
+.sc-bot-peak {
+  fill: var(--color-bg-brand);
+  animation: sc-bot-peak 8s ease-in-out infinite;
+}
+
+@keyframes sc-bot-peak {
+  0%,
+  100% {
+    opacity: 0.9;
+  }
+
+  50% {
+    opacity: 0.25;
+  }
+}
+
+/* r=22 -> circumference 138.2; settled frame shows ~60% (offset 55.3) */
+.sc-bot-ring-track {
+  fill: none;
+  stroke: var(--color-border-line);
+  stroke-width: 5;
+  opacity: 0.9;
+}
+
+.sc-bot-ring {
+  fill: none;
+  stroke: var(--color-bg-brand);
+  stroke-width: 5;
+  stroke-linecap: round;
+  stroke-dasharray: 138.2;
+  stroke-dashoffset: 55.3;
+  transform: rotate(-90deg);
+  transform-origin: center;
+  transform-box: fill-box;
+  animation: sc-bot-ring 4s linear infinite;
+}
+
+@keyframes sc-bot-ring {
+  from {
+    stroke-dashoffset: 55.3;
+  }
+
+  to {
+    stroke-dashoffset: 138.2;
+  }
+}
+
+.sc-bot-num {
+  font-size: 20px;
+  font-weight: 650;
+  letter-spacing: -0.03em;
+  fill: var(--color-text-strong);
+}
+
+.sc-bot-num--danger {
+  fill: var(--color-text-danger);
+}
+
+/* Two stacked readings swap every 4s; the alternate layer leads hidden. */
+.sc-bot-tick {
+  opacity: 1;
+  animation: sc-bot-tick 4s steps(1, end) infinite;
+}
+
+.sc-bot-tick--alt {
+  opacity: 0;
+  animation: sc-bot-tick 4s steps(1, end) infinite;
+  animation-delay: -2s;
+}
+
+@keyframes sc-bot-tick {
+  0%,
+  49.9% {
+    opacity: 1;
+  }
+
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+
+.sc-bot-breath {
+  animation: sc-bot-breath 2s ease-in-out infinite;
+}
+
+@keyframes sc-bot-breath {
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* ---------------------------------------------------------- access scene */
+/* Row highlight rotates through the four rules over the 16s master loop;
+   the settled frame keeps every highlight invisible. */
+.sc-access-hl {
+  fill: var(--site-brand-soft);
+  opacity: 0;
+  animation: sc-access-hl 16s steps(1, end) infinite;
+}
+
+.sc-access-hl--2 {
+  animation-delay: -4s;
+}
+
+.sc-access-hl--3 {
+  animation-delay: -8s;
+}
+
+.sc-access-hl--4 {
+  animation-delay: -12s;
+}
+
+@keyframes sc-access-hl {
+  0%,
+  24% {
+    opacity: 1;
+  }
+
+  25%,
+  100% {
+    opacity: 0;
+  }
+}
+
+.sc-access-dim {
+  opacity: 0.18;
+  animation: sc-access-dim 4s ease-in-out infinite;
+}
+
+.sc-access-dim--2 {
+  animation-delay: -0.5s;
+}
+
+.sc-access-dim--3 {
+  animation-delay: -1s;
+}
+
+.sc-access-dim--4 {
+  animation-delay: -1.5s;
+}
+
+.sc-access-dim--5 {
+  animation-delay: -2s;
+}
+
+.sc-access-dim--6 {
+  animation-delay: -2.5s;
+}
+
+.sc-access-dim--7 {
+  animation-delay: -3s;
+}
+
+@keyframes sc-access-dim {
+  0%,
+  20% {
+    opacity: 1;
+  }
+
+  35%,
+  100% {
+    opacity: 0.18;
+  }
+}
+
+/* Rate-limit reading wavers between two values every 8s. */
+.sc-access-tick {
+  opacity: 1;
+  animation: sc-access-tick 8s steps(1, end) infinite;
+}
+
+.sc-access-tick--alt {
+  opacity: 0;
+  animation: sc-access-tick 8s steps(1, end) infinite;
+  animation-delay: -4s;
+}
+
+@keyframes sc-access-tick {
+  0%,
+  49.9% {
+    opacity: 1;
+  }
+
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+
+.sc-caching-ring-track {
+  stroke: var(--color-border-line);
+  stroke-width: 6;
+  opacity: 0.9;
+}
+
+/* 65.3% arc; the 8s wave nudges dashoffset ±3 so the ratio feels live. */
+.sc-caching-ring-value {
+  stroke: var(--color-bg-brand);
+  stroke-width: 6;
+  stroke-linecap: round;
+  animation: sc-caching-ring 8s ease-in-out infinite;
+}
+
+@keyframes sc-caching-ring {
+  0%,
+  100% {
+    stroke-dashoffset: 74.1;
+  }
+
+  50% {
+    stroke-dashoffset: 71.1;
+  }
+}
+
+.sc-caching-hit-label {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  fill: var(--color-text-success);
+}
+
+.sc-caching-heart {
+  animation: sc-caching-heart 2s ease-in-out infinite;
+}
+
+@keyframes sc-caching-heart {
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* Miss path (client → edge → origin) and hit return path pulse in
+   opposite 4s phases so traffic appears to alternate. */
+.sc-caching-miss-link {
+  stroke: var(--color-border-fill);
+  animation: sc-caching-miss-link 4s ease-in-out infinite;
+}
+
+.sc-caching-hit-link {
+  stroke: var(--color-bg-success);
+  animation: sc-caching-hit-link 4s ease-in-out infinite;
+  animation-delay: -2s;
+}
+
+@keyframes sc-caching-miss-link {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+
+  50% {
+    opacity: 1;
+  }
+}
+
+@keyframes sc-caching-hit-link {
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* Origin nodes light up round-robin, one per 8/3 of the 8s loop. */
+.sc-caching-origin-node {
+  fill: var(--color-border-line);
+}
+
+.sc-caching-origin-active {
+  fill: var(--color-bg-brand);
+  opacity: 0;
+  animation: sc-caching-poll 8s steps(1, end) infinite;
+}
+
+.sc-caching-origin-active--2 {
+  animation-delay: -2.6667s;
+}
+
+.sc-caching-origin-active--3 {
+  animation-delay: -5.3333s;
+}
+
+@keyframes sc-caching-poll {
+  0%,
+  33.3% {
+    opacity: 1;
+  }
+
+  33.4%,
+  100% {
+    opacity: 0;
+  }
+}
+
+/* Ratio figures flip every other 2s half-cycle. */
+.sc-caching-ratio-foot {
+  font-size: 9.5px;
+  fill: var(--color-text-subtle);
+  animation: sc-caching-tick 4s steps(1, end) infinite;
+}
+
+.sc-caching-ratio-foot--alt {
+  opacity: 0;
+  animation-delay: -2s;
+}
+
+@keyframes sc-caching-tick {
+  0%,
+  49.9% {
+    opacity: 1;
+  }
+
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+
+/* ---------------------------------------------------------- agents scene */
+.sc-agents-heart {
+  animation: sc-agents-heart 2s ease-in-out infinite;
+}
+
+@keyframes sc-agents-heart {
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.4;
+  }
+}
+
+.sc-agents-sync {
+  animation: sc-agents-sync 4s ease-in-out infinite;
+}
+
+@keyframes sc-agents-sync {
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.55;
+  }
+}
+
+/* Diff lines take turns being emphasised over the 16s master loop. */
+.sc-agents-diff--add {
+  fill: var(--color-text-success);
+  animation: sc-agents-diff 16s steps(1, end) infinite;
+}
+
+.sc-agents-diff--remove {
+  fill: var(--color-text-danger);
+  animation: sc-agents-diff 16s steps(1, end) infinite;
+  animation-delay: -8s;
+}
+
+@keyframes sc-agents-diff {
+  0%,
+  49.9% {
+    opacity: 1;
+  }
+
+  50%,
+  100% {
+    opacity: 0.62;
+  }
+}
+
+.sc-agents-rollback {
+  animation: sc-agents-rollback 8s ease-in-out infinite;
+}
+
+@keyframes sc-agents-rollback {
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.6;
+  }
+}
+
+.sc-tls-domain {
+  font-size: 17px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  fill: var(--color-text-strong);
+}
+
+.sc-tls-track {
+  fill: var(--color-border-line);
+}
+
+.sc-tls-bar {
+  fill: var(--color-bg-brand);
+  transform-box: fill-box;
+  transform-origin: left center;
+  animation: sc-tls-bar 8s ease-in-out infinite;
+}
+
+/* Wobbles around the settled 62/90 width; never retreats to zero. */
+@keyframes sc-tls-bar {
+  0%,
+  100% {
+    transform: scaleX(1);
+  }
+
+  50% {
+    transform: scaleX(0.965);
+  }
+}
+
+.sc-tls-valid {
+  animation: sc-tls-valid 4s ease-in-out infinite;
+}
+
+@keyframes sc-tls-valid {
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.6;
+  }
+}
+
+/* ---------------------------------------------------------- ACME timeline */
+.sc-tls-node {
+  fill: var(--color-bg-recessed);
+  stroke: var(--color-border-fill);
+  stroke-width: 1.5;
+}
+
+/* Brand-colored overlay that fades in when the node lights up.
+   One shared keyframe; the stagger comes from negative delays so the
+   16s master loop stays in phase. */
+.sc-tls-node-on {
+  fill: var(--color-bg-brand);
+  opacity: 0;
+  animation: sc-tls-on 16s steps(1, end) infinite;
+}
+
+.sc-tls-halo {
+  fill: var(--color-bg-brand);
+  opacity: 0;
+  animation: sc-tls-halo 16s steps(1, end) infinite;
+}
+
+.sc-tls-slot-1 {
+  animation-delay: 0s;
+}
+
+.sc-tls-slot-2 {
+  animation-delay: -12s;
+}
+
+.sc-tls-slot-3 {
+  animation-delay: -8s;
+}
+
+.sc-tls-slot-4 {
+  animation-delay: -4s;
+}
+
+/* 0-1 at the start of the owning 4s slot, then stays lit until the
+   loop restarts — the timeline accumulates left to right. */
+@keyframes sc-tls-on {
+  0% {
+    opacity: 0;
+  }
+
+  2%,
+  100% {
+    opacity: 1;
+  }
+}
+
+/* Soft ring that flashes once when its node lights, then settles faint. */
+@keyframes sc-tls-halo {
+  0% {
+    opacity: 0;
+  }
+
+  2% {
+    opacity: 0.35;
+  }
+
+  25%,
+  100% {
+    opacity: 0.12;
+  }
+}
+
+/* ---------------------------------------------------------- provider badges */
+.sc-tls-provider {
+  opacity: 0.85;
+  animation: sc-tls-provider 16s ease-in-out infinite;
+}
+
+.sc-tls-provider:nth-of-type(1) {
+  animation-delay: 0s;
+}
+
+.sc-tls-provider:nth-of-type(2) {
+  animation-delay: -3.2s;
+}
+
+.sc-tls-provider:nth-of-type(3) {
+  animation-delay: -6.4s;
+}
+
+.sc-tls-provider:nth-of-type(4) {
+  animation-delay: -9.6s;
+}
+
+.sc-tls-provider:nth-of-type(5) {
+  animation-delay: -12.8s;
+}
+
+/* Brief brightening in each badge's slot, then back to rest. */
+@keyframes sc-tls-provider {
+  0%,
+  8% {
+    opacity: 0.85;
+  }
+
+  4% {
+    opacity: 1;
+  }
+
+  9%,
+  100% {
+    opacity: 0.85;
+  }
+}
+
+/* ---------------------------------------------------------- static frame
+   The base declarations above already describe the settled, fully readable
+   composition; with animations disabled nothing collapses or hides. */
+
+/* ---------------------------------------------------------- static frame */
+@media (prefers-reduced-motion: reduce) {
+  .scene__canvas * {
+    animation: none !important;
+  }
+
+  .sc-scan {
+    display: none;
+  }
+
+  /* The renewal timeline settles with every step completed. */
+  .sc-tls-node-on {
+    opacity: 1;
+  }
+
+  /* The log loop repeats rows 7-12 of 1-6; a frozen list would read as
+     duplicate entries, so the settled frame keeps the first six. */
+  .sc-logs-flow > g:nth-child(n + 7) {
+    display: none;
+  }
+}
+
+/* ============================================================
    Proof strip
    ============================================================ */
 .proof {
@@ -1656,15 +2643,11 @@ p {
 }
 
 .showcase__item {
-  grid-column: span 4;
+  grid-column: span 6;
 }
 
-.showcase__item--wide {
-  grid-column: span 8;
-}
-
-.showcase__item--full {
-  grid-column: span 12;
+.showcase__item--center {
+  grid-column: 4 / span 6;
 }
 
 /* ============================================================
@@ -2764,6 +3747,15 @@ tbody tr:hover {
     padding-block: 56px 64px;
   }
 
+  /* Scenes keep a readable width once the two-column layout collapses.
+     `align-items: center` stops grid items stretching, so width is explicit. */
+  .feature__media,
+  .path__media {
+    width: 100%;
+    max-width: 720px;
+    margin-inline: auto;
+  }
+
   .bench-charts {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -2807,8 +3799,8 @@ tbody tr:hover {
   }
 
   .showcase__item,
-  .showcase__item--wide {
-    grid-column: span 6;
+  .showcase__item--center {
+    grid-column: span 12;
   }
 
   .grid--4,
@@ -2890,8 +3882,7 @@ tbody tr:hover {
   }
 
   .showcase__item,
-  .showcase__item--wide,
-  .showcase__item--full {
+  .showcase__item--center {
     grid-column: span 12;
   }
 

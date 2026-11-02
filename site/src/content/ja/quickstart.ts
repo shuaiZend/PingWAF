@@ -133,9 +133,8 @@ const quickstart = {
         },
       ],
       note: "Linux では install.sh（--mode all-in-one）でビルドを省略できます。",
-      shot: {
-        key: "agents",
-        url: "localhost:9080/agents",
+      scene: {
+        id: "agents",
         caption: "自前ビルドをコントロールプレーンとして動かし、後からエージェントを登録できます。",
         alt: "登録済みエッジエージェントとハートビートを表示するエージェントページ",
       },

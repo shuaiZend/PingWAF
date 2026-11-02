@@ -45,9 +45,8 @@ const features = {
         "Le score d'anomalie agrège toutes les correspondances en un seul verdict.",
       ],
       note: "normaliser → signatures → expressions → score",
-      shot: {
-        key: "waf",
-        url: "localhost:9080/sites/example.com/security/protection",
+      scene: {
+        id: "waf",
         caption: "Règles personnalisées et ensembles gérés s'activent par site.",
         alt: "Éditeur de règles WAF dans la console PingWAF",
       },
@@ -65,9 +64,8 @@ const features = {
         "Les défis s'appliquent par site : une politique stricte n'affecte pas les autres domaines.",
       ],
       note: "Empreinte TLS et analyse comportementale sont sur la feuille de route.",
-      shot: {
-        key: "bot",
-        url: "localhost:9080/sites/example.com/security/bot",
+      scene: {
+        id: "bot",
         caption: "Politique anti-bots, robots vérifiés et actions par site.",
         alt: "Réglages de protection anti-bots dans la console",
       },
@@ -84,9 +82,8 @@ const features = {
         "Restrictions géographiques par pays et ASN, avec blocage optionnel des pays inconnus.",
         "Limitation par IP, hôte, chemin, ASN, pays, en-tête, cookie ou paramètre.",
       ],
-      shot: {
-        key: "access",
-        url: "localhost:9080/sites/example.com/security/access",
+      scene: {
+        id: "access",
         caption: "Règles IP et politique géographique sur la même page.",
         alt: "Page de contrôle d'accès avec règles IP et restrictions géographiques",
       },
@@ -103,9 +100,8 @@ const features = {
         "Cache en périphérie avec quotas par site, éviction LRU, stale-while-revalidate et TTL navigateur.",
         "Réécriture d'en-têtes, chemins, requêtes et corps, pages d'erreur Tera et mise en pause par site (503).",
       ],
-      shot: {
-        key: "caching",
-        url: "localhost:9080/sites/example.com/caching",
+      scene: {
+        id: "caching",
         caption: "Règles de cache, TTL et quota du site.",
         alt: "Configuration du cache en périphérie dans la console",
       },
@@ -123,9 +119,8 @@ const features = {
         "HSTS et HTTPS forcé en périphérie, mTLS avec certificats clients émis depuis la console et révocation immédiate.",
       ],
       note: "La vérification du certificat d'origine est un commutateur explicite, global ou par pool.",
-      shot: {
-        key: "ssl",
-        url: "localhost:9080/sites/example.com/ssl",
+      scene: {
+        id: "tls",
         caption: "État du certificat et historique ACME d'un site.",
         alt: "Page TLS avec état du certificat et événements ACME",
       },
@@ -142,9 +137,8 @@ const features = {
         "Tableaux de bord trafic et attaques construits sur les métriques envoyées par les agents.",
         "Santé des agents, taux de cache et compteurs d'éviction visibles depuis le plan de contrôle.",
       ],
-      shot: {
-        key: "logs",
-        url: "localhost:9080/logs",
+      scene: {
+        id: "logs",
         caption: "Journal de requêtes interrogeable avec verdicts et règles appliquées.",
         alt: "Liste des journaux avec verdicts, scores et règles déclenchées",
       },
@@ -161,9 +155,8 @@ const features = {
         "Console en anglais, 简体中文 et 日本語 intégrée via rust-embed, sans déploiement frontend séparé.",
         "Vue de flotte en direct et attribution CPU/mémoire via les endpoints système.",
       ],
-      shot: {
-        key: "agents",
-        url: "localhost:9080/agents",
+      scene: {
+        id: "agents",
         caption: "État de la flotte d'agents et activité de heartbeat.",
         alt: "Page des agents avec les nœuds de périphérie connectés",
       },

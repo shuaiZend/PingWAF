@@ -133,9 +133,8 @@ const quickstart = {
         },
       ],
       note: "Sur Linux, install.sh (--mode all-in-one) évite la compilation.",
-      shot: {
-        key: "agents",
-        url: "localhost:9080/agents",
+      scene: {
+        id: "agents",
         caption: "Une compilation maison peut servir de plan de contrôle puis enrôler des agents.",
         alt: "Page des agents avec les nœuds de périphérie enrôlés et leur heartbeat",
       },

@@ -184,22 +184,19 @@ const intro = {
     eyebrow: "コンソールの中身",
     title: "別のスタックなしで運用",
     lead: "コンソールはバイナリに埋め込まれているため、画面に見えているものがそのままコントロールプレーンの事実です。",
-    shots: [
+    scenes: [
       {
-        key: "waf",
-        url: "localhost:9080/sites/example.com/security/protection",
+        id: "waf",
         caption: "WAF ルールと CC チャレンジはサイト単位で設定します。",
         alt: "WAF ルールのタブとチャレンジ設定を表示するサイト保護ページ",
       },
       {
-        key: "logs",
-        url: "localhost:9080/logs",
+        id: "logs",
         caption: "リクエストログには判定・スコア・一致ルールが残ります。",
         alt: "判定と一致ルールを表示するリクエストログ一覧",
       },
       {
-        key: "ssl",
-        url: "localhost:9080/sites/example.com/ssl",
+        id: "tls",
         caption: "サイトごとの証明書状態と ACME イベント。",
         alt: "証明書状態と ACME イベントを表示するサイト TLS ページ",
       },

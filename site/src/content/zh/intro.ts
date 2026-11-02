@@ -184,22 +184,19 @@ const intro = {
     eyebrow: "控制台一览",
     title: "运维不需要另一套系统",
     lead: "控制台被编译进二进制，界面上看到的，就是控制面掌握的全部事实。",
-    shots: [
+    scenes: [
       {
-        key: "waf",
-        url: "localhost:9080/sites/example.com/security/protection",
+        id: "waf",
         caption: "WAF 规则与 CC 挑战按站点配置。",
         alt: "PingWAF 站点防护页面，展示 WAF 规则标签与挑战设置",
       },
       {
-        key: "logs",
-        url: "localhost:9080/logs",
+        id: "logs",
         caption: "请求日志同时记录判决、评分与命中的规则。",
         alt: "PingWAF 请求日志列表，展示判决与命中规则",
       },
       {
-        key: "ssl",
-        url: "localhost:9080/sites/example.com/ssl",
+        id: "tls",
         caption: "每个站点的证书状态与 ACME 事件。",
         alt: "PingWAF 站点 TLS 页面，展示证书状态与 ACME 事件",
       },

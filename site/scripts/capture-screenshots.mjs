@@ -44,14 +44,6 @@ const VIEWPORT = { width: 1440, height: 900 };
 const SHOTS = [
   { key: "sites", path: "/sites" },
   { key: "login", path: "/login", anonymous: true },
-  { key: "waf", path: `/sites/${siteId}/security/protection` },
-  { key: "cc", path: `/sites/${siteId}/security/rate-limiting` },
-  { key: "bot", path: `/sites/${siteId}/security/bot` },
-  { key: "access", path: `/sites/${siteId}/security/access` },
-  { key: "caching", path: `/sites/${siteId}/caching` },
-  { key: "ssl", path: `/sites/${siteId}/ssl` },
-  { key: "logs", path: "/logs" },
-  { key: "agents", path: "/agents" },
   { key: "configVersions", path: "/config-versions", scroll: 1180 },
 ];
 

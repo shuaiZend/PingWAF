@@ -133,9 +133,8 @@ const quickstart = {
         },
       ],
       note: "在 Linux 上可以跳过构建：curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh | sudo bash -s -- --mode all-in-one",
-      shot: {
-        key: "agents",
-        url: "localhost:9080/agents",
+      scene: {
+        id: "agents",
         caption: "源码构建可以先作为控制面运行，再从集群页面纳管 Agent。",
         alt: "Agent 集群页面，列出已接入的边缘 Agent 与心跳状态",
       },

@@ -9,7 +9,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { DOC_SLUGS, ROUTES, SCREENSHOT_KEYS, docPath } from "../src/content/schema.ts";
+import { DOC_SLUGS, ROUTES, SCENE_IDS, SCREENSHOT_KEYS, docPath } from "../src/content/schema.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, "..");
@@ -152,6 +152,27 @@ function checkShot(locale: string, where: string, shot: { key?: string } | undef
   }
 }
 
+function checkScene(
+  locale: string,
+  where: string,
+  scene: { id?: string; alt?: string; caption?: string } | undefined,
+): void {
+  if (!scene || typeof scene.id !== "string") {
+    fail(`${locale}:${where} — scene id missing`);
+    return;
+  }
+  if (!(SCENE_IDS as readonly string[]).includes(scene.id)) {
+    fail(`${locale}:${where} — unknown scene id "${scene.id}"`);
+  }
+  if (typeof scene.alt !== "string" || scene.alt.trim() === "") {
+    fail(`${locale}:${where} — scene alt missing`);
+  }
+  if (typeof scene.caption !== "string" || scene.caption.trim() === "") {
+    fail(`${locale}:${where} — scene caption missing`);
+  }
+  checks += 1;
+}
+
 function checkUnique(locale: string, where: string, ids: string[]): void {
   const seen = new Set<string>();
   for (const id of ids) {
@@ -208,7 +229,7 @@ for (const locale of LOCALES) {
 /* ------------------------------------------------------------ module rules */
 
 const featuresEn = english.features as
-  | { hero: { toc: Array<{ id: string }> }; groups: Array<{ id: string; points: string[]; shot: unknown }> }
+  | { hero: { toc: Array<{ id: string }> }; groups: Array<{ id: string; points: string[]; scene: unknown }> }
   | undefined;
 
 for (const locale of LOCALES) {
@@ -226,8 +247,16 @@ for (const locale of LOCALES) {
       fail(`${locale}:features.hero.toc — "${entry.id}" does not match any group id`);
     }
   }
+  const featureSceneIds = features.groups.map(
+    (group) => (group.scene as { id?: string } | undefined)?.id,
+  );
+  for (const sceneId of SCENE_IDS) {
+    if (!featureSceneIds.includes(sceneId)) {
+      fail(`${locale}:features.groups — missing scene "${sceneId}"`);
+    }
+  }
   for (const group of features.groups) {
-    checkShot(locale, `features.groups.${group.id}`, group.shot as { key?: string });
+    checkScene(locale, `features.groups.${group.id}`, group.scene as { id?: string });
     if (group.points.length < 3) {
       warnings.push(`${locale}:features.groups.${group.id} — fewer than 3 points`);
     }
@@ -237,7 +266,7 @@ for (const locale of LOCALES) {
     | {
         capabilities: { items: Array<{ link?: LinkLike }> };
         hero: { visual?: { alt?: string } };
-        showcase: { shots: unknown[] };
+        showcase: { scenes: unknown[] };
         architecture: { link: LinkLike };
       }
     | null;
@@ -246,8 +275,8 @@ for (const locale of LOCALES) {
     if (typeof heroAlt !== "string" || heroAlt.trim() === "") {
       fail(`${locale}:intro.hero.visual.alt — accessibility label missing`);
     }
-    intro.showcase.shots.forEach((shot, index) =>
-      checkShot(locale, `intro.showcase.shots.${index}`, shot as { key?: string }),
+    intro.showcase.scenes.forEach((scene, index) =>
+      checkScene(locale, `intro.showcase.scenes.${index}`, scene as { id?: string }),
     );
     checkLink(locale, "intro.architecture.link", intro.architecture.link);
     intro.capabilities.items.forEach((item, index) => {
@@ -264,7 +293,7 @@ for (const locale of LOCALES) {
   const quickstart = (await loadModule(locale, "quickstart")) as
     | {
         hero: { toc: Array<{ id: string }> };
-        paths: { docker: { id: string }; source: { id: string } };
+        paths: { docker: { id: string }; source: { id: string; scene: unknown } };
         credentials: { shot: unknown };
         next: { cards: Array<{ link: LinkLike }> };
       }
@@ -277,6 +306,7 @@ for (const locale of LOCALES) {
       }
     }
     checkShot(locale, "quickstart.credentials.shot", quickstart.credentials.shot as { key?: string });
+    checkScene(locale, "quickstart.paths.source.scene", quickstart.paths.source.scene as { id?: string });
     quickstart.next.cards.forEach((card, index) =>
       checkLink(locale, `quickstart.next.cards.${index}.link`, card.link),
     );

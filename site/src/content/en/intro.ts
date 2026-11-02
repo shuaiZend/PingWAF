@@ -184,22 +184,19 @@ const intro = {
     eyebrow: "Inside the console",
     title: "Operations without a separate stack",
     lead: "The dashboard is compiled into the binary, so what you see is what the control plane knows.",
-    shots: [
+    scenes: [
       {
-        key: "waf",
-        url: "localhost:9080/sites/example.com/security/protection",
+        id: "waf",
         caption: "WAF rules and CC challenges are configured per site.",
         alt: "PingWAF site protection page with WAF rule tabs and challenge settings",
       },
       {
-        key: "logs",
-        url: "localhost:9080/logs",
+        id: "logs",
         caption: "Request logs carry the verdict, score and matched rule.",
         alt: "PingWAF request log list with verdicts and matched rules",
       },
       {
-        key: "ssl",
-        url: "localhost:9080/sites/example.com/ssl",
+        id: "tls",
         caption: "Certificate status and ACME events for each site.",
         alt: "PingWAF site TLS page with certificate status and ACME events",
       },

@@ -1,0 +1,76 @@
+---
+/**
+ * Operations scene — the agent fleet with heartbeats and a syncing node, the
+ * current config version ready to roll back, and the auth story. Rules live
+ * in `global.css` under "Console scenes".
+ */
+import SceneBackdrop from "./SceneBackdrop.astro";
+
+const agents = [
+  { host: "edge-hk-1", meta: "hk · 0.32.10", status: "ONLINE", tone: "ok" },
+  { host: "edge-sg-1", meta: "sg · 0.32.10", status: "ONLINE", tone: "ok" },
+  { host: "edge-fra-1", meta: "fra · 0.32.9", status: "SYNCING", tone: "warn" },
+];
+---
+<SceneBackdrop prefix="agents" />
+
+<!-- Agent fleet -->
+<g>
+  <rect class="sc-card" x="16" y="20" width="344" height="340" rx="10" />
+  <text class="sc-label" x="32" y="44">AGENT FLEET</text>
+  <text class="sc-sub" x="344" y="44" text-anchor="end">3 enrolled</text>
+  <line class="sc-rule" x1="16" x2="360" y1="56" y2="56" />
+
+  {
+    agents.map((agent, index) => {
+      const top = 64 + index * 72;
+      return (
+        <g transform={`translate(0 ${top})`}>
+          <circle class={`sc-dot sc-agents-heart ${agent.tone === "warn" ? "sc-dot--warn" : ""}`} cx="36" cy="18" r="4" />
+          <text class="sc-mono" x="52" y="22">
+            {agent.host}
+          </text>
+          <text class="sc-sub" x="52" y="42">
+            {agent.meta}
+          </text>
+          <g class={`sc-badge sc-badge--${agent.tone} ${agent.tone === "warn" ? "sc-agents-sync" : ""}`} transform="translate(268 8)">
+            <rect width="76" height="19" rx="4" />
+            <text x="38" y="13" text-anchor="middle">
+              {agent.status}
+            </text>
+          </g>
+          {index < agents.length - 1 ? <line class="sc-rule" x1="16" x2="360" y1="60" y2="60" /> : null}
+        </g>
+      );
+    })
+  }
+</g>
+
+<!-- Config version -->
+<g>
+  <rect class="sc-card" x="372" y="20" width="252" height="200" rx="10" />
+  <text class="sc-label" x="388" y="44">CONFIG VERSION</text>
+  <text class="sc-value" x="388" y="84">v43</text>
+  <text class="sc-sub" x="608" y="44" text-anchor="end">draft · 2 deltas</text>
+
+  <text class="sc-code sc-agents-diff sc-agents-diff--add" x="388" y="118">+ rule.add</text>
+  <text class="sc-code sc-agents-diff sc-agents-diff--remove" x="388" y="138">- rule.remove</text>
+
+  <line class="sc-rule" x1="372" x2="624" y1="164" y2="164" />
+
+  <g class="sc-badge sc-badge--brand sc-agents-rollback" transform="translate(388 178)">
+    <rect width="96" height="24" rx="6" />
+    <text x="48" y="15.5" text-anchor="middle">rollback</text>
+  </g>
+  <text class="sc-sub" x="608" y="194" text-anchor="end">applied to 3 agents</text>
+</g>
+
+<!-- Authentication -->
+<g>
+  <rect class="sc-card" x="372" y="232" width="252" height="128" rx="10" />
+  <text class="sc-label" x="388" y="256">AUTHENTICATION</text>
+  <text class="sc-code" x="388" y="284">JWT + bcrypt</text>
+  <text class="sc-code" x="388" y="306">WebAuthn passkey</text>
+  <line class="sc-rule" x1="372" x2="624" y1="322" y2="322" />
+  <text class="sc-sub" x="388" y="344">multi-tenant isolation</text>
+</g>

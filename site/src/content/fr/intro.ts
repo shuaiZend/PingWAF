@@ -184,22 +184,19 @@ const intro = {
     eyebrow: "Dans la console",
     title: "Exploiter sans pile supplémentaire",
     lead: "La console est compilée dans le binaire : ce que vous voyez correspond exactement à ce que sait le plan de contrôle.",
-    shots: [
+    scenes: [
       {
-        key: "waf",
-        url: "localhost:9080/sites/example.com/security/protection",
+        id: "waf",
         caption: "Les règles WAF et les défis CC se configurent par site.",
         alt: "Page de protection du site avec onglets de règles WAF et réglages de défi",
       },
       {
-        key: "logs",
-        url: "localhost:9080/logs",
+        id: "logs",
         caption: "Les journaux de requêtes portent verdict, score et règle appliquée.",
         alt: "Liste des journaux de requêtes avec verdicts et règles déclenchées",
       },
       {
-        key: "ssl",
-        url: "localhost:9080/sites/example.com/ssl",
+        id: "tls",
         caption: "État du certificat et événements ACME pour chaque site.",
         alt: "Page TLS du site avec état du certificat et événements ACME",
       },

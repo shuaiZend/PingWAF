@@ -27,14 +27,6 @@ export function docPath(slug: DocSlug): string {
 export const SCREENSHOT_KEYS = [
   "sites",
   "login",
-  "waf",
-  "cc",
-  "bot",
-  "access",
-  "caching",
-  "ssl",
-  "logs",
-  "agents",
   "configVersions",
   "installInteractive",
   "installSuccess",
@@ -56,6 +48,28 @@ export interface Shot {
   key: ScreenshotKey;
   /** Console URL shown in the browser chrome of the frame. */
   url: string;
+  caption: string;
+  alt: string;
+}
+
+/**
+ * Console scenes — inline SVG animations that stand in for screenshots on the
+ * homepage showcase and the features page. A scene is identified by a stable
+ * id rather than a file, so the same component is reused on both pages.
+ */
+export const SCENE_IDS = [
+  "waf",
+  "bot",
+  "access",
+  "caching",
+  "tls",
+  "logs",
+  "agents",
+] as const;
+export type SceneId = (typeof SCENE_IDS)[number];
+
+export interface Scene {
+  id: SceneId;
   caption: string;
   alt: string;
 }
@@ -122,7 +136,7 @@ export interface IntroContent {
     eyebrow: string;
     title: string;
     lead: string;
-    shots: Shot[];
+    scenes: Scene[];
   };
   quickstart: {
     eyebrow: string;
@@ -146,7 +160,7 @@ export interface FeatureGroup {
   lead: string;
   points: string[];
   note?: string;
-  shot: Shot;
+  scene: Scene;
 }
 
 export interface VerdictRow {
@@ -212,7 +226,7 @@ export interface QuickStartContent {
   };
   paths: {
     docker: { id: string; title: string; lead: string; steps: Step[]; note?: string; shot: Shot };
-    source: { id: string; title: string; lead: string; steps: Step[]; note?: string; shot: Shot };
+    source: { id: string; title: string; lead: string; steps: Step[]; note?: string; scene: Scene };
   };
   credentials: {
     title: string;

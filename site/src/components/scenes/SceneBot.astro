@@ -1,0 +1,73 @@
+---
+/**
+ * Bot management scene — a request-rate spike triggers the JS shield, the
+ * solver earns a signed clearance, and traffic splits into verified vs
+ * challenged. Rules live in `global.css` under "Console scenes".
+ */
+import SceneBackdrop from "./SceneBackdrop.astro";
+---
+<SceneBackdrop prefix="bot" />
+
+<!-- Request rate -->
+<g>
+  <rect class="sc-card" x="16" y="20" width="608" height="110" rx="10" />
+  <text class="sc-label" x="32" y="42">REQUEST RATE</text>
+  <text class="sc-sub" x="608" y="42" text-anchor="end">rps</text>
+
+  <path
+    class="sc-bot-area"
+    d="M32 94 L83 90 L134 92 L185 88 L236 91 L287 56 L338 84 L389 88 L440 86 L491 90 L542 88 L592 91 L592 122 L32 122 Z"
+  />
+  <path
+    class="sc-bot-line"
+    d="M32 94 L83 90 L134 92 L185 88 L236 91 L287 56 L338 84 L389 88 L440 86 L491 90 L542 88 L592 91"
+  />
+  <circle class="sc-bot-peak" cx="287" cy="56" r="3.5" />
+  <text class="sc-sub" x="287" y="48" text-anchor="middle">8.4K rps</text>
+</g>
+
+<!-- Challenge -->
+<g>
+  <rect class="sc-card" x="16" y="146" width="296" height="130" rx="10" />
+  <text class="sc-label" x="32" y="168">CHALLENGE</text>
+  <circle class="sc-dot sc-bot-breath" cx="296" cy="164" r="3.5" />
+  <text class="sc-stage-name" x="32" y="210">JS shield · 5s</text>
+  <text class="sc-sub" x="32" y="252">proof of work · interactive</text>
+
+  <circle class="sc-bot-ring-track" cx="260" cy="211" r="22" />
+  <circle class="sc-bot-ring" cx="260" cy="211" r="22" />
+</g>
+
+<!-- Clearance -->
+<g>
+  <rect class="sc-card" x="328" y="146" width="296" height="130" rx="10" />
+  <text class="sc-label" x="344" y="168">CLEARANCE</text>
+  <text class="sc-mono" x="344" y="216">__pingwaf_clearance</text>
+  <text class="sc-sub" x="344" y="252">HMAC signed · per site</text>
+</g>
+
+<!-- Traffic split -->
+<g>
+  <rect class="sc-card" x="16" y="292" width="608" height="68" rx="10" />
+
+  <g class="sc-badge sc-badge--ok" transform="translate(32 306)">
+    <rect width="112" height="18" rx="4" />
+    <text x="56" y="12.5" text-anchor="middle">VERIFIED → ORIGIN</text>
+  </g>
+  <text class="sc-bot-num sc-bot-tick" x="32" y="352">8.1K</text>
+  <text class="sc-bot-num sc-bot-tick sc-bot-tick--alt" x="32" y="352">8.3K</text>
+
+  <g class="sc-badge sc-badge--danger" transform="translate(496 306)">
+    <rect width="112" height="18" rx="4" />
+    <text x="56" y="12.5" text-anchor="middle">CHALLENGE → 403</text>
+  </g>
+  <text class="sc-bot-num sc-bot-num--danger sc-bot-tick" x="608" y="352" text-anchor="end">0.3K</text>
+  <text class="sc-bot-num sc-bot-num--danger sc-bot-tick sc-bot-tick--alt" x="608" y="352" text-anchor="end">0.4K</text>
+</g>
+
+<defs>
+  <linearGradient id="sc-bot-area" x1="0" y1="0" x2="0" y2="1">
+    <stop class="sc-bot-area-1" offset="0%" />
+    <stop class="sc-bot-area-2" offset="100%" />
+  </linearGradient>
+</defs>

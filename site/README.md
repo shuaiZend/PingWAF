@@ -22,6 +22,7 @@ screenshots are real captures of `web/dist` and are optimised at build time.
 | `src/layouts/DocsLayout.astro` | Three-column documentation shell with sidebar and page TOC |
 | `src/components/` | Header, footer, screenshot frame, code block, section primitives |
 | `src/components/home/HeroVisual.astro` | Inline SVG control-plane animation for the homepage hero — zero JS, CSS keyframes only, follows `html[data-theme]` and renders a static frame under `prefers-reduced-motion`. The component has no `<style>` block; its styles live in the `/* Hero visual (homepage) */` section of `src/styles/global.css` |
+| `src/components/scenes/` | Inline SVG console scenes for the homepage showcase, the features page and the quickstart source path — `SceneHost.astro` dispatches on a scene id to one of seven components (`SceneWaf`, `SceneBot`, `SceneAccess`, `SceneCaching`, `SceneTls`, `SceneLogs`, `SceneAgents`) over a shared `SceneBackdrop.astro`. Styles live in the `/* Console scenes */` section of `src/styles/global.css` |
 | `src/content/<locale>/*.ts` | Typed marketing copy: `intro`, `features`, `quickstart`, `docs` |
 | `src/content/docs/<locale>/*.md` | Long-form documentation (Content Collection) |
 | `src/content/schema.ts` | **The content contract** — every locale implements these shapes |
@@ -55,6 +56,12 @@ npm run verify       # content contract + type check + build + link audit
   `pingwaf-*/src`). Do not invent defaults, ports or endpoints.
 - Keep commands, code samples, URLs, screenshot keys and `slug`/`id` values
   untranslated — the checker treats them as machine identifiers.
+- Showcase imagery comes in two shapes: `Shot` (a key from `SCREENSHOT_KEYS`,
+  resolved to a captured PNG) and `Scene` (an id from `SCENE_IDS`, rendered by
+  `SceneHost.astro`). Use the shape the slot declares and do not mix them.
+  `check:content` validates scene ids against the `SCENE_IDS` whitelist,
+  requires non-empty `alt` and `caption`, and requires the features page
+  groups to cover all seven scene ids.
 - Long-form pages live in `src/content/docs/<locale>/<slug>.md` with
   `title`, `description` and `minutes` frontmatter. Slugs are defined once in
   `src/content/schema.ts` (`DOC_SLUGS`), which also drives routes and the sidebar.
@@ -75,13 +82,20 @@ npm run verify       # content contract + type check + build + link audit
 
 ## Screenshots
 
-The homepage hero no longer shows a screenshot: `Hero.astro` renders
-`src/components/home/HeroVisual.astro`, an inline SVG scene animated with pure
-CSS keyframes (zero JS, follows the active theme, static under
-`prefers-reduced-motion`). The old `dashboard` screenshot and its key were
-removed from `SCREENSHOT_KEYS`, `SCREENSHOT_IMAGES` and the capture script —
-the hero is carried by the vector animation, so nothing references it. Every
-remaining screenshot is still produced by:
+Most console imagery is no longer a screenshot. The homepage showcase, the
+features page groups and the quickstart "source" path all render inline SVG
+scenes: `SceneHost.astro` dispatches on a stable id to one of the seven
+components in `src/components/scenes/` (`SceneWaf`, `SceneBot`,
+`SceneAccess`, `SceneCaching`, `SceneTls`, `SceneLogs`, `SceneAgents`), laid
+out over the shared `SceneBackdrop.astro` and styled by the
+`/* Console scenes */` section of `src/styles/global.css`. The content
+contract exposes `SCENE_IDS` (`waf`, `bot`, `access`, `caching`, `tls`,
+`logs`, `agents`) and `Scene { id, caption, alt }`, so the same component is
+reused across pages and locales while the copy stays localised. The homepage
+hero visual (`HeroVisual.astro`) is a separate inline SVG animation. Only six
+screenshot keys remain in `SCREENSHOT_KEYS` — `sites`, `login`,
+`configVersions`, `installInteractive`, `installSuccess` and
+`installCompose` — and they are still produced by:
 
 ```bash
 npm run capture
@@ -91,8 +105,8 @@ The script serves the built dashboard (`web/dist`, build it with
 `make build-web` first), fulfils every `/api/v1/**` request from
 `scripts/fixtures.mjs`, logs in by injecting the session keys the console uses,
 and writes 1440×900 @2x PNGs into `src/assets/screenshots/`. Recipes live in
-`SHOTS` at the top of the script (now starting with `sites`, since `dashboard`
-is gone); all demo data is `example.com` plus RFC 5737 ranges.
+`SHOTS` at the top of the script, now only three — `sites`, `login` and
+`configVersions`; all demo data is `example.com` plus RFC 5737 ranges.
 
 For a real control plane:
 

@@ -1,0 +1,89 @@
+---
+/**
+ * Observability scene — the request log scrolls, and the selected row expands
+ * into the detail that matters when a verdict is questioned. Rules live in
+ * `global.css` under "Console scenes".
+ */
+import SceneBackdrop from "./SceneBackdrop.astro";
+
+/** Rows 7-12 repeat 1-6 so the stepped scroll loops without a visible jump. */
+const base = [
+  { time: "12:04:07", path: "GET /admin/login", status: "403", verdict: "BLOCK", tone: "danger" },
+  { time: "12:04:09", path: "GET /assets/app.js", status: "200", verdict: "PASS", tone: "ok" },
+  { time: "12:04:11", path: "POST /api/session", status: "200", verdict: "PASS", tone: "ok" },
+  { time: "12:04:14", path: "GET /search?q=%27", status: "403", verdict: "BLOCK", tone: "danger" },
+  { time: "12:04:18", path: "GET /pricing", status: "200", verdict: "PASS", tone: "ok" },
+  { time: "12:04:21", path: "POST /webhook", status: "202", verdict: "PASS", tone: "ok" },
+];
+const rows = [...base, ...base];
+
+---
+<SceneBackdrop prefix="logs" />
+
+<!-- Log list -->
+<g>
+  <rect class="sc-card" x="16" y="20" width="400" height="340" rx="10" />
+  <text class="sc-label" x="32" y="44">REQUEST LOG</text>
+  <text class="sc-sub" x="400" y="44" text-anchor="end">verdict · score · rule</text>
+  <line class="sc-rule" x1="16" x2="416" y1="56" y2="56" />
+
+  <clipPath id="sc-logs-clip">
+    <rect x="16" y="56" width="400" height="248" />
+  </clipPath>
+  <g clip-path="url(#sc-logs-clip)">
+    <g class="sc-logs-flow">
+      {
+        rows.map((row, index) => (
+          <g transform={`translate(0 ${78 + index * 40})`}>
+            <text class="sc-row-time" x="32" y="0">
+              {row.time}
+            </text>
+            <text class="sc-mono" x="104" y="0">
+              {row.path}
+            </text>
+            <text class="sc-row-status" x="308" y="0" text-anchor="end">
+              {row.status}
+            </text>
+            <g class={`sc-badge sc-badge--${row.tone}`} transform="translate(316 -12)">
+              <rect width="84" height="17" rx="4" />
+              <text x="42" y="12" text-anchor="middle">
+                {row.verdict}
+              </text>
+            </g>
+          </g>
+        ))
+      }
+    </g>
+  </g>
+
+  <line class="sc-rule" x1="16" x2="416" y1="312" y2="312" />
+  <text class="sc-sub" x="32" y="336">Elasticsearch · WAL buffer · body truncation</text>
+</g>
+
+<!-- Selected row -->
+<g>
+  <rect class="sc-card" x="428" y="20" width="196" height="340" rx="10" />
+  <text class="sc-label" x="444" y="44">SELECTED</text>
+  <text class="sc-mono" x="444" y="70">GET /admin/login</text>
+  <text class="sc-sub" x="444" y="88">200.1.9.4 · TLS 1.3</text>
+
+  <line class="sc-rule" x1="428" x2="624" y1="104" y2="104" />
+
+  <text class="sc-label" x="444" y="126">VERDICT</text>
+  <text class="sc-verdict sc-logs-verdict" x="444" y="158">BLOCK</text>
+
+  <text class="sc-sub" x="444" y="184">anomaly 84</text>
+  <text class="sc-sub" x="444" y="204">SQLi heuristic</text>
+  <text class="sc-sub" x="444" y="224">latency 43 ms</text>
+
+  <line class="sc-rule" x1="428" x2="624" y1="244" y2="244" />
+
+  <g class="sc-badge sc-badge--brand sc-logs-copy" transform="translate(444 256)">
+    <rect width="164" height="26" rx="6" />
+    <text x="82" y="17" text-anchor="middle">copy as curl</text>
+  </g>
+
+  <text class="sc-sub" x="444" y="304">raw request · headers verbatim</text>
+  <text class="sc-sub" x="444" y="322">body prefix · 2 KB</text>
+  <text class="sc-sub" x="444" y="340">stored in PostgreSQL</text>
+</g>

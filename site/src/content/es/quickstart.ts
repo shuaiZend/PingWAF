@@ -133,9 +133,8 @@ const quickstart = {
         },
       ],
       note: "En Linux puedes omitir la compilación con install.sh (--mode all-in-one).",
-      shot: {
-        key: "agents",
-        url: "localhost:9080/agents",
+      scene: {
+        id: "agents",
         caption: "Una compilación propia puede actuar como plano de control y luego enrolar agentes.",
         alt: "Página de agentes con los nodos edge enrolados y su heartbeat",
       },

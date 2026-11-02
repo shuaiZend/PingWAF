@@ -45,9 +45,8 @@ const features = {
         "异常评分汇总所有命中，为每个请求给出唯一判决。",
       ],
       note: "归一化 → 签名 → 表达式 → 异常评分",
-      shot: {
-        key: "waf",
-        url: "localhost:9080/sites/example.com/security/protection",
+      scene: {
+        id: "waf",
         caption: "自定义规则与托管规则集按站点独立开关。",
         alt: "PingWAF 控制台中的 WAF 规则编辑界面",
       },
@@ -65,9 +64,8 @@ const features = {
         "挑战策略按站点生效，某个域名的严格策略不会影响其他站点。",
       ],
       note: "TLS 指纹与行为分析在路线图中。",
-      shot: {
-        key: "bot",
-        url: "localhost:9080/sites/example.com/security/bot",
+      scene: {
+        id: "bot",
         caption: "按站点配置 Bot 策略、已验证 Bot 与处置动作。",
         alt: "PingWAF 控制台中的 Bot 防护设置",
       },
@@ -84,9 +82,8 @@ const features = {
         "按国家与 ASN 的地域限制，可选「未知国家一律拦截」。",
         "按 IP、主机、路径、ASN、国家、请求头、Cookie 或查询参数限流。",
       ],
-      shot: {
-        key: "access",
-        url: "localhost:9080/sites/example.com/security/access",
+      scene: {
+        id: "access",
         caption: "IP 规则与地域策略在同一个站点页面内维护。",
         alt: "访问控制页面，展示 IP 规则与地域限制",
       },
@@ -103,9 +100,8 @@ const features = {
         "边缘缓存支持按站点磁盘配额、LRU 淘汰、stale-while-revalidate 与浏览器 TTL 控制。",
         "支持请求头/路径/查询/响应体重写、Tera 自定义错误页，以及站点暂停（返回 503，证书继续可用）。",
       ],
-      shot: {
-        key: "caching",
-        url: "localhost:9080/sites/example.com/caching",
+      scene: {
+        id: "caching",
         caption: "缓存规则、TTL 与站点级配额。",
         alt: "PingWAF 控制台中的边缘缓存配置",
       },
@@ -123,9 +119,8 @@ const features = {
         "边缘强制 HSTS 与 HTTPS，双向 TLS 支持控制台签发客户端证书并即时吊销。",
       ],
       note: "源站证书校验是一个显式开关，可按部署或按源站池设置。",
-      shot: {
-        key: "ssl",
-        url: "localhost:9080/sites/example.com/ssl",
+      scene: {
+        id: "tls",
         caption: "单个站点的证书状态与 ACME 历史。",
         alt: "TLS 页面，展示证书状态与 ACME 事件",
       },
@@ -142,9 +137,8 @@ const features = {
         "基于 Agent 心跳上报的指标构建流量与攻击分析面板。",
         "在控制面即可查看 Agent 健康度、缓存命中率与淘汰计数。",
       ],
-      shot: {
-        key: "logs",
-        url: "localhost:9080/logs",
+      scene: {
+        id: "logs",
         caption: "可搜索的请求日志，包含判决与命中规则。",
         alt: "请求日志列表，展示判决、评分与命中规则",
       },
@@ -161,9 +155,8 @@ const features = {
         "通过 rust-embed 内嵌英文、简体中文与日文控制台，无需单独部署前端。",
         "Agent 集群视图展示实时状态，系统接口可查看进程级 CPU 与内存归属。",
       ],
-      shot: {
-        key: "agents",
-        url: "localhost:9080/agents",
+      scene: {
+        id: "agents",
         caption: "Agent 集群状态与心跳活动。",
         alt: "Agent 集群页面，展示已接入的边缘节点",
       },

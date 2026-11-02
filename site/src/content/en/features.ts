@@ -45,9 +45,8 @@ const features = {
         "Anomaly scoring aggregates every match into one verdict per request.",
       ],
       note: "normalize → signatures → expression → anomaly score",
-      shot: {
-        key: "waf",
-        url: "localhost:9080/sites/example.com/security/protection",
+      scene: {
+        id: "waf",
         caption: "Custom rules and managed rule sets are toggled per site.",
         alt: "WAF rule editor in the PingWAF console",
       },
@@ -65,9 +64,8 @@ const features = {
         "Challenges apply per site, so a strict policy on one hostname does not affect another.",
       ],
       note: "TLS fingerprinting and behavioural analysis are on the roadmap.",
-      shot: {
-        key: "bot",
-        url: "localhost:9080/sites/example.com/security/bot",
+      scene: {
+        id: "bot",
         caption: "Bot policy, verified bots and challenge actions per site.",
         alt: "Bot protection settings in the PingWAF console",
       },
@@ -84,9 +82,8 @@ const features = {
         "Geo restrictions by country and ASN, including an optional block-unknown-countries policy.",
         "Rate limiting by IP, host, path, ASN, country, header, cookie or query parameter.",
       ],
-      shot: {
-        key: "access",
-        url: "localhost:9080/sites/example.com/security/access",
+      scene: {
+        id: "access",
         caption: "IP rules and geo policy side by side on a site.",
         alt: "Access control page with IP rules and geo restrictions",
       },
@@ -103,9 +100,8 @@ const features = {
         "Edge cache with per-site disk quotas, LRU eviction, stale-while-revalidate and browser TTL control.",
         "Header, path, query and body rewriting, Tera error pages, and a per-site pause that serves 503 while the certificate keeps working.",
       ],
-      shot: {
-        key: "caching",
-        url: "localhost:9080/sites/example.com/caching",
+      scene: {
+        id: "caching",
         caption: "Cache rules, TTLs and per-site quota.",
         alt: "Edge caching configuration in the PingWAF console",
       },
@@ -123,9 +119,8 @@ const features = {
         "HSTS and forced HTTPS at the edge, mutual TLS with console-issued client certificates and immediate revocation.",
       ],
       note: "Origin certificate verification is an explicit switch, deployment-wide or per pool.",
-      shot: {
-        key: "ssl",
-        url: "localhost:9080/sites/example.com/ssl",
+      scene: {
+        id: "tls",
         caption: "Certificate state and ACME history for one site.",
         alt: "TLS page showing certificate status and ACME events",
       },
@@ -142,9 +137,8 @@ const features = {
         "Traffic and attack analytics dashboards built from the metrics agents ship on every heartbeat.",
         "Agent health, cache hit rates and eviction counters visible from the control plane.",
       ],
-      shot: {
-        key: "logs",
-        url: "localhost:9080/logs",
+      scene: {
+        id: "logs",
         caption: "Searchable request log with verdicts and matched rules.",
         alt: "Request log list with verdicts, scores and matched rules",
       },
@@ -161,9 +155,8 @@ const features = {
         "Embedded English, 简体中文 and 日本語 console built with rust-embed — no separate frontend deployment.",
         "Agent fleet view with live status, plus in-process CPU and memory attribution from the system endpoints.",
       ],
-      shot: {
-        key: "agents",
-        url: "localhost:9080/agents",
+      scene: {
+        id: "agents",
         caption: "Agent fleet status and heartbeat activity.",
         alt: "Agent fleet page showing connected edge agents",
       },

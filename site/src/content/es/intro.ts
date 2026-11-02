@@ -184,22 +184,19 @@ const intro = {
     eyebrow: "Dentro de la consola",
     title: "Operación sin una pila adicional",
     lead: "El panel se compila dentro del binario: lo que ves es exactamente lo que sabe el plano de control.",
-    shots: [
+    scenes: [
       {
-        key: "waf",
-        url: "localhost:9080/sites/example.com/security/protection",
+        id: "waf",
         caption: "Las reglas WAF y los desafíos CC se configuran por sitio.",
         alt: "Página de protección del sitio con pestañas de reglas WAF y ajustes de desafío",
       },
       {
-        key: "logs",
-        url: "localhost:9080/logs",
+        id: "logs",
         caption: "Los logs de petición guardan veredicto, puntuación y regla aplicada.",
         alt: "Lista de logs de petición con veredictos y reglas coincidentes",
       },
       {
-        key: "ssl",
-        url: "localhost:9080/sites/example.com/ssl",
+        id: "tls",
         caption: "Estado del certificado y eventos ACME de cada sitio.",
         alt: "Página TLS del sitio con estado del certificado y eventos ACME",
       },

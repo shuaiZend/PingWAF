@@ -1,0 +1,113 @@
+---
+/**
+ * Traffic & caching scene — a client request reaches the edge cache, hits
+ * 65.3% of the time, and the misses fan out to the origin pool. Rules live
+ * in `global.css` under "Console scenes".
+ */
+import SceneBackdrop from "./SceneBackdrop.astro";
+
+/** r=34 -> circumference 213.6; 65.3% -> 139.5 visible, offset 74.1 */
+const RING_CIRCUMFERENCE = 213.6;
+const RING_DASH = RING_CIRCUMFERENCE * 0.653;
+const RING_OFFSET = RING_CIRCUMFERENCE - RING_DASH;
+
+const origins = [
+  { name: "origin-1", y: 140 },
+  { name: "origin-2", y: 180 },
+  { name: "origin-3", y: 220 },
+];
+
+const policies = [
+  { text: "round-robin", x: 32 },
+  { text: "least connections", x: 138 },
+  { text: "consistent hashing", x: 264 },
+];
+---
+<SceneBackdrop prefix="caching" />
+
+<!-- Client -->
+<g>
+  <rect class="sc-card" x="16" y="116" width="112" height="100" rx="10" />
+  <text class="sc-label" x="32" y="140">CLIENT</text>
+  <text class="sc-mono" x="32" y="176">200.1.9.4</text>
+  <text class="sc-sub" x="32" y="196">TLS 1.3</text>
+  <circle class="sc-dot sc-caching-heart" cx="112" cy="134" r="3.5" />
+</g>
+
+<!-- Edge -->
+<g>
+  <rect class="sc-card" x="156" y="20" width="328" height="236" rx="10" />
+  <text class="sc-label" x="172" y="44">EDGE</text>
+  <text class="sc-sub" x="468" y="44" text-anchor="end">cache: hot</text>
+  <line class="sc-rule" x1="156" x2="484" y1="56" y2="56" />
+
+  <!-- hit-rate ring -->
+  <circle
+    class="sc-caching-ring-track"
+    cx="250"
+    cy="126"
+    r="34"
+    fill="none"
+  />
+  <circle
+    class="sc-caching-ring-value"
+    cx="250"
+    cy="126"
+    r="34"
+    fill="none"
+    stroke-dasharray={`${RING_CIRCUMFERENCE} ${RING_CIRCUMFERENCE}`}
+    stroke-dashoffset={RING_OFFSET.toFixed(1)}
+    transform="rotate(-90 250 126)"
+  />
+  <text class="sc-value sc-caching-ratio" x="250" y="131" text-anchor="middle">65.3%</text>
+
+  <text class="sc-caching-hit-label" x="316" y="118">HIT</text>
+  <text class="sc-caching-hit-label" x="348" y="118">65.3%</text>
+  <text class="sc-sub" x="316" y="142">MISS</text>
+  <text class="sc-sub" x="348" y="142">34.7%</text>
+
+  <!-- policy lines -->
+  <line class="sc-rule" x1="156" x2="484" y1="180" y2="180" />
+  <text class="sc-code" x="172" y="206">LRU eviction · per-site quota</text>
+  <text class="sc-code" x="172" y="230">stale-while-revalidate · browser TTL</text>
+</g>
+
+<!-- Origin pool -->
+<g>
+  <rect class="sc-card" x="504" y="96" width="120" height="160" rx="10" />
+  <text class="sc-label" x="520" y="120">ORIGIN POOL</text>
+  {
+    origins.map((origin, index) => (
+      <g transform={`translate(0 ${origin.y})`}>
+        <circle class="sc-caching-origin-node" cx="526" cy="0" r="4" />
+        <circle class={`sc-caching-origin-active sc-caching-origin-active--${index + 1}`} cx="526" cy="0" r="4" />
+        <text class="sc-mono" x="540" y="4">
+          {origin.name}
+        </text>
+      </g>
+    ))
+  }
+</g>
+
+<!-- Links: client → edge, edge → origin, and the hit return path -->
+<line class="sc-link sc-caching-miss-link" x1="128" x2="156" y1="166" y2="166" />
+<line class="sc-link sc-caching-miss-link" x1="484" x2="504" y1="166" y2="166" />
+<line class="sc-link sc-caching-hit-link" x1="156" x2="128" y1="146" y2="146" />
+
+<!-- Cache policy footer -->
+<g>
+  <rect class="sc-card" x="16" y="272" width="608" height="88" rx="10" />
+  <text class="sc-label" x="32" y="296">CACHE POLICY</text>
+  {
+    policies.map((policy) => (
+      <g class="sc-badge sc-badge--plain" transform={`translate(${policy.x} 308)`}>
+        <rect width={policy.text.length * 5.6 + 16} height="18" rx="4" />
+        <text x={(policy.text.length * 5.6 + 16) / 2} y="12.5" text-anchor="middle">
+          {policy.text}
+        </text>
+      </g>
+    ))
+  }
+  <text class="sc-caching-ratio-foot" x="608" y="330" text-anchor="end">hit ratio 65.3%</text>
+  <text class="sc-caching-ratio-foot sc-caching-ratio-foot--alt" x="608" y="330" text-anchor="end">hit ratio 64.9%</text>
+</g>

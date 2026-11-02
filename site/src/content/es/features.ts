@@ -45,9 +45,8 @@ const features = {
         "La puntuación de anomalía agrega todas las coincidencias en un veredicto por petición.",
       ],
       note: "normalizar → firmas → expresiones → puntuación",
-      shot: {
-        key: "waf",
-        url: "localhost:9080/sites/example.com/security/protection",
+      scene: {
+        id: "waf",
         caption: "Reglas personalizadas y conjuntos gestionados se activan por sitio.",
         alt: "Editor de reglas WAF en la consola de PingWAF",
       },
@@ -65,9 +64,8 @@ const features = {
         "Los desafíos se aplican por sitio, sin afectar a otros dominios.",
       ],
       note: "La huella TLS y el análisis de comportamiento están en la hoja de ruta.",
-      shot: {
-        key: "bot",
-        url: "localhost:9080/sites/example.com/security/bot",
+      scene: {
+        id: "bot",
         caption: "Política de bots, bots verificados y acciones por sitio.",
         alt: "Ajustes de protección de bots en la consola",
       },
@@ -84,9 +82,8 @@ const features = {
         "Restricciones geográficas por país y ASN, con opción de bloquear países desconocidos.",
         "Límites por IP, host, ruta, ASN, país, cabecera, cookie o parámetro de consulta.",
       ],
-      shot: {
-        key: "access",
-        url: "localhost:9080/sites/example.com/security/access",
+      scene: {
+        id: "access",
         caption: "Reglas IP y política geográfica en la misma página.",
         alt: "Página de control de acceso con reglas IP y restricciones geográficas",
       },
@@ -103,9 +100,8 @@ const features = {
         "Caché en el edge con cuotas por sitio, evicción LRU, stale-while-revalidate y TTL de navegador.",
         "Reescritura de cabeceras, rutas, consultas y cuerpo, páginas de error Tera y pausa por sitio con 503.",
       ],
-      shot: {
-        key: "caching",
-        url: "localhost:9080/sites/example.com/caching",
+      scene: {
+        id: "caching",
         caption: "Reglas de caché, TTL y cuota del sitio.",
         alt: "Configuración de caché en el edge dentro de la consola",
       },
@@ -123,9 +119,8 @@ const features = {
         "HSTS y HTTPS forzado en el edge, mTLS con certificados de cliente emitidos desde la consola y revocación inmediata.",
       ],
       note: "La verificación del certificado de origen es un interruptor explícito, global o por grupo.",
-      shot: {
-        key: "ssl",
-        url: "localhost:9080/sites/example.com/ssl",
+      scene: {
+        id: "tls",
         caption: "Estado del certificado e historial ACME de un sitio.",
         alt: "Página TLS con estado del certificado y eventos ACME",
       },
@@ -142,9 +137,8 @@ const features = {
         "Paneles de tráfico y ataques construidos con las métricas que envían los agentes.",
         "Salud de agentes, aciertos de caché y contadores de evicción visibles desde el plano de control.",
       ],
-      shot: {
-        key: "logs",
-        url: "localhost:9080/logs",
+      scene: {
+        id: "logs",
         caption: "Log de peticiones consultable con veredictos y reglas aplicadas.",
         alt: "Lista de logs con veredictos, puntuaciones y reglas coincidentes",
       },
@@ -161,9 +155,8 @@ const features = {
         "Consola en inglés, 简体中文 y 日本語 integrada con rust-embed, sin despliegue de frontend aparte.",
         "Vista de flota con estado en vivo y atribución de CPU y memoria desde los endpoints del sistema.",
       ],
-      shot: {
-        key: "agents",
-        url: "localhost:9080/agents",
+      scene: {
+        id: "agents",
         caption: "Estado de la flota de agentes y actividad de heartbeat.",
         alt: "Página de agentes con los nodos edge conectados",
       },

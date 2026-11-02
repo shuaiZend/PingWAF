@@ -1,5 +1,5 @@
 ---
-import ScreenshotFrame from "../ScreenshotFrame.astro";
+import SceneHost from "../scenes/SceneHost.astro";
 import type { IntroContent } from "../../content/schema";
 
 interface Props {
@@ -7,7 +7,8 @@ interface Props {
 }
 
 const { showcase } = Astro.props;
-const spans = ["showcase__item--wide", "showcase__item", "showcase__item--full"];
+/** Third item sits centred on its own row so all three read at the same size. */
+const spanFor = (index: number) => (index === 2 ? "showcase__item--center" : "");
 ---
 <section class="section">
   <div class="container">
@@ -19,12 +20,9 @@ const spans = ["showcase__item--wide", "showcase__item", "showcase__item--full"]
 
     <div class="showcase">
       {
-        showcase.shots.map((shot, index) => (
-          <div class:list={["showcase__item", spans[index] ?? "showcase__item"]}>
-            <ScreenshotFrame
-              shot={shot}
-              sizes={index === 2 ? "(max-width: 860px) 92vw, 1160px" : "(max-width: 860px) 92vw, 700px"}
-            />
+        showcase.scenes.map((scene, index) => (
+          <div class:list={["showcase__item", spanFor(index)]}>
+            <SceneHost scene={scene} />
           </div>
         ))
       }

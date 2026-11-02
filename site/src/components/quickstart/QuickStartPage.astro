@@ -5,6 +5,7 @@ import CodeBlock from "../CodeBlock.astro";
 import Icon from "../Icon.astro";
 import Notice from "../Notice.astro";
 import ScreenshotFrame from "../ScreenshotFrame.astro";
+import SceneHost from "../scenes/SceneHost.astro";
 import StepList from "../StepList.astro";
 import { getContent } from "../../content";
 import { resolveLink } from "../../i18n/utils";
@@ -18,10 +19,9 @@ interface Props {
 const { locale } = Astro.props;
 const { quickstart } = getContent(locale);
 
-const paths: QuickStartContent["paths"]["docker"][] = [
-  quickstart.paths.docker,
-  quickstart.paths.source,
-];
+type QuickPath = QuickStartContent["paths"]["docker"] | QuickStartContent["paths"]["source"];
+
+const paths: QuickPath[] = [quickstart.paths.docker, quickstart.paths.source];
 ---
 <BaseLayout
   locale={locale}
@@ -95,7 +95,11 @@ const paths: QuickStartContent["paths"]["docker"][] = [
               )}
             </div>
             <div class="path__media">
-              <ScreenshotFrame shot={path.shot} sizes="(max-width: 1080px) 92vw, 560px" />
+              {"scene" in path ? (
+                <SceneHost scene={path.scene} />
+              ) : (
+                <ScreenshotFrame shot={path.shot} sizes="(max-width: 1080px) 92vw, 560px" />
+              )}
             </div>
           </div>
         </section>

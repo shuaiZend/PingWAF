@@ -1,0 +1,55 @@
+---
+/**
+ * Renders one console scene by id.
+ *
+ * Scenes replace the screenshots that used to illustrate the homepage showcase
+ * and the features page: same inline-SVG / CSS-keyframes approach as the hero,
+ * one component per capability so the same frame is reused on both pages.
+ *
+ * Styles live in `src/styles/global.css` under "Console scenes" — component
+ * scoped styles would become an extra blocking stylesheet request.
+ */
+import Icon from "../Icon.astro";
+import type { Scene, SceneId } from "../../content/schema";
+import SceneAccess from "./SceneAccess.astro";
+import SceneAgents from "./SceneAgents.astro";
+import SceneBot from "./SceneBot.astro";
+import SceneCaching from "./SceneCaching.astro";
+import SceneLogs from "./SceneLogs.astro";
+import SceneTls from "./SceneTls.astro";
+import SceneWaf from "./SceneWaf.astro";
+
+interface Props {
+  scene: Scene;
+}
+
+const SCENES: Record<SceneId, typeof SceneWaf> = {
+  waf: SceneWaf,
+  bot: SceneBot,
+  access: SceneAccess,
+  caching: SceneCaching,
+  tls: SceneTls,
+  logs: SceneLogs,
+  agents: SceneAgents,
+};
+
+const { scene } = Astro.props;
+const Body = SCENES[scene.id];
+---
+<figure class="scene">
+  <svg
+    class="scene__canvas"
+    viewBox="0 0 640 400"
+    role="img"
+    aria-label={scene.alt}
+    preserveAspectRatio="xMidYMid meet"
+  >
+    <g aria-hidden="true">
+      <Body />
+    </g>
+  </svg>
+  <figcaption class="scene__caption">
+    <Icon name="info" />
+    <span>{scene.caption}</span>
+  </figcaption>
+</figure>

@@ -45,9 +45,8 @@ const features = {
         "異常スコアがすべての一致を集約し、リクエストごとに 1 つの判定を出します。",
       ],
       note: "正規化 → シグネチャ → 式 → 異常スコア",
-      shot: {
-        key: "waf",
-        url: "localhost:9080/sites/example.com/security/protection",
+      scene: {
+        id: "waf",
         caption: "カスタムルールとマネージドルールセットはサイト単位で切り替えます。",
         alt: "PingWAF コンソールの WAF ルール編集画面",
       },
@@ -65,9 +64,8 @@ const features = {
         "チャレンジはサイト単位で適用され、他のドメインに影響しません。",
       ],
       note: "TLS フィンガープリントと挙動分析はロードマップにあります。",
-      shot: {
-        key: "bot",
-        url: "localhost:9080/sites/example.com/security/bot",
+      scene: {
+        id: "bot",
         caption: "ボットポリシー、検証済みボット、サイト別のアクション。",
         alt: "PingWAF コンソールのボット対策設定",
       },
@@ -84,9 +82,8 @@ const features = {
         "国と ASN による地域制限。「未知の国を拒否」も選択可能。",
         "IP・ホスト・パス・ASN・国・ヘッダー・Cookie・クエリでのレート制限。",
       ],
-      shot: {
-        key: "access",
-        url: "localhost:9080/sites/example.com/security/access",
+      scene: {
+        id: "access",
         caption: "IP ルールと地域ポリシーを同じ画面で管理します。",
         alt: "IP ルールと地域制限を表示するアクセス制御ページ",
       },
@@ -103,9 +100,8 @@ const features = {
         "サイト別ディスククォータ、LRU 削除、stale-while-revalidate、ブラウザ TTL 制御。",
         "ヘッダー・パス・クエリ・本文の書き換え、Tera エラーページ、サイト一時停止（503）。",
       ],
-      shot: {
-        key: "caching",
-        url: "localhost:9080/sites/example.com/caching",
+      scene: {
+        id: "caching",
         caption: "キャッシュルール、TTL、サイトクォータ。",
         alt: "PingWAF コンソールのエッジキャッシュ設定",
       },
@@ -123,9 +119,8 @@ const features = {
         "HSTS と HTTPS 強制、コンソール発行のクライアント証明書による mTLS と即時失効。",
       ],
       note: "オリジン証明書の検証は明示的なスイッチで、デプロイ全体またはプール単位に設定します。",
-      shot: {
-        key: "ssl",
-        url: "localhost:9080/sites/example.com/ssl",
+      scene: {
+        id: "tls",
         caption: "1 つのサイトの証明書状態と ACME 履歴。",
         alt: "証明書状態と ACME イベントを表示する TLS ページ",
       },
@@ -142,9 +137,8 @@ const features = {
         "エージェントが送るメトリクスによるトラフィックと攻撃の分析画面。",
         "エージェントの健全性、キャッシュヒット率、削除件数をコントロールプレーンで確認。",
       ],
-      shot: {
-        key: "logs",
-        url: "localhost:9080/logs",
+      scene: {
+        id: "logs",
         caption: "判定と一致ルールを含む検索可能なリクエストログ。",
         alt: "判定・スコア・一致ルールを表示するリクエストログ一覧",
       },
@@ -161,9 +155,8 @@ const features = {
         "rust-embed で英語・簡体中文・日本語のコンソールを内蔵。フロントエンドの別デプロイは不要。",
         "エージェントの一覧と状態、システムエンドポイントによる CPU・メモリの内訳。",
       ],
-      shot: {
-        key: "agents",
-        url: "localhost:9080/agents",
+      scene: {
+        id: "agents",
         caption: "エージェントフリートの状態とハートビート。",
         alt: "接続済みエッジエージェントを表示するエージェントページ",
       },
