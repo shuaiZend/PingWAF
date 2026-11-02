@@ -2995,14 +2995,47 @@ fn distinct_long_words(input: &str) -> usize {
 
 /// Is the tautology part of a sentence?
 ///
-/// `1 and 1=1 is a very basic mathematical operation` carries four distinct
+/// `1 and 1=1 is a very basic mathematical operation` carries several distinct
 /// English-looking words and reads as a quotation of arithmetic; a payload
 /// padded to slip past a length test carries SQL vocabulary and repetition
 /// instead. Both tests have to hold before a long tautology is written off as
-/// a search phrase — the demotion is now narrower than the length test it
-/// replaces, never wider.
+/// a search phrase — the demotion is narrower than the length test it replaces,
+/// never wider.
+///
+/// A second shape qualifies: a value authored mostly in CJK. Search phrases and
+/// analytics payloads written in Chinese quote `and 1=1` verbatim and never
+/// produce three English words, while a real injection payload is printable
+/// ASCII by construction (the SQL grammar is ASCII). The caller still requires
+/// `!sqli_tautology_statement_shaped`, so a CJK value carrying an actual
+/// statement structure stays critical.
 pub fn tautology_sits_in_prose(input: &str) -> bool {
-    distinct_long_words(input) >= TAUTOLOGY_PROSE_WORDS
+    if distinct_long_words(input) >= TAUTOLOGY_PROSE_WORDS {
+        return true;
+    }
+    let mut total = 0usize;
+    let mut non_ascii = 0usize;
+    let mut has_cjk = false;
+    for ch in input.chars() {
+        // `chars()` here, byte length at the call site (`len() > 32`): the
+        // ratio is about script mix, the length gate is about padding.
+        total += 1;
+        if !ch.is_ascii() {
+            non_ascii += 1;
+            has_cjk |= matches!(
+                ch,
+                '\u{1100}'..='\u{11ff}'   // Hangul Jamo
+                    | '\u{2e80}'..='\u{9fff}' // radicals, kana, unified ideographs
+                    | '\u{ac00}'..='\u{d7af}' // Hangul syllables
+                    | '\u{f900}'..='\u{faff}' // compatibility ideographs
+                    | '\u{fe30}'..='\u{fe4f}' // compatibility forms
+                    | '\u{ff00}'..='\u{ffef}' // full-width forms
+            );
+        }
+    }
+    // 40 % is what the observed search phrases clear (47 % for the query value,
+    // ~46 % for the JSON member it is unpacked into). Pure-ASCII payloads are
+    // unaffected: their non-ASCII share is zero.
+    has_cjk && non_ascii * 5 > total * 2
 }
 
 static SCRIPT_TAG_ATTR: Lazy<Regex> =
@@ -3416,6 +3449,26 @@ mod tests {
         assert!(tautology_sits_in_prose(
             "id=1 and 1=1 because the filter requires a match"
         ));
+    }
+
+    #[test]
+    fn tautology_inside_cjk_search_phrase_is_prose() {
+        // Bing SERP queries quote "and 1=1" in Chinese: ~47 % non-ASCII, no
+        // statement structure. Demoting them is the P14-era gap that produced
+        // seven false positives on the public corpus.
+        assert!(tautology_sits_in_prose(
+            "sql注入的“and 1=1，and 1=2”测试法可以直接用and代替吗？"
+        ));
+        // The same string inside an analytics JSON member (~46 % non-ASCII).
+        assert!(tautology_sits_in_prose(
+            "q:sql注入的“and 1=1，and 1=2”测试法可以直接用and代替吗？,i:1"
+        ));
+        // Latin-only payloads keep the old behaviour: no CJK, no demotion.
+        assert!(!tautology_sits_in_prose("1 OR 1=1 OR 1=1 OR 1=1"));
+        // A real probe annotated in Chinese keeps a quote break and stays out
+        // of the prose class; the caller's statement-shape gate also protects
+        // values that do cross the ratio.
+        assert!(!tautology_sits_in_prose("中文备注 1' and '1'='1"));
     }
 
     #[test]

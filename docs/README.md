@@ -20,6 +20,17 @@ centrally-controlled Web Application Firewall built on
 | [ai-crawl.md](./ai-crawl.md) | AI Crawl Control — crawler families, per-site policy, generated robots.txt / llms.txt |
 | [profiling.md](./profiling.md) | System observation and attribution: `/system/metrics` CPU/memory snapshots, `/system/profile` module/method attribution |
 
+## 🧪 Testing & benchmarks
+
+| Document | What you'll find |
+| --- | --- |
+| [waf-test-plan.md](./waf-test-plan.md) | WAF test plan — layered model, blazehttp suite selection and organisation, matrix, calibres, acceptance gates |
+| [waf-test-report.md](./waf-test-report.md) | Measured effectiveness of the current release — interception, false positives, regression results, limits |
+| [waf-benchmark-report.md](./waf-benchmark-report.md) | Per-round benchmark appendix — P0 → P14 iteration history, per-category tables, semantic-gate rationale |
+| [waf-engine-review.md](./waf-engine-review.md) | Engine review and design record — why each detector exists and which failure it was built for |
+
+Harness: [`tools/waf-bench/`](../tools/waf-bench) — suite manifest, replayer, summariser, verdict diff.
+
 ## 🧭 Project & community
 
 | Document | What you'll find |

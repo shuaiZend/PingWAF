@@ -1,0 +1,17 @@
+waf_scale_bench  engine_size=152
+shared_base_retained=1259547 shared_base_peak=5810265
+signature_retained=111960 signature_peak=334079
+managed_retained=9294 managed_peak=10025
+mode       sites  custom     total_retained     total_peak    incremental
+legacy     2      false              242940         464843         121470
+shared     2      false             1260107        5810825            280
+legacy     10     false             1214700        1436603         121470
+shared     10     false             1262347        5813065            280
+legacy     100    false            12147000       12368903         121470
+shared     100    false             1287547        5838265            280
+legacy     2      true               243499         465378         121749
+shared     2      true              1260621        5811404            537
+legacy     10     true              1217270        1439149         121727
+shared     10     true              1264917        5815700            537
+legacy     100    true             12172700       12394579         121727
+shared     100    true              1313247        5864030            537

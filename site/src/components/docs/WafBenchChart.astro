@@ -1,0 +1,43 @@
+---
+import type { BenchRow } from "../../data/benchmark";
+
+interface Props {
+  title: string;
+  caption: string;
+  max: number;
+  rows: BenchRow[];
+}
+
+const { title, caption, max, rows } = Astro.props;
+
+/** Trim one trailing zero so 93.80 reads 93.8 while 0.06 keeps its precision. */
+const format = (value: number): string => {
+  if (Number.isInteger(value)) return `${value}%`;
+  return `${value.toFixed(2).replace(/0$/, "")}%`;
+};
+
+const width = (value: number): string =>
+  `${Math.min(100, Math.max(0, (value / max) * 100)).toFixed(2)}%`;
+---
+
+<figure class="bench-chart" role="img" aria-label={`${title}. ${caption}`}>
+  <figcaption class="bench-chart__head">
+    <span class="bench-chart__title">{title}</span>
+    <span class="bench-chart__caption">{caption}</span>
+  </figcaption>
+  <dl class="bench-chart__rows">
+    {
+      rows.map((row) => (
+        <div class:list={["bench-chart__row", { "bench-chart__row--accent": row.accent }]}>
+          <dt class="bench-chart__label">{row.label}</dt>
+          <dd class="bench-chart__track">
+            <span class="bench-chart__rail">
+              <span class="bench-chart__bar" style={`--value:${width(row.value)}`} />
+            </span>
+            <span class="bench-chart__value">{format(row.value)}</span>
+          </dd>
+        </div>
+      ))
+    }
+  </dl>
+</figure>

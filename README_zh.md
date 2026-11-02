@@ -133,6 +133,19 @@ graph TB
 
 ---
 
+## 📊 实测效果
+
+基于公开的 [blazehttp](https://github.com/chaitin/blazehttp) 样本库（33 877 条原始 HTTP 报文：恶意 658 / 正常 33 219），对 release 构建逐字节回放实测。拦截数按 WAF 判决面统计——403 拦截页与 503 质询页；"正常流量受影响"同样计入两者，质询不会被藏进"拦截"数字里。
+
+| 档位 | 攻击拦截率 | 正常流量受影响 | p95 |
+| --- | --- | --- | --- |
+| Normal（默认，不检测请求体） | 60.2% | 0.01% | 1 ms |
+| Normal + 请求体检测 | 71.9% | 0.04% | 1 ms |
+| Strict | 76.0% | 0.01% | 1 ms |
+| Strict + 请求体检测 | **93.8%** | **0.06%** | 2 ms |
+
+每个数字都可复现：套件定义、回放工具与原始指标在 [`tools/waf-bench/`](./tools/waf-bench)。方法论见**[测试方案](./docs/zh/waf-test-plan.md)**，结论、分类表、与 Cloudflare / 雷池 / ModSecurity 的横向对比（引自 blazehttp 评测）与已知限制见**[测试效果报告](./docs/zh/waf-test-report.md)**。
+
 ## 🧱 技术栈
 
 | 层次 | 技术 |
@@ -329,6 +342,9 @@ PINGWAF_CONFIG=/etc/pingwaf/pingwaf.toml pingwaf all-in-one   # 等价写法
 | [docs/cli.md](./docs/cli.md) | 管理员二进制 CLI——运行模式、运维子命令、故障处置手册（[中文版](./docs/zh/cli.md)） |
 | [docs/user-guide.md](./docs/user-guide.md) | 控制台使用、站点、规则与策略 |
 | [docs/zh/http-lifecycle.md](./docs/zh/http-lifecycle.md) | 请求生命周期：各项功能在流水线中的执行阶段（WAF 检查顺序、缓存、错误页）与调试方法 |
+| [docs/zh/waf-test-plan.md](./docs/zh/waf-test-plan.md) | WAF 测试方案——分层模型、blazehttp 用例选取、口径与验收门槛 |
+| [docs/zh/waf-test-report.md](./docs/zh/waf-test-report.md) | WAF 实测效果报告（0.32.4）——拦截率、误报、归因与限制 |
+| [docs/waf-benchmark-report.md](./docs/waf-benchmark-report.md) | 逐轮基准数据附录（P0 → P14 迭代史） |
 | [docs/api.md](./docs/api.md) | REST API 参考（`https://<host>:9080/api/v1`） |
 | [docs/README.md](./docs/README.md) | 完整文档索引 |
 | [CONTRIBUTING.md](./CONTRIBUTING.md) | 如何参与贡献 |

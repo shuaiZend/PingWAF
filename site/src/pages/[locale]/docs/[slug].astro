@@ -2,8 +2,15 @@
 import type { GetStaticPaths } from "astro";
 import { getCollection, render } from "astro:content";
 import DocsLayout from "../../../layouts/DocsLayout.astro";
+import WafBenchChart from "../../../components/docs/WafBenchChart.astro";
 import { DOC_SLUGS, type DocSlug } from "../../../content/schema";
 import { PREFIXED_LOCALES, type Locale } from "../../../i18n/config";
+import {
+  FALSE_POSITIVE_MAX,
+  FALSE_POSITIVE_ROWS,
+  INTERCEPTION_MAX,
+  INTERCEPTION_ROWS,
+} from "../../../data/benchmark";
 
 export const getStaticPaths = (() =>
   PREFIXED_LOCALES.flatMap((locale) =>
@@ -19,6 +26,7 @@ if (!entry) {
 }
 
 const { Content, headings } = await render(entry);
+const showBenchChart = slug === "waf-test-report";
 ---
 <DocsLayout
   locale={locale}
@@ -28,5 +36,23 @@ const { Content, headings } = await render(entry);
   minutes={entry.data.minutes}
   headings={headings}
 >
+  {
+    showBenchChart && (
+      <div class="bench-charts">
+        <WafBenchChart
+          title="Interception — public corpus"
+          caption="Share of malicious samples intercepted. PingWAF: 33 877 samples (this repository); other products quoted from the blazehttp README (33 669)."
+          max={INTERCEPTION_MAX}
+          rows={INTERCEPTION_ROWS}
+        />
+        <WafBenchChart
+          title="False positives — public corpus"
+          caption="Share of benign samples affected (403 block or 503 challenge). Lower is better."
+          max={FALSE_POSITIVE_MAX}
+          rows={FALSE_POSITIVE_ROWS}
+        />
+      </div>
+    )
+  }
   <Content />
 </DocsLayout>

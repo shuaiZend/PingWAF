@@ -1,0 +1,603 @@
+{
+  "version": "0.32.4",
+  "git_sha": "3b405cf10d88eee1cdd37dbf1ecd81ccdce30e4d",
+  "date": "2026-11-02",
+  "dataset": {
+    "upstream": "https://github.com/chaitin/blazehttp",
+    "black": 658,
+    "white": 33219,
+    "total": 33877,
+    "official_benchmark_total": 33669
+  },
+  "unit_tests": {
+    "pingwaf_waf_lib": 250,
+    "workspace": "pass"
+  },
+  "calibres": {
+    "blocked": "HTTP 403 block page",
+    "challenged": "HTTP 503 challenge page",
+    "intercepted": "blocked + challenged"
+  },
+  "tiers": {
+    "normal": {
+      "black_total": 658,
+      "black_blocked": 396,
+      "black_challenged": 0,
+      "black_intercepted": 396,
+      "intercept_rate": 60.2,
+      "block_rate": 60.2,
+      "white_total": 33219,
+      "white_blocked": 2,
+      "white_challenged": 2,
+      "white_intercepted": 4,
+      "fp_rate_blocked": 0.01,
+      "fp_rate_intercepted": 0.01,
+      "p50_ms": 0,
+      "p95_ms": 2,
+      "error_rate": 0.0,
+      "status_405": 1,
+      "status_500": 15,
+      "git_sha": "3b405cf10d88eee1cdd37dbf1ecd81ccdce30e4d",
+      "version": "0.32.4",
+      "by_category": {
+        "crlf": {
+          "n": 5,
+          "blocked": 3,
+          "challenged": 0,
+          "intercepted": 3,
+          "rate": 60.0
+        },
+        "deser": {
+          "n": 6,
+          "blocked": 1,
+          "challenged": 0,
+          "intercepted": 1,
+          "rate": 16.7
+        },
+        "lfi": {
+          "n": 25,
+          "blocked": 20,
+          "challenged": 0,
+          "intercepted": 20,
+          "rate": 80.0
+        },
+        "log4shell": {
+          "n": 1,
+          "blocked": 1,
+          "challenged": 0,
+          "intercepted": 1,
+          "rate": 100.0
+        },
+        "other": {
+          "n": 538,
+          "blocked": 333,
+          "challenged": 0,
+          "intercepted": 333,
+          "rate": 61.9
+        },
+        "rce": {
+          "n": 12,
+          "blocked": 3,
+          "challenged": 0,
+          "intercepted": 3,
+          "rate": 25.0
+        },
+        "scanner": {
+          "n": 1,
+          "blocked": 0,
+          "challenged": 0,
+          "intercepted": 0,
+          "rate": 0.0
+        },
+        "sqli": {
+          "n": 20,
+          "blocked": 17,
+          "challenged": 0,
+          "intercepted": 17,
+          "rate": 85.0
+        },
+        "ssrf": {
+          "n": 13,
+          "blocked": 1,
+          "challenged": 0,
+          "intercepted": 1,
+          "rate": 7.7
+        },
+        "ssti": {
+          "n": 5,
+          "blocked": 3,
+          "challenged": 0,
+          "intercepted": 3,
+          "rate": 60.0
+        },
+        "xss": {
+          "n": 30,
+          "blocked": 14,
+          "challenged": 0,
+          "intercepted": 14,
+          "rate": 46.7
+        },
+        "xxe": {
+          "n": 2,
+          "blocked": 0,
+          "challenged": 0,
+          "intercepted": 0,
+          "rate": 0.0
+        }
+      }
+    },
+    "normal-body": {
+      "black_total": 658,
+      "black_blocked": 473,
+      "black_challenged": 0,
+      "black_intercepted": 473,
+      "intercept_rate": 71.9,
+      "block_rate": 71.9,
+      "white_total": 33219,
+      "white_blocked": 10,
+      "white_challenged": 2,
+      "white_intercepted": 12,
+      "fp_rate_blocked": 0.03,
+      "fp_rate_intercepted": 0.04,
+      "p50_ms": 0,
+      "p95_ms": 2,
+      "error_rate": 0.0,
+      "status_405": 1,
+      "status_500": 15,
+      "git_sha": "3b405cf10d88eee1cdd37dbf1ecd81ccdce30e4d",
+      "version": "0.32.4",
+      "by_category": {
+        "crlf": {
+          "n": 5,
+          "blocked": 3,
+          "challenged": 0,
+          "intercepted": 3,
+          "rate": 60.0
+        },
+        "deser": {
+          "n": 6,
+          "blocked": 6,
+          "challenged": 0,
+          "intercepted": 6,
+          "rate": 100.0
+        },
+        "lfi": {
+          "n": 25,
+          "blocked": 22,
+          "challenged": 0,
+          "intercepted": 22,
+          "rate": 88.0
+        },
+        "log4shell": {
+          "n": 1,
+          "blocked": 1,
+          "challenged": 0,
+          "intercepted": 1,
+          "rate": 100.0
+        },
+        "other": {
+          "n": 538,
+          "blocked": 392,
+          "challenged": 0,
+          "intercepted": 392,
+          "rate": 72.9
+        },
+        "rce": {
+          "n": 12,
+          "blocked": 6,
+          "challenged": 0,
+          "intercepted": 6,
+          "rate": 50.0
+        },
+        "scanner": {
+          "n": 1,
+          "blocked": 0,
+          "challenged": 0,
+          "intercepted": 0,
+          "rate": 0.0
+        },
+        "sqli": {
+          "n": 20,
+          "blocked": 17,
+          "challenged": 0,
+          "intercepted": 17,
+          "rate": 85.0
+        },
+        "ssrf": {
+          "n": 13,
+          "blocked": 8,
+          "challenged": 0,
+          "intercepted": 8,
+          "rate": 61.5
+        },
+        "ssti": {
+          "n": 5,
+          "blocked": 3,
+          "challenged": 0,
+          "intercepted": 3,
+          "rate": 60.0
+        },
+        "xss": {
+          "n": 30,
+          "blocked": 14,
+          "challenged": 0,
+          "intercepted": 14,
+          "rate": 46.7
+        },
+        "xxe": {
+          "n": 2,
+          "blocked": 1,
+          "challenged": 0,
+          "intercepted": 1,
+          "rate": 50.0
+        }
+      }
+    },
+    "strict": {
+      "black_total": 658,
+      "black_blocked": 490,
+      "black_challenged": 10,
+      "black_intercepted": 500,
+      "intercept_rate": 76.0,
+      "block_rate": 74.5,
+      "white_total": 33219,
+      "white_blocked": 2,
+      "white_challenged": 2,
+      "white_intercepted": 4,
+      "fp_rate_blocked": 0.01,
+      "fp_rate_intercepted": 0.01,
+      "p50_ms": 1,
+      "p95_ms": 2,
+      "error_rate": 0.0,
+      "status_405": 1,
+      "status_500": 15,
+      "git_sha": "3b405cf10d88eee1cdd37dbf1ecd81ccdce30e4d",
+      "version": "0.32.4",
+      "by_category": {
+        "crlf": {
+          "n": 5,
+          "blocked": 3,
+          "challenged": 0,
+          "intercepted": 3,
+          "rate": 60.0
+        },
+        "deser": {
+          "n": 6,
+          "blocked": 1,
+          "challenged": 0,
+          "intercepted": 1,
+          "rate": 16.7
+        },
+        "lfi": {
+          "n": 25,
+          "blocked": 20,
+          "challenged": 1,
+          "intercepted": 21,
+          "rate": 84.0
+        },
+        "log4shell": {
+          "n": 1,
+          "blocked": 1,
+          "challenged": 0,
+          "intercepted": 1,
+          "rate": 100.0
+        },
+        "other": {
+          "n": 538,
+          "blocked": 408,
+          "challenged": 6,
+          "intercepted": 414,
+          "rate": 77.0
+        },
+        "rce": {
+          "n": 12,
+          "blocked": 6,
+          "challenged": 2,
+          "intercepted": 8,
+          "rate": 66.7
+        },
+        "scanner": {
+          "n": 1,
+          "blocked": 0,
+          "challenged": 0,
+          "intercepted": 0,
+          "rate": 0.0
+        },
+        "sqli": {
+          "n": 20,
+          "blocked": 17,
+          "challenged": 0,
+          "intercepted": 17,
+          "rate": 85.0
+        },
+        "ssrf": {
+          "n": 13,
+          "blocked": 1,
+          "challenged": 0,
+          "intercepted": 1,
+          "rate": 7.7
+        },
+        "ssti": {
+          "n": 5,
+          "blocked": 5,
+          "challenged": 0,
+          "intercepted": 5,
+          "rate": 100.0
+        },
+        "xss": {
+          "n": 30,
+          "blocked": 28,
+          "challenged": 0,
+          "intercepted": 28,
+          "rate": 93.3
+        },
+        "xxe": {
+          "n": 2,
+          "blocked": 0,
+          "challenged": 1,
+          "intercepted": 1,
+          "rate": 50.0
+        }
+      }
+    },
+    "strict-body": {
+      "black_total": 658,
+      "black_blocked": 607,
+      "black_challenged": 10,
+      "black_intercepted": 617,
+      "intercept_rate": 93.8,
+      "block_rate": 92.2,
+      "white_total": 33219,
+      "white_blocked": 17,
+      "white_challenged": 2,
+      "white_intercepted": 19,
+      "fp_rate_blocked": 0.05,
+      "fp_rate_intercepted": 0.06,
+      "p50_ms": 1,
+      "p95_ms": 2,
+      "error_rate": 0.0,
+      "status_405": 1,
+      "status_500": 15,
+      "git_sha": "3b405cf10d88eee1cdd37dbf1ecd81ccdce30e4d",
+      "version": "0.32.4",
+      "by_category": {
+        "crlf": {
+          "n": 5,
+          "blocked": 5,
+          "challenged": 0,
+          "intercepted": 5,
+          "rate": 100.0
+        },
+        "deser": {
+          "n": 6,
+          "blocked": 6,
+          "challenged": 0,
+          "intercepted": 6,
+          "rate": 100.0
+        },
+        "lfi": {
+          "n": 25,
+          "blocked": 23,
+          "challenged": 1,
+          "intercepted": 24,
+          "rate": 96.0
+        },
+        "log4shell": {
+          "n": 1,
+          "blocked": 1,
+          "challenged": 0,
+          "intercepted": 1,
+          "rate": 100.0
+        },
+        "other": {
+          "n": 538,
+          "blocked": 499,
+          "challenged": 6,
+          "intercepted": 505,
+          "rate": 93.9
+        },
+        "rce": {
+          "n": 12,
+          "blocked": 8,
+          "challenged": 2,
+          "intercepted": 10,
+          "rate": 83.3
+        },
+        "scanner": {
+          "n": 1,
+          "blocked": 1,
+          "challenged": 0,
+          "intercepted": 1,
+          "rate": 100.0
+        },
+        "sqli": {
+          "n": 20,
+          "blocked": 17,
+          "challenged": 0,
+          "intercepted": 17,
+          "rate": 85.0
+        },
+        "ssrf": {
+          "n": 13,
+          "blocked": 13,
+          "challenged": 0,
+          "intercepted": 13,
+          "rate": 100.0
+        },
+        "ssti": {
+          "n": 5,
+          "blocked": 5,
+          "challenged": 0,
+          "intercepted": 5,
+          "rate": 100.0
+        },
+        "xss": {
+          "n": 30,
+          "blocked": 29,
+          "challenged": 0,
+          "intercepted": 29,
+          "rate": 96.7
+        },
+        "xxe": {
+          "n": 2,
+          "blocked": 0,
+          "challenged": 1,
+          "intercepted": 1,
+          "rate": 50.0
+        }
+      }
+    }
+  },
+  "compressed": {
+    "strict-body": {
+      "black_total": 8,
+      "black_intercepted": 8,
+      "white_total": 2,
+      "white_intercepted": 0,
+      "missed": []
+    },
+    "normal-body": {
+      "black_total": 8,
+      "black_intercepted": 7,
+      "white_total": 2,
+      "white_intercepted": 0,
+      "missed": [
+        "local/gzip/rce-cmdsub.black"
+      ]
+    }
+  },
+  "spot": {
+    "spot_advanced": {
+      "note": "bit-identical to strict-body over 33877 samples",
+      "black_intercepted": 617,
+      "white_intercepted": 19
+    },
+    "spot_monitor_sqli": {
+      "sqli_black_downgraded": 3,
+      "ssti_black_still_blocked": 2
+    },
+    "spot_monitor_java": {
+      "ssti_black_downgraded": 2,
+      "sqli_black_still_blocked": 3
+    }
+  },
+  "misses": {
+    "open": 41,
+    "byte_artefacts": 19,
+    "verdict_artefacts": 3,
+    "real_passed": 19,
+    "by_verdict": {
+      "passed": 38,
+      "status_405": 1,
+      "protocol_reject": 2
+    },
+    "real_by_category": {
+      "other": 19
+    },
+    "verdict_artefact_files": [
+      "ac/6d/17adc90a65a652a768f959eea284.black",
+      "bd/40/8bdebf8443eecd343739e7fbdf2b.black",
+      "ec/98/75af1332f120a05581069320ad6f.black"
+    ]
+  },
+  "effective": {
+    "byte_artefact_excluded": {
+      "denominator": 638,
+      "intercepted": 616,
+      "rate": 96.6
+    },
+    "all_artefacts_excluded": {
+      "denominator": 635,
+      "intercepted": 616,
+      "rate": 97.0
+    }
+  },
+  "fixes": {
+    "fp_removed_vs_previous_round": 8,
+    "fp_pin_samples_now_passed": 8,
+    "tautology_cjk_demotion": true,
+    "dotfile_github_exempt": true
+  },
+  "regression": {
+    "triage": 20,
+    "triage_passed": 19,
+    "triage_status_405": 1,
+    "fp_pin": 27,
+    "fp_pin_blocked": 17,
+    "fp_pin_challenged": 2,
+    "fp_pin_passed": 8,
+    "smoke_runs": 2,
+    "smoke_verdict_flips": 0
+  },
+  "scale": {
+    "engine_size": 152,
+    "shared_base_retained": 1259547,
+    "shared_base_peak": 5810265,
+    "legacy_100_sites_retained": 12147000,
+    "shared_100_sites_retained": 1287547,
+    "legacy_per_site": 121470,
+    "shared_per_site": 280
+  },
+  "comparison": {
+    "source": "https://github.com/chaitin/blazehttp#\u6d4b\u8bd5\u6548\u679c",
+    "note": "official figures use 33669 samples (570-575 malicious); this round uses 33877 (658 malicious)",
+    "rows": [
+      {
+        "product": "PingWAF 0.32.4 Strict+body",
+        "samples": 33877,
+        "interception": 93.8,
+        "fp": 0.06,
+        "fp_blocked": 0.05,
+        "latency_note": "p95 2 ms loopback"
+      },
+      {
+        "product": "PingWAF 0.32.4 Normal",
+        "samples": 33877,
+        "interception": 60.2,
+        "fp": 0.01,
+        "fp_blocked": 0.01,
+        "latency_note": "p95 1 ms loopback"
+      },
+      {
+        "product": "SafeLine free strict",
+        "samples": 33669,
+        "interception": 76.17,
+        "fp": 0.22,
+        "fp_blocked": 0.22,
+        "latency_note": "64.34 ms public"
+      },
+      {
+        "product": "SafeLine free balanced",
+        "samples": 33669,
+        "interception": 71.65,
+        "fp": 0.07,
+        "fp_blocked": 0.07,
+        "latency_note": "70.05 ms public"
+      },
+      {
+        "product": "ModSecurity PL4",
+        "samples": 33669,
+        "interception": 94.61,
+        "fp": 52.46,
+        "fp_blocked": 52.46,
+        "latency_note": "28.89 ms public"
+      },
+      {
+        "product": "ModSecurity PL1",
+        "samples": 33669,
+        "interception": 69.74,
+        "fp": 17.58,
+        "fp_blocked": 17.58,
+        "latency_note": "31.15 ms public"
+      },
+      {
+        "product": "Cloudflare free",
+        "samples": 33669,
+        "interception": 10.7,
+        "fp": 0.07,
+        "fp_blocked": 0.07,
+        "latency_note": "288.96 ms public"
+      }
+    ]
+  }
+}

@@ -1,5 +1,9 @@
 # PingWAF 数据面 WAF 实测评估报告（基于 blazehttp 攻击样本）
 
+> 本文件保留为**逐轮数据附录**（P0 → P14 迭代史、分类表与语义门取舍理由）。
+> 当前版本的测试方法见 [waf-test-plan.md](./waf-test-plan.md)，效果结论见
+> [waf-test-report.md](./waf-test-report.md)。
+
 - 测试日期：2026-10-04
 - 样本来源：[chaitin/blazehttp](https://github.com/chaitin/blazehttp) 内置测试集（33877 条原始 HTTP 报文：恶意 658 / 正常 33219）
 - 被测对象：PingWAF 数据面（pingap-plugin WAF，pingora 0.9.0）静态配置模式

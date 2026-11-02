@@ -50,6 +50,11 @@ const intro = {
       label: "Synchronisation à chaud",
       note: "Flux bidirectionnels, sans redémarrage.",
     },
+    {
+      value: "93.8%",
+      label: "Interception des attaques (Strict + body)",
+      note: "658 échantillons malveillants publics ; 0.06 % de bénins affectés.",
+    },
   ],
   architecture: {
     eyebrow: "Architecture",

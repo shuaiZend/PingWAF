@@ -18,6 +18,17 @@
 | [ai-crawl.md](./ai-crawl.md) | AI 爬虫控制——爬虫家族、站点级策略、生成的 robots.txt / llms.txt |
 | [profiling.md](./profiling.md) | 系统观测与归因：`/system/metrics` CPU/内存快照、`/system/profile` 模块/方法归因 |
 
+## 🧪 测试与基准
+
+| 文档 | 内容 |
+| --- | --- |
+| [waf-test-plan.md](waf-test-plan.md) | WAF 测试方案——分层模型、blazehttp 用例选取与组织、矩阵、口径、验收门槛 |
+| [waf-test-report.md](waf-test-report.md) | 当前版本的实测效果——拦截率、误报、回归结论与限制 |
+| [waf-benchmark-report.md](../waf-benchmark-report.md) | 逐轮基准数据附录——P0 → P14 迭代史、分类表与语义门取舍理由 |
+| [waf-engine-review.md](../waf-engine-review.md) | 引擎复盘与设计记录——每个检测器为何存在、为哪种失败形态而建 |
+
+工具链：[`tools/waf-bench/`](../../tools/waf-bench)——套件清单、回放器、汇总器、判决差异工具。
+
 ## 🧭 项目与社区
 
 | 文档 | 内容 |

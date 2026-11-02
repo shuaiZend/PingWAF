@@ -46,7 +46,7 @@ TARGET_MAX_GB ?= 20
 TARGET_SWEEP_DAYS ?= 3
 
 GUARDED := lint lint-rustls test test-rustls cov bench bench-all bloat \
-	build check \
+	build check waf-bench-smoke \
 	release release-full release-rustls-full release-all release-perf \
 	release-pyro
 
@@ -134,6 +134,19 @@ unused-features:
 
 test:
 	cargo test --workspace --features=full
+
+# WAF bench smoke: build the data plane, validate the suite manifest and replay
+# ~70 samples through one tier. Needs the blazehttp dataset; see
+# docs/waf-test-plan.md and tools/waf-bench/README.md.
+waf-bench-smoke:
+	@test -n "$(BLAZEHTTP_ROOT)" || { \
+	  echo "set BLAZEHTTP_ROOT to a blazehttp clone (git clone --depth 1 https://github.com/chaitin/blazehttp)" >&2; \
+	  exit 1; \
+	}
+	cargo build --release --bin pingwaf --features=full
+	./tools/waf-bench/run_suite.sh \
+	  --conf tools/waf-bench/conf/level-normal-body.toml \
+	  --suite smoke --group smoke-normal-body
 
 # Same suite on the rustls TLS backend
 test-rustls:

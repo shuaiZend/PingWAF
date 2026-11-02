@@ -1,0 +1,14 @@
+{
+  "version": "0.32.4",
+  "git_sha": "3b405cf10d88eee1cdd37dbf1ecd81ccdce30e4d",
+  "git_dirty": true,
+  "conf": "tools/waf-bench/conf/spot-monitor-java.toml",
+  "suite": "smoke",
+  "group": "spot-monitor-java",
+  "target": "127.0.0.1:6289",
+  "origin_port": 6199,
+  "concurrency": 32,
+  "delay_ms": 0.0,
+  "dataset_root": "/tmp/blazehttp",
+  "finished_at": "2026-11-02T04:44:23Z"
+}

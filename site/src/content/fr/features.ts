@@ -20,6 +20,17 @@ const features = {
       { id: "operations", label: "Exploitation" },
     ],
   },
+  metrics: {
+    eyebrow: "Efficacité mesurée",
+    title: "Des chiffres issus d'un corpus public",
+    lead: "33 877 échantillons blazehttp rejoués octet par octet sur un build release — calibre strict : seules comptent les pages de blocage 403 et les défis 503.",
+    items: [
+      { value: "93.8%", label: "Interception des attaques", note: "Strict + body · 658 échantillons malveillants" },
+      { value: "0.06%", label: "Faux positifs", note: "19 sur 33 219 échantillons bénins" },
+      { value: "1–2 ms", label: "p95 du tier statique", note: "replay en loopback / build release" },
+    ],
+    link: { label: "Lire le rapport de tests complet", path: "/docs/waf-test-report/" },
+  },
   groups: [
     {
       id: "waf-engine",

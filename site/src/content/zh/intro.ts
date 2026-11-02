@@ -50,6 +50,11 @@ const intro = {
       label: "规则热同步",
       note: "双向流推送，进程无需重启。",
     },
+    {
+      value: "93.8%",
+      label: "攻击拦截率（Strict + 请求体检测）",
+      note: "658 条公开恶意样本；受影响的正常样本 0.06%。",
+    },
   ],
   architecture: {
     eyebrow: "架构",

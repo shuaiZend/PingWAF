@@ -37,6 +37,14 @@ const docs = {
       topics: ["pipeline", "expressions", "verdicts", "défis"],
     },
     {
+      slug: "waf-test-report",
+      icon: "activity",
+      title: "Rapport de tests WAF",
+      lead: "Efficacité mesurée sur le corpus blazehttp : interception, faux positifs, régression et déterminisme.",
+      minutes: 10,
+      topics: ["interception", "faux positifs", "régression", "p95"],
+    },
+    {
       slug: "api",
       icon: "code",
       title: "API",

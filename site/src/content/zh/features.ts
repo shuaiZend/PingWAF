@@ -20,6 +20,17 @@ const features = {
       { id: "operations", label: "运维" },
     ],
   },
+  metrics: {
+    eyebrow: "实测效果",
+    title: "公开语料上的真实数字",
+    lead: "33 877 条 blazehttp 样本经 raw socket 逐字节回放到 release 构建——严格口径：仅 403 拦截页与 503 质询页计入拦截。",
+    items: [
+      { value: "93.8%", label: "攻击拦截率", note: "Strict + body · 658 条恶意样本" },
+      { value: "0.06%", label: "误报率", note: "33 219 条正常样本中的 19 条" },
+      { value: "1–2 ms", label: "静态档 p95", note: "loopback 回放 / release 构建" },
+    ],
+    link: { label: "查看完整测试报告", path: "/docs/waf-test-report/" },
+  },
   groups: [
     {
       id: "waf-engine",

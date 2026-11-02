@@ -150,7 +150,11 @@ pub fn default_managed_rules(level: WafLevel) -> Vec<CompiledRule> {
         ManagedSpec {
             id: "PINGWAF-1020",
             name: "Block sensitive dotfile probes",
-            expression: r#"http.request.uri.path matches "(?i)/\\.(?:git|env|svn|aws|kube|ssh|docker)""#.to_string(),
+            // The trailing boundary keeps `.github` (a public hosting path)
+            // out while `.git/config`, `.env`, `.env.local` still match. The
+            // path is already stripped of query and fragment upstream, so the
+            // boundary only needs a separator or the end of the path.
+            expression: r#"http.request.uri.path matches "(?i)/\\.(?:git|env|svn|aws|kube|ssh|docker)(?:[./;]|$)""#.to_string(),
             action: RuleAction::Block,
             severity: 5,
             paranoia_level: 1,
@@ -426,6 +430,15 @@ mod tests {
         }
     }
 
+    /// Evaluation context for path-oriented rules.
+    fn path_ctx(path: &'static str) -> EvalContext<'static> {
+        EvalContext {
+            path,
+            full_uri: path,
+            ..score_ctx(0, 0, 0, 0)
+        }
+    }
+
     fn find<'r>(rules: &'r [CompiledRule], id: &str) -> &'r CompiledRule {
         rules
             .iter()
@@ -469,6 +482,30 @@ mod tests {
             assert!(!r.id.is_empty());
             assert!((1..=5).contains(&r.severity));
             assert!((1..=4).contains(&r.paranoia_level));
+        }
+    }
+
+    #[test]
+    fn dotfile_rule_leaves_hosting_paths_alone() {
+        let rules = default_managed_rules(WafLevel::Normal);
+        let rule = find(&rules, "PINGWAF-1020");
+        // `.github` only shares a prefix with `.git`; it is a public hosting
+        // path, not a leaked repository directory.
+        assert!(!evaluate(
+            &rule.expression,
+            &path_ctx("/safeline/xray/blob/master/.github/PULL_REQUEST_TEMPLATE.md")
+        ));
+        for path in ["/.github/workflows/ci.yml", "/.gitignore", "/.envrc"] {
+            assert!(
+                !evaluate(&rule.expression, &path_ctx(path)),
+                "{path} is a public or ordinary path, not a dotfile probe"
+            );
+        }
+        for path in ["/.git/config", "/.git", "/.env", "/.env.local", "/.svn/entries"] {
+            assert!(
+                evaluate(&rule.expression, &path_ctx(path)),
+                "{path} should still match the dotfile rule"
+            );
         }
     }
 

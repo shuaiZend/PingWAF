@@ -27,6 +27,32 @@ const { features } = getContent(locale);
     </div>
   </header>
 
+  <section class="section section--tight" id="metrics">
+    <div class="container">
+      <div class="section__head reveal">
+        <p class="eyebrow">{features.metrics.eyebrow}</p>
+        <h2 class="title">{features.metrics.title}</h2>
+        <p class="lead">{features.metrics.lead}</p>
+      </div>
+
+      <dl class="proof proof--three reveal">
+        {
+          features.metrics.items.map((item) => (
+            <div class="proof__item">
+              <dd class="proof__value">{item.value}</dd>
+              <dt class="proof__label">{item.label}</dt>
+              <dd class="proof__note">{item.note}</dd>
+            </div>
+          ))
+        }
+      </dl>
+
+      <p class="metrics__link reveal">
+        <a href={features.metrics.link.path}>{features.metrics.link.label} →</a>
+      </p>
+    </div>
+  </section>
+
   <nav class="toc-pills" aria-label={features.hero.eyebrow}>
     <div class="container toc-pills__inner">
       {
@@ -106,6 +132,25 @@ const { features } = getContent(locale);
 </BaseLayout>
 
 <style>
+  .proof__item dd,
+  .proof__item dt {
+    margin: 0;
+  }
+
+  .metrics__link {
+    margin-top: 18px;
+    font-size: var(--site-text-sm);
+  }
+
+  .metrics__link a {
+    color: var(--color-text-link);
+    text-decoration: none;
+  }
+
+  .metrics__link a:hover {
+    text-decoration: underline;
+  }
+
   .toc-pills__inner {
     display: flex;
     gap: 6px;

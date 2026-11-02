@@ -20,6 +20,17 @@ const features = {
       { id: "operations", label: "Operations" },
     ],
   },
+  metrics: {
+    eyebrow: "Measured effectiveness",
+    title: "Numbers from a public corpus",
+    lead: "33 877 blazehttp samples replayed byte for byte against a release build — strict calibre: only 403 block pages and 503 challenge pages count.",
+    items: [
+      { value: "93.8%", label: "Attack interception", note: "Strict + body · 658 malicious samples" },
+      { value: "0.06%", label: "False positives", note: "19 of 33 219 benign samples" },
+      { value: "1–2 ms", label: "Static-tier p95", note: "loopback replay / release build" },
+    ],
+    link: { label: "Read the full test report", path: "/docs/waf-test-report/" },
+  },
   groups: [
     {
       id: "waf-engine",

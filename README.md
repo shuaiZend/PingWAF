@@ -133,6 +133,28 @@ The control plane and the data plane talk over the `ControlPlane` gRPC service (
 
 ---
 
+## 📊 Measured effectiveness
+
+Measured on the public [blazehttp](https://github.com/chaitin/blazehttp) corpus
+(33 877 raw HTTP requests: 658 malicious / 33 219 benign), replayed
+byte-for-byte against a release build. Interception counts the WAF verdict
+surface — the 403 block page and the 503 challenge page — and "benign affected"
+counts both, so a challenge is never hidden inside a "blocked" number.
+
+| Tier | Attack interception | Benign affected | p95 |
+| --- | --- | --- | --- |
+| Normal (default, no body inspection) | 60.2 % | 0.01 % | 1 ms |
+| Normal + body inspection | 71.9 % | 0.04 % | 1 ms |
+| Strict | 76.0 % | 0.01 % | 1 ms |
+| Strict + body inspection | **93.8 %** | **0.06 %** | 2 ms |
+
+Every figure is reproducible: the suite definitions, the replay harness and the
+raw metrics live in [`tools/waf-bench/`](./tools/waf-bench). The
+**[test plan](./docs/waf-test-plan.md)** documents the methodology and the
+**[test report](./docs/waf-test-report.md)** the conclusions, per-category
+tables, the cross-vendor comparison with Cloudflare / SafeLine / ModSecurity
+(quoted from the blazehttp benchmark) and known limits.
+
 ## 🧱 Tech Stack
 
 | Layer | Technology |
@@ -339,6 +361,9 @@ PINGWAF_CONFIG=/etc/pingwaf/pingwaf.toml pingwaf all-in-one   # equivalent
 | [docs/cli.md](./docs/cli.md) | Administrator binary CLI — run modes, break-glass maintenance commands, incident runbooks |
 | [docs/user-guide.md](./docs/user-guide.md) | Dashboard walkthrough, sites, rules, policies |
 | [docs/http-lifecycle.md](./docs/http-lifecycle.md) | Where every feature acts in the request pipeline (WAF check order, caching, error pages) and how to debug with it |
+| [docs/waf-test-plan.md](./docs/waf-test-plan.md) | WAF test plan — layers, blazehttp suite selection, calibres and acceptance gates |
+| [docs/waf-test-report.md](./docs/waf-test-report.md) | Measured WAF effectiveness (0.32.4) — interception, false positives, attribution, limits |
+| [docs/waf-benchmark-report.md](./docs/waf-benchmark-report.md) | Per-round benchmark appendix (P0 → P14 iteration history) |
 | [docs/api.md](./docs/api.md) | REST API reference (`https://<host>:9080/api/v1`) |
 | [docs/README.md](./docs/README.md) | Full documentation index |
 | [CONTRIBUTING.md](./CONTRIBUTING.md) | How to contribute |

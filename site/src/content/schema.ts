@@ -16,7 +16,7 @@ export const ROUTES = {
   docs: "/docs/",
 } as const;
 
-export const DOC_SLUGS = ["architecture", "deployment", "waf-engine", "api"] as const;
+export const DOC_SLUGS = ["architecture", "deployment", "waf-engine", "waf-test-report", "api"] as const;
 export type DocSlug = (typeof DOC_SLUGS)[number];
 
 export function docPath(slug: DocSlug): string {
@@ -160,6 +160,13 @@ export interface FeaturesContent {
     title: string;
     lead: string;
     toc: Array<{ id: string; label: string }>;
+  };
+  metrics: {
+    eyebrow: string;
+    title: string;
+    lead: string;
+    items: Array<{ value: string; label: string; note: string }>;
+    link: LinkRef;
   };
   groups: FeatureGroup[];
   verdicts: {

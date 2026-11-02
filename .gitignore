@@ -91,6 +91,13 @@ Thumbs.db
 # Python bytecode from tools/waf-bench scripts
 __pycache__/
 
+# waf-bench run artefacts: per-sample verdicts and the symlink suite tree are
+# regenerated from the dataset. summary.md / run.json / metrics.json are the
+# committed part (they carry the numbers quoted in the report).
+results/**/*.jsonl
+results/**/suite/
+results/**/*.manifest.json
+
 # Internal review notes — never publish
 docs-internal/
 

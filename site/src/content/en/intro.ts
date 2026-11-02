@@ -50,6 +50,11 @@ const intro = {
       label: "Hot rule synchronisation",
       note: "Bidirectional streams, no process restarts.",
     },
+    {
+      value: "93.8%",
+      label: "Attack interception (Strict + body)",
+      note: "658 public malicious samples; 0.06 % benign affected.",
+    },
   ],
   architecture: {
     eyebrow: "Architecture",

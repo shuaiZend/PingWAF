@@ -37,6 +37,14 @@ const docs = {
       topics: ["パイプライン", "式", "判定", "チャレンジ"],
     },
     {
+      slug: "waf-test-report",
+      icon: "activity",
+      title: "WAF 実測レポート",
+      lead: "blazehttp の公開コーパスにおける実測効果：検知率、誤検知率、回帰テスト、決定論。",
+      minutes: 10,
+      topics: ["検知率", "誤検知率", "回帰テスト", "p95"],
+    },
+    {
       slug: "api",
       icon: "code",
       title: "API",

@@ -1,0 +1,14 @@
+{
+  "version": "0.32.4",
+  "git_sha": "3b405cf10d88eee1cdd37dbf1ecd81ccdce30e4d",
+  "git_dirty": true,
+  "conf": "tools/waf-bench/conf/level-strict.toml",
+  "suite": "full",
+  "group": "strict",
+  "target": "127.0.0.1:6188",
+  "origin_port": 6199,
+  "concurrency": 16,
+  "delay_ms": 5.0,
+  "dataset_root": "/tmp/blazehttp",
+  "finished_at": "2026-11-02T04:25:03Z"
+}

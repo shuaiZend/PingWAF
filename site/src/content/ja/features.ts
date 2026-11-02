@@ -20,6 +20,17 @@ const features = {
       { id: "operations", label: "運用" },
     ],
   },
+  metrics: {
+    eyebrow: "実測効果",
+    title: "公開コーパスの実測数値",
+    lead: "33 877 件の blazehttp サンプルを raw socket でバイト単位に release ビルドへリプレイ — 厳格基準：403 ブロックページと 503 チャレンジページのみを検知に数えます。",
+    items: [
+      { value: "93.8%", label: "攻撃検知率", note: "Strict + body · 悪意あるサンプル 658 件" },
+      { value: "0.06%", label: "誤検知率", note: "正常サンプル 33 219 件中 19 件" },
+      { value: "1–2 ms", label: "静的ティア p95", note: "loopback リプレイ / release ビルド" },
+    ],
+    link: { label: "完全なテストレポートを読む", path: "/docs/waf-test-report/" },
+  },
   groups: [
     {
       id: "waf-engine",

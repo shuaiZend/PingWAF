@@ -37,6 +37,14 @@ const docs = {
       topics: ["流水线", "表达式", "判决", "挑战"],
     },
     {
+      slug: "waf-test-report",
+      icon: "activity",
+      title: "WAF 实测报告",
+      lead: "blazehttp 公开语料上的实测效果：拦截率、误报率、回归与确定性。",
+      minutes: 10,
+      topics: ["拦截率", "误报率", "回归", "p95"],
+    },
+    {
       slug: "api",
       icon: "code",
       title: "API",

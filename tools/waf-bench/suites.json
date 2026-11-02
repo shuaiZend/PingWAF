@@ -1,0 +1,375 @@
+{
+  "dataset": {
+    "upstream": "https://github.com/chaitin/blazehttp",
+    "root_env": "BLAZEHTTP_ROOT",
+    "black": 658,
+    "white": 33219,
+    "local_root": "local"
+  },
+  "categories": [
+    "log4shell",
+    "sqli",
+    "xss",
+    "xxe",
+    "ssti",
+    "rce",
+    "lfi",
+    "ssrf",
+    "scanner",
+    "deser",
+    "crlf",
+    "other"
+  ],
+  "exclude": [
+    {
+      "id": "no-content-length",
+      "reason": "POST/PUT/PATCH without Content-Length or Transfer-Encoding carries an empty body under RFC 7230; the payload never reaches the server",
+      "methods": [
+        "POST",
+        "PUT",
+        "PATCH"
+      ],
+      "missing_all_headers": [
+        "content-length",
+        "transfer-encoding"
+      ]
+    },
+    {
+      "id": "method-not-allowed",
+      "reason": "HTTP 405: the method layer refuses the request before the WAF decides; not a detection miss",
+      "verdicts": [
+        "status_405"
+      ]
+    },
+    {
+      "id": "protocol-reject",
+      "reason": "Rejected by the HTTP layer before any WAF verdict; counted in the wide calibre only",
+      "verdicts": [
+        "protocol_reject"
+      ]
+    },
+    {
+      "id": "fragment-payload",
+      "reason": "The URL fragment is stripped before the request line reaches any handler, so the payload cannot reach the origin either",
+      "request_target_contains": "#"
+    }
+  ],
+  "suites": {
+    "smoke": {
+      "select": "per-category",
+      "black": 3,
+      "white": 3,
+      "order": "path"
+    },
+    "category": {
+      "select": "per-category",
+      "black": "all",
+      "white": 50,
+      "order": "path"
+    },
+    "perf": {
+      "select": "per-category",
+      "black": 20,
+      "white": 60,
+      "order": "path"
+    },
+    "full": {
+      "select": "all"
+    },
+    "compressed": {
+      "select": "local"
+    },
+    "triage": {
+      "select": "pinned",
+      "pins": [
+        {
+          "file": "3e/3e/d7b61c3dfcd450e63e1cbeca4058.black",
+          "expected": "black",
+          "category": "other",
+          "reason": "0.32.4 strict-body full run"
+        },
+        {
+          "file": "4b/0a/096825fe5d589a0fe75c44aca53e.black",
+          "expected": "black",
+          "category": "other",
+          "reason": "0.32.4 strict-body full run"
+        },
+        {
+          "file": "56/e4/0a547696d93b1a50b4533c4bcfa2.black",
+          "expected": "black",
+          "category": "other",
+          "reason": "0.32.4 strict-body full run"
+        },
+        {
+          "file": "6b/2a/83249e94cbaa8d93929c46c426bf.black",
+          "expected": "black",
+          "category": "other",
+          "reason": "0.32.4 strict-body full run"
+        },
+        {
+          "file": "73/81/da87ccf03256c0a4f316afe35e04.black",
+          "expected": "black",
+          "category": "other",
+          "reason": "0.32.4 strict-body full run"
+        },
+        {
+          "file": "73/8e/ef0bd93ca82328cc2cbf18c3a88f.black",
+          "expected": "black",
+          "category": "other",
+          "reason": "0.32.4 strict-body full run"
+        },
+        {
+          "file": "76/39/bc154a04aa31f06519d5e1688786.black",
+          "expected": "black",
+          "category": "other",
+          "reason": "0.32.4 strict-body full run"
+        },
+        {
+          "file": "85/cb/61f73a9bda80379e6e7575f2050b.black",
+          "expected": "black",
+          "category": "other",
+          "reason": "0.32.4 strict-body full run"
+        },
+        {
+          "file": "90/46/839d115ea9e8194e115809fcbe71.black",
+          "expected": "black",
+          "category": "other",
+          "reason": "0.32.4 strict-body full run"
+        },
+        {
+          "file": "a5/7f/bbda3bb3a6d78649b617f43ce411.black",
+          "expected": "black",
+          "category": "other",
+          "reason": "0.32.4 strict-body full run"
+        },
+        {
+          "file": "ac/6d/17adc90a65a652a768f959eea284.black",
+          "expected": "black",
+          "category": "sqli",
+          "reason": "0.32.4 strict-body full run"
+        },
+        {
+          "file": "ad/a3/b458e0b3f38885272bcdbc216a6f.black",
+          "expected": "black",
+          "category": "other",
+          "reason": "0.32.4 strict-body full run"
+        },
+        {
+          "file": "af/e8/d22211a1901d5d84eb20743722b3.black",
+          "expected": "black",
+          "category": "other",
+          "reason": "0.32.4 strict-body full run"
+        },
+        {
+          "file": "be/32/cbb9261c728de3c91a11a7bd086d.black",
+          "expected": "black",
+          "category": "other",
+          "reason": "0.32.4 strict-body full run"
+        },
+        {
+          "file": "c6/3e/8f64da2c9db52db6e9f1e19b41f4.black",
+          "expected": "black",
+          "category": "other",
+          "reason": "0.32.4 strict-body full run"
+        },
+        {
+          "file": "d8/ab/654a635915b6333180d6bbe05008.black",
+          "expected": "black",
+          "category": "other",
+          "reason": "0.32.4 strict-body full run"
+        },
+        {
+          "file": "db/4b/a5cd9c65fb336cc13352f1d23a93.black",
+          "expected": "black",
+          "category": "other",
+          "reason": "0.32.4 strict-body full run"
+        },
+        {
+          "file": "dd/d4/a106194baa526572f694c84ff559.black",
+          "expected": "black",
+          "category": "other",
+          "reason": "0.32.4 strict-body full run"
+        },
+        {
+          "file": "e7/06/ec824dd3bbca23314d8c46b75fa8.black",
+          "expected": "black",
+          "category": "other",
+          "reason": "0.32.4 strict-body full run"
+        },
+        {
+          "file": "fa/1a/46f22aab5ed9dadbb08372658e20.black",
+          "expected": "black",
+          "category": "other",
+          "reason": "0.32.4 strict-body full run"
+        }
+      ]
+    },
+    "fp-pin": {
+      "select": "pinned",
+      "pins": [
+        {
+          "file": "07/cd/61fa0932f7c58ecae04b8506c1d9.white",
+          "expected": "white",
+          "category": "other",
+          "reason": "0.32.4 strict-body full run"
+        },
+        {
+          "file": "2b/19/616c4c2a8288ed28d4d4566f71f8.white",
+          "expected": "white",
+          "category": "rce",
+          "reason": "0.32.4 strict-body full run"
+        },
+        {
+          "file": "40/ea/df246aa220caef04ae54a1eac6ae.white",
+          "expected": "white",
+          "category": "xss",
+          "reason": "0.32.4 strict-body full run"
+        },
+        {
+          "file": "46/8b/c07bd371d381b197928bca36cb94.white",
+          "expected": "white",
+          "category": "lfi",
+          "reason": "0.32.4 strict-body full run"
+        },
+        {
+          "file": "4a/ce/2bcf8ac155178a88015c5ae178a5.white",
+          "expected": "white",
+          "category": "scanner",
+          "reason": "0.32.4 strict-body full run"
+        },
+        {
+          "file": "4c/7c/5c3413c84dad8655aebd603d1b8e.white",
+          "expected": "white",
+          "category": "other",
+          "reason": "0.32.4 strict-body full run"
+        },
+        {
+          "file": "52/5c/5a044ff90b8548e753b3ffc47ce2.white",
+          "expected": "white",
+          "category": "crlf",
+          "reason": "0.32.4 strict-body full run"
+        },
+        {
+          "file": "53/8d/8aaede20848d0877bad6b4be6acc.white",
+          "expected": "white",
+          "category": "xss",
+          "reason": "0.32.4 strict-body full run"
+        },
+        {
+          "file": "59/30/ae3e988a6ed4a9ae2c571eb001ef.white",
+          "expected": "white",
+          "category": "rce",
+          "reason": "0.32.4 strict-body full run"
+        },
+        {
+          "file": "5a/49/5f51563e70b27114bc29840e4e10.white",
+          "expected": "white",
+          "category": "other",
+          "reason": "0.32.4 strict-body full run"
+        },
+        {
+          "file": "5e/cc/8f95195e047fe555fb0b8775eb7b.white",
+          "expected": "white",
+          "category": "other",
+          "reason": "0.32.4 strict-body full run"
+        },
+        {
+          "file": "61/81/472215d2fca9ef868561906345b2.white",
+          "expected": "white",
+          "category": "ssti",
+          "reason": "0.32.4 strict-body full run"
+        },
+        {
+          "file": "73/29/62f8a14a1887f13f097d9e8ac310.white",
+          "expected": "white",
+          "category": "rce",
+          "reason": "0.32.4 strict-body full run"
+        },
+        {
+          "file": "73/e6/24ff969cb99ec070e4d65861e311.white",
+          "expected": "white",
+          "category": "lfi",
+          "reason": "0.32.4 strict-body full run"
+        },
+        {
+          "file": "7e/ac/a54c85a827388378627dc1e0daa2.white",
+          "expected": "white",
+          "category": "lfi",
+          "reason": "0.32.4 strict-body full run"
+        },
+        {
+          "file": "80/38/8c27ccc89c23fb4ea04ed7ae4be2.white",
+          "expected": "white",
+          "category": "xss",
+          "reason": "0.32.4 strict-body full run"
+        },
+        {
+          "file": "86/57/2b7873c1998979a889bc72812853.white",
+          "expected": "white",
+          "category": "other",
+          "reason": "0.32.4 strict-body full run"
+        },
+        {
+          "file": "87/f5/c2b9fd3b741be8782a2ece2b9b55.white",
+          "expected": "white",
+          "category": "other",
+          "reason": "0.32.4 strict-body full run"
+        },
+        {
+          "file": "92/49/913922b6c313eb1bc7c594324578da3f.white",
+          "expected": "white",
+          "category": "sqli",
+          "reason": "0.32.4 strict-body full run"
+        },
+        {
+          "file": "a0/69/32c1c083da7c3737f2548f0ca1ac.white",
+          "expected": "white",
+          "category": "other",
+          "reason": "0.32.4 strict-body full run"
+        },
+        {
+          "file": "a4/15/ce94a553f132de70f988405dd932.white",
+          "expected": "white",
+          "category": "rce",
+          "reason": "0.32.4 strict-body full run"
+        },
+        {
+          "file": "b6/5f/3539ffaf5a5316408d5dcf38e0fc.white",
+          "expected": "white",
+          "category": "other",
+          "reason": "0.32.4 strict-body full run"
+        },
+        {
+          "file": "bb/79/83610bba10cf1fed5c571093c838.white",
+          "expected": "white",
+          "category": "rce",
+          "reason": "0.32.4 strict-body full run"
+        },
+        {
+          "file": "bc/ae/d6d6252d25a720745dab65f3b78e.white",
+          "expected": "white",
+          "category": "other",
+          "reason": "0.32.4 strict-body full run"
+        },
+        {
+          "file": "e7/35/b604bbdaa40644b9bed3daa46997.white",
+          "expected": "white",
+          "category": "other",
+          "reason": "0.32.4 strict-body full run"
+        },
+        {
+          "file": "e9/75/6d588c1fcc5baa1baee6ea139e49.white",
+          "expected": "white",
+          "category": "other",
+          "reason": "0.32.4 strict-body full run"
+        },
+        {
+          "file": "ff/ed/2a1b1445dc557c6d7732d22fd201.white",
+          "expected": "white",
+          "category": "other",
+          "reason": "0.32.4 strict-body full run"
+        }
+      ]
+    }
+  }
+}

@@ -25,7 +25,11 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-BLOCK_STATUSES = {403, 503}
+BLOCK_STATUS = 403
+CHALLENGE_STATUS = 503
+# Both statuses are WAF verdicts. Reports split them; regression checks and the
+# headline interception rate use the pair, so it is defined once, here.
+INTERCEPTED = ("blocked", "challenged")
 PROTOCOL_REJECT = {400, 413, 414, 431, 501}
 CONNECT_TIMEOUT = 3.0
 READ_TIMEOUT = 5.0
@@ -160,8 +164,14 @@ def read_response(sock) -> tuple[int | None, str]:
 def verdict_of(status: int | None, detail: str) -> str:
     if status is None:
         return "error"
-    if status in BLOCK_STATUSES:
+    if status == BLOCK_STATUS:
         return "blocked"
+    # A challenge page is a WAF verdict but not a denial: keeping it in its own
+    # bucket makes "blocked" mean "the request was refused" and lets reports
+    # show how much of the interception surface costs a visitor a cookie round
+    # trip instead.
+    if status == CHALLENGE_STATUS:
+        return "challenged"
     if status in PROTOCOL_REJECT:
         return "protocol_reject"
     if status == 429:
