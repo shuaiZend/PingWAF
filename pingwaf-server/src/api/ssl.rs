@@ -1620,6 +1620,8 @@ async fn delete_certificate_row(
     owner: Option<Uuid>,
     target: Uuid,
 ) -> Result<(), ApiError> {
+    // Same predicate as the usage endpoint, same index:
+    // `idx_site_ssl_certificate_id` (migration `m20240101_000091`).
     let in_use: Vec<Uuid> = site_ssl::Entity::find()
         .filter(site_ssl::Column::CertificateId.eq(target))
         .all(&state.db)
@@ -2200,6 +2202,8 @@ async fn certificate_usage(
         .await?
         .into_iter()
         .map(|link| link.site_id);
+    // Equality on `site_ssl.certificate_id`, served by the partial index
+    // `idx_site_ssl_certificate_id` (migration `m20240101_000091`).
     let serving_ids = site_ssl::Entity::find()
         .filter(site_ssl::Column::CertificateId.eq(target))
         .all(&state.db)
