@@ -1549,9 +1549,10 @@ fn get_upstream_with_variables(
 const GZIP_DECODE_HANDLER: &str = "_upstream_gzip_decode_";
 
 /// Largest plaintext a single response may be decoded into. A body that would
-/// expand past it is left as it arrived and logged instead: a few kilobytes of
-/// gzip can describe gigabytes, and the response is not worth a memory lever
-/// (the same bound, and for the same reason, as the sub-filter's buffer).
+/// expand past it terminates the response instead of being decoded: a few
+/// kilobytes of gzip can describe gigabytes, and the response is not worth a
+/// memory lever (the same bound, and for the same reason, as the sub-filter's
+/// buffer).
 const MAX_GZIP_DECODE_BYTES: usize = 8 * 1024 * 1024;
 
 /// Step the decompressor reads in, so a large plaintext is assembled from
@@ -1738,26 +1739,25 @@ fn decode_headers(header: &mut ResponseHeader) {
 /// Body handler that turns an origin's gzip response back into the plaintext
 /// the client can read, for a request the proxy itself asked to be compressed.
 ///
-/// The compressed bytes are held until the stream ends because the rewritten
-/// headers have already gone out by then: keeping the origin bytes in hand is
-/// what lets a failed decode fall back to them unchanged instead of leaving a
-/// half-decoded body on the wire. Buffering is bounded by
-/// [`MAX_GZIP_DECODE_BYTES`], and a body that crosses it while streaming is
-/// forwarded from that point on as it arrived.
+/// The whole compressed body is buffered in memory (bounded by
+/// [`MAX_GZIP_DECODE_BYTES`]) until the stream ends, so a response on this
+/// path reaches the client no sooner than the upstream finishes sending it —
+/// this is the price of a diagnosable failure mode, since flate2's default
+/// feature set offers no streaming decoder.
+///
+/// A decode failure or a body crossing the cap terminates the response with
+/// an error: the compressed bytes are never pushed onto the wire as a body
+/// whose headers no longer say `Content-Encoding: gzip` — a client would
+/// render the gzip framing as garbage plaintext.
 struct GzipBodyDecoder {
     /// Compressed bytes received so far.
     buffer: BytesMut,
-    /// Set once decoding has been given up: every later chunk is forwarded
-    /// untouched, so one response pays for one log line and never for a second
-    /// attempt.
-    passthrough: bool,
 }
 
 impl GzipBodyDecoder {
     fn new() -> Self {
         Self {
             buffer: BytesMut::new(),
-            passthrough: false,
         }
     }
 
@@ -1791,26 +1791,25 @@ impl ModifyResponseBody for GzipBodyDecoder {
         body: &mut Option<Bytes>,
         end_of_stream: bool,
     ) -> pingora::Result<()> {
-        if self.passthrough {
-            return Ok(());
-        }
         if let Some(data) = body.take() {
             self.buffer.extend_from_slice(&data);
         }
         if !end_of_stream {
             // A chunked response declares no length, so the cap is enforced as
-            // the chunks arrive: what is already buffered goes out exactly as
-            // it came and the rest is forwarded untouched, rather than letting
-            // the buffer grow with the body.
+            // the chunks arrive: rather than forwarding half a compressed
+            // stream to a client expecting plaintext, the response is
+            // terminated here.
             if self.buffer.len() > MAX_GZIP_DECODE_BYTES {
                 let size = self.buffer.len();
                 warn!(
                     target: LOG_TARGET,
                     size,
-                    "origin gzip body exceeded the decode cap; forwarding it unchanged"
+                    "origin gzip body exceeded the decode cap; terminating the response"
                 );
-                self.passthrough = true;
-                *body = Some(self.buffer.split().freeze());
+                return Err(pingora::Error::explain(
+                    pingora::ErrorType::InternalError,
+                    "upstream gzip body exceeded the decode cap",
+                ));
             }
             return Ok(());
         }
@@ -1818,18 +1817,20 @@ impl ModifyResponseBody for GzipBodyDecoder {
         match Self::decode(&raw) {
             Some(plaintext) => {
                 *body = Some(plaintext);
+                Ok(())
             },
             None => {
                 warn!(
                     target: LOG_TARGET,
                     size = raw.len(),
-                    "failed to decode the origin gzip body; forwarding it unchanged"
+                    "failed to decode the origin gzip body; terminating the response"
                 );
-                self.passthrough = true;
-                *body = Some(raw);
+                Err(pingora::Error::explain(
+                    pingora::ErrorType::InternalError,
+                    "upstream gzip decode failed",
+                ))
             },
         }
-        Ok(())
     }
 
     fn name(&self) -> &str {
@@ -4644,7 +4645,8 @@ value = 'proxy_set_headers = ["name:value"]'
     }
 
     /// Runs the handler over `chunks`, the last one at end of stream, and
-    /// returns what reached the client.
+    /// returns what reached the client. A handler `Err` aborts the run, which
+    /// is what pingora does to the live response.
     fn decode_body(
         decoder: &mut GzipBodyDecoder,
         chunks: &[(bytes::Bytes, bool)],
@@ -4696,65 +4698,56 @@ value = 'proxy_set_headers = ["name:value"]'
         assert!(emitted[0].iter().all(|byte| *byte == b'a'));
     }
 
-    /// A body that claims gzip but does not decode reaches the client exactly
-    /// as it arrived, and the handler never tries again.
+    /// A body that claims gzip but does not decode terminates the response:
+    /// the compressed bytes never go out as a body the headers describe as
+    /// plaintext.
     #[test]
-    fn corrupt_gzip_body_is_forwarded_unchanged() {
+    fn gzip_decode_failure_terminates_the_response() {
         let raw = vec![0xde, 0xad, 0xbe, 0xef, 0x00, 0xff];
         let mut decoder = GzipBodyDecoder::new();
-        let emitted = decode_body(
-            &mut decoder,
-            &[(bytes::Bytes::copy_from_slice(&raw), true)],
-        );
-        assert_eq!(vec![bytes::Bytes::copy_from_slice(&raw)], emitted);
-        assert!(decoder.passthrough, "the failure is latched");
-
-        // Every later chunk is forwarded untouched, end of stream included.
-        let emitted = decode_body(
-            &mut decoder,
-            &[(bytes::Bytes::from_static(b"tail"), true)],
-        );
-        assert_eq!(vec![bytes::Bytes::from_static(b"tail")], emitted);
+        let session = body_session();
+        let mut body = Some(bytes::Bytes::copy_from_slice(&raw));
+        let result = decoder.handle(&session, &mut body, true);
+        assert!(result.is_err(), "the failure must abort, not emit");
+        assert!(body.is_none(), "the corrupted bytes are dropped, not sent");
     }
 
-    /// A gzip body that would expand past the cap is forwarded compressed:
-    /// the cap is what stops a few kilobytes of gzip from becoming a memory
-    /// lever.
+    /// A gzip body that would expand past the cap terminates the response
+    /// instead of forwarding the compressed bytes: the cap is what stops a
+    /// few kilobytes of gzip from becoming a memory lever.
     #[test]
-    fn gzip_body_over_the_decode_cap_is_forwarded_unchanged() {
+    fn gzip_body_over_the_decode_cap_terminates_the_response() {
         let raw = gzip(&vec![0u8; MAX_GZIP_DECODE_BYTES + 1024]);
         assert!(
             raw.len() < MAX_GZIP_DECODE_BYTES,
             "the fixture must fit the buffer cap to isolate the decoded one"
         );
         let mut decoder = GzipBodyDecoder::new();
-        let emitted = decode_body(
-            &mut decoder,
-            &[(bytes::Bytes::copy_from_slice(&raw), true)],
-        );
-        assert_eq!(vec![bytes::Bytes::copy_from_slice(&raw)], emitted);
-        assert!(decoder.passthrough);
+        let session = body_session();
+        let mut body = Some(bytes::Bytes::copy_from_slice(&raw));
+        let result = decoder.handle(&session, &mut body, true);
+        assert!(result.is_err(), "the cap must abort, not emit");
+        assert!(body.is_none(), "the compressed bytes are dropped");
     }
 
-    /// A chunked body with no `Content-Length` to check up front crosses the
-    /// cap while streaming: what is buffered goes out unchanged and every
-    /// later chunk is forwarded as it arrived.
+    /// A chunked body with no `Content-Length` to check up front terminates
+    /// the response the moment its buffered bytes cross the cap: half a
+    /// compressed stream is never pushed onto the wire.
     #[test]
-    fn chunked_gzip_body_stops_decoding_at_the_cap() {
+    fn chunked_gzip_body_terminates_at_the_cap() {
         let mut decoder = GzipBodyDecoder::new();
+        let session = body_session();
         let chunk = bytes::Bytes::from(vec![b'z'; 5 * 1024 * 1024]);
-        let emitted = decode_body(
-            &mut decoder,
-            &[(chunk.clone(), false), (chunk.clone(), false)],
-        );
-        assert!(decoder.passthrough, "the cap trips while streaming");
-        assert_eq!(1, emitted.len(), "the buffered bytes are handed back");
-        assert_eq!(10 * 1024 * 1024, emitted[0].len());
 
-        let emitted = decode_body(
-            &mut decoder,
-            &[(bytes::Bytes::from_static(b"tail"), true)],
-        );
-        assert_eq!(vec![bytes::Bytes::from_static(b"tail")], emitted);
+        // First chunk fits, nothing is emitted while streaming.
+        let mut body = Some(chunk.clone());
+        assert!(decoder.handle(&session, &mut body, false).is_ok());
+        assert!(body.is_none(), "buffered, not emitted");
+
+        // The second chunk crosses the cap: the response aborts.
+        let mut body = Some(chunk);
+        let result = decoder.handle(&session, &mut body, false);
+        assert!(result.is_err(), "the cap must abort, not emit");
+        assert!(body.is_none(), "the buffered bytes are dropped");
     }
 }

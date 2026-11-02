@@ -954,6 +954,28 @@ fn pools_to_proto(
     configs
 }
 
+/// Names the pools that dial a `$host` SNI while certificate verification is
+/// off, so the config builder can log the combination once per build.
+///
+/// `effective_verify` is what a pool without its own pin runs with — the
+/// site-level default, or the deployment-wide value when the site row leaves
+/// it unset. A pool that pins `Some(false)` counts the same way; a pin of
+/// `Some(true)` or a `None` wire value under a strict effective default does
+/// not. Not part of the wire format: purely an observability aid.
+fn host_sni_without_verification(
+    pools: &[site_upstream_pools::Model],
+    effective_verify: Option<bool>,
+) -> Vec<String> {
+    pools
+        .iter()
+        .filter(|pool| {
+            pool.sni.as_deref() == Some("$host")
+                && pool.verify_cert.or(effective_verify) == Some(false)
+        })
+        .map(|pool| pool.name.clone())
+        .collect()
+}
+
 /// Turns stored routes into their protocol representation, dropping routes
 /// that are disabled or point at a pool without nodes (the agent would have
 /// no upstream to serve them with). The path is passed through verbatim; the
@@ -1682,6 +1704,21 @@ pub async fn build_rule_bundle(
         .await
         .ok()
         .map(|row| row.verify_cert);
+    // A `$host` SNI resolves at request time from the client's Host header,
+    // so an attacker can send any Host and have the pool dial an origin with
+    // that name in SNI. Without certificate verification that name is never
+    // checked — a deployment-wide `verify_cert = false` makes every `$host`
+    // pool dial blind. Not a blocker (the global switch is an operator's
+    // choice), but every config build that produces the combination says so
+    // once, so the situation cannot stay silent. Warning, not blocking.
+    let unpinned_verify = site_row.origin_verify_cert.or(origin_verify_cert);
+    for pool in host_sni_without_verification(&pools, unpinned_verify) {
+        tracing::warn!(
+            site_id = %site_row.id,
+            pool = %pool,
+            "$host SNI runs without origin certificate verification"
+        );
+    }
     // Deployment-wide access-log filtering. A read failure leaves the field
     // unset, which the agent reads as "never skip logging" (fail-open), the
     // same degradation an old server without the field produces.
@@ -2640,6 +2677,39 @@ mod tests {
         let nodes = vec![node_model(pool.id, "10.0.0.1:8080", 1)];
         let configs = pools_to_proto(&[pool], &nodes, None);
         assert_eq!(configs[0].verify_cert, Some(false));
+    }
+
+    /// `$host` SNI plus a disabled certificate check (pool pin, site default
+    /// or deployment-wide fallback) is the combination the config builder
+    /// warns about; every other shape stays silent.
+    #[test]
+    fn host_sni_without_verification_is_detected() {
+        let flagged =
+            |sni: Option<&str>, pin: Option<bool>| site_upstream_pools::Model {
+                verify_cert: pin,
+                ..pool_model("p", "round_robin", sni, false)
+            };
+        let pools = vec![
+            flagged(Some("$host"), None),
+            flagged(Some("$host"), Some(false)),
+            flagged(Some("$host"), Some(true)),
+            flagged(Some("origin.example.com"), None),
+            flagged(None, None),
+        ];
+
+        // Deployment-wide verify off: both unpinned and explicitly-off
+        // `$host` pools are flagged.
+        assert_eq!(
+            host_sni_without_verification(&pools, Some(false)),
+            vec!["p", "p"]
+        );
+        // Strict everywhere: only the pool's own `Some(false)` pin flags.
+        assert_eq!(
+            host_sni_without_verification(&pools, Some(true)),
+            vec!["p"]
+        );
+        // No opinion at any level: only the explicit pin flags.
+        assert_eq!(host_sni_without_verification(&pools, None), vec!["p"]);
     }
 
     /// The three-level certificate-verification cascade: a pool pin wins
