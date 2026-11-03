@@ -280,6 +280,11 @@ export function RateLimitingPage() {
           <p className="pw-mono truncate text-xs text-fg-subtle">
             {r.expression || t('pages.rateLimiting.allRequests')}
           </p>
+          {r.exception_expression && (
+            <p className="pw-mono truncate text-xs text-fg-subtle">
+              {t('pages.rateLimiting.exceptionShort')} {r.exception_expression}
+            </p>
+          )}
         </div>
       ),
     },

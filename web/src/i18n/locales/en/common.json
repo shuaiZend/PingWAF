@@ -683,7 +683,8 @@
       "unitMinute": "min",
       "unitHour": "h",
       "exceptionExpression": "Exception expression",
-      "exceptionExpressionHint": "Optional exclusion — requests matching this are not counted or mitigated by this rule. The field above remains an inclusion filter."
+      "exceptionExpressionHint": "Optional exclusion — requests matching this are not counted or mitigated by this rule. The field above remains an inclusion filter.",
+      "exceptionShort": "Except:"
     },
     "bot": {
       "title": "Bot Protection",

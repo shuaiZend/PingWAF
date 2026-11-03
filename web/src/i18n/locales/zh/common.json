@@ -683,7 +683,8 @@
       "unitMinute": "分",
       "unitHour": "小时",
       "exceptionExpression": "例外表达式",
-      "exceptionExpressionHint": "可选排除条件 — 匹配的请求不计入本规则，也不会被本规则限速或质询。上方表达式仍是包含过滤条件。"
+      "exceptionExpressionHint": "可选排除条件 — 匹配的请求不计入本规则，也不会被本规则限速或质询。上方表达式仍是包含过滤条件。",
+      "exceptionShort": "例外："
     },
     "bot": {
       "title": "Bot 防护",

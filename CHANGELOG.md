@@ -8,6 +8,15 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.32.14] — 2026-11-04
+
+### Fixed
+
+- **Rate-limit list shows the exception expression.** The editor already
+  persisted `exception_expression`, but the table rendered only the inclusion
+  expression, so an operator could not tell a saved exception was active. The
+  row now shows `Except: <expression>` under the main filter.
+
 ## [PingWAF 0.32.13] — 2026-11-04
 
 ### Added
