@@ -1048,7 +1048,8 @@ impl Plugin for ChallengePlugin {
         // plugin has no site-rule context of its own. No entry (or a
         // request the WAF skipped) reads as false: fail-closed.
         if let Some(request_id) = ctx.state.request_id.as_deref()
-            && super::waf::pending_path_bypasses_challenge(request_id)
+            && (super::waf::pending_path_bypasses_challenge(request_id)
+                || super::waf::pending_path_bypasses_rate_limit(request_id))
         {
             return Ok(RequestPluginResult::Continue);
         }

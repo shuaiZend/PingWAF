@@ -146,6 +146,8 @@ pub mod rate_limit_rules {
         pub site_id: Uuid,
         pub name: String,
         pub expression: String,
+        /// Requests matching this filter are excluded from the rule entirely.
+        pub exception_expression: String,
         /// Counter keys to group requests by, e.g. `ip`, `path`, or the
         /// parameterized `header:<name>` / `cookie:<name>` / `query:<name>`.
         pub characteristics: Vec<String>,

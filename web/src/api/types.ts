@@ -741,6 +741,7 @@ export interface RateLimitRule {
   site_id: string
   name: string
   expression: string
+  exception_expression: string
   characteristics: string[]
   period_seconds: number
   threshold: number
@@ -755,6 +756,7 @@ export interface RateLimitRule {
 export interface CreateRateLimitRequest {
   name: string
   expression?: string
+  exception_expression?: string
   characteristics?: string[]
   period_seconds?: number
   threshold?: number
@@ -767,6 +769,7 @@ export interface CreateRateLimitRequest {
 export interface UpdateRateLimitRequest {
   name?: string
   expression?: string
+  exception_expression?: string
   characteristics?: string[]
   period_seconds?: number
   threshold?: number

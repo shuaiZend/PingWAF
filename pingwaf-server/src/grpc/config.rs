@@ -539,6 +539,7 @@ fn rate_limit_to_proto(row: &rate_limit_rules::Model) -> RateLimitRule {
         id: row.id.to_string(),
         name: row.name.clone(),
         expression: row.expression.clone(),
+        exception_expression: row.exception_expression.clone(),
         characteristics: row
             .characteristics
             .iter()

@@ -681,7 +681,9 @@
       "untilReset": "ウィンドウリセットまで",
       "unitSecond": "秒",
       "unitMinute": "分",
-      "unitHour": "時間"
+      "unitHour": "時間",
+      "exceptionExpression": "除外式",
+      "exceptionExpressionHint": "任意 — 一致するリクエストはこのルールでカウント・制限されません。上の式は包含フィルターのままです。"
     },
     "bot": {
       "title": "Bot 防御",

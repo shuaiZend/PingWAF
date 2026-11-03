@@ -2032,18 +2032,9 @@ Delete a rule.
 ## Path Exceptions
 
 Per-site request paths that skip selected protection layers (WAF, bot
-protection, access rules, …) while the site observes traffic. This is an
-operator-curated hole in the site's own defences, so it is guarded twice:
-
-- **Control plane**: the site's `waf_settings.mode` must be `monitor`
-  (observation mode) to create or update an exception; otherwise the API
-  returns `409` with
-  `path exceptions require the site to be in observation mode; current WAF mode is '<mode>' (set it to 'monitor' first)`.
-  A missing `waf_settings` row counts as `monitor` (that is what the data
-  plane falls back to). Deleting an exception is allowed in any mode.
-- **Data plane**: a site that is not in observation mode ignores its exception
-  list entirely, so a stale bundle can never punch a hole after the site
-  returns to `block`.
+protection, access rules, …), like Cloudflare's path bypass. Exceptions are
+available in **every** WAF mode — monitor and block alike. A matching request
+is still access-logged, while the named layers are skipped.
 
 What an exception can **never** bypass, because those checks run before the
 exception is consulted: a paused site (maintenance page), a fail-closed edge
@@ -2073,7 +2064,7 @@ List the site's path exceptions, ordered by `path`.
 
 ### POST /sites/{site_id}/path-exceptions
 
-Create an exception. Requires write access and observation mode (see above).
+Create an exception. Requires write access; no observation-mode gate.
 
 **Request:**
 ```json
@@ -2159,6 +2150,7 @@ Create a rate limit rule.
 {
   "name": "API Rate Limit",
   "expression": "",
+  "exception_expression": "",
   "enabled": true,
   "threshold": 100,
   "period_seconds": 60,
@@ -2169,7 +2161,7 @@ Create a rate limit rule.
 }
 ```
 
-`characteristics` accepts `ip`, `ip_nat`, `host`, `path`, `asn`, `country`, and the parameterized forms `header:<name>`, `cookie:<name>`, `query:<name>` (requests missing the value bucket together). Header names match case-insensitively; cookie and query names are case-sensitive. `ja3` is reserved for future use. `expression` is an optional filter — empty means all requests.
+`characteristics` accepts `ip`, `ip_nat`, `host`, `path`, `asn`, `country`, and the parameterized forms `header:<name>`, `cookie:<name>`, `query:<name>` (requests missing the value bucket together). Header names match case-insensitively; cookie and query names are case-sensitive. `ja3` is reserved for future use. `expression` is an optional **inclusion** filter — empty means all requests. `exception_expression` is an optional **exclusion** filter: a matching request is not counted, mitigated or challenged by this rule. `action: "allow"` is also an explicit exception and stops evaluation of lower-priority rate-limit rules.
 
 ### PUT /sites/{site_id}/rate-limit-rules/{rule_id}
 

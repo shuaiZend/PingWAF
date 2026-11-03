@@ -306,7 +306,7 @@ Sites → [site] → Web Protection (top banner)
 
 A site-wide emergency switch: every visitor is challenged with a JavaScript check, and CC protection is switched on automatically. Enable it only while the site is under an active flood attack and disable it once the attack subsides.
 
-### Path Exceptions (observation mode)
+### Path Exceptions
 
 A per-site list of request paths that skip selected protection layers — for
 widening a rule that is too aggressive while you watch what a change actually
@@ -325,13 +325,10 @@ Sites → [site] → Web Protection → Path exceptions
 | Log hits | When on, every hit is recorded as a `path_bypass` security event (action `log`) |
 | Enabled | Disabled exceptions are not evaluated |
 
-**Why the observation-mode gate:** a bypass that silently skips enforcement on
-a blocking site is exactly the kind of change that never gets removed again.
-The site must be in **Detection** (`monitor`) to save a path exception —
-otherwise the save fails with
-`path exceptions require the site to be in observation mode; current WAF mode is '<mode>' (set it to 'monitor' first)`. The edge enforces the same rule:
-on a site that is not observing, exceptions are ignored entirely, so a stale
-configuration can never weaken active blocking.
+**All modes:** path exceptions can be saved and are enforced in both
+**Detection** (`monitor`) and **Block** mode. A matching request still appears
+in the access log; only the layers named in `skip_layers` are skipped. When
+`rate_limit` is skipped, the standalone CC rate challenge is skipped too.
 
 **What an exception cannot bypass**, no matter which layers it names: a paused
 site (maintenance page), a fail-closed edge, and an active dynamic IP ban —

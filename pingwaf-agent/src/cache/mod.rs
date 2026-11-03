@@ -585,6 +585,9 @@ pub struct RateLimitRule {
     pub id: String,
     pub name: String,
     pub expression: String,
+    /// Requests matching this filter are excluded from the rule entirely.
+    #[serde(default)]
+    pub exception_expression: String,
     pub characteristics: Vec<String>,
     /// Parameter names for `RateLimitCharHeader/Cookie/Query` characteristics,
     /// parallel to `characteristics`. Older caches without this field load as
@@ -2844,6 +2847,7 @@ impl RuleCache {
             id: r.id.clone(),
             name: r.name.clone(),
             expression: r.expression.clone(),
+            exception_expression: r.exception_expression.clone(),
             characteristics: r
                 .characteristics
                 .iter()

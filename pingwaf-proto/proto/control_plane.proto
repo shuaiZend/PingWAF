@@ -750,6 +750,9 @@ message RateLimitRule {
   // characteristic at the matching index; only HEADER/COOKIE/QUERY carry one
   // (e.g. "X-Api-Key", "session", "token"), every other index stays empty.
   repeated string characteristic_params = 11;
+  // Requests matching this filter are excluded from the rule entirely. Empty
+  // means no exception; `expression` remains an inclusion filter.
+  string exception_expression = 12;
 }
 
 enum RateLimitCharacteristics {

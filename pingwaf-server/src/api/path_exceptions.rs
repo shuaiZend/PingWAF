@@ -1,12 +1,11 @@
 //! Per-site path exceptions: request paths that skip selected protection
 //! layers (WAF, bot protection, access rules, ...).
 //!
-//! Safety rule: the site must be in observation mode (`waf_settings.mode =
-//! monitor`) to configure them. A bypass that silently skips enforcement on a
-//! blocking site is exactly the kind of change that never gets removed again;
-//! requiring monitor keeps the site's traffic logged and unenforced while the
-//! operator narrows down what the exception must cover. The data plane re-checks
-//! the mode before honouring a rule, so a stale bundle cannot punch a hole after
+//! Path exceptions are available in every WAF mode. They are an explicit
+//! operator decision, like Cloudflare's path bypass: a matching request still
+//! enters the access log, while the named layers are skipped. The data plane
+//! honours the same rule regardless of the site's observation mode, so a
+//! block-mode site does not silently ignore an exception an operator saved.
 //! the site returns to `block`.
 
 use axum::extract::{Path, State};
@@ -26,7 +25,7 @@ use crate::api::sites::touch_site;
 use crate::api::state::AppState;
 use crate::auth::AuthUser;
 use crate::grpc::notify_config_changed;
-use crate::models::{path_exceptions, waf_settings};
+use crate::models::path_exceptions;
 
 /// Per-site cap: small by nature, and the whole list ships in every bundle.
 pub const MAX_PATH_EXCEPTIONS: usize = 64;
@@ -210,29 +209,6 @@ fn validate_note(raw: Option<&str>) -> Result<Option<String>, ApiError> {
     Ok(note.map(str::to_string))
 }
 
-/// The safety gate. A missing `waf_settings` row means the data plane falls
-/// back to monitor (`grpc/config.rs` floors a missing mode to monitor), so it
-/// is treated the same as an explicit `monitor`.
-async fn require_observation_mode(
-    state: &AppState,
-    site_id: Uuid,
-) -> Result<(), ApiError> {
-    let settings = waf_settings::Entity::find()
-        .filter(waf_settings::Column::SiteId.eq(site_id))
-        .one(&state.db)
-        .await?;
-    let mode = settings
-        .map(|row| row.mode)
-        .unwrap_or_else(|| "monitor".to_string());
-    if mode != "monitor" {
-        return Err(ApiError::Conflict(format!(
-            "path exceptions require the site to be in observation mode; \
-             current WAF mode is '{mode}' (set it to 'monitor' first)"
-        )));
-    }
-    Ok(())
-}
-
 /// `GET /api/v1/sites/{site_id}/path-exceptions`
 async fn list_exceptions(
     State(state): State<AppState>,
@@ -273,7 +249,6 @@ async fn create_exception(
 ) -> Result<Json<PathExceptionView>, ApiError> {
     let site_id = parse_uuid(&site_id, "site id")?;
     load_site_write(&state.db, site_id, &current).await?;
-    require_observation_mode(&state, site_id).await?;
 
     let match_type = validate_match_type(payload.match_type.as_deref())?;
     let path = validate_path(
@@ -345,7 +320,6 @@ async fn update_exception(
     let site_id = parse_uuid(&site_id, "site id")?;
     let id = parse_uuid(&id, "path exception id")?;
     load_site_write(&state.db, site_id, &current).await?;
-    require_observation_mode(&state, site_id).await?;
 
     let row = find_exception(&state, site_id, id).await?;
     let mut match_type = row.match_type.clone();

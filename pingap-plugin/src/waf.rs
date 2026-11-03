@@ -440,12 +440,11 @@ impl PathExceptions {
     }
 }
 
-/// Resolves the path exception in force for a request, if any. Fail-safe by
-/// construction: a site that is not in observation mode never matches.
+/// Resolves the path exception in force for a request, if any. Exceptions are
+/// honoured in every WAF mode; the access log still records the request, and
+/// the hard gates (paused site, fail-closed, IP ban, mTLS) are evaluated before
+/// this bypass is consulted.
 fn resolve_path_bypass(site: &SiteContext, path: &str) -> Option<PathBypass> {
-    if !site.observation_mode {
-        return None;
-    }
     site.path_exceptions.as_ref()?.match_path(path).cloned()
 }
 
@@ -1124,6 +1123,8 @@ enum RateChar {
 enum RateAction {
     /// Record a security event only.
     Log,
+    /// Stop rate-limit evaluation for this request (explicit exception).
+    Allow,
     /// Serve the browser challenge; clients holding a valid clearance are
     /// exempt (they already proved a human is behind the traffic).
     Challenge,
@@ -1137,8 +1138,10 @@ enum RateAction {
 struct CompiledRateRule {
     id: String,
     name: String,
-    /// Optional match condition; `None` applies to every request.
+    /// Optional inclusion filter; `None` applies to every request.
     expression: Option<Expression>,
+    /// Optional exception filter; when it matches the rule is skipped.
+    exception: Option<Expression>,
     chars: Vec<RateChar>,
     period_secs: u64,
     threshold: u32,
@@ -1234,20 +1237,38 @@ impl CompiledRateRule {
                 },
             }
         };
+        let exception = if rule.exception_expression.trim().is_empty() {
+            None
+        } else {
+            match parse_expression(&rule.exception_expression) {
+                Ok(expr) => Some(expr),
+                Err(e) => {
+                    debug!(
+                        rule = %rule.id,
+                        error = %e,
+                        "rate limit exception expression failed to parse; rule ignored"
+                    );
+                    return None;
+                },
+            }
+        };
         let action = match rule.action {
             CacheWafAction::Log => RateAction::Log,
             CacheWafAction::Challenge | CacheWafAction::JsChallenge => {
                 RateAction::Challenge
             },
             CacheWafAction::Block => RateAction::Block,
-            // Counting without consequence would only burn CPU, and basic
-            // auth is not a rate limit outcome.
-            CacheWafAction::Allow | CacheWafAction::BasicAuth => return None,
+            // An allow rule is an explicit exception: matching requests stop
+            // rate-limit evaluation. It must be compiled, not silently dropped.
+            CacheWafAction::Allow => RateAction::Allow,
+            // Basic auth is not a rate limit outcome.
+            CacheWafAction::BasicAuth => return None,
         };
         Some(Self {
             id: rule.id.clone(),
             name: rule.name.clone(),
             expression,
+            exception,
             chars,
             period_secs: u64::from(rule.period_seconds),
             threshold: rule.threshold,
@@ -1445,9 +1466,19 @@ impl RateLimitPolicy {
         let expression_state = self
             .rules
             .iter()
-            .any(|r| r.expression.is_some())
+            .any(|r| r.expression.is_some() || r.exception.is_some())
             .then(|| ExpressionState::build(request_data));
         for rule in &self.rules {
+            if let (Some(state), Some(expr)) =
+                (expression_state.as_ref(), rule.exception.as_ref())
+                && evaluate_expression(
+                    expr,
+                    &state.eval(request_data, host, client_addr),
+                )
+            {
+                // The operator explicitly excluded this request.
+                continue;
+            }
             if let (Some(state), Some(expr)) =
                 (expression_state.as_ref(), rule.expression.as_ref())
                 && !evaluate_expression(
@@ -1456,6 +1487,11 @@ impl RateLimitPolicy {
                 )
             {
                 continue;
+            }
+            if rule.action == RateAction::Allow {
+                // This rule is an explicit exception; stop evaluating the
+                // remaining rate-limit rules and do not create a counter.
+                return RateOutcome { deny: None, logged };
             }
             // A client holding a valid clearance already solved a challenge;
             // challenge rules neither count nor stop it.
@@ -1522,6 +1558,7 @@ impl RateLimitPolicy {
                 let tripped = rate_tripped(rule, retry_after);
                 match rule.action {
                     RateAction::Log => logged.push(tripped),
+                    RateAction::Allow => {},
                     _ => {
                         return RateOutcome {
                             deny: Some(tripped),
@@ -1542,6 +1579,7 @@ impl RateLimitPolicy {
                 let tripped = rate_tripped(rule, retry_after);
                 match rule.action {
                     RateAction::Log => logged.push(tripped),
+                    RateAction::Allow => {},
                     _ => {
                         return RateOutcome {
                             deny: Some(tripped),
@@ -1726,6 +1764,9 @@ struct PendingAccess {
     waf_triggered: bool,
     /// A path exception skipped the challenge layer for this request.
     path_bypasses_challenge: bool,
+    /// A path exception skipped the rate-limit layer. The standalone challenge
+    /// plugin shares its rate window with CC, so it must honour this too.
+    path_bypasses_rate_limit: bool,
     start: Instant,
 }
 
@@ -1986,6 +2027,13 @@ pub fn pending_path_bypasses_challenge(request_id: &str) -> bool {
     PENDING_ACCESS
         .get(request_id)
         .is_some_and(|entry| entry.path_bypasses_challenge)
+}
+
+/// Whether a path exception skipped the rate-limit layer for this request.
+pub fn pending_path_bypasses_rate_limit(request_id: &str) -> bool {
+    PENDING_ACCESS
+        .get(request_id)
+        .is_some_and(|entry| entry.path_bypasses_rate_limit)
 }
 
 /// Backfills the request-body facts of a pending access entry once the
@@ -2533,6 +2581,7 @@ pub(crate) fn emit_challenge_access(
         // This entry is built for a response the plugin generated itself —
         // the request-phase exception evaluation never ran for it.
         path_bypasses_challenge: false,
+        path_bypasses_rate_limit: false,
         start: Instant::now(),
     };
     PENDING_ACCESS.insert(request_id.clone(), pending);
@@ -3937,6 +3986,9 @@ impl Plugin for WafPlugin {
         let path_bypasses_challenge = path_bypass
             .as_ref()
             .is_some_and(|bypass| bypass.layers.skips_challenge());
+        let path_bypasses_rate_limit = path_bypass
+            .as_ref()
+            .is_some_and(|bypass| bypass.layers.skips("rate_limit"));
         if agent.is_some() {
             // Only the access log needs this capped copy. Building it before
             // the `agent.is_some()` gate made a standalone deployment clone
@@ -3985,6 +4037,7 @@ impl Plugin for WafPlugin {
                     // for this request; the challenge plugin reads it back
                     // through `pending_path_bypasses_challenge`.
                     path_bypasses_challenge,
+                    path_bypasses_rate_limit,
                     start: Instant::now(),
                 },
             );
@@ -8212,6 +8265,7 @@ inspect_body = true"###,
             id: id.to_string(),
             name: format!("rule-{id}"),
             expression: expression.to_string(),
+            exception_expression: String::new(),
             characteristics: chars.into_iter().map(|c| c as i32).collect(),
             characteristic_params: Vec::new(),
             period_seconds: 60,
@@ -8300,6 +8354,7 @@ inspect_body = true"###,
                 id: "rl-gc".to_string(),
                 name: "gc".to_string(),
                 expression: None,
+                exception: None,
                 chars: vec![RateChar::Ip],
                 period_secs: 60,
                 threshold: 1_000_000,
@@ -8375,6 +8430,7 @@ inspect_body = true"###,
                 id: "rl-idle".to_string(),
                 name: "idle".to_string(),
                 expression: None,
+                exception: None,
                 chars: vec![RateChar::Ip],
                 period_secs: 60,
                 threshold: 1_000_000,
@@ -8505,6 +8561,7 @@ inspect_body = true"###,
                 id: rule.id,
                 name: rule.name,
                 expression: rule.expression,
+                exception_expression: rule.exception_expression,
                 characteristics: rule
                     .characteristics
                     .iter()
@@ -8566,18 +8623,18 @@ inspect_body = true"###,
             ))
             .is_none()
         );
-        // Allow actions do nothing meaningful on a counter.
-        assert!(
-            build(rate_rule(
-                "d",
-                vec![proto::RateLimitCharacteristics::RateLimitCharIp],
-                "",
-                10,
-                proto::WafAction::Allow,
-                0
-            ))
-            .is_none()
-        );
+        // An allow action is an explicit exception and must compile, not be
+        // silently dropped.
+        let allow = build(rate_rule(
+            "d",
+            vec![proto::RateLimitCharacteristics::RateLimitCharIp],
+            "",
+            10,
+            proto::WafAction::Allow,
+            0,
+        ))
+        .unwrap();
+        assert_eq!(RateAction::Allow, allow.action);
         // A parse failure leaves the rule out rather than matching nothing.
         assert!(
             build(rate_rule(
@@ -8604,12 +8661,49 @@ inspect_body = true"###,
     }
 
     #[test]
+    fn rate_limit_exception_skips_counting() {
+        let rule = CompiledRateRule {
+            id: "except".to_string(),
+            name: "except".to_string(),
+            expression: None,
+            exception: Some(
+                parse_expression("http.request.uri.path starts_with \"/api\"")
+                    .unwrap(),
+            ),
+            chars: vec![RateChar::Ip],
+            period_secs: 60,
+            threshold: 1,
+            mitigation_secs: 0,
+            action: RateAction::Block,
+        };
+        let policy = RateLimitPolicy {
+            rules: vec![rule],
+            last_gc_sweep: AtomicU64::new(0),
+        };
+        let counters: DashMap<String, RateCounter> = DashMap::new();
+        let request = RequestData::new("GET", "/api/x");
+        let outcome = policy.evaluate(
+            &counters,
+            &request,
+            "example.com",
+            false,
+            Some("203.0.113.7".parse().unwrap()),
+        );
+        assert!(outcome.deny.is_none());
+        assert!(
+            counters.is_empty(),
+            "an excepted request must not be counted"
+        );
+    }
+
+    #[test]
     fn rate_rule_build_accepts_parameterized_characteristics() {
         let build = |characteristics: &[&str], params: &[&str]| {
             CompiledRateRule::build(&CacheRateLimitRule {
                 id: "p".to_string(),
                 name: "rule-p".to_string(),
                 expression: String::new(),
+                exception_expression: String::new(),
                 characteristics: characteristics
                     .iter()
                     .map(|s| s.to_string())
@@ -8657,6 +8751,7 @@ inspect_body = true"###,
             id: "rl-h".to_string(),
             name: "per-key".to_string(),
             expression: None,
+            exception: None,
             chars: vec![
                 RateChar::Header("X-Api-Key".to_string()),
                 RateChar::Cookie("Session".to_string()),
@@ -8716,6 +8811,7 @@ inspect_body = true"###,
                 id: "rl".to_string(),
                 name: "per-ip".to_string(),
                 expression: None,
+                exception: None,
                 chars: vec![RateChar::Ip],
                 period_secs: 60,
                 threshold: 1,
@@ -9012,6 +9108,7 @@ inspect_body = true"###,
             response: None,
             waf_triggered,
             path_bypasses_challenge: false,
+            path_bypasses_rate_limit: false,
             start: Instant::now(),
         }
     }
@@ -9177,21 +9274,21 @@ inspect_body = true"###,
     }
 
     #[test]
-    fn path_exception_only_applies_in_observation_mode() {
+    fn path_exception_applies_in_every_waf_mode() {
         let mut rules = site_rules(None);
         rules.observation_mode = false;
         rules.path_exceptions =
             vec![path_exception("e1", "/api", "prefix", &["waf"])];
         let block_site = SiteContext::build(&rules);
         assert!(
-            resolve_path_bypass(&block_site, "/api/x").is_none(),
-            "a site outside observation mode must ignore exceptions (fail-safe)"
+            resolve_path_bypass(&block_site, "/api/x").is_some(),
+            "block mode must honour an operator-configured exception"
         );
 
         rules.observation_mode = true;
         let monitor_site = SiteContext::build(&rules);
         let bypass = resolve_path_bypass(&monitor_site, "/api/x")
-            .expect("observation mode honours the exception");
+            .expect("monitor mode honours the exception too");
         assert_eq!(bypass.id, "e1");
     }
 

@@ -24,7 +24,6 @@ import { PillMultiSelect } from '@/components/ui/MultiSelect'
 import { useToast } from '@/components/ui/Toast'
 import { errorMessage } from '@/api/errors'
 import { pathExceptionsApi, pathExceptionKeys } from '@/api/pathExceptions'
-import { wafSettingsApi, wafSettingsKeys } from '@/api/wafSettings'
 import { useCanWrite } from '@/hooks'
 import { cn } from '@/lib/utils'
 import { formatDateTime } from '@/lib/format'
@@ -98,15 +97,6 @@ export function PathExceptionsPanel() {
     enabled: Boolean(siteId),
   })
 
-  const settingsQuery = useQuery({
-    queryKey: wafSettingsKeys.settings(siteId),
-    queryFn: () => wafSettingsApi.get(siteId),
-    enabled: Boolean(siteId),
-  })
-  const wafMode = settingsQuery.data?.mode ?? 'off'
-  const observations = wafMode !== 'monitor'
-  // Site is in observation mode (monitor) — required for writes.
-
   // Re-seed the editor only when it opens or the target changes (render-phase
   // reset), so a background refetch never wipes in-progress edits.
   const seedKey = dialogOpen ? (editing?.id ?? 'new') : ''
@@ -122,16 +112,6 @@ export function PathExceptionsPanel() {
   const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: pathExceptionKeys.all(siteId) })
   }
-
-  const switchToMonitor = useMutation({
-    mutationFn: () => wafSettingsApi.update(siteId, { mode: 'monitor' }),
-    onSuccess: () => {
-      toast.success(t('pages.pathExceptions.monitorApplied'))
-      void queryClient.invalidateQueries({ queryKey: wafSettingsKeys.settings(siteId) })
-      void queryClient.invalidateQueries({ queryKey: wafSettingsKeys.posture(siteId) })
-    },
-    onError: (e) => toast.error(t('pages.protection.updateFailed'), errorMessage(e)),
-  })
 
   const save = useMutation({
     mutationFn: (payload: CreatePathExceptionRequest) =>
@@ -281,7 +261,7 @@ export function PathExceptionsPanel() {
             size="icon"
             variant="ghost"
             aria-label={t('common.edit')}
-            disabled={!canWrite || observations}
+            disabled={!canWrite}
             onClick={() => {
               setEditing(p)
               setDialogOpen(true)
@@ -293,7 +273,7 @@ export function PathExceptionsPanel() {
             variant="ghost"
             className="hover:text-fg-danger"
             aria-label={t('common.delete')}
-            disabled={!canWrite || observations}
+            disabled={!canWrite}
             onClick={() => setPendingDelete(p)}
             icon={<Trash weight="duotone" className="h-4 w-4" />}
           />
@@ -303,7 +283,7 @@ export function PathExceptionsPanel() {
   ]
 
   const exceptions = useMemo(() => exceptionsQuery.data ?? [], [exceptionsQuery.data])
-  const editingDisabled = !canWrite || observations
+  const editingDisabled = !canWrite
 
   return (
     <Card>
@@ -325,7 +305,7 @@ export function PathExceptionsPanel() {
               <Button
                 variant="primary"
                 size="sm"
-                disabled={observations}
+                disabled={!canWrite}
                 icon={<Plus weight="bold" className="h-4 w-4" />}
                 onClick={() => {
                   setEditing(null)
@@ -338,23 +318,6 @@ export function PathExceptionsPanel() {
           </div>
         }
       />
-
-      {/* Observation-mode gate: writes require the site to run in monitor. */}
-      {observations && (
-        <div className="mx-5 mt-4 flex flex-wrap items-center justify-between gap-3 rounded-md border border-warning/40 bg-warning/10 px-3 py-2.5">
-          <p className="text-[13px] text-fg">{t('pages.pathExceptions.observationGate')}</p>
-          {canWrite && (
-            <Button
-              size="sm"
-              variant="secondary"
-              loading={switchToMonitor.isPending}
-              onClick={() => switchToMonitor.mutate()}
-            >
-              {t('pages.pathExceptions.switchToMonitor')}
-            </Button>
-          )}
-        </div>
-      )}
 
       <CardBody className="p-0">
         {exceptionsQuery.isPending ? (
@@ -370,7 +333,7 @@ export function PathExceptionsPanel() {
                 <Button
                   variant="primary"
                   icon={<Plus weight="bold" className="h-4 w-4" />}
-                  disabled={observations}
+                  disabled={!canWrite}
                   onClick={() => {
                     setEditing(null)
                     setDialogOpen(true)

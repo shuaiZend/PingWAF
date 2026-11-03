@@ -67,6 +67,8 @@ pub struct CreateRequest {
     pub name: String,
     #[serde(default)]
     pub expression: String,
+    #[serde(default)]
+    pub exception_expression: String,
     #[serde(default = "default_characteristics")]
     pub characteristics: Vec<String>,
     #[serde(default = "default_period")]
@@ -89,6 +91,8 @@ pub struct UpdateRequest {
     pub name: Option<String>,
     #[serde(default)]
     pub expression: Option<String>,
+    #[serde(default)]
+    pub exception_expression: Option<String>,
     #[serde(default)]
     pub characteristics: Option<Vec<String>>,
     #[serde(default)]
@@ -241,6 +245,7 @@ async fn create(
     // whole rule when it fails to parse — so it is validated here, the same way
     // the update path does (2026-10-19 audit, D05).
     validate_optional_expression(&payload.expression)?;
+    validate_optional_expression(&payload.exception_expression)?;
 
     let timestamp = chrono::Utc::now();
     let model = rate_limit_rules::ActiveModel {
@@ -248,6 +253,7 @@ async fn create(
         site_id: Set(id),
         name: Set(payload.name.trim().to_string()),
         expression: Set(payload.expression),
+        exception_expression: Set(payload.exception_expression),
         characteristics: Set(characteristics),
         period_seconds: Set(payload.period_seconds),
         threshold: Set(payload.threshold),
@@ -293,6 +299,10 @@ async fn update(
     if let Some(expression) = payload.expression {
         validate_optional_expression(&expression)?;
         active.expression = Set(expression);
+    }
+    if let Some(expression) = payload.exception_expression {
+        validate_optional_expression(&expression)?;
+        active.exception_expression = Set(expression);
     }
     if let Some(characteristics) = payload.characteristics {
         active.characteristics =

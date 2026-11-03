@@ -58,6 +58,7 @@ const PERIOD_MAX = 86_400
 interface FormState {
   name: string
   expression: string
+  exception_expression: string
   characteristics: string[]
   period_seconds: number
   threshold: number
@@ -70,6 +71,7 @@ interface FormState {
 const emptyForm = (): FormState => ({
   name: '',
   expression: '',
+  exception_expression: '',
   characteristics: ['ip'],
   period_seconds: 60,
   threshold: 100,
@@ -83,6 +85,7 @@ function formFromRule(rule: RateLimitRule): FormState {
   return {
     name: rule.name,
     expression: rule.expression,
+    exception_expression: rule.exception_expression ?? '',
     characteristics: [...(rule.characteristics ?? [])],
     period_seconds: rule.period_seconds,
     threshold: rule.threshold,
@@ -254,6 +257,7 @@ export function RateLimitingPage() {
     save.mutate({
       name,
       expression: form.expression.trim(),
+      exception_expression: form.exception_expression.trim(),
       characteristics: form.characteristics,
       period_seconds: form.period_seconds,
       threshold: form.threshold,
@@ -533,6 +537,17 @@ export function RateLimitingPage() {
             placeholder='http.request.uri.path starts_with "/api"'
             hint={t('pages.rateLimiting.expressionHint')}
             onChange={(e) => setForm((f) => ({ ...f, expression: e.target.value }))}
+          />
+
+          <Input
+            label={t('pages.rateLimiting.exceptionExpression')}
+            value={form.exception_expression}
+            className="pw-mono text-[13px]"
+            placeholder='http.request.uri.path starts_with "/api"'
+            hint={t('pages.rateLimiting.exceptionExpressionHint')}
+            onChange={(e) =>
+              setForm((f) => ({ ...f, exception_expression: e.target.value }))
+            }
           />
 
           <PillMultiSelect

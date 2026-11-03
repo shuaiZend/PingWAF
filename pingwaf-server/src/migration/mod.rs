@@ -96,6 +96,7 @@ pub mod m20240101_000088_heartbeat_indexes;
 mod m20240101_000089_api_protection_trust;
 mod m20240101_000090_certificate_site_optional;
 pub mod m20240101_000091_site_ssl_certificate_index;
+mod m20240101_000092_rate_limit_exception;
 
 use sea_orm_migration::prelude::*;
 
@@ -207,6 +208,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20240101_000089_api_protection_trust::Migration),
             Box::new(m20240101_000090_certificate_site_optional::Migration),
             Box::new(m20240101_000091_site_ssl_certificate_index::Migration),
+            Box::new(m20240101_000092_rate_limit_exception::Migration),
         ]
     }
 }
@@ -218,7 +220,7 @@ mod tests {
     #[test]
     fn migrations_are_ordered_and_unique() {
         let migrations = Migrator::migrations();
-        assert_eq!(migrations.len(), 91);
+        assert_eq!(migrations.len(), 92);
         let names: Vec<String> =
             migrations.iter().map(|m| m.name().to_owned()).collect();
         let mut sorted = names.clone();

@@ -8,6 +8,23 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [Unreleased]
+
+### Added
+
+- **Explicit rate-limit exceptions.** `rate_limit_rules` gains
+  `exception_expression` (migration `000092`): matching requests are skipped by
+  the rule instead of being counted. The existing `expression` remains an
+  inclusion filter, so existing rules keep their meaning. `action: "allow"` is
+  now compiled and stops lower-priority rules instead of being silently dropped.
+
+### Fixed
+
+- **Path exceptions work in every WAF mode.** Removed the API, data-plane and
+  console observation-mode gates; a block-mode site now honours an operator's
+  path exception. The standalone CC challenge also honours `skip_layers:
+  ["rate_limit"]`, so a bypass does not still trigger its own rate challenge.
+
 ## [PingWAF 0.32.12] — 2026-11-03
 
 ### Fixed
