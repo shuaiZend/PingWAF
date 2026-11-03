@@ -96,7 +96,7 @@ pub const POW_JS: &str = r#"
   }
 
   // Proof-of-work: find nonce such that SHA-256(challenge_nonce + nonce) has enough leading zeros
-  function computeProofOfWork() {
+  function computeProofOfWork(onSolved) {
     var counter = 0;
     var batchSize = 5000;
 
@@ -107,6 +107,10 @@ pub const POW_JS: &str = r#"
         if (leadingZeroBits(hash) >= CONFIG.difficulty) {
           solution = candidate;
           updateProgress(80);
+          // Submission is driven by completion, not by the 5-second display
+          // timer: a slow device must not report a failure while the proof is
+          // still being computed.
+          if (onSolved) onSolved();
           return true;
         }
         counter++;
@@ -152,16 +156,25 @@ impl Default for ChallengePageParams {
     }
 }
 
+/// JSON-encodes a value for embedding in an inline script. The extra `</`
+/// replacement prevents a crafted original URL from closing the enclosing
+/// `<script>` element.
+fn js_string(value: &str) -> String {
+    serde_json::to_string(value)
+        .unwrap_or_else(|_| "\"/\"".to_string())
+        .replace("</", "<\\/")
+}
+
 /// Generate the JS challenge HTML page (5-second shield).
 /// The page is self-contained with inline CSS and JS — no external dependencies.
 pub fn generate_js_challenge_html(params: &ChallengePageParams) -> String {
     let fingerprint_js = fingerprint_collection_js();
     let pow_js = POW_JS;
-    let nonce = &params.challenge_nonce;
     let difficulty = params.difficulty;
-    let request_id = &params.request_id;
-    let verify_endpoint = &params.verify_endpoint;
-    let original_url = &params.original_url;
+    let request_id = js_string(&params.request_id);
+    let nonce = js_string(&params.challenge_nonce);
+    let verify_endpoint = js_string(&params.verify_endpoint);
+    let original_url = js_string(&params.original_url);
     let brand_name = &params.brand_name;
 
     format!(
@@ -253,11 +266,11 @@ h1{{font-size:20px;font-weight:600;margin-bottom:12px;color:var(--text)}}
   'use strict';
 
   var CONFIG = {{
-    requestId: '{request_id}',
-    nonce: '{nonce}',
+    requestId: {request_id},
+    nonce: {nonce},
     difficulty: {difficulty},
-    verifyEndpoint: '{verify_endpoint}',
-    originalUrl: '{original_url}',
+    verifyEndpoint: {verify_endpoint},
+    originalUrl: {original_url},
     countdownSeconds: 5
   }};
 
@@ -273,6 +286,7 @@ h1{{font-size:20px;font-weight:600;margin-bottom:12px;color:var(--text)}}
 
   var solution = null;
   var fingerprint = null;
+  var submitting = false;
   var startTime = Date.now();
 
   function showStatus(msg, type) {{
@@ -322,6 +336,7 @@ h1{{font-size:20px;font-weight:600;margin-bottom:12px;color:var(--text)}}
       return;
     }}
 
+    submitting = true;
     updateProgress(90);
     showStatus('Verifying solution…', '');
 
@@ -380,7 +395,7 @@ h1{{font-size:20px;font-weight:600;margin-bottom:12px;color:var(--text)}}
   // Main flow
   function init() {{
     collectFingerprint();
-    computeProofOfWork();
+    computeProofOfWork(function () {{ submitSolution(); }});
     startCountdown();
   }}
 
@@ -406,10 +421,11 @@ h1{{font-size:20px;font-weight:600;margin-bottom:12px;color:var(--text)}}
 /// Generate the managed challenge HTML page.
 /// This page can escalate to interactive verification if needed.
 pub fn generate_managed_challenge_html(params: &ChallengePageParams) -> String {
-    // Managed challenge uses the same page but with a flag for potential escalation
-    let mut managed_params = params.clone();
-    managed_params.difficulty = params.difficulty + 4; // Slightly harder PoW
-    generate_js_challenge_html(&managed_params)
+    // Managed challenge uses the same server-verified JS page. Do not raise the
+    // PoW difficulty here: the verifier still checks `pow_difficulty`, so the
+    // extra +4 only multiplied client work (and timeouts) without adding any
+    // server-side security.
+    generate_js_challenge_html(params)
 }
 
 /// Generate the interactive challenge HTML page (CAPTCHA-style).
@@ -417,78 +433,11 @@ pub fn generate_managed_challenge_html(params: &ChallengePageParams) -> String {
 pub fn generate_interactive_challenge_html(
     params: &ChallengePageParams,
 ) -> String {
-    let brand_name = &params.brand_name;
-    let request_id = &params.request_id;
-    let original_url = &params.original_url;
-
-    format!(
-        r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="robots" content="noindex, nofollow">
-<title>Security Check — {brand_name}</title>
-<style>
-*,*::before,*::after{{box-sizing:border-box;margin:0;padding:0}}
-:root{{
-  --bg:#f8f9fa;--surface:#ffffff;--text:#1a1a2e;--text-secondary:#555;
-  --accent:#2563eb;--border:#e2e8f0;--radius:12px;
-  --shadow:0 4px 24px rgba(0,0,0,0.06);
-}}
-@media(prefers-color-scheme:dark){{
-  :root{{
-    --bg:#0f1117;--surface:#1a1d2e;--text:#e8eaed;--text-secondary:#9ca3af;
-    --accent:#60a5fa;--border:#2d3348;--shadow:0 4px 24px rgba(0,0,0,0.3);
-  }}
-}}
-html,body{{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif}}
-body{{background:var(--bg);color:var(--text);display:flex;align-items:center;justify-content:center;min-height:100vh;padding:24px}}
-.container{{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow);padding:48px 40px;max-width:480px;width:100%;text-align:center}}
-.brand{{display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:32px}}
-.brand svg{{width:32px;height:32px;color:var(--accent)}}
-.brand span{{font-size:18px;font-weight:700;letter-spacing:-0.5px}}
-h1{{font-size:20px;font-weight:600;margin-bottom:12px}}
-.subtitle{{font-size:14px;color:var(--text-secondary);line-height:1.6;margin-bottom:24px}}
-.checkbox-wrap{{display:flex;align-items:center;justify-content:center;gap:12px;padding:16px;border:2px solid var(--border);border-radius:8px;cursor:pointer;transition:border-color 0.2s}}
-.checkbox-wrap:hover{{border-color:var(--accent)}}
-.checkbox{{width:24px;height:24px;border:2px solid var(--border);border-radius:4px;display:flex;align-items:center;justify-content:center;transition:all 0.2s}}
-.checkbox.checked{{background:var(--accent);border-color:var(--accent)}}
-.checkbox.checked::after{{content:'✓';color:white;font-size:14px;font-weight:bold}}
-.checkbox-label{{font-size:15px;font-weight:500}}
-.footer{{margin-top:32px;font-size:11px;color:var(--text-secondary);opacity:0.7}}
-</style>
-</head>
-<body>
-<div class="container">
-  <div class="brand">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
-    </svg>
-    <span>{brand_name}</span>
-  </div>
-  <h1>Security Verification</h1>
-  <p class="subtitle">Please confirm you are human to continue to the requested page.</p>
-  <div class="checkbox-wrap" id="verifyBox" onclick="verify()">
-    <div class="checkbox" id="checkbox"></div>
-    <span class="checkbox-label">I'm not a robot</span>
-  </div>
-  <div class="footer">
-    Protected by {brand_name} · Ray ID: {request_id}
-  </div>
-</div>
-<script>
-function verify() {{
-  var cb = document.getElementById('checkbox');
-  cb.classList.add('checked');
-  setTimeout(function() {{
-    window.location.href = '{original_url}';
-  }}, 1000);
-}}
-</script>
-</body>
-</html>"#
-    )
+    // There is no CAPTCHA provider in this build. Returning a click-to-redirect
+    // page was a challenge bypass: it never called the verify endpoint and
+    // never minted a clearance cookie. Until a real CAPTCHA lands, use the
+    // same server-verified proof-of-work page so the visitor can actually pass.
+    generate_js_challenge_html(params)
 }
 
 #[cfg(test)]
@@ -546,9 +495,9 @@ mod tests {
         };
         let html = generate_interactive_challenge_html(&params);
         assert!(html.contains("<!DOCTYPE html>"));
-        assert!(html.contains("Security Verification"));
+        assert!(html.contains("Checking your browser"));
         assert!(html.contains("ray-456"));
-        assert!(html.contains("I'm not a robot"));
+        assert!(html.contains("computeProofOfWork"));
     }
 
     #[test]
@@ -564,5 +513,25 @@ mod tests {
         let html = generate_js_challenge_html(&params);
         assert!(html.contains("<noscript>"));
         assert!(html.contains("JavaScript Required"));
+    }
+    #[test]
+    fn original_url_is_js_escaped() {
+        let params = ChallengePageParams {
+            original_url: "/\"'</script><script>alert(1)</script>".to_string(),
+            ..Default::default()
+        };
+        let html = generate_js_challenge_html(&params);
+        assert!(
+            !html.contains("</script><script>alert(1)"),
+            "the client-controlled URL must not close the challenge script"
+        );
+        assert!(html.contains("computeProofOfWork"));
+    }
+
+    #[test]
+    fn proof_completion_submits_the_solution() {
+        let html = generate_js_challenge_html(&ChallengePageParams::default());
+        assert!(html
+            .contains("computeProofOfWork(function () { submitSolution(); })"));
     }
 }

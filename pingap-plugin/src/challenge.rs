@@ -80,6 +80,7 @@ const RATE_WINDOW_SECS: i64 = 60;
 /// solution. The browser only echoes back `{request_id, solution,
 /// fingerprint_json, timestamp}` — the nonce and site id never leave the edge,
 /// so they are looked up here by request id.
+#[derive(Clone)]
 pub(crate) struct PendingChallenge {
     pub nonce: String,
     pub site_id: String,
@@ -191,9 +192,15 @@ pub(crate) fn store_pending(
     nonce
 }
 
-/// Take (and remove) the pending challenge for a request id.
-fn take_pending(request_id: &str) -> Option<PendingChallenge> {
-    let pending = PENDING_CHALLENGES.remove(request_id).map(|(_, v)| v)?;
+/// Look up a pending challenge without consuming it.
+///
+/// The entry is removed only after the submission verifies. Taking it first
+/// made every failed PoW/fingerprint attempt unrecoverable: the browser had
+/// already lost the nonce by the time it tried to correct the answer.
+fn peek_pending(request_id: &str) -> Option<PendingChallenge> {
+    let pending = PENDING_CHALLENGES
+        .get(request_id)
+        .map(|entry| entry.clone())?;
     if now_secs().saturating_sub(pending.created_at) >= PENDING_TTL_SECS {
         return None;
     }
@@ -821,7 +828,7 @@ impl ChallengePlugin {
             .and_then(|v| v.as_i64())
             .unwrap_or_else(now_secs);
 
-        let Some(pending) = take_pending(&request_id) else {
+        let Some(pending) = peek_pending(&request_id) else {
             return Ok(RequestPluginResult::Respond(block_page(
                 &request_id,
                 "challenge expired or unknown, please retry",
@@ -830,11 +837,11 @@ impl ChallengePlugin {
 
         let submission = ChallengeSubmission {
             request_id: request_id.clone(),
-            challenge_nonce: pending.nonce,
+            challenge_nonce: pending.nonce.clone(),
             solution,
             fingerprint_json,
             timestamp,
-            site_id: pending.site_id,
+            site_id: pending.site_id.clone(),
         };
 
         let result = self
@@ -846,6 +853,9 @@ impl ChallengePlugin {
                 cookie_value,
                 cookie_attributes,
             } => {
+                // The nonce is spent and the challenge resolved; drop it only
+                // after the verifier accepted the submission.
+                PENDING_CHALLENGES.remove(&request_id);
                 let set_cookie = format!(
                     "{}={}; {}",
                     self.cookie_name, cookie_value, cookie_attributes

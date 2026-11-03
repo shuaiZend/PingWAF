@@ -15,6 +15,21 @@ verbatim for reference and attribution, and is not maintained here.
 > moved; the entries will be folded into the release notes of whichever
 > version ships this work.
 
+### Fixed
+
+- **Rate-limit JS challenge can be completed.** The countdown submitted before
+  the proof-of-work finished, so slow clients saw “Computation failed” and the
+  page never retried; the PoW completion now drives submission and the
+  countdown only reports progress. Managed challenges no longer add four
+  hidden difficulty bits that the verifier never required, and the
+  interactive placeholder no longer redirects without calling `/verify`.
+- **Challenge pages do not reflect the original URL into inline JS.** The
+  request path/query is JSON-encoded and `</` is escaped before it enters the
+  page, closing a reflected-XSS hole in the challenge response.
+- **Failed challenge attempts can be retried.** The pending entry and nonce are
+  consumed only after the proof, fingerprint and timestamp all pass, so a
+  malformed first submission does not force a page reload.
+
 ### Added
 
 - **`br` and `zstd` response-body rewriting.** The site `response_replace`

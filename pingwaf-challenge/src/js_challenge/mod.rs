@@ -256,20 +256,9 @@ impl ChallengeEngine {
                 reason: "challenge nonce is invalid or expired".to_string(),
             };
         }
-        // 3. A nonce is single-use: replaying a solved pair must not mint a
-        // second clearance cookie.
-        if !consume_nonce(
-            &submission.challenge_nonce,
-            Duration::from_secs(
-                self.config.submission_max_age_secs.max(1) as u64
-            ),
-        ) {
-            return VerifyResult::Failed {
-                reason: "challenge nonce was already used".to_string(),
-            };
-        }
-
-        // 4. Verify proof-of-work
+        // 3. Verify proof-of-work before spending the nonce. A failed proof
+        // must be retryable with the same challenge; burning the nonce here
+        // turned every malformed/failed submission into a fresh page load.
         if !verify_proof_of_work(
             &submission.challenge_nonce,
             &submission.solution,
@@ -280,7 +269,7 @@ impl ChallengeEngine {
             };
         }
 
-        // 3. Parse and check browser fingerprint
+        // 4. Parse and check browser fingerprint
         let fingerprint =
             match BrowserFingerprint::from_json(&submission.fingerprint_json) {
                 Ok(fp) => fp,
@@ -319,7 +308,21 @@ impl ChallengeEngine {
             }
         }
 
-        // 5. Issue clearance cookie
+        // 5. A nonce is single-use: replaying a solved pair must not mint a
+        // second clearance cookie. Consume it only after every other check
+        // passed, so a retry can use the same challenge.
+        if !consume_nonce(
+            &submission.challenge_nonce,
+            Duration::from_secs(
+                self.config.submission_max_age_secs.max(1) as u64
+            ),
+        ) {
+            return VerifyResult::Failed {
+                reason: "challenge nonce was already used".to_string(),
+            };
+        }
+
+        // 6. Issue clearance cookie
         let fp_hash = fingerprint.hash();
         let (cookie_value, payload) =
             self.cookie_manager.issue_clearance_with_payload(
