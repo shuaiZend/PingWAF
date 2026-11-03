@@ -296,7 +296,7 @@ members = [
     "pingwaf-agent",
 ]
 [workspace.package]
-version = "0.32.14"
+version = "0.32.15"
 
 [patch.crates-io]
 # Pingora 0.9 pins zstd ^0.13.1, whose zstd-safe 7.3.0 carries the October

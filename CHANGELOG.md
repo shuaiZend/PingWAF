@@ -8,6 +8,17 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.32.15] — 2026-11-04
+
+### Fixed
+
+- **Browser challenge submissions use the pending nonce.** The plugin stores a
+  plain random nonce in its pending map, while `verify_solution` required the
+  signed nonce format used by the public engine API. Every browser submission
+  therefore failed with “challenge nonce is invalid or expired” and the page
+  showed “Verification Failed”. The verify endpoint now calls a pending-map
+  variant that trusts the server-side lookup (the nonce is still single-use).
+
 ## [PingWAF 0.32.14] — 2026-11-04
 
 ### Fixed

@@ -234,6 +234,30 @@ impl ChallengeEngine {
         submission: &ChallengeSubmission,
         secure: bool,
     ) -> VerifyResult {
+        self.verify_solution_inner(submission, secure, true)
+    }
+
+    /// Verifies a submission whose nonce came from the plugin's pending map.
+    ///
+    /// The map lookup already proves this edge issued the challenge, so the
+    /// signed-nonce check is redundant here. The page's nonce is a random
+    /// server-side value stored in that map, not the signed format the public
+    /// engine API uses; requiring the signature made every browser submission
+    /// fail with "challenge nonce is invalid or expired".
+    pub fn verify_solution_for_pending(
+        &self,
+        submission: &ChallengeSubmission,
+        secure: bool,
+    ) -> VerifyResult {
+        self.verify_solution_inner(submission, secure, false)
+    }
+
+    fn verify_solution_inner(
+        &self,
+        submission: &ChallengeSubmission,
+        secure: bool,
+        require_signed_nonce: bool,
+    ) -> VerifyResult {
         // 1. Verify timestamp (prevent replay)
         if !verify_timestamp(
             submission.timestamp,
@@ -247,11 +271,13 @@ impl ChallengeEngine {
         // 2. The nonce must be one this engine issued and has not expired:
         // otherwise a client can pick its own nonce, solve once offline and
         // replay the pair forever.
-        if !verify_nonce(
-            self.config.cookie_secret.as_bytes(),
-            &submission.challenge_nonce,
-            self.config.submission_max_age_secs,
-        ) {
+        if require_signed_nonce
+            && !verify_nonce(
+                self.config.cookie_secret.as_bytes(),
+                &submission.challenge_nonce,
+                self.config.submission_max_age_secs,
+            )
+        {
             return VerifyResult::Failed {
                 reason: "challenge nonce is invalid or expired".to_string(),
             };
@@ -859,6 +885,33 @@ mod tests {
             },
             VerifyResult::Failed { reason } => {
                 panic!("Expected success but got failure: {reason}");
+            },
+        }
+    }
+
+    #[test]
+    fn pending_submission_accepts_the_random_map_nonce() {
+        let config = ChallengeConfig {
+            browser_integrity_check: false,
+            ..test_config()
+        };
+        let engine = ChallengeEngine::new(config);
+        let submission = ChallengeSubmission {
+            request_id: "pending-ray".to_string(),
+            // The plugin stores a plain random UUID, not a signed nonce.
+            challenge_nonce: "0123456789abcdef0123456789abcdef".to_string(),
+            solution: "anything".to_string(),
+            fingerprint_json: r#"{"user_agent":"Mozilla/5.0 Chrome/120","screen_width":1920,"screen_height":1080,"timezone_offset":-480,"language":"en-US","platform":"Win32","canvas_hash":"abc","webgl_vendor":"Google","webgl_renderer":"ANGLE","plugins_count":3,"touch_support":false,"hardware_concurrency":8,"device_memory":8.0}"#
+                .to_string(),
+            timestamp: chrono::Utc::now().timestamp(),
+            site_id: "test-site".to_string(),
+        };
+        match engine.verify_solution_for_pending(&submission, true) {
+            VerifyResult::Success { cookie_value, .. } => {
+                assert!(!cookie_value.is_empty())
+            },
+            VerifyResult::Failed { reason } => {
+                panic!("pending nonce should verify, got: {reason}")
             },
         }
     }

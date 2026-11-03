@@ -844,9 +844,10 @@ impl ChallengePlugin {
             site_id: pending.site_id.clone(),
         };
 
-        let result = self
-            .engine
-            .verify_solution(&submission, ctx.conn.tls_version.is_some());
+        let result = self.engine.verify_solution_for_pending(
+            &submission,
+            ctx.conn.tls_version.is_some(),
+        );
 
         match result {
             VerifyResult::Success {
