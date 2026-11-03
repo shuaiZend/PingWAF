@@ -16,6 +16,12 @@ BA = "BA"
 COSE = "COSE"
 FO = "FO"
 PN = "PN"
+# Spanish/French SEO copy in site/src/i18n/seo.ts: real words, not English
+# misspellings. The content directories are excluded, but this typed module is
+# not, and typos has no language model to tell them apart.
+informe = "informe"
+interactivo = "interactivo"
+moteur = "moteur"
 
 [files]
 # The portal ships translated copy; the spell checker only understands English.

@@ -8,12 +8,7 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
-## [Unreleased]
-
-> **Not released this round** — these entries describe uncommitted workspace
-> changes and are listed for review only. No version is cut and no tag is
-> moved; the entries will be folded into the release notes of whichever
-> version ships this work.
+## [PingWAF 0.32.11] — 2026-11-03
 
 ### Fixed
 
