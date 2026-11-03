@@ -326,8 +326,11 @@ h1{{font-size:20px;font-weight:600;margin-bottom:12px;color:var(--text)}}
 
   // Submit the solution to the server
   function submitSolution() {{
+    if (submitting) return;
     if (!solution) {{
-      showStatus('Computation failed. Please refresh the page.', 'error');
+      // The countdown is cosmetic; keep waiting for the proof instead of
+      // turning a slow device into a hard failure.
+      showStatus('Still verifying your browser…', '');
       return;
     }}
 
@@ -357,15 +360,22 @@ h1{{font-size:20px;font-weight:600;margin-bottom:12px;color:var(--text)}}
         showStatus('Verification successful! Redirecting…', 'success');
         elements.title.textContent = 'Verified!';
         elements.spinnerWrap.style.display = 'none';
+        var target = CONFIG.originalUrl;
+        try {{
+          var result = JSON.parse(xhr.responseText || '{{}}');
+          if (result && result.redirect) target = result.redirect;
+        }} catch (e) {{}}
         setTimeout(function() {{
-          window.location.href = CONFIG.originalUrl;
+          window.location.href = target;
         }}, 500);
       }} else {{
+        submitting = false;
         showStatus('Verification failed. Please refresh and try again.', 'error');
         elements.title.textContent = 'Verification Failed';
       }}
     }};
     xhr.onerror = function() {{
+      submitting = false;
       showStatus('Network error. Please check your connection and refresh.', 'error');
     }};
     xhr.send(JSON.stringify(payload));
@@ -381,7 +391,10 @@ h1{{font-size:20px;font-weight:600;margin-bottom:12px;color:var(--text)}}
       if (remaining <= 0) {{
         clearInterval(interval);
         elements.countdown.textContent = '…';
-        submitSolution();
+        // If PoW is still running, the completion callback submits it; the
+        // countdown must not fail the challenge.
+        if (solution) submitSolution();
+        else showStatus('Still verifying your browser…', '');
       }} else {{
         elements.countdown.textContent = remaining;
         // Update progress during countdown

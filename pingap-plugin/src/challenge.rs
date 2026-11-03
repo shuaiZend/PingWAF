@@ -867,11 +867,22 @@ impl ChallengePlugin {
                 // "/" (so `//evil.com` cannot become a protocol-relative
                 // open redirect either).
                 let target = safe_redirect_target(&pending.original_url);
-                let location = HeaderValue::from_str(target)
-                    .unwrap_or(HeaderValue::from_static("/"));
-                let builder = HttpResponse::builder(StatusCode::SEE_OTHER)
-                    .body(String::new())
-                    .header((header::LOCATION, location));
+                // Return the redirect in the body instead of a 303. XHR follows
+                // a 303 to the original URL; when that URL redirects to an
+                // external auth portal the browser reports a CORS failure and
+                // the challenge page shows "Verification Failed" even though
+                // the clearance cookie is already set. A 200 keeps the
+                // redirect under this page's control.
+                let body = serde_json::json!({
+                    "ok": true,
+                    "redirect": target,
+                })
+                .to_string();
+                let builder =
+                    HttpResponse::builder(StatusCode::OK).body(body).header((
+                        header::CONTENT_TYPE,
+                        HeaderValue::from_static("application/json"),
+                    ));
                 let mut builder = builder;
                 if let Ok(hv) = HeaderValue::from_str(&set_cookie) {
                     builder = builder.header((header::SET_COOKIE, hv));
@@ -998,9 +1009,6 @@ impl Plugin for ChallengePlugin {
         if step != self.plugin_step {
             return Ok(RequestPluginResult::Skipped);
         }
-        if !self.enabled {
-            return Ok(RequestPluginResult::Skipped);
-        }
 
         // ACME http-01 validation requests are answered by the proxy before
         // the plugin chain runs; skip them here too, as a second line of
@@ -1022,6 +1030,15 @@ impl Plugin for ChallengePlugin {
         // otherwise be skipped for this path.
         if path == VERIFY_ENDPOINT && method == "POST" {
             return self.handle_verify(session, ctx).await;
+        }
+
+        // Only the decision path needs the feature switch. The verify endpoint
+        // above must stay reachable even when CC/challenge settings are off:
+        // the WAF plugin can issue a challenge page on its own, and without
+        // this endpoint the browser's solution falls through to the upstream
+        // (typically an auth redirect) and shows "Verification Failed".
+        if !self.enabled {
+            return Ok(RequestPluginResult::Skipped);
         }
 
         // A path exception that skips the challenge layer exempts this

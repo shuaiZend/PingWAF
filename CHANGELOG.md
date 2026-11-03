@@ -8,6 +8,23 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.32.12] — 2026-11-03
+
+### Fixed
+
+- **Verify endpoint is served even when the challenge decision is disabled.**
+  The WAF can issue a challenge page on its own; if the CC/challenge plugin
+  switch was off, `/_pingwaf/challenge/verify` fell through to the upstream
+  auth portal, which answered 302 and made the browser report “Verification
+  Failed”. The verify branch now runs before the feature switch.
+- **Challenge success returns a 200 JSON redirect.** A 303 made XHR follow the
+  original URL; when that URL redirected to an external login, the cross-origin
+  follow was reported as a failure even after the clearance cookie was set.
+  The page now reads `{"redirect": ...}` and navigates itself.
+- **Slow browsers are not failed by the five-second display timer.** The
+  submit handler now waits for proof completion, ignores duplicate submits,
+  and reports “Still verifying” instead of “Computation failed”.
+
 ## [PingWAF 0.32.11] — 2026-11-03
 
 ### Fixed
