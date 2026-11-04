@@ -1467,7 +1467,7 @@ impl RateLimitPolicy {
             .rules
             .iter()
             .any(|r| r.expression.is_some() || r.exception.is_some())
-            .then(|| ExpressionState::build(request_data));
+            .then(ExpressionState::new);
         for rule in &self.rules {
             if let (Some(state), Some(expr)) =
                 (expression_state.as_ref(), rule.exception.as_ref())
@@ -1596,20 +1596,15 @@ impl RateLimitPolicy {
 /// Owned per-request data rule expressions evaluate against: the
 /// [`EvalContext`] borrows from this state plus the request data.
 struct ExpressionState {
-    full_uri: String,
-    cookies: Vec<(String, String)>,
+    full_uri: std::cell::OnceCell<String>,
+    cookies: std::cell::OnceCell<Vec<(String, String)>>,
 }
 
 impl ExpressionState {
-    fn build(request_data: &RequestData) -> Self {
-        let full_uri = if request_data.query.is_empty() {
-            request_data.path.clone()
-        } else {
-            format!("{}?{}", request_data.path, request_data.query)
-        };
+    fn new() -> Self {
         Self {
-            full_uri,
-            cookies: parse_cookies(&request_data.headers),
+            full_uri: std::cell::OnceCell::new(),
+            cookies: std::cell::OnceCell::new(),
         }
     }
 
@@ -1619,6 +1614,16 @@ impl ExpressionState {
         host: &'a str,
         parsed_ip: Option<IpAddr>,
     ) -> EvalContext<'a> {
+        let full_uri = self.full_uri.get_or_init(|| {
+            if request_data.query.is_empty() {
+                request_data.path.clone()
+            } else {
+                format!("{}?{}", request_data.path, request_data.query)
+            }
+        });
+        let cookies = self
+            .cookies
+            .get_or_init(|| parse_cookies(&request_data.headers));
         let user_agent = request_data
             .headers
             .iter()
@@ -1628,12 +1633,12 @@ impl ExpressionState {
         EvalContext {
             method: &request_data.method,
             path: &request_data.path,
-            full_uri: &self.full_uri,
+            full_uri,
             host,
             user_agent,
             body: None,
             headers: &request_data.headers,
-            cookies: &self.cookies,
+            cookies,
             client_ip: &request_data.client_ip,
             parsed_ip,
             country_code: request_data.country_code.as_deref(),

@@ -197,7 +197,7 @@
     "block": "拦截",
     "log": "记录",
     "challenge": "质询",
-    "js_challenge": "JS 质询",
+    "js_challenge": "质询",
     "allow": "放行",
     "basic_auth": "Basic 认证",
     "pass": "通过",

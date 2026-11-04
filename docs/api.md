@@ -2161,7 +2161,7 @@ Create a rate limit rule.
 }
 ```
 
-`characteristics` accepts `ip`, `ip_nat`, `host`, `path`, `asn`, `country`, and the parameterized forms `header:<name>`, `cookie:<name>`, `query:<name>` (requests missing the value bucket together). Header names match case-insensitively; cookie and query names are case-sensitive. `ja3` is reserved for future use. `expression` is an optional **inclusion** filter — empty means all requests. `exception_expression` is an optional **exclusion** filter: a matching request is not counted, mitigated or challenged by this rule. `action: "allow"` is also an explicit exception and stops evaluation of lower-priority rate-limit rules.
+`characteristics` accepts `ip`, `ip_nat`, `host`, `path`, `asn`, `country`, and the parameterized forms `header:<name>`, `cookie:<name>`, `query:<name>` (requests missing the value bucket together). Header names match case-insensitively; cookie and query names are case-sensitive. `ja3` is reserved for future use. `expression` is an optional **inclusion** filter — empty means all requests. `exception_expression` is an optional **exclusion** filter: a matching request is not counted, mitigated or challenged by this rule. `action: "allow"` is also an explicit exception and stops evaluation of lower-priority rate-limit rules. The console now presents one `challenge` action; `js_challenge` remains accepted as a compatibility alias and is stored/displayed as `challenge`.
 
 ### PUT /sites/{site_id}/rate-limit-rules/{rule_id}
 

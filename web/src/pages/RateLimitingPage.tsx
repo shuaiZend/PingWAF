@@ -89,7 +89,7 @@ function formFromRule(rule: RateLimitRule): FormState {
     characteristics: [...(rule.characteristics ?? [])],
     period_seconds: rule.period_seconds,
     threshold: rule.threshold,
-    action: rule.action,
+    action: rule.action === 'js_challenge' ? 'challenge' : rule.action,
     mitigation_timeout_seconds: rule.mitigation_timeout_seconds,
     priority: rule.priority,
     enabled: rule.enabled,

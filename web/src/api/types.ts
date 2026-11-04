@@ -484,11 +484,16 @@ export type RuleMode = 'off' | 'monitor' | 'block'
 /** `models::rules::phase` */
 export type RulePhase = 'request' | 'response' | 'custom'
 
+/**
+ * The data plane implements `challenge` and the legacy `js_challenge` alias
+ * with the same server-verified page. The UI exposes one option so operators
+ * do not have to guess which one to pick; the API still accepts the alias for
+ * existing rules.
+ */
 export const RULE_ACTIONS: RuleAction[] = [
   'block',
   'log',
   'challenge',
-  'js_challenge',
   'allow',
 ]
 export const RULE_MODES: RuleMode[] = ['off', 'monitor', 'block']
@@ -2056,7 +2061,6 @@ export type IpRuleAction =
 export const IP_RULE_ACTIONS: IpRuleAction[] = [
   'block',
   'challenge',
-  'js_challenge',
   'allow',
   'basic_auth',
 ]

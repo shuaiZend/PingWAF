@@ -8,6 +8,27 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.32.16] — 2026-11-04
+
+### Fixed
+
+- **Pending challenges have a bounded memory footprint.** The pending map now
+  caps each original URL at 2 KiB and the whole map at 8 MiB, stores entries as
+  `Arc` so verification does not clone the URL, and accounts removed entries.
+  This addresses the RSS growth after retryable challenges retained failed
+  entries for the full TTL.
+- **Rate-limit expression state is lazy.** `ExpressionState` no longer clones
+  the URI and parses every cookie on every request; each value is built only
+  when an expression actually evaluates it.
+
+### Changed
+
+- **One challenge action in the console.** Rate-limit, custom-rule and IP-rule
+  editors now show a single `Challenge` option. Existing `js_challenge` rows
+  are normalized to `challenge` on edit; the API still accepts
+  `js_challenge` as a compatibility alias. Both names already used the same
+  server-verified JS page.
+
 ## [PingWAF 0.32.15] — 2026-11-04
 
 ### Fixed

@@ -86,12 +86,14 @@ pub(crate) struct PendingChallenge {
     pub site_id: String,
     pub original_url: String,
     pub created_at: i64,
+    /// Approximate heap size, used by the process-wide byte budget.
+    bytes: usize,
 }
 
 /// Process-wide map of outstanding challenges, keyed by request id. Shared by
 /// the WAF and Challenge plugins.
 pub(crate) static PENDING_CHALLENGES: LazyLock<
-    DashMap<String, PendingChallenge>,
+    DashMap<String, Arc<PendingChallenge>>,
 > = LazyLock::new(DashMap::new);
 
 /// How long an unverified challenge stays resolvable (5 minutes).
@@ -149,7 +151,42 @@ const PENDING_CHALLENGE_GC_THRESHOLD: usize = 1024;
 /// the challenge is still issued (the nonce reaches the client) but not
 /// remembered — verification then fails closed and the client retries,
 /// which is the same outcome as an expired challenge.
-const PENDING_CHALLENGE_MAX_ENTRIES: usize = 4096;
+const PENDING_CHALLENGE_MAX_ENTRIES: usize = 2048;
+
+/// The request path/query is attacker-controlled. A challenge flood with
+/// unique long URLs must not turn the pending map into an unbounded string
+/// cache: longer targets fall back to `/` (the visitor still gets a working
+/// verification, just not a redirect to the oversized URL).
+const PENDING_CHALLENGE_MAX_URL_BYTES: usize = 2048;
+
+/// Total approximate heap budget for the pending map. The entry cap alone is
+/// not enough when each original URL can be 2 KiB.
+const PENDING_CHALLENGE_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+/// Approximate bytes currently held by `PENDING_CHALLENGES`.
+static PENDING_CHALLENGE_BYTES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+fn pending_bytes(entry: &PendingChallenge) -> usize {
+    entry.nonce.len()
+        + entry.site_id.len()
+        + entry.original_url.len()
+        + std::mem::size_of::<PendingChallenge>()
+}
+
+fn account_pending_removed(entry: &PendingChallenge) {
+    PENDING_CHALLENGE_BYTES
+        .fetch_sub(entry.bytes, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn sweep_pending(now: i64) {
+    PENDING_CHALLENGES
+        .retain(|_, v| now.saturating_sub(v.created_at) < PENDING_TTL_SECS);
+    // Recompute rather than trying to track every retain callback. This runs
+    // only on the throttled GC path, not per request.
+    let after: usize = PENDING_CHALLENGES.iter().map(|entry| entry.bytes).sum();
+    PENDING_CHALLENGE_BYTES.store(after, std::sync::atomic::Ordering::Relaxed);
+}
 
 /// Throttle for the O(N) TTL sweeps: every Nth insert does the scan.
 static GC_TICK: std::sync::atomic::AtomicUsize =
@@ -172,23 +209,39 @@ pub(crate) fn store_pending(
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             .is_multiple_of(64)
     {
-        PENDING_CHALLENGES
-            .retain(|_, v| now.saturating_sub(v.created_at) < PENDING_TTL_SECS);
+        sweep_pending(now);
     }
     if PENDING_CHALLENGES.len() >= PENDING_CHALLENGE_MAX_ENTRIES {
         // Reached the hard ceiling: issue the nonce without remembering it.
         return generate_nonce();
     }
+    let original_url = if original_url.len() > PENDING_CHALLENGE_MAX_URL_BYTES {
+        "/".to_string()
+    } else {
+        original_url.to_string()
+    };
     let nonce = generate_nonce();
+    let entry = PendingChallenge {
+        nonce: nonce.clone(),
+        site_id: site_id.to_string(),
+        original_url,
+        created_at: now,
+        bytes: 0,
+    };
+    let bytes = pending_bytes(&entry);
+    let current =
+        PENDING_CHALLENGE_BYTES.load(std::sync::atomic::Ordering::Relaxed);
+    if current.saturating_add(bytes) > PENDING_CHALLENGE_MAX_BYTES {
+        // Bound the map even when URLs are short: issue a nonce without a
+        // pending record; verification fails closed (the client retries).
+        return nonce;
+    }
     PENDING_CHALLENGES.insert(
         request_id.to_string(),
-        PendingChallenge {
-            nonce: nonce.clone(),
-            site_id: site_id.to_string(),
-            original_url: original_url.to_string(),
-            created_at: now,
-        },
+        Arc::new(PendingChallenge { bytes, ..entry }),
     );
+    PENDING_CHALLENGE_BYTES
+        .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
     nonce
 }
 
@@ -197,11 +250,14 @@ pub(crate) fn store_pending(
 /// The entry is removed only after the submission verifies. Taking it first
 /// made every failed PoW/fingerprint attempt unrecoverable: the browser had
 /// already lost the nonce by the time it tried to correct the answer.
-fn peek_pending(request_id: &str) -> Option<PendingChallenge> {
+fn peek_pending(request_id: &str) -> Option<Arc<PendingChallenge>> {
     let pending = PENDING_CHALLENGES
         .get(request_id)
         .map(|entry| entry.clone())?;
     if now_secs().saturating_sub(pending.created_at) >= PENDING_TTL_SECS {
+        if let Some((_, removed)) = PENDING_CHALLENGES.remove(request_id) {
+            account_pending_removed(&removed);
+        }
         return None;
     }
     Some(pending)
@@ -856,7 +912,11 @@ impl ChallengePlugin {
             } => {
                 // The nonce is spent and the challenge resolved; drop it only
                 // after the verifier accepted the submission.
-                PENDING_CHALLENGES.remove(&request_id);
+                if let Some((_, removed)) =
+                    PENDING_CHALLENGES.remove(&request_id)
+                {
+                    account_pending_removed(&removed);
+                }
                 let set_cookie = format!(
                     "{}={}; {}",
                     self.cookie_name, cookie_value, cookie_attributes
@@ -1196,6 +1256,21 @@ mod tests {
             .iter()
             .find(|(n, _)| n.as_str().eq_ignore_ascii_case(name))
             .map(|(_, v)| v.to_str().unwrap_or_default().to_string())
+    }
+
+    #[test]
+    fn pending_challenge_rejects_oversized_original_urls() {
+        let request_id =
+            format!("pending-url-{}", uuid::Uuid::new_v4().simple());
+        let long_url =
+            format!("/{}", "a".repeat(PENDING_CHALLENGE_MAX_URL_BYTES + 16));
+        store_pending(&request_id, "site-test", &long_url);
+        let pending = peek_pending(&request_id).expect("pending entry");
+        assert_eq!("/", pending.original_url);
+        assert!(pending.bytes > 0);
+        if let Some((_, removed)) = PENDING_CHALLENGES.remove(&request_id) {
+            account_pending_removed(&removed);
+        }
     }
 
     #[test]

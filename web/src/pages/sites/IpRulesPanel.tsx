@@ -81,7 +81,7 @@ function formFromRule(rule: IpRule): FormState {
     name: rule.name,
     group_id: rule.group_id ?? '',
     ranges: rule.ip_ranges.join('\n'),
-    action: rule.action,
+    action: rule.action === 'js_challenge' ? 'challenge' : rule.action,
     note: rule.note ?? '',
     enabled: rule.enabled,
     priority: rule.priority,

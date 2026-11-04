@@ -79,7 +79,7 @@ function formFromRule(rule: Rule): RuleFormState {
     name: rule.name,
     description: rule.description ?? '',
     groupId: rule.group_id ?? '',
-    action: rule.action,
+    action: rule.action === 'js_challenge' ? 'challenge' : rule.action,
     severity: rule.severity,
     mode: rule.mode,
     priority: rule.priority,

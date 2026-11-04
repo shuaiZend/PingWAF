@@ -197,7 +197,7 @@
     "block": "Block",
     "log": "Log",
     "challenge": "Challenge",
-    "js_challenge": "JS Challenge",
+    "js_challenge": "Challenge",
     "allow": "Allow",
     "basic_auth": "Basic auth",
     "pass": "Pass",
