@@ -992,11 +992,7 @@ mod tests {
             "https"
         );
         assert_eq!(
-            request_scheme(
-                &headers(&[("referer", "not a url")]),
-                false,
-                true
-            ),
+            request_scheme(&headers(&[("referer", "not a url")]), false, true),
             "http"
         );
         // Nothing usable: fall back to whether this listener serves TLS.
