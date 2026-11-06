@@ -4,12 +4,23 @@
 //! never mistaken for host usage (or the other way round):
 //!
 //! * `process` — RSS/virtual bytes of this process (`memory-stats`), plus the
-//!   `/proc/self` counters: `VmHWM` (peak RSS) and the page-fault totals.
+//!   `/proc/self` counters: `VmHWM` (peak RSS), `VmSize` (address space) and
+//!   the page-fault totals.
 //! * `system` — total/used memory of the machine (sysinfo) and the
 //!   `/proc/meminfo` figures sysinfo does not mirror (`MemAvailable`,
-//!   `SwapTotal`/`SwapFree`, `Cached`, `Buffers`).
+//!   `SwapTotal`/`SwapFree`, `Cached`, `Buffers`, `Committed_AS`/
+//!   `CommitLimit`).
 //! * container — the cgroup accounting, present only under a memory-limited
 //!   cgroup.
+//!
+//! None of the three answers the question the 43.110.22.168 incident asked:
+//! how many bytes has the kernel *promised*? RSS can sit at 113 MB while
+//! `Committed_AS` runs into the RAM+swap ceiling, and from then on the kernel
+//! has to reclaim page cache, `iowait` saturates and the box stops answering.
+//! `vm_size_bytes` (process) and
+//! `committed_as_bytes` / `commit_limit_bytes` / `commit_percent` (host) put
+//! the address space and the commit accounting on the dashboard, where before
+//! this they were visible only in a host-side `sar` capture.
 //!
 //! Every `/proc` parser here is a pure function over the file text, so the
 //! accounting is fixture-tested on every platform; the readers themselves
@@ -97,6 +108,37 @@ pub struct MemorySnapshot {
     pub cached: String,
     /// Human-readable form of `buffers_bytes`.
     pub buffers: String,
+    /// Virtual address space of this process in bytes — `/proc/self/status`
+    /// `VmSize`, the procfs view of the figure `virtual_bytes` reports
+    /// through `memory-stats`. A large allocator arena shows up here even
+    /// when RSS is small: the mapping is reserved, its pages are not resident
+    /// yet, so `rss_bytes` cannot see it. `0` when the counter is unavailable
+    /// (non-Linux).
+    pub vm_size_bytes: u64,
+    /// System-wide committed anonymous memory in bytes — `/proc/meminfo`
+    /// `Committed_AS`, everything the kernel has already promised to
+    /// mappings across the machine.
+    pub committed_as_bytes: u64,
+    /// The commit ceiling in bytes — `/proc/meminfo` `CommitLimit`, i.e.
+    /// `RAM * overcommit_ratio + swap`.
+    pub commit_limit_bytes: u64,
+    /// `committed_as_bytes / commit_limit_bytes * 100`, rounded to one
+    /// decimal; `0.0` when the limit is `0`.
+    ///
+    /// A reading above 100 is passed through, not clamped. Under the default
+    /// heuristic overcommit the ceiling is advisory, and `Committed_AS` is a
+    /// per-CPU-batched estimate, so a healthy host can sit over it for a
+    /// moment — and a host parked at 118 % is exactly the state this field
+    /// exists to surface, which a cap at 100 would hide. Both inputs are
+    /// integers and the limit is non-zero by construction, so the result is
+    /// always finite and can never make serde_json reject the payload.
+    pub commit_percent: f64,
+    /// Human-readable form of `vm_size_bytes`.
+    pub vm_size: String,
+    /// Human-readable form of `committed_as_bytes`.
+    pub committed_as: String,
+    /// Human-readable form of `commit_limit_bytes`.
+    pub commit_limit: String,
 }
 
 /// `/proc/meminfo` figures, in bytes.
@@ -117,6 +159,10 @@ pub struct MemInfo {
     pub cached_bytes: u64,
     /// `Buffers` — block-device buffers in bytes.
     pub buffers_bytes: u64,
+    /// `Committed_AS` — system-wide committed address space in bytes.
+    pub committed_as_bytes: u64,
+    /// `CommitLimit` — `RAM * overcommit_ratio + swap`, in bytes.
+    pub commit_limit_bytes: u64,
 }
 
 impl MemInfo {
@@ -159,20 +205,61 @@ pub fn parse_meminfo(text: &str) -> MemInfo {
             "MemAvailable" => info.available_bytes = bytes,
             "Cached" => info.cached_bytes = bytes,
             "Buffers" => info.buffers_bytes = bytes,
+            "Committed_AS" => info.committed_as_bytes = bytes,
+            "CommitLimit" => info.commit_limit_bytes = bytes,
             _ => {},
         }
     }
     info
 }
 
+/// Parses the two commit accounting figures out of `/proc/meminfo` text:
+/// `(Committed_AS, CommitLimit)`, both in bytes.
+///
+/// `Committed_AS` is the memory the kernel has already promised to mappings
+/// system-wide; `CommitLimit` is the ceiling it refuses to exceed when
+/// `vm.overcommit_memory=2` (`RAM * overcommit_ratio + swap`). Under the
+/// default heuristic overcommit that ceiling is advisory, so the first figure
+/// can legitimately run past the second — the ratio is reported as it is, see
+/// [`MemorySnapshot::commit_percent`].
+///
+/// Delegates to [`parse_meminfo`], so the two readers share one set of key
+/// matches and cannot drift apart. Missing keys stay at `0`: a non-Linux host
+/// reads `""` and gets `(0, 0)`.
+pub fn parse_meminfo_commit(text: &str) -> (u64, u64) {
+    let info = parse_meminfo(text);
+    (info.committed_as_bytes, info.commit_limit_bytes)
+}
+
+/// Parses one `Key:  1234 kB` counter out of a procfs status file, where
+/// `key` is the literal line prefix *including* the colon (`"VmHWM:"`,
+/// `"VmSize:"`), which makes this an exact key match: a `VmPeak:` line can
+/// never answer for `VmSize`, and vice versa. An absent, truncated or
+/// unparsable counter reports `0`.
+fn parse_status_kib(text: &str, key: &str) -> u64 {
+    text.lines()
+        .find_map(|line| line.strip_prefix(key))
+        .and_then(parse_kib_value)
+        .unwrap_or_default()
+}
+
 /// Parses `VmHWM` — the peak resident set size, i.e. the high-water mark
 /// since process start — out of `/proc/self/status`. An absent counter
 /// (non-Linux, stripped-down procfs) reports `0`.
 pub fn parse_vm_hwm(text: &str) -> u64 {
-    text.lines()
-        .find_map(|line| line.strip_prefix("VmHWM:"))
-        .and_then(parse_kib_value)
-        .unwrap_or_default()
+    parse_status_kib(text, "VmHWM:")
+}
+
+/// Parses `VmSize` — the whole virtual address space of the process, glibc
+/// and jemalloc arenas included — out of `/proc/self/status`.
+///
+/// This is the counter RSS cannot stand in for: an arena that has been
+/// `mmap`ed and committed to is address space (and counts towards the host
+/// `Committed_AS`) long before its pages are touched, so a small RSS with a
+/// huge `VmSize` is the signature of a reservation waiting to happen. An
+/// absent counter (non-Linux) reports `0`.
+pub fn parse_vm_size(text: &str) -> u64 {
+    parse_status_kib(text, "VmSize:")
 }
 
 /// Parses the page-fault counters out of `/proc/self/stat`: field 10
@@ -234,12 +321,18 @@ pub fn memory_snapshot() -> MemorySnapshot {
     // sysinfo version, and a file that cannot be read reads as "" and parses
     // to 0.
     let meminfo = parse_meminfo(&read_proc("/proc/meminfo"));
-    let rss_peak_bytes = parse_vm_hwm(&read_proc("/proc/self/status"));
+    // One read of `/proc/self/status` answers both counters: two reads could
+    // disagree with each other, and the file is the same either way.
+    let status = read_proc("/proc/self/status");
+    let rss_peak_bytes = parse_vm_hwm(&status);
+    let vm_size_bytes = parse_vm_size(&status);
     let (page_faults_minor, page_faults_major) =
         parse_page_faults(&read_proc("/proc/self/stat"));
     let total_memory_bytes = sys.total_memory();
     let used_memory_bytes = sys.used_memory();
     let swap_used_bytes = meminfo.swap_used_bytes();
+    let committed_as_bytes = meminfo.committed_as_bytes;
+    let commit_limit_bytes = meminfo.commit_limit_bytes;
     let collected_at_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
@@ -282,6 +375,19 @@ pub fn memory_snapshot() -> MemorySnapshot {
         buffers_bytes: meminfo.buffers_bytes,
         cached: human_bytes(meminfo.cached_bytes),
         buffers: human_bytes(meminfo.buffers_bytes),
+        vm_size_bytes,
+        committed_as_bytes,
+        commit_limit_bytes,
+        // The same `used / total * 100` the memory percentage uses: one
+        // rounding rule for every percentage on the dashboard, and `0.0` when
+        // there is no total to divide by.
+        commit_percent: memory_used_percent(
+            committed_as_bytes,
+            commit_limit_bytes,
+        ),
+        vm_size: human_bytes(vm_size_bytes),
+        committed_as: human_bytes(committed_as_bytes),
+        commit_limit: human_bytes(commit_limit_bytes),
     }
 }
 
@@ -289,8 +395,11 @@ pub fn memory_snapshot() -> MemorySnapshot {
 mod tests {
     use super::*;
 
-    /// Verbatim `/proc/meminfo` excerpt of a 16 GB box with 8 GB swap.
-    /// Values are kB; the bare counters at the end carry no unit.
+    /// Verbatim `/proc/meminfo` excerpt of a 16 GB box with 8 GB swap and
+    /// `vm.overcommit_ratio = 50`, so `CommitLimit` is RAM/2 + swap = 16 GiB.
+    /// `Committed_AS` carries the 1.85 GB the incident host reported while
+    /// RSS sat at 113 MB. Values are kB; the bare counters at the end carry
+    /// no unit.
     const MEMINFO: &str = "\
 MemTotal:       16316396 kB
 MemFree:          882848 kB
@@ -300,6 +409,8 @@ Cached:          6213860 kB
 SwapCached:            0 kB
 SwapTotal:       8388604 kB
 SwapFree:        7340036 kB
+Committed_AS:    1939866 kB
+CommitLimit:    16777216 kB
 Dirty:               344 kB
 HugePages_Total:       0
 ";
@@ -318,6 +429,104 @@ HugePages_Total:       0
         // underflow.
         let odd = parse_meminfo("SwapTotal: 100 kB\nSwapFree: 200 kB\n");
         assert_eq!(odd.swap_used_bytes(), 0);
+    }
+
+    /// The two figures that decide whether the kernel still has room to
+    /// promise memory: `Committed_AS` and `CommitLimit`.
+    #[test]
+    fn meminfo_parses_committed_as_and_limit() {
+        let info = parse_meminfo(MEMINFO);
+        assert_eq!(info.committed_as_bytes, 1_939_866 * 1024);
+        assert_eq!(info.commit_limit_bytes, 16_777_216 * 1024);
+        // The tuple reader is the same parse, so the two cannot disagree.
+        assert_eq!(
+            parse_meminfo_commit(MEMINFO),
+            (info.committed_as_bytes, info.commit_limit_bytes)
+        );
+    }
+
+    /// `VmSize` is the address space RSS cannot stand in for: a reserved
+    /// arena lands here long before its pages are resident.
+    #[test]
+    fn status_parses_vm_size() {
+        let status = "\
+Name:\tpingwaf
+State:\tS (sleeping)
+VmPeak:\t 4212340 kB
+VmSize:\t 4193300 kB
+VmHWM:\t  178932 kB
+VmRSS:\t  120044 kB
+";
+        // Neither `VmPeak` nor `VmRSS` may answer for `VmSize`, and a huge
+        // address space next to a small resident set is a normal reading.
+        assert_eq!(parse_vm_size(status), 4_193_300 * 1024);
+        assert_eq!(parse_vm_hwm(status), 178_932 * 1024);
+        // Absent off Linux: zero, not a failure.
+        assert_eq!(parse_vm_size("Name:\tpingwaf\n"), 0);
+        assert_eq!(parse_vm_size("VmSize:\tgarbage kB\n"), 0);
+        assert_eq!(parse_vm_size(""), 0);
+    }
+
+    /// A missing key is a zero, never a panic: no `/proc` on this platform,
+    /// an old kernel without the commit counters, a truncated line.
+    #[test]
+    fn missing_commit_fields_are_zero() {
+        assert_eq!(parse_meminfo_commit(""), (0, 0));
+        assert_eq!(parse_meminfo_commit("\n\n"), (0, 0));
+        assert_eq!(parse_vm_size(""), 0);
+        let info =
+            parse_meminfo("MemAvailable: 1024 kB\nCommitted_AS: nope kB\n");
+        assert_eq!(info.available_bytes, 1024 * 1024);
+        assert_eq!(info.committed_as_bytes, 0);
+        assert_eq!(info.commit_limit_bytes, 0);
+        // One of the pair present leaves the other at zero.
+        assert_eq!(
+            parse_meminfo_commit("CommitLimit: 1024 kB\n"),
+            (0, 1024 * 1024)
+        );
+    }
+
+    #[test]
+    fn commit_percent_rounds_to_one_decimal() {
+        let gib = 1u64 << 30;
+        // 1.234 GB promised against a 1.5 GB limit: 82.2666…% -> 82.3.
+        let committed = (1.234 * gib as f64) as u64;
+        let limit = (1.5 * gib as f64) as u64;
+        assert_eq!(memory_used_percent(committed, limit), 82.3);
+        // No limit, no ratio: 0.0 rather than a division by zero.
+        assert_eq!(memory_used_percent(committed, 0), 0.0);
+        assert_eq!(memory_used_percent(0, 0), 0.0);
+        // Exactly at the ceiling is 100.0; the rounding is one decimal place,
+        // not one significant figure.
+        assert_eq!(memory_used_percent(limit, limit), 100.0);
+        assert_eq!(memory_used_percent(limit / 3, limit), 33.3);
+    }
+
+    /// `Committed_AS` above `CommitLimit` is a real reading, not an error:
+    /// under the default heuristic overcommit the ceiling is advisory and the
+    /// first figure is a batched estimate, so a host can sit at 118 %.
+    ///
+    /// The ratio is therefore reported as measured instead of being clamped
+    /// to 100 — a cap would hide exactly the exhaustion this field exists to
+    /// surface. What is guaranteed is that it stays finite: both inputs are
+    /// integers and the limit is non-zero here, so serde_json can never be
+    /// handed a `NaN` that would fail the whole response.
+    #[test]
+    fn commit_percent_never_exceeds_a_sane_range() {
+        let gib = 1u64 << 30;
+        assert_eq!(memory_used_percent(2 * gib, gib), 200.0);
+        assert_eq!(memory_used_percent(11 * gib, 10 * gib), 110.0);
+        // The incident shape: 1.85 GiB promised against a 1.84 GB ceiling.
+        assert_eq!(
+            memory_used_percent(1_939_866 * 1024, 1_843_200 * 1024),
+            105.2
+        );
+        // Extreme inputs neither panic nor produce a non-finite ratio.
+        let extreme = memory_used_percent(u64::MAX, 1);
+        assert!(extreme.is_finite());
+        assert!(extreme > 100.0);
+        assert!(memory_used_percent(1, u64::MAX).is_finite());
+        assert_eq!(memory_used_percent(u64::MAX, u64::MAX), 100.0);
     }
 
     #[test]
@@ -399,11 +608,21 @@ VmRSS:\t  120044 kB
             &snapshot.mem_available,
             &snapshot.cached,
             &snapshot.buffers,
+            &snapshot.vm_size,
+            &snapshot.committed_as,
+            &snapshot.commit_limit,
         ] {
             assert!(!rendered.is_empty());
         }
         assert!(snapshot.memory_used_percent.is_finite());
         assert!(snapshot.memory_used_percent >= 0.0);
+        // The commit ratio is a number the payload can carry, and it is 0.0
+        // exactly when there is no ceiling to divide by.
+        assert!(snapshot.commit_percent.is_finite());
+        assert!(snapshot.commit_percent >= 0.0);
+        if snapshot.commit_limit_bytes == 0 {
+            assert_eq!(snapshot.commit_percent, 0.0);
+        }
         // A container limit may be absent, but when present it is positive.
         if let Some(limit) = snapshot.container_memory_limit_bytes {
             assert!(limit > 0);
@@ -423,10 +642,18 @@ VmRSS:\t  120044 kB
         let meminfo = read_proc("/proc/meminfo");
         if !meminfo.is_empty() {
             assert!(parse_meminfo(&meminfo).available_bytes > 0);
+            // Every running system has promised something; `CommitLimit` is
+            // left unasserted because RAM with `overcommit_ratio = 0` and no
+            // swap legitimately reports 0.
+            assert!(parse_meminfo_commit(&meminfo).0 > 0);
         }
         let status = read_proc("/proc/self/status");
         if !status.is_empty() {
             assert!(parse_vm_hwm(&status) > 0);
+            assert!(
+                parse_vm_size(&status) >= parse_vm_hwm(&status),
+                "the address space covers the resident set"
+            );
         }
         let stat = read_proc("/proc/self/stat");
         if !stat.is_empty() {
@@ -458,6 +685,13 @@ VmRSS:\t  120044 kB
             "buffers_bytes",
             "cached",
             "buffers",
+            "vm_size_bytes",
+            "committed_as_bytes",
+            "commit_limit_bytes",
+            "commit_percent",
+            "vm_size",
+            "committed_as",
+            "commit_limit",
         ] {
             assert!(
                 json.get(key).is_some(),
@@ -467,5 +701,16 @@ VmRSS:\t  120044 kB
         // A non-finite percentage would make serde_json reject the whole
         // payload (HTTP 500), so the field is always a number.
         assert!(json["memory_used_percent"].is_number());
+        assert!(json["commit_percent"].is_number());
+        for key in ["vm_size_bytes", "committed_as_bytes", "commit_limit_bytes"]
+        {
+            assert!(
+                json[key].is_u64(),
+                "{key} is an unsigned byte count on the wire"
+            );
+        }
+        for key in ["vm_size", "committed_as", "commit_limit"] {
+            assert!(json[key].is_string(), "{key} is a rendered size");
+        }
     }
 }

@@ -155,6 +155,20 @@ pub struct ControlNode {
     /// Peak process RSS since start, in bytes (`0` where the OS does not
     /// expose it).
     pub rss_peak_bytes: u64,
+    /// Virtual address space of this process in bytes (`/proc/self/status`
+    /// `VmSize`); `0` where the OS does not expose it. The number that stays
+    /// large while `rss_bytes` looks harmless.
+    pub vm_size_bytes: u64,
+    /// System-wide committed address space in bytes (`/proc/meminfo`
+    /// `Committed_AS`) — what the kernel has promised, not what is resident.
+    pub committed_as_bytes: u64,
+    /// The commit ceiling in bytes (`/proc/meminfo` `CommitLimit`:
+    /// `RAM * overcommit_ratio + swap`).
+    pub commit_limit_bytes: u64,
+    /// `committed_as_bytes / commit_limit_bytes * 100`, one decimal; `0.0`
+    /// when there is no limit. Above 100 is reported as measured — see
+    /// `pingwaf_system::MemorySnapshot::commit_percent`.
+    pub commit_percent: f64,
     /// Requests the profiler attributed to the `control` module.
     pub requests: u64,
     /// Mean wall-clock time per attributed control request, in milliseconds.
@@ -319,6 +333,10 @@ fn control_node(
         cores: cpu.cores,
         rss_bytes: memory.rss_bytes,
         rss_peak_bytes: memory.rss_peak_bytes,
+        vm_size_bytes: memory.vm_size_bytes,
+        committed_as_bytes: memory.committed_as_bytes,
+        commit_limit_bytes: memory.commit_limit_bytes,
+        commit_percent: memory.commit_percent,
         requests,
         avg_elapsed_ms: avg_us / 1000.0,
     }
@@ -784,6 +802,44 @@ mod tests {
         assert!(snapshot.collected_at_ms > 0);
     }
 
+    /// `/system/metrics` hands `MemorySnapshot` to serde as-is, so the commit
+    /// accounting the console reads *is* that struct field set. Pinned here as
+    /// well as in `pingwaf-system`, because a field renamed there has to fail
+    /// an API test rather than silently empty a panel on the dashboard.
+    #[test]
+    fn metrics_memory_carries_the_commit_accounting() {
+        let json = serde_json::to_value(SystemMetrics {
+            cpu: pingwaf_system::cpu_snapshot(),
+            memory: pingwaf_system::memory_snapshot(),
+        })
+        .expect("serialises");
+        let memory = json
+            .get("memory")
+            .and_then(serde_json::Value::as_object)
+            .expect("memory is an object on the wire");
+
+        for field in
+            ["vm_size_bytes", "committed_as_bytes", "commit_limit_bytes"]
+        {
+            assert!(
+                memory.get(field).is_some_and(serde_json::Value::is_u64),
+                "memory.{field} must be an unsigned byte count"
+            );
+        }
+        assert!(
+            memory
+                .get("commit_percent")
+                .is_some_and(serde_json::Value::is_number),
+            "memory.commit_percent must be a number serde_json can carry"
+        );
+        for field in ["vm_size", "committed_as", "commit_limit"] {
+            assert!(
+                memory.get(field).is_some_and(serde_json::Value::is_string),
+                "memory.{field} must be a human-readable size"
+            );
+        }
+    }
+
     fn inventory_row(
         hostname: &str,
         status: &str,
@@ -1138,6 +1194,12 @@ mod tests {
             "cores",
             "rss_bytes",
             "rss_peak_bytes",
+            // The commit accounting travels with the control block: the node
+            // view is where the operator looks when a host stops answering.
+            "vm_size_bytes",
+            "committed_as_bytes",
+            "commit_limit_bytes",
+            "commit_percent",
             "requests",
             "avg_elapsed_ms",
         ];
@@ -1146,6 +1208,20 @@ mod tests {
         for field in control_fields {
             assert!(object.contains_key(field), "control.{field} is missing");
         }
+        // The commit accounting is numeric on the wire, and the three sizes
+        // are unsigned byte counts the console can divide.
+        for field in
+            ["vm_size_bytes", "committed_as_bytes", "commit_limit_bytes"]
+        {
+            assert!(
+                control[field].is_u64(),
+                "control.{field} must be a byte count"
+            );
+        }
+        assert!(
+            control["commit_percent"].is_number(),
+            "control.commit_percent must be a ratio"
+        );
 
         let row = inventory_row("edge-1", "online", Some(Utc::now()));
         let agent =
