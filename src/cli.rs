@@ -176,8 +176,8 @@ pub struct ServerOpts {
 #[command(args_override_self = true)]
 pub struct AgentOpts {
     /// TOML configuration file; its `[server]` and `[agent]` tables hold
-    /// these same settings. Precedence is this file, then the `PINGWAF_*`
-    /// environment variables, then the command line.
+    /// these same settings. In agent mode the file wins over the `PINGWAF_*`
+    /// environment variables, and the command line wins over both.
     #[arg(long, env = "PINGWAF_CONFIG")]
     pub config: Option<String>,
 
@@ -193,6 +193,12 @@ pub struct AgentOpts {
     /// plane's gRPC certificate; defaults to the bundled webpki roots.
     #[arg(long, env = "PINGWAF_SERVER_CA_CERT")]
     pub server_ca_cert: Option<String>,
+
+    /// Name used for TLS SNI and certificate verification instead of the host
+    /// in --server-url. Set it to a SAN of the control plane's certificate
+    /// when that certificate does not name the host the agent dials.
+    #[arg(long, env = "PINGWAF_SERVER_TLS_NAME")]
+    pub server_tls_name: Option<String>,
 
     /// API key for agent authentication
     #[arg(long, env = "PINGWAF_API_KEY", default_value = "")]

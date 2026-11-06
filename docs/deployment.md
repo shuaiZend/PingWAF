@@ -160,9 +160,12 @@ bash install.sh
 # One line, unattended (add sudo when the user cannot write /usr/local/bin)
 curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh | sudo bash -s -- --mode all-in-one
 
-# Agent enrolled against a remote control plane
+# Agent enrolled against a remote control plane. The gRPC listener serves
+# TLS by default, so use https:// and point --server-ca-cert at the CA that
+# signed the control plane's certificate (Settings → Control plane HTTPS):
 curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh | sudo bash -s -- \
-  --mode agent --server-url https://10.0.0.1:9090 --api-key pwk_xxx
+  --mode agent --server-url https://10.0.0.1:9090 --api-key pwk_xxx \
+  --server-ca-cert /path/to/grpc-ca.pem
 ```
 
 Options beyond `--version`, `--mode`, `--server-url`, `--api-key`, `--db-url`
@@ -173,6 +176,8 @@ and `--no-systemd`:
 | `--admin-email` | `PINGWAF_ADMIN_EMAIL` | Seed administrator e-mail (server / all-in-one) |
 | `--admin-password` | `PINGWAF_ADMIN_PASSWORD` | Seed administrator password (server / all-in-one) |
 | `--tls-sans` | `PINGWAF_TLS_SANS` | Comma-separated SANs of the dashboard certificate |
+| `--server-ca-cert` | `PINGWAF_SERVER_CA_CERT` | PEM file with the CA that signed the control plane's gRPC certificate (agent mode, https); readability is verified before installing |
+| `--server-tls-name` | `PINGWAF_SERVER_TLS_NAME` | Name used for SNI and certificate verification when the certificate has no SAN for the URL host (agent mode; requires a release that knows the flag) |
 | `--interactive` | — | Prompt even when options were given |
 | `--non-interactive`, `--yes` | — | Never prompt; use the given values and defaults |
 | `--dry-run` | — | Print the resolved plan, then exit without installing |
@@ -312,6 +317,7 @@ server-side log batch size (`500`) are compiled-in constants with no override.
 |-----|------|---------|-------------|
 | `server_url` | string | `http://localhost:9090` (`--server-url`); the compiled-in struct default is `https://localhost:9090` and applies when the key is absent from the file | Control plane gRPC URL |
 | `server_ca_cert` | string | — | PEM file with the CA that signed the control plane's TLS certificate (required for private CAs; bundled roots are used otherwise) |
+| `server_tls_name` | string | — | Name used for SNI and certificate verification when the control plane's certificate carries no SAN for the host in `server_url`. Requires a release that knows the flag/keys (0.32.16 does not); on older binaries, point the SAN name at the control plane via `/etc/hosts` instead |
 | `api_key` | string | `""` | Agent authentication key (empty = auto-register over loopback in all-in-one) |
 | `cache_dir` | string | `./data/cache` (`--cache-dir`); the compiled-in struct default is `/var/lib/pingwaf/cache` and applies when the key is absent from the file | Local rule cache directory |
 | `fail_open` | bool | `true` | Local fallback while disconnected: `true` keeps serving with the last synced rules; `false` answers 503 for hosts without synced rules. The per-site failover policy (console → site → basic) and the control-plane-wide default (settings → defense) take precedence once synced |
@@ -321,10 +327,20 @@ server-side log batch size (`500`) are compiled-in constants with no override.
 | `max_body_log_size` | int | `8192` | Max request body bytes to log |
 | `metrics_ship_interval_secs` | int | `30` | Edge-metrics ship interval; `0` disables shipping |
 
-Environment variables: `PINGWAF_SERVER_URL`, `PINGWAF_API_KEY`,
+Environment variables: `PINGWAF_SERVER_URL`, `PINGWAF_SERVER_CA_CERT`,
+`PINGWAF_SERVER_TLS_NAME`, `PINGWAF_API_KEY`,
 `PINGWAF_CACHE_DIR`, `PINGWAF_FAIL_OPEN`, `PINGWAF_HEARTBEAT_INTERVAL`,
 `PINGWAF_METRICS_SHIP_INTERVAL`. The three log settings and the reconnect
 backoff constants (`1 s` doubling to `60 s`) have no environment variable.
+
+In **agent mode the configuration file wins over these environment
+variables** (command-line flags still win) — `install.sh` keeps `server_url`,
+`api_key` and `cache_dir` in `/etc/pingwaf/pingwaf.toml` only and no longer
+mirrors them into the systemd unit's `Environment=` lines, so an operator who
+edits the file and restarts gets exactly what they wrote. When a file value
+overrides a still-present environment variable the agent logs a warning with
+the secret masked, so a legacy unit cannot silently shadow the file. Server
+and all-in-one modes keep the opposite order (environment beats file).
 
 ### Environment Variables
 
@@ -359,6 +375,8 @@ are listed against it below; the dash in a table entry means the setting has no
 | `PINGWAF_PASSKEY_TRUST_FORWARDED_PROTO` | — |
 | `PINGWAF_MODE` | CLI mode (`all-in-one`, `server`, `agent`) |
 | `PINGWAF_SERVER_URL` | `agent.server_url` |
+| `PINGWAF_SERVER_CA_CERT` | `agent.server_ca_cert` |
+| `PINGWAF_SERVER_TLS_NAME` | `agent.server_tls_name` |
 | `PINGWAF_API_KEY` | `agent.api_key` |
 | `PINGWAF_CACHE_DIR` | `agent.cache_dir` |
 | `PINGWAF_FAIL_OPEN` | `agent.fail_open` |
@@ -396,6 +414,14 @@ pingwaf server --db-url "postgres://..." --admin-addr 0.0.0.0:9080 --grpc-addr 0
 ```bash
 pingwaf agent --server-url "https://control-plane:9090" --server-ca-cert /var/lib/pingwaf/data/grpc-ca.pem --api-key "your-agent-key"
 ```
+
+The gRPC listener serves TLS by default, so `server_url` should be `https://`
+with the CA that signed the control plane's certificate in
+`server_ca_cert` (self-signed control plane: download the CA from
+**Settings → Control plane HTTPS**). If the certificate's SANs do not include
+the host agents dial, set `server_tls_name` to a SAN it does carry — note the
+parameter needs a release that knows the flag (0.32.16 does not); on older
+binaries, point the SAN name at the control plane in `/etc/hosts` instead.
 
 Generate an agent API key from the dashboard: **Settings → API Keys → Create Key**.
 
@@ -740,6 +766,47 @@ all-in-one boots fully encrypted with no extra configuration.
 
 The API for all of this is documented in
 [`docs/api.md` → Control-plane certificate](./api.md#control-plane-certificate).
+
+### Agent Can't Reach the Control Plane
+
+**Symptoms.** The agent's journal shows a repeating
+`Connection to control plane failed` with one of:
+
+- `GoAway(b"", FRAME_SIZE_ERROR, Library)` — a plaintext h2 preface hitting a
+  TLS port (e.g. an `http://` server URL against the default TLS listener);
+- `UnknownIssuer` — the server's certificate is signed by a CA the agent does
+  not trust (typically a self-signed control plane with no `server_ca_cert`);
+- `NotValidForName` — the certificate has no SAN for the host the agent dials.
+
+**Diagnose:**
+
+```bash
+# Is 9090 actually TLS, and does the certificate match the host?
+openssl s_client -connect <host>:9090 -servername <host> -alpn h2
+
+# Which SAN does the certificate carry (compare against server_url)?
+openssl s_client -connect <host>:9090 -servername <host> -verify_hostname <host> </dev/null
+
+# Is a legacy unit still exporting PINGWAF_* overrides? Agent mode gives the
+# configuration file precedence over the environment, but the warning in the
+# journal names the shadowed variable — check what the unit carries:
+systemctl show pingwaf -p Environment
+```
+
+**Fix:**
+
+1. Use `https://` in `server_url` (the gRPC listener serves TLS by default)
+   and set `server_ca_cert` to the CA that signed the control plane's
+   certificate (self-signed control plane: **Settings → Control plane HTTPS**).
+2. If the certificate has no SAN for the URL host, set `server_tls_name` to a
+   SAN it does carry (requires a release that knows the flag — 0.32.16 does
+   not; on older binaries, point the SAN name at the control plane via
+   `/etc/hosts`).
+3. Remove stale `PINGWAF_*` overrides from the unit (`systemctl edit pingwaf`)
+   and restart: `sudo systemctl restart pingwaf`.
+
+Do **not** work around this with `grpc_tls_mode = "off"` across an untrusted
+network — that sends agent traffic and credentials in plaintext.
 
 ## Firewall & Port Requirements
 
@@ -1149,6 +1216,10 @@ psql "postgres://pingwaf:password@localhost:5432/pingwaf" -c "SELECT 1"
 2. Check the API key is valid
 3. Review agent logs: `RUST_LOG=debug pingwaf agent --server-url ...`
 4. Ensure clocks are synchronized (NTP)
+
+TLS handshake errors (`GoAway … FRAME_SIZE_ERROR`, `UnknownIssuer`,
+`NotValidForName`) have a dedicated walkthrough under
+[Agent Can't Reach the Control Plane](#agent-cant-reach-the-control-plane).
 
 ### High memory usage
 

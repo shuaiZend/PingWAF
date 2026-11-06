@@ -49,7 +49,12 @@ Web 控制台是 `:9080` 控制面的 HTTP 客户端。当控制面本身出问�
 
 ### 配置优先级
 
-配置依次从 TOML 文件、`PINGWAF_*` 环境变量、命令行读取——后者覆盖前者。同一参数在命令行重复出现时，命令行的值覆盖配置文件注入的值，因此 `pingwaf all-in-one --config /etc/pingwaf/pingwaf.toml --tls-enabled false` 总能关闭 TLS，与文件内容无关。
+命令行始终最优先，其余两者按模式区分：
+
+- **server / all-in-one 模式**：命令行 > `PINGWAF_*` 环境变量 > TOML 文件。环境变量保持覆盖文件的行为，既有容器部署依赖这一点。
+- **agent 模式**：命令行 > TOML 配置文件 > `PINGWAF_*` 环境变量。配置文件是部署的唯一事实来源——`install.sh` 不再把 agent 配置写进 systemd unit，运维改完文件重启就应生效；文件覆盖环境变量时会打印一条告警（secret 已脱敏），方便排查「改了文件却没变化」。
+
+因此 `pingwaf all-in-one --config /etc/pingwaf/pingwaf.toml --tls-enabled false` 总能关闭 TLS，与文件内容无关；而 agent 模式下 unit 里遗留的旧环境变量会被文件中的同名键覆盖。
 
 ## 运维子命令
 

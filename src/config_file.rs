@@ -21,10 +21,13 @@
 //! (`--admin-addr` is `admin_addr`), and array values are written as TOML
 //! arrays (`tls_sans = ["waf.example.com"]`).
 //!
-//! Precedence is file, then environment, then command line: the file only
-//! fills in the arguments neither of the others set, which is implemented by
-//! asking clap where each value came from and injecting the file's arguments
-//! for the ones still at their default.
+//! The command line always wins. In agent mode the file is the deployment's
+//! single source of truth and therefore beats the environment — `install.sh`
+//! no longer mirrors the agent keys into the unit, and an operator who edits
+//! the file and restarts expects exactly that. The server and all-in-one modes
+//! keep the environment as an override, which existing container deployments
+//! rely on. The choice is implemented by asking clap where each value came
+//! from and injecting the file's arguments for the ones it may replace.
 
 use std::path::Path;
 
@@ -121,10 +124,14 @@ pub fn injections(mode: &str, argv: &[String]) -> anyhow::Result<Vec<String>> {
                 continue;
             };
             let id = arg.get_id().as_str();
-            if matches!(
-                matches.value_source(id),
-                Some(ValueSource::CommandLine | ValueSource::EnvVariable)
-            ) {
+            let source = matches.value_source(id);
+            // The command line always wins. In agent mode the file is the
+            // deployment's single source of truth — `install.sh` no longer
+            // mirrors these keys into the unit's environment — so the file
+            // also wins over the environment; an operator who edits
+            // /etc/pingwaf/pingwaf.toml and restarts gets what they wrote.
+            // Other modes keep the environment as an override.
+            if injection_blocked(source, mode == "agent") {
                 continue;
             }
             let Some(flag) = arg.get_long() else {
@@ -136,6 +143,19 @@ pub fn injections(mode: &str, argv: &[String]) -> anyhow::Result<Vec<String>> {
                 );
                 continue;
             };
+            // A legacy unit still carries the value the installer used to
+            // write. Say why the file is about to win, so "I edited the file
+            // and nothing changed" is diagnosable in one line.
+            if source == Some(ValueSource::EnvVariable)
+                && let Some((env_name, env_value)) = environment_value(arg)
+                && env_value != text
+            {
+                eprintln!(
+                    "pingwaf: [{section}] {key} in {path} overrides {env_name} (file value wins); file={}, environment={}",
+                    shown(key, &text),
+                    shown(key, &env_value)
+                );
+            }
             injections.push(format!("--{flag}={text}"));
         }
     }
@@ -148,6 +168,40 @@ pub fn injections(mode: &str, argv: &[String]) -> anyhow::Result<Vec<String>> {
         );
     }
     Ok(injections)
+}
+
+/// Whether a value the command line or the environment already supplied blocks
+/// the file's value.
+///
+/// The command line always wins — it is the per-invocation override. In agent
+/// mode the file wins over the environment (see [`injections`]); in the other
+/// modes the environment keeps overriding the file, which is what existing
+/// container deployments rely on.
+fn injection_blocked(
+    source: Option<ValueSource>,
+    file_wins_over_env: bool,
+) -> bool {
+    match source {
+        Some(ValueSource::CommandLine) => true,
+        Some(ValueSource::EnvVariable) => !file_wins_over_env,
+        _ => false,
+    }
+}
+
+/// The environment variable clap read for this argument, if any.
+fn environment_value(arg: &clap::Arg) -> Option<(String, String)> {
+    let name = arg.get_env()?.to_str()?.to_string();
+    let value = std::env::var(&name).ok()?;
+    Some((name, value))
+}
+
+/// A value safe to print: secrets are never echoed to the terminal.
+fn shown<'a>(key: &str, value: &'a str) -> &'a str {
+    if matches!(key, "api_key" | "jwt_secret" | "admin_password") {
+        "***"
+    } else {
+        value
+    }
 }
 
 /// Renders a TOML value the way the matching flag expects it.
@@ -204,5 +258,34 @@ mod tests {
         assert_eq!(sections("server"), &["server"]);
         assert_eq!(sections("agent"), &["agent"]);
         assert_eq!(sections("all-in-one"), &["server", "agent"]);
+    }
+
+    #[test]
+    fn agent_mode_lets_the_file_override_the_environment() {
+        // An operator editing the file in agent mode must get what they wrote,
+        // even when a legacy unit still exports the old value.
+        assert!(!injection_blocked(Some(ValueSource::EnvVariable), true));
+        // A per-invocation flag still wins.
+        assert!(injection_blocked(Some(ValueSource::CommandLine), true));
+        // Untouched arguments are always filled from the file.
+        assert!(!injection_blocked(None, true));
+    }
+
+    #[test]
+    fn other_modes_keep_the_environment_as_an_override() {
+        assert!(injection_blocked(Some(ValueSource::EnvVariable), false));
+        assert!(injection_blocked(Some(ValueSource::CommandLine), false));
+        assert!(!injection_blocked(None, false));
+    }
+
+    #[test]
+    fn shadowed_secrets_are_never_echoed() {
+        assert_eq!(shown("api_key", "pwk_secret"), "***");
+        assert_eq!(shown("jwt_secret", "top-secret"), "***");
+        assert_eq!(shown("admin_password", "hunter2"), "***");
+        assert_eq!(
+            shown("server_url", "https://waf.example.com:9090"),
+            "https://waf.example.com:9090"
+        );
     }
 }

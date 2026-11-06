@@ -19,6 +19,16 @@ pub struct AgentConfig {
     /// database and no file exists. Takes precedence over `server_ca_cert`.
     #[serde(default)]
     pub server_ca_pem: Option<String>,
+    /// Name used for TLS SNI and certificate verification instead of the
+    /// host in `server_url`.
+    ///
+    /// Needed when the control plane's certificate carries no SAN for the
+    /// name the agent dials (a self-signed certificate generated for
+    /// `localhost`/the container hostname, reached through a public
+    /// hostname). One of the certificate's SANs must be supplied; the chain
+    /// and the name are still verified — this never disables verification.
+    #[serde(default)]
+    pub server_tls_name: Option<String>,
     /// API key for authentication with control plane
     pub api_key: String,
     /// Unique identifier for this agent (auto-generated if empty)
@@ -105,6 +115,7 @@ impl Default for AgentConfig {
             server_url: "https://localhost:9090".to_string(),
             server_ca_cert: None,
             server_ca_pem: None,
+            server_tls_name: None,
             api_key: String::new(),
             agent_id: String::new(),
             heartbeat_interval_secs: default_heartbeat_interval(),

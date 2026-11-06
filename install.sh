@@ -59,6 +59,8 @@ MODE=""
 SKIP_SYSTEMD=false
 DB_URL=""
 SERVER_URL=""
+SERVER_CA_CERT=""
+SERVER_TLS_NAME=""
 API_KEY=""
 ADMIN_EMAIL=""
 ADMIN_PASSWORD=""
@@ -85,6 +87,11 @@ Options:
   --version VERSION        Install a specific version (default: latest release)
   --mode MODE              Operating mode: all-in-one, server, agent
   --server-url URL         Control plane gRPC URL (agent mode)
+  --server-ca-cert PATH    PEM file with the CA that signed the control plane's
+                           gRPC certificate (agent mode, https)
+  --server-tls-name NAME   Name used for SNI and certificate verification when
+                           the certificate has no SAN for the URL host (agent
+                           mode, requires a release that knows the flag)
   --api-key KEY            Agent enrollment token (agent mode)
   --db-url URL             PostgreSQL connection string
   --admin-email EMAIL      Seed administrator e-mail (server / all-in-one)
@@ -100,6 +107,8 @@ Environment Variables:
   PINGWAF_VERSION       Same as --version
   PINGWAF_MODE          Same as --mode
   PINGWAF_SERVER_URL    Same as --server-url
+  PINGWAF_SERVER_CA_CERT Same as --server-ca-cert
+  PINGWAF_SERVER_TLS_NAME Same as --server-tls-name
   PINGWAF_API_KEY       Same as --api-key
   PINGWAF_DB_URL        Same as --db-url
   PINGWAF_ADMIN_EMAIL   Same as --admin-email
@@ -145,6 +154,8 @@ while [[ $# -gt 0 ]]; do
         --mode)           require_value "$1" "${2:-}"; MODE="$2"; PARAMS_GIVEN=true; shift 2 ;;
         --db-url)         require_value "$1" "${2:-}"; DB_URL="$2"; PARAMS_GIVEN=true; shift 2 ;;
         --server-url)     require_value "$1" "${2:-}"; SERVER_URL="$2"; PARAMS_GIVEN=true; shift 2 ;;
+        --server-ca-cert) require_value "$1" "${2:-}"; SERVER_CA_CERT="$2"; PARAMS_GIVEN=true; shift 2 ;;
+        --server-tls-name) require_value "$1" "${2:-}"; SERVER_TLS_NAME="$2"; PARAMS_GIVEN=true; shift 2 ;;
         --api-key)        require_value "$1" "${2:-}"; API_KEY="$2"; PARAMS_GIVEN=true; shift 2 ;;
         --admin-email)    require_value "$1" "${2:-}"; ADMIN_EMAIL="$2"; PARAMS_GIVEN=true; shift 2 ;;
         --admin-password) require_value "$1" "${2:-}"; ADMIN_PASSWORD="$2"; PARAMS_GIVEN=true; shift 2 ;;
@@ -166,6 +177,8 @@ DB_URL="${DB_URL:-${PINGWAF_DB_URL:-}}"
 # Agent mode reads its settings from the command line or the environment, so
 # these are what the systemd unit is built from.
 SERVER_URL="${SERVER_URL:-${PINGWAF_SERVER_URL:-}}"
+SERVER_CA_CERT="${SERVER_CA_CERT:-${PINGWAF_SERVER_CA_CERT:-}}"
+SERVER_TLS_NAME="${SERVER_TLS_NAME:-${PINGWAF_SERVER_TLS_NAME:-}}"
 API_KEY="${API_KEY:-${PINGWAF_API_KEY:-}}"
 ADMIN_EMAIL="${ADMIN_EMAIL:-${PINGWAF_ADMIN_EMAIL:-}}"
 ADMIN_PASSWORD="${ADMIN_PASSWORD:-${PINGWAF_ADMIN_PASSWORD:-}}"
@@ -176,7 +189,7 @@ TLS_SANS="${TLS_SANS:-${PINGWAF_TLS_SANS:-}}"
 # URL becomes .../download/vlatest/...
 if [[ "$VERSION" == "latest" ]]; then VERSION=""; fi
 
-if [[ -n "$VERSION$MODE$DB_URL$SERVER_URL$API_KEY$ADMIN_EMAIL$ADMIN_PASSWORD$TLS_SANS" ]]; then
+if [[ -n "$VERSION$MODE$DB_URL$SERVER_URL$SERVER_CA_CERT$SERVER_TLS_NAME$API_KEY$ADMIN_EMAIL$ADMIN_PASSWORD$TLS_SANS" ]]; then
     PARAMS_GIVEN=true
 fi
 
@@ -294,6 +307,8 @@ validate_install_values() {
     reject_control_chars "--version" "$VERSION"
     reject_control_chars "--db-url" "$DB_URL"
     reject_control_chars "--server-url" "$SERVER_URL"
+    reject_control_chars "--server-ca-cert" "$SERVER_CA_CERT"
+    reject_control_chars "--server-tls-name" "$SERVER_TLS_NAME"
     reject_control_chars "--api-key" "$API_KEY"
     reject_control_chars "--admin-email" "$ADMIN_EMAIL"
     reject_control_chars "--admin-password" "$ADMIN_PASSWORD"
@@ -362,6 +377,8 @@ print_plan_summary() {
     echo "  systemd:     ${systemd_state}"
     if [[ "${MODE:-all-in-one}" == "agent" ]]; then
         echo "  control:     ${SERVER_URL}"
+        echo "  control CA:  ${SERVER_CA_CERT:-none (bundled webpki roots)}"
+        echo "  tls name:    ${SERVER_TLS_NAME:-URL host}"
         echo "  api key:     ${api_key_state}"
     else
         echo "  database:    $(mask_db_url "${DB_URL:-postgres://pingwaf:pingwaf@localhost:5432/pingwaf}")"
@@ -461,6 +478,15 @@ if [[ "$MODE" == "agent" ]]; then
     fi
     if [[ "$SERVER_URL" == http:* ]]; then
         warn "The control plane serves gRPC over TLS by default; a plain http:// server-url only works when the control plane sets grpc_tls_mode = \"off\". For TLS use https:// and configure agent.server_ca_cert with the control plane's certificate."
+    fi
+    if [[ -n "$SERVER_CA_CERT" && ! -r "$SERVER_CA_CERT" ]]; then
+        fatal "--server-ca-cert ${SERVER_CA_CERT} is not readable. Download the control plane certificate (Settings -> Control plane HTTPS) and point this option at the PEM file."
+    fi
+    if [[ -n "$SERVER_TLS_NAME" && -z "$SERVER_CA_CERT" ]]; then
+        warn "--server-tls-name only changes certificate verification; the control plane's CA still has to be trusted (use --server-ca-cert)."
+    fi
+    if [[ -n "$SERVER_TLS_NAME" && "$SERVER_URL" == http:* ]]; then
+        warn "--server-tls-name has no effect while --server-url is http:// (TLS is not in use)."
     fi
 fi
 
@@ -644,8 +670,15 @@ write_config() {
     local config_file="${CONFIG_DIR}/pingwaf.toml"
     if [[ -f "$config_file" ]]; then
         warn "Config file already exists at ${config_file}, leaving it untouched."
-        warn "Values from this run (admin account, TLS names, database) were not applied;"
+        warn "Values from this run (control-plane URL, API key, admin account, TLS names,"
+        warn "database) were not applied. In agent mode this file is authoritative:"
         warn "edit ${config_file} and run: sudo systemctl restart ${SERVICE_NAME}"
+        if [[ "$MODE" == "agent" ]]; then
+            local key_state="unset"
+            if [[ -n "$API_KEY" ]]; then key_state="set"; fi
+            warn "Requested agent settings that were NOT applied: server_url=${SERVER_URL:-unset} api_key=${key_state} server_ca_cert=${SERVER_CA_CERT:-unset} server_tls_name=${SERVER_TLS_NAME:-unset}"
+            warn "Put them under [agent] in ${config_file} instead."
+        fi
         return
     fi
 
@@ -657,8 +690,23 @@ write_config() {
     # alone (see docs/deployment.md). Settings without a flag — registration,
     # CORS, Elasticsearch, passkeys — stay in the environment.
     local agent_server_url="# agent mode only; all-in-one talks to its own loopback gRPC"
+    local agent_api_key="# api_key = \"pwk_...\""
+    local agent_ca_cert="# server_ca_cert = \"/etc/pingwaf/grpc-ca.pem\""
+    local agent_tls_name="# server_tls_name = \"control-plane\""
     if [[ "$MODE" == "agent" ]]; then
         agent_server_url="server_url = \"$(toml_string "$SERVER_URL")\""
+        # The node's credentials live in this file only. The unit used to carry
+        # them as well, and the environment silently beat the file, so an
+        # operator editing the file saw no effect.
+        if [[ -n "$API_KEY" ]]; then
+            agent_api_key="api_key = \"$(toml_string "$API_KEY")\""
+        fi
+        if [[ -n "$SERVER_CA_CERT" ]]; then
+            agent_ca_cert="server_ca_cert = \"$(toml_string "$SERVER_CA_CERT")\""
+        fi
+        if [[ -n "$SERVER_TLS_NAME" ]]; then
+            agent_tls_name="server_tls_name = \"$(toml_string "$SERVER_TLS_NAME")\""
+        fi
     fi
 
     local tls_sans_line="# tls_sans = [\"waf.example.com\"]"
@@ -682,8 +730,10 @@ write_config() {
 # Mode: ${MODE}
 #
 # This file is read when PINGWAF_CONFIG points at it (the systemd unit sets
-# that). Precedence: this file, then PINGWAF_* environment variables, then
-# command-line flags. Unknown keys are reported at startup and ignored.
+# that). In agent mode this file is the source of truth: it wins over
+# PINGWAF_* environment variables, while command-line flags still win. Server
+# and all-in-one keep the environment as an override. Unknown keys are reported
+# at startup and ignored.
 
 [server]
 db_url = "$(toml_string "$DB_URL")"
@@ -707,6 +757,9 @@ serve_frontend = true
 # Used by the all-in-one mode and by agents; a server ignores this section.
 [agent]
 ${agent_server_url}
+${agent_api_key}
+${agent_ca_cert}
+${agent_tls_name}
 cache_dir = "${DATA_DIR}/cache"
 heartbeat_interval_secs = 30
 log_batch_size = 100
@@ -805,10 +858,28 @@ install_systemd() {
     if [[ "$MODE" == "agent" ]]; then
         unit_after="After=network-online.target"
         unit_wants="Wants=network-online.target"
-        agent_env="${agent_env}
+        # A fresh install keeps the agent settings in the file only: two
+        # copies meant the environment silently beat the file, so editing
+        # /etc/pingwaf/pingwaf.toml did nothing. An existing file was written
+        # by an older installer and may have no api_key, so keep the
+        # environment as a fallback for it.
+        if [[ "$CONFIG_PRESENT" == "true" ]]; then
+            agent_env="${agent_env}
 $(systemd_env PINGWAF_SERVER_URL "$SERVER_URL")
 $(systemd_env PINGWAF_API_KEY "$API_KEY")
 $(systemd_env PINGWAF_CACHE_DIR "${DATA_DIR}/cache")"
+            # The keys this installer newly understands may not exist in a file
+            # written by an older version; the environment carries them until
+            # the operator moves them into [agent].
+            if [[ -n "$SERVER_CA_CERT" ]]; then
+                agent_env="${agent_env}
+$(systemd_env PINGWAF_SERVER_CA_CERT "$SERVER_CA_CERT")"
+            fi
+            if [[ -n "$SERVER_TLS_NAME" ]]; then
+                agent_env="${agent_env}
+$(systemd_env PINGWAF_SERVER_TLS_NAME "$SERVER_TLS_NAME")"
+            fi
+        fi
     else
         # The dashboard is served over HTTPS with a self-signed certificate
         # until a real one is uploaded. Add the hostname it is reached under so

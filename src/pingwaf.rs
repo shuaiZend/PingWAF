@@ -122,6 +122,7 @@ fn agent_config_from_opts(opts: &AgentOpts) -> AgentConfig {
         agent_id: String::new(),
         server_ca_cert: opts.server_ca_cert.clone(),
         server_ca_pem: None,
+        server_tls_name: opts.server_tls_name.clone(),
         heartbeat_interval_secs: opts.heartbeat_interval_secs,
         cache_dir: opts.cache_dir.clone(),
         log_batch_size: opts.log_batch_size,
@@ -166,6 +167,9 @@ fn agent_config_from_all_in_one(opts: &AllInOneOpts) -> AgentConfig {
         agent_id: String::new(),
         server_ca_cert,
         server_ca_pem: None,
+        // The embedded agent dials loopback, which the generated certificate
+        // always covers.
+        server_tls_name: None,
         heartbeat_interval_secs: opts.heartbeat_interval_secs,
         cache_dir: opts.cache_dir.clone(),
         log_batch_size: opts.log_batch_size,

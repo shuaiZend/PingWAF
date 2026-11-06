@@ -1675,18 +1675,24 @@ that is needed for the node to appear in `GET /agents`.
 {
   "key_id": "uuid",
   "token": "pwk_…",
-  "server_url": "waf.example.com:9090",
-  "install_command": "curl -fsSL …/install.sh | sudo bash -s -- --mode agent --server-url waf.example.com:9090 --api-key pwk_…"
+  "server_url": "https://waf.example.com:9090",
+  "install_command": "curl -fsSL …/install.sh | sudo bash -s -- --mode agent --server-url https://waf.example.com:9090 --api-key pwk_…"
 }
 ```
 
 `token` is returned exactly once — only its hash is stored. It is already part
 of `install_command`; API callers may build their own command from it.
 `server_url` is the caller's host plus the configured gRPC port (the bind
-address is not routable from another server). The key carries the `agent` and
-`read` permissions. Running `install_command` on a fresh host installs the
-binary, writes the node configuration and starts the service, so the node
-registers itself without further steps.
+address is not routable from another server). The scheme follows the request:
+`X-Forwarded-Proto` (first value) when the deployment trusts forwarded headers
+(`PINGWAF_PASSKEY_TRUST_FORWARDED_PROTO`), else the `Referer` scheme, else
+whether the console listener itself serves TLS — the gRPC listener serves TLS by
+default, so the value is usually `https://`. Behind a TLS-terminating reverse
+proxy that terminates TLS, turn on the trust flag or make sure the browser sends
+a `Referer`. The key
+carries the `agent` and `read` permissions. Running `install_command` on a
+fresh host installs the binary, writes the node configuration and starts the
+service, so the node registers itself without further steps.
 
 ### GET /agents/{agent_id}
 

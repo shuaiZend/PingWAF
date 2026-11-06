@@ -269,7 +269,74 @@ fn agent_server_url(state: &AppState, headers: &HeaderMap) -> String {
         .map(host_without_port)
         .filter(|host| !host.is_empty() && *host != "localhost")
         .unwrap_or("localhost");
-    format!("http://{host}:{port}")
+    let scheme = request_scheme(
+        headers,
+        state.control_tls.is_enabled(),
+        state.config.passkey_trust_forwarded_proto,
+    );
+    format!("{scheme}://{host}:{port}")
+}
+
+/// The scheme the browser used to reach the console.
+///
+/// The endpoint handed to an agent has to speak the same scheme the operator's
+/// browser used: the gRPC listener serves TLS by default, so a hard-coded
+/// `http://` produces a command whose plaintext h2 preface hits a TLS port and
+/// fails the handshake (the agent only shows a cryptic h2 error). A reverse
+/// proxy that terminates TLS hides the browser's scheme, so
+/// `X-Forwarded-Proto` is believed first and the `Referer` — which is the
+/// console page the operator is looking at — second. Only when neither is
+/// usable does the listener decide.
+///
+/// This value only shapes a piece of copyable text; it never decides how a
+/// connection is encrypted, and the endpoint still requires an authenticated
+/// caller with write access.
+///
+/// `X-Forwarded-Proto` is believed only when the deployment opted into
+/// trusting forwarded headers (`passkey_trust_forwarded_proto`), the same
+/// switch the passkey origin check uses: a direct caller must not be able to
+/// talk the control plane into advertising a scheme it never served.
+fn request_scheme(
+    headers: &HeaderMap,
+    tls_enabled: bool,
+    trust_forwarded_proto: bool,
+) -> &'static str {
+    fn known(raw: &str) -> Option<&'static str> {
+        let raw = raw.trim();
+        if raw.eq_ignore_ascii_case("https") {
+            Some("https")
+        } else if raw.eq_ignore_ascii_case("http") {
+            Some("http")
+        } else {
+            None
+        }
+    }
+
+    let forwarded = if trust_forwarded_proto {
+        headers
+            .get("x-forwarded-proto")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(',').next())
+            .and_then(known)
+    } else {
+        None
+    };
+    if let Some(scheme) = forwarded {
+        return scheme;
+    }
+    if let Some(scheme) = headers
+        .get(header::REFERER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split_once("://"))
+        .and_then(|(scheme, _)| known(scheme))
+    {
+        return scheme;
+    }
+    if tls_enabled {
+        "https"
+    } else {
+        "http"
+    }
 }
 
 /// Strips the port from a `Host` header value, keeping IPv6 literals intact.
@@ -803,6 +870,8 @@ pub fn resolve_site_scope(
 
 #[cfg(test)]
 mod tests {
+    use axum::http::HeaderValue;
+
     use super::*;
 
     fn request(command: &str) -> CommandRequest {
@@ -844,6 +913,95 @@ mod tests {
     #[test]
     fn unknown_commands_are_rejected() {
         assert!(build_command(&request("self-destruct"), None).is_err());
+    }
+
+    fn headers(pairs: &[(&'static str, &str)]) -> HeaderMap {
+        let mut map = HeaderMap::new();
+        for (name, value) in pairs {
+            map.insert(*name, HeaderValue::from_str(value).unwrap());
+        }
+        map
+    }
+
+    #[test]
+    fn enrollment_scheme_follows_the_browser() {
+        // A trusted TLS-terminating proxy is authoritative about the scheme.
+        assert_eq!(
+            request_scheme(
+                &headers(&[("x-forwarded-proto", "https")]),
+                false,
+                true
+            ),
+            "https"
+        );
+        // A proxy chain reports the client-facing scheme first.
+        assert_eq!(
+            request_scheme(
+                &headers(&[("x-forwarded-proto", "https, http")]),
+                false,
+                true
+            ),
+            "https"
+        );
+        // Header values are case-insensitive, like the tokens they carry.
+        assert_eq!(
+            request_scheme(
+                &headers(&[("x-forwarded-proto", "HTTPS")]),
+                false,
+                true
+            ),
+            "https"
+        );
+        // Without the trust opt-in the same header must not be believed.
+        assert_eq!(
+            request_scheme(
+                &headers(&[("x-forwarded-proto", "https")]),
+                false,
+                false
+            ),
+            "http"
+        );
+        // The console page the operator is looking at decides even when the
+        // forwarded header is not trusted — a proxy may not set it at all.
+        assert_eq!(
+            request_scheme(
+                &headers(&[("referer", "https://waf.example.com:9080/agents")]),
+                false,
+                false
+            ),
+            "https"
+        );
+        assert_eq!(
+            request_scheme(
+                &headers(&[("referer", "http://10.0.0.5:9080/agents")]),
+                false,
+                true
+            ),
+            "http"
+        );
+        // Junk in a header is ignored instead of being echoed into the command.
+        assert_eq!(
+            request_scheme(
+                &headers(&[
+                    ("x-forwarded-proto", "ftp"),
+                    ("referer", "https://waf.example.com/")
+                ]),
+                false,
+                true
+            ),
+            "https"
+        );
+        assert_eq!(
+            request_scheme(
+                &headers(&[("referer", "not a url")]),
+                false,
+                true
+            ),
+            "http"
+        );
+        // Nothing usable: fall back to whether this listener serves TLS.
+        assert_eq!(request_scheme(&HeaderMap::new(), true, false), "https");
+        assert_eq!(request_scheme(&HeaderMap::new(), false, false), "http");
     }
 
     fn ips(command: &str, addresses: &[&str]) -> CommandRequest {

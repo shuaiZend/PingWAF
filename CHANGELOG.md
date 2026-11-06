@@ -8,6 +8,53 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [Unreleased]
+
+### Fixed
+
+- **Enrollment hands out a `server_url` that matches the protocol the agent
+  will actually speak.** `POST /api/v1/agents/enroll` (and the
+  `install_command` built from it) used to hard-code `http://`, so an operator
+  following the printed command pointed a plaintext h2 agent at the TLS
+  control plane and only saw a cryptic `GoAway … FRAME_SIZE_ERROR`. The scheme
+  is now derived from the request: `X-Forwarded-Proto` first, then the
+  `Referer` scheme, then whether the console listener serves TLS — so behind a
+  TLS-terminating proxy the proxy must forward `X-Forwarded-Proto` for the
+  command to be right.
+
+### Changed
+
+- **Agent mode: the configuration file now wins over the environment.**
+  `server_url`, `api_key` and `cache_dir` come from
+  `/etc/pingwaf/pingwaf.toml` first (command-line flags still win), because
+  `install.sh` no longer mirrors the agent keys into the systemd unit's
+  `Environment=` lines — a fresh unit keeps only `PINGWAF_CONFIG` and
+  `RUST_LOG`, and the API key lives solely in the 0600/0640 configuration
+  file instead of a world-readable unit. Editing the file and restarting now
+  takes effect even when a legacy unit still exports the old variables; the
+  agent logs a warning (secrets masked) naming the shadowed variable.
+  Existing installs keep their unit's environment as a fallback. Server and
+  all-in-one modes keep the previous order (environment overrides the file),
+  which container deployments rely on.
+
+### Added
+
+- **`--server-tls-name` for agents** (`PINGWAF_SERVER_TLS_NAME`, file key
+  `agent.server_tls_name`): names the host to use for SNI and certificate
+  verification when the control plane's certificate carries no SAN for the
+  host in `server_url`. Requires a release that knows the flag — 0.32.16
+  binaries reject it; on those, point the SAN name at the control plane via
+  `/etc/hosts` instead.
+- **`install.sh` gains `--server-ca-cert`** (`PINGWAF_SERVER_CA_CERT`,
+  readability checked before installing) **and `--server-tls-name`**
+  (`PINGWAF_SERVER_TLS_NAME`) for agent mode, and the enrollment command and
+  docs now say to use `https://` plus the control plane CA instead of plain
+  `http://`.
+
+> Note: this section describes work that has not shipped yet —
+> `--server-tls-name` in particular needs a release that includes the flag,
+> so none of the above applies to 0.32.16 binaries.
+
 ## [PingWAF 0.32.16] — 2026-11-04
 
 ### Fixed

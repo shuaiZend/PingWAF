@@ -254,6 +254,7 @@ impl ControlPlaneClient {
             &self.config.server_url,
             &self.config.server_ca_cert,
             &self.config.server_ca_pem,
+            &self.config.server_tls_name,
         )?;
 
         let channel = endpoint.connect().await?;
@@ -1670,11 +1671,18 @@ impl ControlPlaneClient {
 /// config the agent would speak cleartext h2 into a TLS port. With inline CA
 /// PEM (all-in-one) or a configured CA file that material is the only trust
 /// anchor; otherwise the bundled webpki roots apply.
+///
+/// `tls_name` overrides the name used for SNI and certificate verification,
+/// for control planes whose certificate carries no SAN for the host being
+/// dialed (a self-signed certificate issued for the container hostname,
+/// reached through a public name). The chain and the name are still checked:
+/// the value must be one of the certificate's SANs.
 fn apply_client_tls(
     endpoint: Endpoint,
     server_url: &str,
     ca_cert_path: &Option<String>,
     ca_cert_pem: &Option<String>,
+    tls_name: &Option<String>,
 ) -> anyhow::Result<Endpoint> {
     if !server_url.starts_with("https://") {
         return Ok(endpoint);
@@ -1691,6 +1699,9 @@ fn apply_client_tls(
         tls = tls.ca_certificate(Certificate::from_pem(pem));
     } else {
         tls = tls.with_enabled_roots();
+    }
+    if let Some(name) = tls_name {
+        tls = tls.domain_name(name.clone());
     }
     Ok(endpoint.tls_config(tls)?)
 }
@@ -1999,6 +2010,7 @@ mod tests {
             endpoint,
             "http://localhost:9090",
             &None,
+            &None,
             &None
         )
         .is_ok());
@@ -2011,6 +2023,7 @@ mod tests {
         assert!(apply_client_tls(
             endpoint,
             "https://waf.example.com:9090",
+            &None,
             &None,
             &None
         )
@@ -2025,6 +2038,7 @@ mod tests {
             endpoint,
             "https://waf.example.com:9090",
             &Some("/nonexistent/ca.pem".to_string()),
+            &None,
             &None,
         )
         .expect_err("a missing CA file must fail before connecting");
@@ -2043,6 +2057,24 @@ mod tests {
             "https://127.0.0.1:9090",
             &Some("/nonexistent/ca.pem".to_string()),
             &Some("not a pem".to_string()),
+            &None,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn tls_name_overrides_the_name_from_the_url() {
+        // A control plane whose certificate only names its container host is
+        // reachable through a public name once the SAN is supplied explicitly;
+        // the URL host stays untouched.
+        let endpoint =
+            Endpoint::from_shared("https://waf.example.com:9090").unwrap();
+        assert!(apply_client_tls(
+            endpoint,
+            "https://waf.example.com:9090",
+            &None,
+            &None,
+            &Some("pingwaf".to_string()),
         )
         .is_ok());
     }
