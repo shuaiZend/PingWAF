@@ -29,7 +29,14 @@ export function validatePathExceptionPath(
     // check — the server compiles it with the Rust regex crate and answers
     // 400 with a displayable message if it still fails.
     if (trimmed.length > 512) return 'pages.pathExceptions.errorPathRegex'
-    if (/[\s\u0000-\u001f\u007f]/.test(trimmed)) return 'pages.pathExceptions.errorPathRegex'
+    // No whitespace or control characters: a request path never contains them,
+    // and the server rejects them too. Walking the code points avoids a
+    // control-character regex (which the linter forbids for good reason).
+    const hasUnsafeChar = [...trimmed].some((ch) => {
+      const code = ch.codePointAt(0) ?? 0
+      return ch.trim() === '' || code < 0x20 || code === 0x7f
+    })
+    if (hasUnsafeChar) return 'pages.pathExceptions.errorPathRegex'
     try {
       new RegExp(trimmed)
     } catch {

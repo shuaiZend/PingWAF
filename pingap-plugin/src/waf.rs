@@ -40,7 +40,6 @@ use bytes::{Bytes, BytesMut};
 use dashmap::DashMap;
 use http::{HeaderName, HeaderValue};
 use ipnet::IpNet;
-use regex::{Regex, RegexBuilder};
 use pingap_config::{PluginCategory, PluginConf};
 use pingap_core::{
     Ctx, HTTP_HEADER_NAME_X_REQUEST_ID, HttpResponse, Plugin, PluginStep,
@@ -73,6 +72,7 @@ use pingwaf_waf::{
     StackSet, WafAction, WafEngine, WafEngineConfig, WafLevel, WafMode,
     WafVerdict,
 };
+use regex::{Regex, RegexBuilder};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
