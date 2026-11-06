@@ -430,6 +430,39 @@ template = "<html><h1>{{ error_code }} {{ error_message }}</h1><p>{{ request_pat
         assert!(!body.contains("{{"));
     }
 
+    /// The unmatched-host page interpolates a client-supplied Host header and
+    /// request path into an HTML document; both must be escaped. This is the
+    /// regression guard for the variables the console default page relies on.
+    #[tokio::test]
+    async fn test_console_default_variables_are_escaped() {
+        let plugin = plugin_from(
+            r###"
+category = "fallback_page"
+[[pages]]
+status_code = 404
+content_type = "text/html"
+template = "<p>{{ request_path }}|{{ request_host }}</p>"
+"###,
+        );
+        let mut s = session("GET", "/a&b", "evil&host<script>").await;
+        let result = plugin
+            .handle_request(PluginStep::Request, &mut s, &mut Ctx::default())
+            .await
+            .unwrap();
+        let RequestPluginResult::Respond(response) = result else {
+            panic!("expected response");
+        };
+        let body = String::from_utf8(response.body.to_vec()).unwrap();
+        assert!(
+            body.contains("/a&amp;b|evil&amp;host&lt;script&gt;"),
+            "request_path and request_host must be HTML-escaped: {body}"
+        );
+        assert!(
+            !body.contains("<script>") && !body.contains("evil&host"),
+            "raw client input must never be reflected: {body}"
+        );
+    }
+
     #[tokio::test]
     async fn test_empty_config_answers_plain_404() {
         let plugin = plugin_from(r###"category = "fallback_page""###);
