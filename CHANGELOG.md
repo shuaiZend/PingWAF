@@ -10,6 +10,38 @@ verbatim for reference and attribution, and is not maintained here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Unmatched-host error pages render the configured HTML again.** The
+  console default 404 template referenced `error_code`, `error_message`,
+  `request_host`, `request_path` and `timestamp`, which the fallback plugin
+  did not provide, so Tera fell back to plain text. The variables are now
+  filled (host and path HTML-escaped, unknown site/upstream values empty),
+  the template preview uses the status code being edited instead of a fixed
+  `403`, long `unmatched_host` labels no longer overlap neighbouring cards,
+  and the pagination screen-reader label no longer stretches the document.
+
+### Changed
+
+- **Pingora upgraded from `0.9.0` to `0.9.1`.** The patch release fixes the
+  `pingora-limits` estimator overflow (`wrapping_add`), keeps zero-capacity
+  L4 read buffers working on tokio ≥ 1.54, and requires zstd 0.14.3 for
+  RUSTSEC-2026-0403. Its `pingora-header-serde` now resolves from crates.io,
+  so the local `[patch.crates-io]` override and `vendor/` copy are removed.
+  tokio stays pinned to `=1.53.3` for a separate, tested bump — 0.9.1 removed
+  the panic that originally justified the pin.
+
+### Added
+
+- **Upstream sync analysis** (`docs/upstream-sync.md`): the workspace and
+  `vicanso/pingap` share no git ancestry, so the page records the closest
+  baseline (`v0.15.0`), the P0/P1 port backlog with upstream commit ids, and
+  what is deliberately not ported.
+- **Three upstream bug reports** (`docs/upstream/`): transparent-pool SNI
+  uses the raw Host, one `ERROR` log per unmatched-SNI handshake, and
+  `X-Pingap-EType` reflects internal `Custom` error names. Each is ready to
+  submit as a `pingap` issue.
+
 ## [PingWAF 0.32.17] — 2026-11-06
 
 ### Fixed

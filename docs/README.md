@@ -20,6 +20,13 @@ centrally-controlled Web Application Firewall built on
 | [ai-crawl.md](./ai-crawl.md) | AI Crawl Control — crawler families, per-site policy, generated robots.txt / llms.txt |
 | [profiling.md](./profiling.md) | System observation and attribution: `/system/metrics` CPU/memory snapshots, `/system/profile` module/method attribution |
 
+## 🔧 Maintenance
+
+| Document | What you'll find |
+| --- | --- |
+| [upstream-sync.md](./upstream-sync.md) | Pingap/Pingora upstream sync: closest baseline, P0/P1 port backlog, what is deliberately not ported |
+| [upstream/README.md](./upstream/README.md) | Confirmed `vicanso/pingap` defects, each ready to submit as an upstream issue |
+
 ## 🧪 Testing & benchmarks
 
 | Document | What you'll find |

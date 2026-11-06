@@ -55,7 +55,7 @@ unprivileged `pingwaf` user. Binding a port below 1024 therefore needs
 `CAP_NET_BIND_SERVICE`; without it the proxy panics during startup:
 
 ```
-thread 'Pingora HTTP Proxy Service' panicked at …/pingora-core-0.9.0/src/services/listening.rs:293:14:
+thread 'Pingora HTTP Proxy Service' panicked at …/pingora-core-0.9.x/src/services/listening.rs:293:14:
 Failed to build listeners: … PermissionDenied … bind() failed on 0.0.0.0:443
 ```
 
@@ -546,22 +546,17 @@ reasons live in the sources this section points at.
 
 ### tokio is pinned to `=1.53.3`
 
-The workspace pins tokio to exactly `1.53.3`
-(`[workspace.dependencies]` in the root `Cargo.toml`, comment included):
-tokio 1.54.0 added `assert!(capacity > 0)` to
-`BufReader::with_capacity` / `BufStream::with_capacity`, while
-`pingora-core 0.9.0` still constructs both with a hardcoded `(0, 0)`
-(`L4BufferSettings::unbuffered` and the `From<TcpStream>` /
-`From<UnixStream>` impls). The result is a panic on the **first accepted
-connection** of the data plane — see upstream
-[cloudflare/pingora#1059](https://github.com/cloudflare/pingora/issues/1059),
-which is still open and not in any crates.io release.
-
-**Do not raise the pin casually** — dependabot is configured to ignore
-`tokio >= 1.54.0` (`.github/dependabot.yml`), so a dependabot PR will not
-silently break the accept path. Un-pin (raise to `>= 1.54`) **only once**
-pingora ships a release containing that fix, and drop the matching
-`ignore` entry in `.github/dependabot.yml` at the same time.
+The workspace still pins tokio to exactly `1.53.3`
+(`[workspace.dependencies]` in the root `Cargo.toml`, comment included)
+because the tokio upgrade has not been validated on its own. The original
+reason is gone: tokio 1.54.0 added `assert!(capacity > 0)` to
+`BufReader::with_capacity` / `BufStream::with_capacity`, and pingora 0.9.0
+constructed both with a hardcoded `(0, 0)`, which panicked on the **first
+accepted connection** of the data plane
+([cloudflare/pingora#1059](https://github.com/cloudflare/pingora/issues/1059)).
+**Pingora 0.9.1 contains that fix**, so raising the pin to `>= 1.54` is now
+a normal dependency change: do it in a dedicated commit, run the data-plane
+tests, and remove the matching note in `.github/dependabot.yml`.
 
 ### CI shape
 

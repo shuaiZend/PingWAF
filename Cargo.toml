@@ -264,9 +264,6 @@ enable = false
 start = false
 
 [workspace]
-# The local pingora-header-serde patch is a path dependency, not a workspace
-# member: its upstream unit tests need fixtures that crates.io excludes.
-exclude = ["vendor/*"]
 members = [
     "pingap-acme",
     "pingap-cache",
@@ -297,13 +294,6 @@ members = [
 ]
 [workspace.package]
 version = "0.32.17"
-
-[patch.crates-io]
-# Pingora 0.9 pins zstd ^0.13.1, whose zstd-safe 7.3.0 carries the October
-# 2026 RUSTSEC unsound set. The crate's API usage is unchanged on 0.14; patch
-# only this small header codec so the workspace resolves zstd 0.14.3 and
-# zstd-safe 8.2.0. Remove when Pingora ships a release using zstd 0.14.
-pingora-header-serde = { path = "vendor/pingora-header-serde" }
 
 [workspace.dependencies]
 aes-gcm-siv = { version = "0.12.1", default-features = false, features = [
@@ -411,12 +401,12 @@ pingap-webhook = { version = "0.32.17", path = "pingap-webhook" }
 # resolves one copy of pingora-core.
 # The TLS backend (`openssl` or `rustls`) is chosen by the top-level
 # `openssl` / `tls-rustls` features, not here.
-pingora = { version = "0.9.0", default-features = false, features = [
+pingora = { version = "0.9.1", default-features = false, features = [
     "lb",
     "cache",
 ] }
-pingora-limits = "0.9.0"
-pingora-runtime = "0.9.0"
+pingora-limits = "0.9.1"
+pingora-runtime = "0.9.1"
 pem = "4.0.0"
 # Replaces tldextract, whose idna 0.2 dependency carries RUSTSEC-2024-0421;
 # the public suffix list is compiled in, no runtime fetching.
@@ -472,14 +462,11 @@ tempfile = "3.27.0"
 tera = { version = "2", default-features = false }
 time = { version = "0.3.55", features = ["local-offset"] }
 TinyUFO = "0.9.0"
-# Pin tokio to exactly 1.53.3: 1.54.0 added `assert!(capacity > 0)` to
-# `BufReader::with_capacity` / `BufStream::with_capacity`, while pingora 0.9.0
-# still constructs both with a hardcoded (0, 0) (`L4BufferSettings::unbuffered`
-# and the `From<TcpStream>/From<UnixStream>` impls), so the first accepted
-# connection panics — see upstream cloudflare/pingora#1059 (still open, and
-# 0.9.0 is the newest crates.io release). Un-pin (= raise to >= 1.54) once
-# pingora ships a release containing that fix, and drop the matching `ignore`
-# entry in .github/dependabot.yml at the same time.
+# Pingora 0.9.1 fixed cloudflare/pingora#1059: tokio 1.54's
+# `assert!(capacity > 0)` no longer trips the L4 read buffers. The pin stays
+# for this release only so the tokio upgrade can be tested on its own; it can
+# be raised to `>= 1.54` in a dedicated change (and the matching note in
+# .github/dependabot.yml removed then).
 tokio = { version = "=1.53.3", default-features = false, features = ["fs"] }
 toml = "1.1.6"
 hcl-rs = "0.19"

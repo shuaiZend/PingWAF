@@ -18,6 +18,13 @@
 | [ai-crawl.md](./ai-crawl.md) | AI 爬虫控制——爬虫家族、站点级策略、生成的 robots.txt / llms.txt |
 | [profiling.md](./profiling.md) | 系统观测与归因：`/system/metrics` CPU/内存快照、`/system/profile` 模块/方法归因 |
 
+## 🔧 维护
+
+| 文档 | 内容 |
+| --- | --- |
+| [upstream-sync.md](./upstream-sync.md) | pingap/Pingora 上游同步：最接近的基线、P0/P1 移植清单、明确不移植的项 |
+| [upstream/README.md](./upstream/README.md) | 已确认的 `vicanso/pingap` 缺陷，每份都可直接提交上游 issue（报告正文为英文） |
+
 ## 🧪 测试与基准
 
 | 文档 | 内容 |
