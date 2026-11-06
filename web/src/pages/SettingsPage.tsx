@@ -57,10 +57,9 @@ import {
   errorPagesApi,
   errorPageKeys,
   ERROR_PAGE_MESSAGES,
-  ERROR_PAGE_SAMPLE,
   ERROR_PAGE_VARIABLES,
   defaultErrorPageTemplate,
-  renderErrorPageTemplate,
+  renderErrorPagePreview,
 } from '@/api/errorPages'
 import { PasskeyToggleCard } from '@/components/account/PasskeyToggleCard'
 import { apiProtectionApi, apiProtectionKeys } from '@/api/apiProtection'
@@ -994,10 +993,7 @@ function ErrorPagesCard({ canWrite }: { canWrite: boolean }) {
   }
 
   const previewHtml = editor
-    ? renderErrorPageTemplate(editor.body_template, {
-        ...ERROR_PAGE_SAMPLE,
-        host: '203.0.113.10',
-      })
+    ? renderErrorPagePreview(editor.body_template, editor.status_code)
     : ''
 
   return (
@@ -1082,8 +1078,8 @@ function ErrorPagesCard({ canWrite }: { canWrite: boolean }) {
                     onClick={() => canWrite && openEditor(code)}
                     className={cn('cursor-pointer', !canWrite && 'cursor-default')}
                   >
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="flex items-center gap-3">
+                    <div className="flex flex-col gap-3">
+                      <div className="flex min-w-0 items-center gap-3">
                         <span
                           className={cn(
                             'flex h-12 w-12 shrink-0 items-center justify-center rounded-lg text-lg font-bold tabular-nums',
@@ -1103,10 +1099,10 @@ function ErrorPagesCard({ canWrite }: { canWrite: boolean }) {
                           </p>
                         </div>
                       </div>
-                      <span className="flex shrink-0 items-center gap-1.5">
+                      <span className="flex min-w-0 flex-wrap items-center gap-1.5">
                         {customized &&
                           asErrorPageScope(page?.scope) === 'unmatched_host' && (
-                            <Badge tone="warning" size="sm">
+                            <Badge tone="warning" size="sm" className="max-w-full break-words" style={{ whiteSpace: 'normal' }}>
                               {t('pages.errorPages.scopeUnmatched')}
                             </Badge>
                           )}
