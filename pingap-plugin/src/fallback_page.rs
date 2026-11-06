@@ -21,10 +21,9 @@
 //! from `http_response.rs`. The plugin short-circuits in the request phase —
 //! there is no upstream to contact — and renders the configured Tera page.
 //!
-//! Template context is deliberately minimal: `host` (HTML-escaped before it
-//! enters the context, so `{{ host }}` is always safe regardless of what a
-//! template author writes) and `request_id` (edge-generated). **No request
-//! header is ever reflected into the context.**
+//! Template context includes the console's default error-page variables.
+//! Host and path are HTML-escaped before entering the context. Site and
+//! upstream values are empty because this request matched no site.
 //!
 //! Page bodies are capped at 256 KiB both at configuration time and after
 //! rendering, so a runaway template cannot balloon the response.
@@ -183,12 +182,28 @@ impl FallbackPagePlugin {
         page: &CompiledFallbackPage,
         host: &str,
         request_id: &str,
+        path: &str,
     ) -> (String, String) {
         // `host` is escaped *before* it enters the context: whatever the
         // template does, the value it interpolates is already inert HTML.
         let mut ctx = Context::new();
         ctx.insert("host", &escape_html(host));
         ctx.insert("request_id", request_id);
+        ctx.insert("error_code", &page.status_code);
+        ctx.insert(
+            "error_message",
+            StatusCode::from_u16(page.status_code)
+                .ok()
+                .and_then(|s| s.canonical_reason())
+                .unwrap_or("Unknown Error"),
+        );
+        ctx.insert("request_host", &escape_html(host));
+        ctx.insert("request_path", &escape_html(path));
+        ctx.insert("timestamp", &chrono::Utc::now().to_rfc3339());
+        for key in ["client_ip", "site_name", "upstream_name", "upstream_addr"]
+        {
+            ctx.insert(key, "");
+        }
         match self.tera.render(&page.template_name, &ctx) {
             Ok(rendered) if rendered.len() <= MAX_PAGE_BYTES => {
                 (rendered, page.content_type.clone())
@@ -316,7 +331,12 @@ impl Plugin for FallbackPagePlugin {
             ));
         };
 
-        let (body, content_type) = self.render_page(page, &host, &request_id);
+        let (body, content_type) = self.render_page(
+            page,
+            &host,
+            &request_id,
+            session.req_header().uri.path(),
+        );
         let status = StatusCode::from_u16(page.status_code)
             .unwrap_or(StatusCode::NOT_FOUND);
         debug!(
@@ -379,6 +399,68 @@ template = "<html><body><h1>404</h1><p>{{ host }}</p><p>{{ request_id }}</p></bo
             name == http::header::CONTENT_TYPE
                 && value.to_str().unwrap().starts_with("text/html")
         }));
+    }
+
+    #[tokio::test]
+    async fn test_console_default_variables_render_html() {
+        let plugin = plugin_from(
+            r###"
+category = "fallback_page"
+[[pages]]
+status_code = 404
+content_type = "text/html"
+template = "<html><h1>{{ error_code }} {{ error_message }}</h1><p>{{ request_path }} on {{ request_host }}</p><p>{{ timestamp }} {{ request_id }}</p>{{ client_ip }}{{ site_name }}{{ upstream_name }}{{ upstream_addr }}</html>"
+"###,
+        );
+        let mut s = session("GET", "/probe", "unknown.example").await;
+        let result = plugin
+            .handle_request(PluginStep::Request, &mut s, &mut Ctx::default())
+            .await
+            .unwrap();
+        let RequestPluginResult::Respond(response) = result else {
+            panic!("expected response");
+        };
+        let body = String::from_utf8(response.body.to_vec()).unwrap();
+        assert!(
+            body.starts_with("<html>"),
+            "must not fall back to plain text: {body}"
+        );
+        assert!(body.contains("404 Not Found"));
+        assert!(body.contains("/probe on unknown.example"));
+        assert!(!body.contains("{{"));
+    }
+
+    /// The unmatched-host page interpolates a client-supplied Host header and
+    /// request path into an HTML document; both must be escaped. This is the
+    /// regression guard for the variables the console default page relies on.
+    #[tokio::test]
+    async fn test_console_default_variables_are_escaped() {
+        let plugin = plugin_from(
+            r###"
+category = "fallback_page"
+[[pages]]
+status_code = 404
+content_type = "text/html"
+template = "<p>{{ request_path }}|{{ request_host }}</p>"
+"###,
+        );
+        let mut s = session("GET", "/a&b", "evil&host<script>").await;
+        let result = plugin
+            .handle_request(PluginStep::Request, &mut s, &mut Ctx::default())
+            .await
+            .unwrap();
+        let RequestPluginResult::Respond(response) = result else {
+            panic!("expected response");
+        };
+        let body = String::from_utf8(response.body.to_vec()).unwrap();
+        assert!(
+            body.contains("/a&amp;b|evil&amp;host&lt;script&gt;"),
+            "request_path and request_host must be HTML-escaped: {body}"
+        );
+        assert!(
+            !body.contains("<script>") && !body.contains("evil&host"),
+            "raw client input must never be reflected: {body}"
+        );
     }
 
     #[tokio::test]

@@ -220,6 +220,15 @@ export function renderErrorPageTemplate(
   )
 }
 
+/** Render the editor preview using the selected response status. */
+export function renderErrorPagePreview(template: string, statusCode: number): string {
+  return renderErrorPageTemplate(template, {
+    ...ERROR_PAGE_SAMPLE,
+    error_code: String(statusCode),
+    error_message: ERROR_PAGE_MESSAGES[statusCode] ?? String(statusCode),
+  })
+}
+
 export const errorPageKeys = {
   all: ['error-pages'] as const,
   list: (scope?: ErrorPageScope) => ['error-pages', 'list', scope ?? 'all'] as const,
