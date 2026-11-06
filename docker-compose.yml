@@ -25,6 +25,23 @@ services:
     # matches agents by hostname + API key, so a changing container-ID
     # hostname would register a fresh offline ghost on every redeploy.
     hostname: pingwaf
+    # ── Memory ceiling ───────────────────────────────────────────────────────
+    # 768 MiB covers the all-in-one container (control plane + data plane).
+    # On a small host this is not a suggestion: the 2026-11-06 box had 894 MiB
+    # RAM and 1 GiB swap, its allocator reservation alone reached the
+    # Committed_AS ceiling, and the kernel answered by dropping page cache
+    # until the disk was saturated (iowait 88%) and the host stopped
+    # responding. Lower it with PINGWAF_MEM_LIMIT on such a host — leave
+    # enough headroom for sshd and postgres.
+    mem_limit: ${PINGWAF_MEM_LIMIT:-768m}
+    # Same value as mem_limit = no swap for this container. Swap does not
+    # rescue a runaway allocator, it only converts a fast kill into minutes of
+    # thrashing that drag the whole host down.
+    memswap_limit: ${PINGWAF_MEM_LIMIT:-768m}
+    # When the kernel must pick a victim, prefer this container over sshd.
+    # Hitting the limit only costs a restart (`restart: unless-stopped`) and
+    # the host stays reachable.
+    oom_score_adj: 500
     # ── Networking: bridge + port mapping by default ─────────────────────────
     # Opt into host networking by uncommenting `network_mode: host` below.
     # Use it when the proxy must see the real client IP, or when 80/443 cannot
@@ -63,6 +80,17 @@ services:
       # production; never set this on a real deployment.
       - PINGAP_ACME_STAGING=${PINGAP_ACME_STAGING:-}
       - RUST_LOG=${RUST_LOG:-info,sqlx=warn}
+      # ── Allocator reservation (must be in the environment, not the code) ──
+      # mimalloc reserves a 1 GiB arena by default on 64-bit and, on a Linux
+      # overcommit kernel, commits that whole reservation up front — the
+      # `[anon:mimalloc]` mapping with Size 1 GiB / Rss 93 MB in the
+      # 2026-11-06 `smaps`. 67108864 bytes = 64 MiB, sized for the 768 MiB
+      # ceiling above; raise it together with PINGWAF_MEM_LIMIT (e.g. 256 MiB
+      # for 2 GiB, 512 MiB for 8 GiB — see src/allocator_tune.rs).
+      # These are parsed by mimalloc before `main`, which is exactly why they
+      # belong here: mi_option_set cannot shrink an arena that already exists.
+      - MIMALLOC_ARENA_RESERVE=${MIMALLOC_ARENA_RESERVE:-67108864}
+      - MIMALLOC_ARENA_EAGER_COMMIT=${MIMALLOC_ARENA_EAGER_COMMIT:-0}
       # Elasticsearch (optional — uncomment to enable log shipping)
       # - PINGWAF_ES_ENABLED=true
       # - PINGWAF_ES_URLS=http://elasticsearch:9200
