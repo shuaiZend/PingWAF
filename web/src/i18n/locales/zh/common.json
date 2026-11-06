@@ -16,6 +16,13 @@
     "rssPeak": "RSS 峰值",
     "available": "可用内存",
     "usagePercent": "内存使用率",
+    "memory": {
+      "vmSize": "虚拟地址空间",
+      "vmSizeHint": "进程地址空间（VmSize）。大分配器 arena 会在这里体现，RSS 小但 VmSize 大是正常的预留。",
+      "commit": "系统承诺内存",
+      "commitHint": "内核已向进程承诺的内存总量（Committed_AS）。比 RSS 更早增长，OOM killer 按 CommitLimit 判定。",
+      "commitLimit": "承诺上限"
+    },
     "share": "耗时占比",
     "held": "内存持有",
     "calls": "调用数",

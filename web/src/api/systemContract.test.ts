@@ -63,6 +63,13 @@ const METRICS: SystemMetrics = {
     page_faults_major: 5,
     cached_bytes: 0,
     buffers_bytes: 0,
+    vm_size_bytes: 2119628,
+    vm_size: '2.0 GiB',
+    committed_as_bytes: 787916,
+    committed_as: '770 MiB',
+    commit_limit_bytes: 1506536,
+    commit_limit: '1.4 GiB',
+    commit_percent: 52.3,
   },
 }
 
@@ -126,13 +133,20 @@ describe('system API contract', () => {
     expect(normaliseUsagePercent(-5)).toBe(0)
   })
 
-  it('the memory-detail card is gone and left no orphan keys or imports', () => {
-    // 2026-10-23：概览卡与胶囊条已覆盖 RSS/峰值/可用/使用率，「内存明细」是
-    // 同一批数字的第二份渲染，整卡移除。
-    expect(() => readFileSync(resolve(process.cwd(), 'src/components/system/MemoryDetail.tsx'), 'utf8')).toThrow()
+  it('the memory-detail card renders VmSize and Committed_AS with early thresholds', () => {
+    // 2026-10-23 曾整卡移除「内存明细」（与概览重复）；需求变更为补充
+    // VmSize / Committed_AS 两个概览未覆盖的口径后重建。卡片渲染这两行。
+    const detail = readFileSync(
+      resolve(process.cwd(), 'src/components/system/MemoryDetail.tsx'),
+      'utf8',
+    )
+    // 承诺内存消费 commit_percent，阈值比 RSS 更早（70/85，注释说明原因）。
+    expect(detail).toContain('commit_percent')
+    expect(detail).toMatch(/85/)
+    expect(detail).toMatch(/70/)
     const page = readFileSync(resolve(process.cwd(), 'src/pages/SystemPage.tsx'), 'utf8')
-    expect(page).not.toContain('MemoryDetail')
-    // 只有该卡使用的键必须一起消失，否则三语里会留下永不显示的孤儿文案。
+    expect(page).toContain('MemoryDetail')
+    // 只有旧卡使用、概览未复用的键必须仍然消失，否则三语里会留下孤儿文案。
     for (const lang of ['en', 'zh', 'ja']) {
       const parsed = JSON.parse(
         readFileSync(resolve(process.cwd(), `src/i18n/locales/${lang}/common.json`), 'utf8'),
@@ -140,11 +154,23 @@ describe('system API contract', () => {
       for (const gone of ['memoryDetail', 'virtual', 'swap', 'pageFaults', 'cached', 'buffers']) {
         expect(parsed.system[gone], `${lang}.system.${gone}`).toBeUndefined()
       }
-      // 概览卡/胶囊条仍在用的键不能被顺手删掉。
-      for (const kept of ['rss', 'rssPeak', 'available', 'usagePercent']) {
+      // 概览卡/胶囊条/内存明细卡在用的键不能被顺手删掉。
+      for (const kept of ['rss', 'rssPeak', 'available', 'usagePercent', 'memory']) {
         expect(parsed.system[kept], `${lang}.system.${kept}`).toBeTruthy()
       }
     }
+  })
+
+  it('memory metrics expose VmSize / Committed_AS contract fields', () => {
+    // 与 pingwaf-system 内存快照对齐：4 个数值字段 + 人类可读形式。
+    expect(METRICS.memory.vm_size_bytes).toBeGreaterThan(0)
+    expect(METRICS.memory.committed_as_bytes).toBeGreaterThan(0)
+    expect(METRICS.memory.commit_limit_bytes).toBeGreaterThan(0)
+    expect(METRICS.memory.commit_percent).toBeGreaterThanOrEqual(0)
+    expect(METRICS.memory.commit_percent).toBeLessThanOrEqual(100)
+    expect(METRICS.memory.vm_size).toBeTruthy()
+    expect(METRICS.memory.committed_as).toBeTruthy()
+    expect(METRICS.memory.commit_limit).toBeTruthy()
   })
 
   it('non-prefix routes always submit strip_prefix: false', () => {

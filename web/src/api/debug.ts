@@ -77,6 +77,20 @@ export interface SystemMemoryMetrics {
   cached_bytes: number
   /** 主机 Buffer（字节）；不可用时为 0。 */
   buffers_bytes: number
+  /** 进程地址空间（/proc VmSize，字节）；大 allocator arena 会体现在这里。旧后端不返回。 */
+  vm_size_bytes?: number
+  /** `vm_size_bytes` 的人类可读形式。 */
+  vm_size?: string
+  /** 系统承诺内存（/proc/meminfo Committed_AS，字节）。旧后端不返回。 */
+  committed_as_bytes?: number
+  /** `committed_as_bytes` 的人类可读形式。 */
+  committed_as?: string
+  /** 承诺上限（/proc/meminfo CommitLimit，字节）；不可用时为 0。 */
+  commit_limit_bytes?: number
+  /** `commit_limit_bytes` 的人类可读形式。 */
+  commit_limit?: string
+  /** `committed_as_bytes / commit_limit_bytes`（0-100，1 位小数）；limit 为 0 时为 0。 */
+  commit_percent?: number
 }
 
 /** `GET /api/v1/system/metrics` 响应。 */
@@ -174,6 +188,14 @@ export interface SystemControlNode {
   requests: number
   /** 归因到 control 的请求平均墙钟耗时（毫秒）。 */
   avg_elapsed_ms: number
+  /** 进程地址空间（VmSize，字节）；旧后端不返回。 */
+  vm_size_bytes?: number
+  /** 系统承诺内存（Committed_AS，字节）；旧后端不返回。 */
+  committed_as_bytes?: number
+  /** 承诺上限（CommitLimit，字节）；旧后端不返回。 */
+  commit_limit_bytes?: number
+  /** `committed_as_bytes / commit_limit_bytes`（0-100，1 位小数）；旧后端不返回。 */
+  commit_percent?: number
 }
 
 /** `GET /api/v1/system/nodes` 单个 agent 节点 — 未知值一律为 null，禁止当 0 渲染。 */

@@ -16,6 +16,13 @@
     "rssPeak": "RSS ピーク",
     "available": "空きメモリ",
     "usagePercent": "メモリ使用率",
+    "memory": {
+      "vmSize": "仮想アドレス空間",
+      "vmSizeHint": "プロセスのアドレス空間（VmSize）。アロケータの大きなアリーナもここに現れます — RSS が小さく VmSize が大きいのは正常な予約です。",
+      "commit": "コミット済みメモリ",
+      "commitHint": "カーネルがプロセスに保証したメモリ総量（Committed_AS）。RSS より先に増え、OOM killer は CommitLimit で判定します。",
+      "commitLimit": "コミット上限"
+    },
     "share": "経過時間占有率",
     "held": "保持メモリ",
     "calls": "呼び出し数",

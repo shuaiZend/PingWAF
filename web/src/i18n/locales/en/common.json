@@ -16,6 +16,13 @@
     "rssPeak": "RSS peak",
     "available": "Available memory",
     "usagePercent": "Memory usage",
+    "memory": {
+      "vmSize": "Virtual address space",
+      "vmSizeHint": "Process address space (VmSize). Large allocator arenas show up here — a small RSS with a large VmSize is normal reservation.",
+      "commit": "Committed memory",
+      "commitHint": "Total memory the kernel has promised to processes (Committed_AS). It grows ahead of RSS; the OOM killer judges by CommitLimit.",
+      "commitLimit": "Commit limit"
+    },
     "share": "Elapsed share",
     "held": "Memory held",
     "calls": "Calls",

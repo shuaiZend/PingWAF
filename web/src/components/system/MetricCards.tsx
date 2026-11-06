@@ -95,6 +95,10 @@ export function MetricPills({ metrics }: { metrics: SystemMetrics | undefined })
     { label: t('system.rssPeak'), value: mem.rss_peak },
     { label: t('system.available'), value: mem.mem_available },
     { label: t('system.usagePercent'), value: `${mem.memory_used_percent.toFixed(1)}%` },
+    // 承诺内存：旧后端不返回 commit_percent，无值时不显示该胶囊。
+    ...(mem.commit_percent != null
+      ? [{ label: t('system.memory.commit'), value: `${mem.commit_percent.toFixed(1)}%` }]
+      : []),
   ]
   return (
     <div className="flex flex-wrap gap-2">

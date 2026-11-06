@@ -7,6 +7,7 @@ import { Card, CardBody, CardHeader } from '@/components/ui/Card'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { ErrorState } from '@/components/ErrorState'
 import { MetricCards, MetricPills } from '@/components/system/MetricCards'
+import { MemoryDetail } from '@/components/system/MemoryDetail'
 import { ModuleTable } from '@/components/system/ModuleTable'
 import { MethodTable } from '@/components/system/MethodTable'
 import { NodeSection } from '@/components/system/NodeSection'
@@ -102,6 +103,9 @@ export function SystemPage() {
           <MetricCards metrics={metrics.data} loading={metrics.isFetching} />
           <div className="mt-3">
             <MetricPills metrics={metrics.data} />
+          </div>
+          <div className="mt-3">
+            <MemoryDetail memory={metrics.data?.memory} />
           </div>
         </>
       )}
