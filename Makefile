@@ -246,7 +246,12 @@ check-version:
 # Static consistency checks for docs and agent prompts: frontmatter, model
 # names, cross references, markdown links. No toolchain deps, runs anywhere.
 # Not in GUARDED: touches no cargo artifacts, so the disk guard is pointless.
-check-docs:
+check-docs: check-api-docs
 	./scripts/check-docs-prompts.sh
 
-.PHONY: check-docs
+# Every axum route must have a `### METHOD /path` section in docs/api.md.
+# Pure static check: no toolchain, no network.
+check-api-docs:
+	python3 ./scripts/check-api-docs.py
+
+.PHONY: check-docs check-api-docs

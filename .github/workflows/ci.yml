@@ -415,6 +415,11 @@ jobs:
       - name: Check docs & agent prompts
         run: ./scripts/check-docs-prompts.sh
 
+      # Every axum route must have a `### METHOD /path` section in
+      # docs/api.md. Pure static check (python3 is preinstalled on the runner).
+      - name: Check API reference covers every route
+        run: python3 ./scripts/check-api-docs.py
+
   # Packs the :main snapshot image from the binary built by the
   # `release-binary` job. Only on main (and only when code changed): a PR run
   # would burn a lot of minutes for little signal.

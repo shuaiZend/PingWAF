@@ -512,6 +512,14 @@ async fn list_agents(
             json!({
                 "id": row.id,
                 "hostname": row.hostname,
+                // The operator label, mirroring the REST list: `name` falls
+                // back to the reported hostname when no label is set, so a
+                // client reading either surface sees the same identifier.
+                "display_name": row.display_name,
+                "name": row
+                    .display_name
+                    .clone()
+                    .unwrap_or_else(|| row.hostname.clone()),
                 "site": row.site_id.map(|id| names.get(&id).cloned().unwrap_or_else(|| id.to_string())),
                 "ip_address": row.ip_address,
                 "version": row.version,
@@ -1028,6 +1036,29 @@ mod tests {
                 "{} needs a real description",
                 spec.name
             );
+        }
+    }
+
+    /// Every advertised tool is named in the MCP section of the reference, so
+    /// a tool cannot ship undocumented.
+    #[test]
+    fn the_reference_lists_every_tool() {
+        let section = mcp_section(include_str!("../../../docs/api.md"));
+        for spec in specs() {
+            assert!(
+                section.contains(&format!("`{}`", spec.name)),
+                "docs/api.md is missing the MCP tool `{}`",
+                spec.name
+            );
+        }
+    }
+
+    fn mcp_section(docs: &str) -> &str {
+        let start = docs.find("## MCP server").expect("MCP section");
+        let rest = &docs[start..];
+        match rest[3..].find("\n## ") {
+            Some(offset) => &rest[..3 + offset],
+            None => rest,
         }
     }
 }

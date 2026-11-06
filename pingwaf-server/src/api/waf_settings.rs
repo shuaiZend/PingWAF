@@ -167,7 +167,7 @@ pub fn routes() -> Router<AppState> {
 /// Listed at the Strict level so the strict-only rules (PINGWAF-1061 and
 /// PINGWAF-1070) show too; a site running the Normal level simply never
 /// matches them, and the `strict_only` flag tells the dashboard.
-async fn list_managed_rules() -> Json<Vec<ManagedRuleEntry>> {
+async fn list_managed_rules(_current: AuthUser) -> Json<Vec<ManagedRuleEntry>> {
     Json(
         pingwaf_waf::managed_rule_catalogue(pingwaf_waf::WafLevel::Strict)
             .into_iter()

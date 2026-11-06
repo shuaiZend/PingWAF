@@ -10,7 +10,23 @@ verbatim for reference and attribution, and is not maintained here.
 
 ## [Unreleased]
 
+## [PingWAF 0.32.17] — 2026-11-06
+
 ### Fixed
+
+- **`GET /api/v1/managed-rules` now requires authentication.** The catalogue
+  handler had no auth extractor, so the built-in rule metadata was readable
+  without a token — the only `/api/v1` route in that state. It now requires an
+  authenticated user (any role), like the rest of the API. **Breaking for
+  unauthenticated clients:** a script that read the catalogue without a token
+  now gets `401`; send an API key or JWT.
+
+- **Agent monitor values no longer show long decimals.** `formatSize`
+  rounded nothing: a 371-byte buffer rendered as `371.0 B`, network
+  throughput as `1.2345678 KB/s` in the chart tooltip. Values below 1024 B
+  are now integers, KB/MB/GB/TB keep at most one decimal place — display
+  only, underlying metrics are unchanged. A reading that rounds up to 1024
+  (≥ 1023.5 B) is shown as `1.0 KB` rather than `1024 B`.
 
 - **Enrollment hands out a `server_url` that matches the protocol the agent
   will actually speak.** `POST /api/v1/agents/enroll` (and the
@@ -23,6 +39,17 @@ verbatim for reference and attribution, and is not maintained here.
   command to be right.
 
 ### Changed
+
+- **Path exception `challenge` now waives every challenge source, not just
+  some.** Previously only the standalone challenge plugin honoured the skip;
+  a request hitting a WAF rule or scoring judgement of `Challenge`, a CC or
+  rate-limit rule with the `challenge` action, a bot-protection challenge or
+  an IP/geo rule challenge could still be challenged despite the exception.
+  All of these now pass through to the origin when `challenge` (or `*`) is
+  skipped. Blocks still enforce, security events and access logs are still
+  recorded, and the hard gates (paused site, fail-closed edge, dynamic IP
+  bans) still run before the exception. Applies in every WAF mode, like the
+  other skipped layers.
 
 - **Agent mode: the configuration file now wins over the environment.**
   `server_url`, `api_key` and `cache_dir` come from
@@ -39,6 +66,32 @@ verbatim for reference and attribution, and is not maintained here.
 
 ### Added
 
+- **Agent display names.** `agents` gains a nullable `display_name`
+  (migration 000093, at most 100 characters). `GET /api/v1/agents` and
+  `GET /api/v1/agents/{id}` return `display_name` alongside `name`, whose
+  meaning changes from "always the hostname" to `display_name ?? hostname`
+  — set a label and the console (and `GET /system/nodes`) shows it instead
+  of the hostname. New `PATCH /api/v1/agents/{id}` with body
+  `{ "display_name": string | null }` (write access required): the value is
+  trimmed, `null`/empty clears it, control characters are rejected, and the
+  updated agent is returned. `hostname` remains the agent's reported
+  identity — registration still matches on `hostname` + API key, so a rename
+  never creates a duplicate node. `GET /agents?search=` now matches
+  `display_name`, `hostname` and `ip`.
+
+- **`regex` match type for path exceptions.** `match_type` accepts `regex`
+  next to `prefix`/`exact`/`wildcard` (`control_plane.proto` gains
+  `PATH_MATCH_REGEX = 3`). The pattern is a Rust `regex` expression,
+  unanchored (`is_match`; write `^…$` for a full-path match), case-sensitive
+  by default (`(?i)` opts out). The server validates that it compiles (4 MiB
+  `size_limit`/`dfa_size_limit`, same budget as the WAF expression engine)
+  and keeps the shared limits (512 characters, no whitespace/control
+  characters); an invalid pattern is a `400` with the compiler's reason.
+  Evaluation order is `exact` → `prefix` → `wildcard` → `regex`, first hit
+  wins. **Upgrade agents before using it:** an older agent treats the
+  unknown `PATH_MATCH_REGEX = 3` as `prefix` (fail-safe), so the regex
+  exception silently stops applying there.
+
 - **`--server-tls-name` for agents** (`PINGWAF_SERVER_TLS_NAME`, file key
   `agent.server_tls_name`): names the host to use for SNI and certificate
   verification when the control plane's certificate carries no SAN for the
@@ -51,9 +104,23 @@ verbatim for reference and attribution, and is not maintained here.
   docs now say to use `https://` plus the control plane CA instead of plain
   `http://`.
 
-> Note: this section describes work that has not shipped yet —
-> `--server-tls-name` in particular needs a release that includes the flag,
-> so none of the above applies to 0.32.16 binaries.
+- **The API reference now covers every registered route.** 50 endpoints that
+  shipped without a `### METHOD /path` section — configuration backups and
+  targets, notification settings/channels, OIDC providers, visitor accounts,
+  login security and history, global cache and passkey settings, per-site
+  cache settings and failover, managed-rule catalogue, certificate update and
+  renewal, single log detail, and the remaining `blocked-ips` / geo /
+  WAF-defaults routes — are documented with their real request and response
+  fields, permissions and error codes.
+
+- **`make check-api-docs` / the CI docs job** compare every axum route with
+  `docs/api.md` (method + path, placeholder-normalised) and fail on drift in
+  either direction, so a route can no longer ship undocumented.
+
+- **MCP `list_agents` and `pingwaf://agents` expose `display_name`** and the
+  `name` fallback, matching the REST inventory; the MCP tool table and the
+  five `pingwaf://` resources are now listed explicitly in the reference and
+  covered by tests that fail when a tool or resource is added without docs.
 
 ## [PingWAF 0.32.16] — 2026-11-04
 

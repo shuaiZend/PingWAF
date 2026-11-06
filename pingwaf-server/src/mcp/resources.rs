@@ -150,6 +150,25 @@ mod tests {
         assert!(!is_known("pingwaf://nope"));
     }
 
+    /// Every resource URI is named in the MCP section of the reference.
+    #[test]
+    fn the_reference_lists_every_resource() {
+        let docs = include_str!("../../../docs/api.md");
+        let start = docs.find("## MCP server").expect("MCP section");
+        let rest = &docs[start..];
+        let section = match rest[3..].find("\n## ") {
+            Some(offset) => &rest[..3 + offset],
+            None => rest,
+        };
+        for resource in &RESOURCES {
+            assert!(
+                section.contains(resource.uri),
+                "docs/api.md is missing the MCP resource {}",
+                resource.uri
+            );
+        }
+    }
+
     #[test]
     fn list_advertises_every_resource_as_json() {
         let value = list();
