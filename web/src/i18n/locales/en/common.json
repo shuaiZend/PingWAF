@@ -1585,6 +1585,13 @@
       "os": "OS",
       "totalAgents": "Total agents",
       "searchPlaceholder": "Search agents…",
+      "displayNameLabel": "Display name",
+      "displayNameHint": "Leave empty to show the hostname.",
+      "rename": "Rename",
+      "renameTitle": "Rename agent",
+      "displayNameSaved": "Display name saved",
+      "displayNameCleared": "Display name cleared — showing the hostname",
+      "displayNameFailed": "Rename failed",
       "remove": "Remove agent",
       "removeTitle": "Remove agent",
       "removeDescription": "This will deregister the agent. It can re-register with a valid API key.",
@@ -2941,6 +2948,8 @@
       "match_prefix": "Prefix",
       "match_exact": "Exact",
       "match_wildcard": "Wildcard",
+      "match_regex": "Regex",
+      "regexHint": "Rust regex: unanchored match, case-sensitive by default (use (?i) to ignore case). Invalid patterns fail to save.",
       "wildcardHint": "Wildcard paths must end with “*”.",
       "skipLayers": "Bypassed layers",
       "bypassLayers": "Bypass layers",
@@ -2977,7 +2986,8 @@
       "deleteDescription": "Requests on this path will be inspected again.",
       "errorPathRequired": "Path is required.",
       "errorPathRooted": "The path must start with “/”.",
-      "errorPathWildcardSuffix": "Wildcard paths must end with “*”."
+      "errorPathWildcardSuffix": "Wildcard paths must end with “*”.",
+      "errorPathRegex": "Invalid regular expression: it must be non-empty, contain no whitespace or control characters, and compile."
     }
   },
   "challengeLevels": {

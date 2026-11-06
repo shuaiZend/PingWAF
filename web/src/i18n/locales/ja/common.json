@@ -1585,6 +1585,13 @@
       "os": "OS",
       "totalAgents": "エージェント合計",
       "searchPlaceholder": "エージェントを検索…",
+      "displayNameLabel": "表示名",
+      "displayNameHint": "空欄の場合はホスト名を表示します。",
+      "rename": "名前を変更",
+      "renameTitle": "エージェントの名前を変更",
+      "displayNameSaved": "表示名を保存しました",
+      "displayNameCleared": "表示名をクリアしました — ホスト名を表示します",
+      "displayNameFailed": "名前の変更に失敗しました",
       "remove": "エージェントを削除",
       "removeTitle": "エージェントを削除",
       "removeDescription": "これによりエージェントの登録が解除されます。有効な API キーで再登録できます。",
@@ -2932,6 +2939,8 @@
       "match_prefix": "前方一致",
       "match_exact": "完全一致",
       "match_wildcard": "ワイルドカード",
+      "match_regex": "正規表現",
+      "regexHint": "Rust 正規表現：未アンカー一致、既定では大文字小文字を区別（(?i) で無効化）。不正な正規表現は保存に失敗します。",
       "wildcardHint": "ワイルドカード パスは「*」で終わる必要があります。",
       "skipLayers": "バイパス レイヤー",
       "bypassLayers": "バイパスするレイヤー",
@@ -2968,7 +2977,8 @@
       "deleteDescription": "このパスのリクエストは再び検査されます。",
       "errorPathRequired": "パスは必須です。",
       "errorPathRooted": "パスは「/」で始まる必要があります。",
-      "errorPathWildcardSuffix": "ワイルドカード パスは「*」で終わる必要があります。"
+      "errorPathWildcardSuffix": "ワイルドカード パスは「*」で終わる必要があります。",
+      "errorPathRegex": "正規表現が無効です：空でないこと、空白や制御文字を含まないこと、コンパイルできることが必要です。"
     }
   },
   "challengeLevels": {

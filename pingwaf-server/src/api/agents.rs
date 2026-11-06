@@ -13,8 +13,8 @@ use pingwaf_proto::control_plane::{
     ServerCommand,
 };
 use sea_orm::{
-    ColumnTrait, Condition, EntityTrait, PaginatorTrait, QueryFilter,
-    QueryOrder,
+    ActiveModelTrait, ColumnTrait, Condition, EntityTrait, PaginatorTrait,
+    QueryFilter, QueryOrder, Set,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -60,6 +60,11 @@ const MAX_PURGE_TAGS: usize = 100;
 /// single string from bloating a command that is mirrored to every agent.
 const MAX_PURGE_SELECTOR_LEN: usize = 2048;
 
+/// Cap on an operator-visible agent label. Long enough for a descriptive
+/// note, short enough that it cannot be used to smuggle a paragraph into the
+/// inventory table.
+const MAX_DISPLAY_NAME_LEN: usize = 100;
+
 /// Agent row enriched with live connection information.
 #[derive(Debug, Serialize)]
 pub struct AgentResponse {
@@ -67,13 +72,16 @@ pub struct AgentResponse {
     pub site_id: Option<Uuid>,
     pub site_domain: Option<String>,
     pub hostname: String,
-    /// Display name of the node.
+    /// Operator-editable label; `null` means "use the hostname".
     ///
-    /// The inventory stores one identity per row — `hostname` — and has no
-    /// separate name column, so this mirrors it. It is emitted because the
-    /// node view (`GET /system/nodes`) names the field `name`; carrying both
-    /// keeps one shape for the console without breaking callers that already
-    /// read `hostname`.
+    /// The inventory stores one identity per row — `hostname` — and matches a
+    /// re-registration on it, so this is a label, never an identity.
+    pub display_name: Option<String>,
+    /// Display name of the node, falling back to `hostname`.
+    ///
+    /// Emitted because the node view (`GET /system/nodes`) names the field
+    /// `name`; carrying both keeps one shape for the console without breaking
+    /// callers that already read `hostname`.
     pub name: String,
     pub ip_address: String,
     /// Egress address as seen from the public internet, empty when unknown.
@@ -158,6 +166,43 @@ fn default_graceful() -> bool {
     true
 }
 
+/// Rename request: `display_name` is the label shown instead of the hostname.
+///
+/// Omitting the field, sending `null`, or sending an empty/blank string all
+/// clear it, so the hostname shows again. The hostname itself is reported by
+/// the agent and cannot be changed here — registration matches on it.
+#[derive(Debug, Deserialize, Default)]
+pub struct UpdateAgentRequest {
+    #[serde(default)]
+    pub display_name: Option<String>,
+}
+
+/// Normalises an operator-supplied label: trimmed, blank becomes `None`, and
+/// the length/control-character limits are enforced. Returns the value to
+/// store.
+fn normalise_display_name(
+    raw: Option<String>,
+) -> Result<Option<String>, ApiError> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.chars().count() > MAX_DISPLAY_NAME_LEN {
+        return Err(ApiError::BadRequest(format!(
+            "display_name must be at most {MAX_DISPLAY_NAME_LEN} characters"
+        )));
+    }
+    if trimmed.chars().any(char::is_control) {
+        return Err(ApiError::BadRequest(
+            "display_name must not contain control characters".to_string(),
+        ));
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
 /// Enrollment options. The minted key does not expire: a node is admitted as
 /// long as the token is valid, and it is revoked by deleting the key.
 #[derive(Debug, Deserialize, Default)]
@@ -193,7 +238,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/agents", get(list))
         .route("/agents/enroll", post(enroll))
-        .route("/agents/{agent_id}", get(show).delete(remove))
+        .route("/agents/{agent_id}", get(show).patch(update).delete(remove))
         .route("/agents/{agent_id}/samples", get(samples))
         .route("/agents/{agent_id}/commands", post(send_command))
         .route("/agents/flush-logs", post(flush_logs))
@@ -413,6 +458,7 @@ async fn list(
         condition = condition.add(
             Condition::any()
                 .add(agent::Column::Hostname.like(&pattern))
+                .add(agent::Column::DisplayName.like(&pattern))
                 .add(agent::Column::IpAddress.like(&pattern)),
         );
     }
@@ -436,6 +482,37 @@ async fn show(
     Path(agent_id): Path<String>,
 ) -> Result<Json<AgentResponse>, ApiError> {
     let id = parse_uuid(&agent_id, "agent id")?;
+    let row = load_agent(&state, id, &current).await?;
+    let mut items = enrich(&state, vec![row]).await?;
+    Ok(Json(items.remove(0)))
+}
+
+/// `PATCH /api/v1/agents/{agent_id}` — set or clear the operator label.
+///
+/// Only the label changes: `hostname` is the agent's identity and stays as
+/// reported. An empty or missing value clears the label, so the console falls
+/// back to the hostname.
+async fn update(
+    State(state): State<AppState>,
+    current: AuthUser,
+    Path(agent_id): Path<String>,
+    Json(payload): Json<UpdateAgentRequest>,
+) -> Result<Json<AgentResponse>, ApiError> {
+    require_write(&current)?;
+    let id = parse_uuid(&agent_id, "agent id")?;
+    let row = load_agent(&state, id, &current).await?;
+
+    let display_name = normalise_display_name(payload.display_name)?;
+    let mut active: agent::ActiveModel = row.into();
+    active.display_name = Set(display_name.clone());
+    active.update(&state.db).await?;
+
+    tracing::info!(
+        agent_id = %id,
+        renamed = display_name.is_some(),
+        "agent display name updated"
+    );
+
     let row = load_agent(&state, id, &current).await?;
     let mut items = enrich(&state, vec![row]).await?;
     Ok(Json(items.remove(0)))
@@ -652,7 +729,11 @@ async fn enrich(
             id: row.id,
             site_domain: row.site_id.and_then(|id| domains.get(&id).cloned()),
             site_id: row.site_id,
-            name: row.hostname.clone(),
+            name: row
+                .display_name
+                .clone()
+                .unwrap_or_else(|| row.hostname.clone()),
+            display_name: row.display_name,
             hostname: row.hostname,
             ip_address: row.ip_address,
             public_ip: row.public_ip,
@@ -1161,5 +1242,33 @@ mod tests {
         );
         // Invalid input is still rejected.
         assert!(build_command(&ips("unblock_ip", &["nonsense"]), None).is_err());
+    }
+
+    #[test]
+    fn display_names_are_trimmed_and_bounded() {
+        assert_eq!(normalise_display_name(None).unwrap(), None);
+        assert_eq!(
+            normalise_display_name(Some("   ".to_string())).unwrap(),
+            None
+        );
+        assert_eq!(
+            normalise_display_name(Some("  edge-hk-01  ".to_string())).unwrap(),
+            Some("edge-hk-01".to_string())
+        );
+        // Exactly at the limit is accepted; one more is refused.
+        let at_limit = "a".repeat(MAX_DISPLAY_NAME_LEN);
+        assert_eq!(
+            normalise_display_name(Some(at_limit)).unwrap(),
+            Some("a".repeat(MAX_DISPLAY_NAME_LEN))
+        );
+        assert!(matches!(
+            normalise_display_name(Some("a".repeat(MAX_DISPLAY_NAME_LEN + 1))),
+            Err(ApiError::BadRequest(_))
+        ));
+        // Control characters would break the table and the access log.
+        assert!(matches!(
+            normalise_display_name(Some("edge\nhk".to_string())),
+            Err(ApiError::BadRequest(_))
+        ));
     }
 }

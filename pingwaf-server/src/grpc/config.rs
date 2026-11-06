@@ -251,6 +251,9 @@ fn path_match_type(raw: &str) -> i32 {
     match raw {
         "exact" => PathMatchType::PathMatchExact as i32,
         "wildcard" => PathMatchType::PathMatchWildcard as i32,
+        // Unknown values (a row written by a newer control plane) fall back to
+        // prefix, matching what an older agent does with the enum value.
+        "regex" => PathMatchType::PathMatchRegex as i32,
         _ => PathMatchType::PathMatchPrefix as i32,
     }
 }

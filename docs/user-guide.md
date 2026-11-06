@@ -318,9 +318,9 @@ Sites → [site] → Web Protection → Path exceptions
 
 | Field | Meaning |
 |-------|---------|
-| Path | Must start with `/`, at most 512 characters, no whitespace or control characters |
-| Match type | `prefix` (default; matches by path segment — `/api` covers `/api/x`, never `/apix`), `exact`, or `wildcard` (a single trailing `*`, e.g. `/api/*`) |
-| Skip layers | `*` (every layer), or any of `waf`, `bot`, `access`, `basic_auth`, `mtls`, `ai_bot`, `rate_limit`, `challenge` — the hit skips exactly these checks |
+| Path | Must start with `/` (except `regex`, which is a pattern), at most 512 characters, no whitespace or control characters |
+| Match type | `prefix` (default; matches by path segment — `/api` covers `/api/x`, never `/apix`), `exact`, `wildcard` (a single trailing `*`, e.g. `/api/*`), or `regex` (unanchored Rust-regex match, case-sensitive by default, use `^…$` for a full match; must compile server-side) |
+| Skip layers | `*` (every layer), or any of `waf`, `bot`, `access`, `basic_auth`, `mtls`, `ai_bot`, `rate_limit`, `challenge` — the hit skips exactly these checks. `challenge` waives **every** challenge source (WAF rule/scoring challenges, CC & rate-limit challenge actions, bot protection, IP/geo rules, the standalone challenge plugin) while blocks still enforce |
 | Note | Free text, at most 200 characters; used as the label when a hit is logged |
 | Log hits | When on, every hit is recorded as a `path_bypass` security event (action `log`) |
 | Enabled | Disabled exceptions are not evaluated |
@@ -931,6 +931,7 @@ key. An explicitly configured secret always wins.
 ### Monitoring Agents
 
 The Agents page shows:
+- Display name (an optional operator label — left empty, the hostname is shown; rename via `PATCH /api/v1/agents/{id}`, search matches the label, hostname and IP)
 - Connection status (online/offline/degraded)
 - Last heartbeat time
 - System info (hostname, OS, CPU, memory)

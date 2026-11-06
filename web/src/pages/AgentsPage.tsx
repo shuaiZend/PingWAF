@@ -12,6 +12,7 @@ import {
   HardDrives,
   Copy,
   Plus,
+  PencilSimple,
   Warning,
 } from '@phosphor-icons/react'
 import { PageHeader } from '@/components/PageHeader'
@@ -28,6 +29,7 @@ import { AgentProbePanel } from '@/components/agents/AgentProbePanel'
 import { SkeletonRows } from '@/components/ui/Skeleton'
 import { useToast } from '@/components/ui/Toast'
 import { ErrorState } from '@/components/ErrorState'
+import { errorMessage } from '@/api/errors'
 import { AGENT_STATUSES, agentKeys, agentsApi, countByStatus } from '@/api/agents'
 import { systemApi } from '@/api/system'
 import { analyticsApi } from '@/api/analytics'
@@ -53,6 +55,9 @@ const REFRESH_MS = 30_000
 
 const COMMANDS: AgentCommand[] = ['flush_logs', 'reload', 'restart', 'purge_cache']
 
+/** List-title label: the operator-assigned name, else the real hostname. */
+const displayName = (agent: Agent): string => agent.display_name ?? agent.hostname
+
 export function AgentsPage() {
   const { t } = useTranslation()
   const toast = useToast()
@@ -66,6 +71,8 @@ export function AgentsPage() {
   const [siteFilter, setSiteFilter] = useState('')
   const [detail, setDetail] = useState<Agent | null>(null)
   const [pendingDelete, setPendingDelete] = useState<Agent | null>(null)
+  const [renameAgent, setRenameAgent] = useState<Agent | null>(null)
+  const [renameValue, setRenameValue] = useState('')
   const [pendingCommand, setPendingCommand] = useState<{ agent: Agent; command: AgentCommand } | null>(null)
   const [enrollOpen, setEnrollOpen] = useState(false)
   const [enrollName, setEnrollName] = useState('')
@@ -146,11 +153,30 @@ export function AgentsPage() {
     }
   }
 
+  const openRename = (agent: Agent) => {
+    setRenameAgent(agent)
+    setRenameValue(agent.display_name ?? '')
+  }
+
+  const rename = useMutation({
+    mutationFn: ({ id, value }: { id: string; value: string }) =>
+      agentsApi.update(id, { display_name: value || null }),
+    onSuccess: (_data, { value }) => {
+      // Empty input means "clear" — restore the hostname.
+      toast.success(t(value ? 'pages.agents.displayNameSaved' : 'pages.agents.displayNameCleared'))
+      setRenameAgent(null)
+      invalidate()
+    },
+    onError: (error) => {
+      toast.error(t('pages.agents.displayNameFailed'), errorMessage(error))
+    },
+  })
+
   const remove = useMutation({
     mutationFn: (id: string) => agentsApi.remove(id),
     onSuccess: (_data, id) => {
       const target = agents.find((a) => a.id === id)
-      toast.success(t('pages.agents.removed'), target?.hostname)
+      toast.success(t('pages.agents.removed'), target ? displayName(target) : undefined)
       setPendingDelete(null)
       setDetail(null)
       invalidate()
@@ -205,7 +231,7 @@ export function AgentsPage() {
     {
       key: 'hostname',
       header: t('pages.agents.hostname'),
-      accessor: (a) => a.hostname,
+      accessor: (a) => displayName(a),
       sortable: true,
       cell: (a) => (
         <div className="flex items-center gap-3">
@@ -222,8 +248,14 @@ export function AgentsPage() {
             <Desktop weight="duotone" className="h-4 w-4" />
           </span>
           <div className="min-w-0">
-            <p className="truncate text-[13px] font-medium text-fg-strong">{a.hostname}</p>
-            <p className="pw-mono truncate text-xs text-fg-subtle">{a.ip_address}</p>
+            <p className="truncate text-[13px] font-medium text-fg-strong">{displayName(a)}</p>
+            {a.display_name ? (
+              <p className="pw-mono truncate text-xs text-fg-subtle">
+                {a.hostname} · {a.ip_address}
+              </p>
+            ) : (
+              <p className="pw-mono truncate text-xs text-fg-subtle">{a.ip_address}</p>
+            )}
           </div>
         </div>
       ),
@@ -336,6 +368,14 @@ export function AgentsPage() {
       width: '1%',
       cell: (a) => (
         <div className="flex items-center justify-end gap-1" onClick={(e) => e.stopPropagation()}>
+          <Button
+            size="icon"
+            variant="ghost"
+            aria-label={t('pages.agents.rename')}
+            disabled={!canWrite}
+            onClick={() => openRename(a)}
+            icon={<PencilSimple weight="duotone" className="h-4 w-4" />}
+          />
           <Button
             size="icon"
             variant="ghost"
@@ -558,12 +598,20 @@ export function AgentsPage() {
         open={detail !== null}
         onClose={() => setDetail(null)}
         size="lg"
-        title={detail?.hostname}
-        description={detail?.ip_address}
+        title={detail ? displayName(detail) : undefined}
+        description={detail ? `${detail.hostname} · ${detail.ip_address}` : undefined}
         footer={
           <>
             {canWrite && detail && (
               <div className="mr-auto flex items-center gap-2">
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => openRename(detail)}
+                  icon={<PencilSimple weight="duotone" className="h-3.5 w-3.5" />}
+                >
+                  {t('pages.agents.rename')}
+                </Button>
                 {COMMANDS.map((command) => (
                   <Button
                     key={command}
@@ -698,7 +746,7 @@ export function AgentsPage() {
       >
         {pendingCommand && (
           <div className="rounded-md border border-line bg-recessed px-3 py-2">
-            <p className="text-[13px] font-medium text-fg-strong">{pendingCommand.agent.hostname}</p>
+            <p className="text-[13px] font-medium text-fg-strong">{displayName(pendingCommand.agent)}</p>
             <p className="pw-mono mt-0.5 text-xs text-fg-subtle">
               {pendingCommand.agent.ip_address}
             </p>
@@ -718,8 +766,10 @@ export function AgentsPage() {
       >
         {pendingDelete && (
           <div className="rounded-md border border-line bg-recessed px-3 py-2">
-            <p className="text-[13px] font-medium text-fg-strong">{pendingDelete.hostname}</p>
-            <p className="pw-mono mt-0.5 text-xs text-fg-subtle">{pendingDelete.ip_address}</p>
+            <p className="text-[13px] font-medium text-fg-strong">{displayName(pendingDelete)}</p>
+            <p className="pw-mono mt-0.5 text-xs text-fg-subtle">
+              {pendingDelete.hostname} · {pendingDelete.ip_address}
+            </p>
             <p className="mt-1.5 text-xs text-fg-subtle">
               {pendingDelete.site_domain
                 ? t('pages.agents.removeSiteNote', { domain: pendingDelete.site_domain })
@@ -794,6 +844,47 @@ export function AgentsPage() {
             </>
           )}
         </div>
+      </Dialog>
+
+      {/* Rename / display name */}
+      <Dialog
+        open={renameAgent !== null}
+        onClose={() => setRenameAgent(null)}
+        size="md"
+        title={t('pages.agents.renameTitle')}
+        description={renameAgent?.hostname}
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setRenameAgent(null)}>
+              {t('common.cancel')}
+            </Button>
+            <Button
+              variant="primary"
+              loading={rename.isPending}
+              onClick={() =>
+                renameAgent && rename.mutate({ id: renameAgent.id, value: renameValue.trim() })
+              }
+            >
+              {t('common.save')}
+            </Button>
+          </>
+        }
+      >
+        <Input
+          label={t('pages.agents.displayNameLabel')}
+          value={renameValue}
+          autoFocus
+          maxLength={100}
+          disabled={rename.isPending}
+          placeholder={renameAgent?.hostname}
+          hint={t('pages.agents.displayNameHint')}
+          onChange={(e) => setRenameValue(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && renameAgent && !rename.isPending) {
+              rename.mutate({ id: renameAgent.id, value: renameValue.trim() })
+            }
+          }}
+        />
       </Dialog>
     </div>
   )

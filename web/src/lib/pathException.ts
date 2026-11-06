@@ -7,6 +7,12 @@
 
 import { PATH_SKIP_LAYERS, type PathMatchType, type PathSkipLayer } from '@/api/types'
 
+type PathErrorKey =
+  | 'pages.pathExceptions.errorPathRequired'
+  | 'pages.pathExceptions.errorPathRooted'
+  | 'pages.pathExceptions.errorPathWildcardSuffix'
+  | 'pages.pathExceptions.errorPathRegex'
+
 /**
  * Validation for the (path, match_type) pair. Returns an i18n error key or
  * `null` when the input is acceptable.
@@ -14,9 +20,23 @@ import { PATH_SKIP_LAYERS, type PathMatchType, type PathSkipLayer } from '@/api/
 export function validatePathExceptionPath(
   path: string,
   matchType: PathMatchType | string,
-): 'pages.pathExceptions.errorPathRequired' | 'pages.pathExceptions.errorPathRooted' | 'pages.pathExceptions.errorPathWildcardSuffix' | null {
+): PathErrorKey | null {
   const trimmed = path.trim()
   if (trimmed.length === 0) return 'pages.pathExceptions.errorPathRequired'
+  if (matchType === 'regex') {
+    // Regex patterns are free-form: no rooting or glob rules, just basic
+    // sanity (length, no whitespace/control chars) and a best-effort syntax
+    // check — the server compiles it with the Rust regex crate and answers
+    // 400 with a displayable message if it still fails.
+    if (trimmed.length > 512) return 'pages.pathExceptions.errorPathRegex'
+    if (/[\s\u0000-\u001f\u007f]/.test(trimmed)) return 'pages.pathExceptions.errorPathRegex'
+    try {
+      new RegExp(trimmed)
+    } catch {
+      return 'pages.pathExceptions.errorPathRegex'
+    }
+    return null
+  }
   if (!trimmed.startsWith('/')) return 'pages.pathExceptions.errorPathRooted'
   if (matchType === 'wildcard' && !trimmed.endsWith('*'))
     return 'pages.pathExceptions.errorPathWildcardSuffix'

@@ -169,7 +169,8 @@ pub struct PathExceptionConfig {
     pub id: String,
     #[serde(default)]
     pub path: String,
-    /// `prefix` / `exact` / `wildcard`; unknown values degrade to `prefix`.
+    /// `prefix` / `exact` / `wildcard` / `regex`; unknown values degrade to
+    /// `prefix`.
     #[serde(default)]
     pub match_type: String,
     /// `*` collapses the list; empty means every layer (old-server shape).
@@ -2730,6 +2731,11 @@ impl RuleCache {
             .map(|mt| match mt {
                 proto::PathMatchType::PathMatchExact => "exact",
                 proto::PathMatchType::PathMatchWildcard => "wildcard",
+                proto::PathMatchType::PathMatchRegex => "regex",
+                // Unknown enum values (a newer control plane) degrade to the
+                // proto default; a regex source string under prefix semantics
+                // almost never matches, so the exception stops applying
+                // rather than widening.
                 _ => "prefix",
             })
             .unwrap_or("prefix");

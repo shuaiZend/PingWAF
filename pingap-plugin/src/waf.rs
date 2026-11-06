@@ -40,6 +40,7 @@ use bytes::{Bytes, BytesMut};
 use dashmap::DashMap;
 use http::{HeaderName, HeaderValue};
 use ipnet::IpNet;
+use regex::{Regex, RegexBuilder};
 use pingap_config::{PluginCategory, PluginConf};
 use pingap_core::{
     Ctx, HTTP_HEADER_NAME_X_REQUEST_ID, HttpResponse, Plugin, PluginStep,
@@ -369,6 +370,20 @@ struct PathExceptions {
     /// Single trailing `*`: a segment prefix of the pattern with the `*`
     /// removed (`/api/*` matches `/api/x`, not `/api`).
     wildcard: Vec<(String, PathBypass)>,
+    /// Operator-written `regex`, unanchored and case-sensitive. Consulted
+    /// last so the older match types keep their precedence.
+    regex: Vec<(Regex, PathBypass)>,
+}
+
+/// Compiles an operator pattern with the same automaton budget the WAF
+/// expression engine uses, so one pathological pattern cannot pin tens of
+/// megabytes on the data plane.
+fn compile_path_regex(pattern: &str) -> Result<Regex, regex::Error> {
+    const MAX_REGEX_SIZE: usize = 4 * 1024 * 1024;
+    RegexBuilder::new(pattern)
+        .size_limit(MAX_REGEX_SIZE)
+        .dfa_size_limit(MAX_REGEX_SIZE)
+        .build()
 }
 
 impl PathExceptions {
@@ -397,6 +412,19 @@ impl PathExceptions {
                     rule.path.trim_end_matches('*').to_string(),
                     bypass,
                 )),
+                "regex" => match compile_path_regex(&rule.path) {
+                    Ok(re) => compiled.regex.push((re, bypass)),
+                    Err(err) => {
+                        // The control plane refuses these on save; this is the
+                        // defence for a bundle written by another version. The
+                        // exception simply stops applying, never widens.
+                        warn!(
+                            path = %rule.path,
+                            error = %err,
+                            "path exception regex failed to compile; rule ignored"
+                        );
+                    },
+                },
                 // `prefix` and any unknown match type: the proto default is
                 // PATH_MATCH_PREFIX, so unknown degrades to the same
                 // semantics rather than to something broader.
@@ -406,6 +434,7 @@ impl PathExceptions {
         if compiled.exact.is_empty()
             && compiled.prefix.is_empty()
             && compiled.wildcard.is_empty()
+            && compiled.regex.is_empty()
         {
             None
         } else {
@@ -435,6 +464,12 @@ impl PathExceptions {
                 self.wildcard
                     .iter()
                     .find(|(pattern, _)| path.starts_with(pattern.as_str()))
+                    .map(|(_, bypass)| bypass)
+            })
+            .or_else(|| {
+                self.regex
+                    .iter()
+                    .find(|(pattern, _)| pattern.is_match(path))
                     .map(|(_, bypass)| bypass)
             })
     }
@@ -2106,6 +2141,9 @@ struct DeferredVerdict {
     choice: EngineChoice,
     context: Option<Arc<SiteContext>>,
     observe: bool,
+    /// A path exception skipped the challenge layer for this request, so a
+    /// Challenge verdict from the body phase must not serve a challenge page.
+    skip_challenge: bool,
     site_id: String,
     host: String,
     request_data: RequestData,
@@ -3409,6 +3447,7 @@ impl WafPlugin {
         denial: &Denial,
         original_url: &str,
         pow_difficulty: u32,
+        skip_challenge: bool,
         event_type: &str,
     ) -> RequestPluginResult {
         let verdict = WafVerdict {
@@ -3432,6 +3471,15 @@ impl WafPlugin {
             &denial.rule_name,
             event_type,
         );
+        if denial.challenge && skip_challenge {
+            // The path exception exempts this path from challenges. The
+            // security event above still records what would have happened;
+            // the visitor simply continues to the origin.
+            if let Some(agent) = agent {
+                agent.record_request(false);
+            }
+            return RequestPluginResult::Continue;
+        }
         let response = if denial.challenge {
             // A client holding a valid clearance for this site already
             // solved its challenge: re-issuing it would loop forever, so
@@ -3470,6 +3518,7 @@ impl WafPlugin {
         choice: &EngineChoice,
         context: Option<&Arc<SiteContext>>,
         observe: bool,
+        skip_challenge: bool,
     ) -> VerdictOutcome {
         match choice {
             EngineChoice::Disabled => {
@@ -3623,6 +3672,15 @@ impl WafPlugin {
             }
             block_page(request_id, &verdict.details)
         } else {
+            if skip_challenge {
+                // The path exception exempts this request from challenges.
+                // The security event above still records the verdict, but the
+                // visitor continues to the origin.
+                if let Some(agent) = agent {
+                    agent.record_request(false);
+                }
+                return VerdictOutcome::Continue;
+            }
             // Challenge verdict. A client that already holds a valid
             // clearance for this site solved its challenge before: issuing
             // the same challenge again would loop forever, so let it
@@ -4229,6 +4287,7 @@ impl Plugin for WafPlugin {
                         denial,
                         &original_url,
                         self.pow_difficulty,
+                        bypasses("challenge"),
                         "ip_geo",
                     ));
                 }
@@ -4335,6 +4394,7 @@ impl Plugin for WafPlugin {
                             &denial,
                             &original_url,
                             self.pow_difficulty,
+                            bypasses("challenge"),
                             "ai_bot",
                         ));
                     }
@@ -4379,6 +4439,7 @@ impl Plugin for WafPlugin {
                             &denial,
                             &original_url,
                             self.pow_difficulty,
+                            bypasses("challenge"),
                             "bot",
                         ));
                     }
@@ -4488,6 +4549,14 @@ impl Plugin for WafPlugin {
                         &tripped.rule_name,
                         "rate_limit",
                     );
+                    if tripped.challenge && bypasses("challenge") {
+                        // The path exception exempts this path from
+                        // challenges; the event above records the rule.
+                        if let Some(agent) = &agent {
+                            agent.record_request(false);
+                        }
+                        return Ok(RequestPluginResult::Continue);
+                    }
                     // Defense in depth: refuse the client at the edge for the
                     // mitigation window so a repeat offender never reaches
                     // the counters (or the origin) again in that time.
@@ -4559,6 +4628,7 @@ impl Plugin for WafPlugin {
                 &choice,
                 context.as_ref(),
                 observe,
+                bypasses("challenge"),
             );
             if let VerdictOutcome::Respond(response) = outcome {
                 return Ok(RequestPluginResult::Respond(response));
@@ -4635,6 +4705,7 @@ impl Plugin for WafPlugin {
                         choice: choice.clone(),
                         context: context.clone(),
                         observe,
+                        skip_challenge: bypasses("challenge"),
                         site_id: site_id.clone(),
                         host: host.clone(),
                         request_data: request_data.clone(),
@@ -4676,6 +4747,7 @@ impl Plugin for WafPlugin {
                             choice: choice.clone(),
                             context: context.clone(),
                             observe,
+                            skip_challenge: bypasses("challenge"),
                             site_id: site_id.clone(),
                             host: host.clone(),
                             request_data: request_data.clone(),
@@ -4930,6 +5002,7 @@ impl Plugin for WafPlugin {
                                 &dv.choice,
                                 dv.context.as_ref(),
                                 dv.observe,
+                                dv.skip_challenge,
                             );
                             if let VerdictOutcome::Respond(response) = outcome {
                                 return Ok(Some(response));
@@ -4988,6 +5061,7 @@ impl Plugin for WafPlugin {
                     &dv.choice,
                     dv.context.as_ref(),
                     dv.observe,
+                    dv.skip_challenge,
                 );
                 // The block page goes back through the proxy; the
                 // staged body is dropped with the aborted upstream
@@ -9295,6 +9369,96 @@ inspect_body = true"###,
         let bypass = resolve_path_bypass(&monitor_site, "/api/x")
             .expect("monitor mode honours the exception too");
         assert_eq!(bypass.id, "e1");
+    }
+
+    #[test]
+    fn path_exception_regex_matches_unanchored_and_case_sensitive() {
+        let compiled = PathExceptions::build(&[
+            path_exception("r1", r"^/api/(v1|v2)/", "regex", &["waf"]),
+            path_exception("r2", r"/Admin/", "regex", &["bot"]),
+            path_exception("r3", r"(?i)^/docs/", "regex", &["access"]),
+            // A pattern the control plane refuses on save: ignored here, and
+            // never widened into a prefix match.
+            path_exception("bad", r"^/broken(", "regex", &["waf"]),
+            path_exception("e1", "/api/v1/pinned", "exact", &["bot"]),
+            path_exception("p1", "/other", "prefix", &["bot"]),
+        ])
+        .unwrap();
+
+        assert_eq!(compiled.match_path("/api/v1/x").unwrap().id, "r1");
+        assert_eq!(compiled.match_path("/api/v2/x").unwrap().id, "r1");
+        // Existing match types keep their precedence over regex.
+        assert_eq!(compiled.match_path("/api/v1/pinned").unwrap().id, "e1");
+        assert_eq!(compiled.match_path("/other/x").unwrap().id, "p1");
+        // Unanchored: the pattern matches anywhere in the path…
+        assert_eq!(compiled.match_path("/x/Admin/y").unwrap().id, "r2");
+        // …and case-sensitive unless the pattern opts in.
+        assert!(compiled.match_path("/x/admin/y").is_none());
+        assert_eq!(compiled.match_path("/DOCS/a").unwrap().id, "r3");
+        // The invalid pattern neither matches nor fails the build.
+        assert!(compiled.match_path("/broken").is_none());
+    }
+
+    #[test]
+    fn challenge_layer_suppresses_a_policy_challenge() {
+        let denial = Denial {
+            rule_id: "ip1".to_string(),
+            rule_name: "IP rule".to_string(),
+            detail: "client ip matched challenge rule".to_string(),
+            challenge: true,
+            basic_auth: false,
+        };
+        let request = probe("");
+
+        let skipped = WafPlugin::deny_request(
+            None,
+            "site1",
+            "req-skip",
+            "example.com",
+            &request,
+            &denial,
+            "/x",
+            4,
+            true,
+            "ip_geo",
+        );
+        assert!(matches!(skipped, RequestPluginResult::Continue));
+
+        // Without the exception the challenge page still goes out, and a
+        // block is never suppressed by the challenge layer.
+        let served = WafPlugin::deny_request(
+            None,
+            "site1",
+            "req-serve",
+            "example.com",
+            &request,
+            &denial,
+            "/x",
+            4,
+            false,
+            "ip_geo",
+        );
+        assert!(matches!(served, RequestPluginResult::Respond(_)));
+
+        // A block is never waived by the challenge layer, even when the path
+        // exception asks to skip challenges.
+        let block = Denial {
+            challenge: false,
+            ..denial
+        };
+        let blocked = WafPlugin::deny_request(
+            None,
+            "site1",
+            "req-block",
+            "example.com",
+            &request,
+            &block,
+            "/x",
+            4,
+            true,
+            "ip_geo",
+        );
+        assert!(matches!(blocked, RequestPluginResult::Respond(_)));
     }
 
     #[test]

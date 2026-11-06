@@ -1096,6 +1096,8 @@ export interface Agent {
   site_id: string | null
   site_domain: string | null
   hostname: string
+  /** Operator-assigned label; null = show the hostname instead. */
+  display_name: string | null
   ip_address: string
   /** Egress address as seen from the public internet; null when unknown. */
   public_ip: string | null
@@ -1697,9 +1699,9 @@ export interface FlushLogsResult {
 /* ── Path exceptions ──────────────────────────────────────────────── */
 
 /** How a path exception matches a request path. */
-export type PathMatchType = 'prefix' | 'exact' | 'wildcard'
+export type PathMatchType = 'prefix' | 'exact' | 'wildcard' | 'regex'
 
-export const PATH_MATCH_TYPES: PathMatchType[] = ['prefix', 'exact', 'wildcard']
+export const PATH_MATCH_TYPES: PathMatchType[] = ['prefix', 'exact', 'wildcard', 'regex']
 
 /**
  * Protection layers a path exception can bypass. `*` bypasses everything;

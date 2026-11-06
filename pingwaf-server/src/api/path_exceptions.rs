@@ -113,19 +113,53 @@ fn validate_match_type(raw: Option<&str>) -> Result<String, ApiError> {
         .filter(|v| !v.is_empty())
         .unwrap_or("prefix");
     match value {
-        "prefix" | "exact" | "wildcard" => Ok(value.to_string()),
+        "prefix" | "exact" | "wildcard" | "regex" => Ok(value.to_string()),
         other => Err(ApiError::BadRequest(format!(
-            "unknown match_type '{other}'; expected one of prefix, exact, wildcard"
+            "unknown match_type '{other}'; expected one of prefix, exact, wildcard, regex"
         ))),
     }
 }
 
+/// Compiles a path pattern with the same automaton budget the WAF expression
+/// engine uses (`pingwaf-waf/src/rules/expression.rs`), so a pathological
+/// pattern is refused at save time instead of being dropped — or pinning
+/// memory — on the data plane.
+fn validate_regex(pattern: &str) -> Result<(), ApiError> {
+    const MAX_REGEX_SIZE: usize = 4 * 1024 * 1024;
+    regex::RegexBuilder::new(pattern)
+        .size_limit(MAX_REGEX_SIZE)
+        .dfa_size_limit(MAX_REGEX_SIZE)
+        .build()
+        .map(|_| ())
+        .map_err(|err| {
+            ApiError::BadRequest(format!("invalid regex '{pattern}': {err}"))
+        })
+}
+
 /// A path must be a request path: leading `/`, no whitespace or control
 /// characters, and `wildcard` only supports a single trailing `*`.
+///
+/// `regex` is the exception: `^/api` does not start with `/` and `*`/`?` are
+/// operators there, so only the shared limits (length, no whitespace/control
+/// characters) apply in addition to a compile check.
 fn validate_path(raw: &str, match_type: &str) -> Result<String, ApiError> {
     let path = raw.trim();
     if path.is_empty() {
         return Err(ApiError::BadRequest("path must not be empty".to_string()));
+    }
+    if match_type == "regex" {
+        if path.len() > MAX_PATH_LEN {
+            return Err(ApiError::BadRequest(format!(
+                "invalid path: at most {MAX_PATH_LEN} characters"
+            )));
+        }
+        if path.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            return Err(ApiError::BadRequest(format!(
+                "invalid regex '{path}': whitespace and control characters are not allowed"
+            )));
+        }
+        validate_regex(path)?;
+        return Ok(path.to_string());
     }
     if !path.starts_with('/') {
         return Err(ApiError::BadRequest(format!(
@@ -472,8 +506,25 @@ mod tests {
     }
 
     #[test]
-    fn match_type_defaults_to_prefix() {
+    fn match_types_include_regex() {
         assert_eq!(validate_match_type(None).unwrap(), "prefix");
-        assert!(validate_match_type(Some("regex")).is_err());
+        assert_eq!(validate_match_type(Some("regex")).unwrap(), "regex");
+        assert!(validate_match_type(Some("glob")).is_err());
+    }
+
+    #[test]
+    fn regex_paths_compile_and_keep_the_shared_limits() {
+        assert_eq!(
+            validate_path("^/api/(v1|v2)/", "regex").unwrap(),
+            "^/api/(v1|v2)/".to_string()
+        );
+        // `*` and `?` are operators here, and anchoring is the author's choice.
+        assert!(validate_path("/api/.*", "regex").is_ok());
+        // An unparsable pattern is refused at save time, not shipped.
+        assert!(validate_path("^/api/(", "regex").is_err());
+        assert!(validate_path("/api health", "regex").is_err());
+        assert!(
+            validate_path(&format!("/{}", "a".repeat(600)), "regex").is_err()
+        );
     }
 }

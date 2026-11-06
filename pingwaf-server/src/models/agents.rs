@@ -37,6 +37,11 @@ pub mod agents {
         pub id: Uuid,
         pub site_id: Option<Uuid>,
         pub hostname: String,
+        /// Operator-editable label shown instead of `hostname` when set.
+        ///
+        /// Never used for identity: registration matches on
+        /// `hostname + api_key_id`, so renaming the label cannot orphan a row.
+        pub display_name: Option<String>,
         pub ip_address: String,
         /// Egress address as seen by the public internet, empty when unknown.
         pub public_ip: Option<String>,

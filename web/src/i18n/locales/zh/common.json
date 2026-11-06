@@ -1585,6 +1585,13 @@
       "os": "操作系统",
       "totalAgents": "节点总数",
       "searchPlaceholder": "搜索节点…",
+      "displayNameLabel": "显示名称",
+      "displayNameHint": "留空则显示主机名。",
+      "rename": "重命名",
+      "renameTitle": "重命名节点",
+      "displayNameSaved": "显示名称已保存",
+      "displayNameCleared": "显示名称已清除，恢复显示主机名",
+      "displayNameFailed": "重命名失败",
       "remove": "移除节点",
       "removeTitle": "移除节点",
       "removeDescription": "这将取消节点注册。节点可使用有效的 API 密钥重新注册。",
@@ -2941,6 +2948,8 @@
       "match_prefix": "前缀",
       "match_exact": "精确",
       "match_wildcard": "通配",
+      "match_regex": "正则",
+      "regexHint": "Rust 正则表达式：未锚定匹配、默认区分大小写（可用 (?i) 忽略）；非法正则保存时会失败。",
       "wildcardHint": "通配路径必须以「*」结尾。",
       "skipLayers": "绕过层",
       "bypassLayers": "绕过防护层",
@@ -2977,7 +2986,8 @@
       "deleteDescription": "该路径的请求将重新接受检查。",
       "errorPathRequired": "请填写路径。",
       "errorPathRooted": "路径必须以「/」开头。",
-      "errorPathWildcardSuffix": "通配路径必须以「*」结尾。"
+      "errorPathWildcardSuffix": "通配路径必须以「*」结尾。",
+      "errorPathRegex": "正则表达式无效：不能为空、不能包含空白或控制字符，且必须可以编译。"
     }
   },
   "challengeLevels": {

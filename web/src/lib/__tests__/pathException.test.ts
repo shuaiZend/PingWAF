@@ -32,6 +32,24 @@ describe('validatePathExceptionPath', () => {
     expect(validatePathExceptionPath('/api', 'prefix')).toBeNull()
     expect(validatePathExceptionPath('/healthz', 'exact')).toBeNull()
   })
+
+  it('accepts unanchored regex patterns without rooting or glob rules', () => {
+    expect(validatePathExceptionPath('^/api/(v1|v2)/', 'regex')).toBeNull()
+    expect(validatePathExceptionPath('api/[0-9]+', 'regex')).toBeNull()
+    expect(validatePathExceptionPath('/assets', 'regex')).toBeNull()
+  })
+
+  it('rejects invalid regex patterns', () => {
+    expect(validatePathExceptionPath('(/api', 'regex')).toBe(
+      'pages.pathExceptions.errorPathRegex',
+    )
+    expect(validatePathExceptionPath('a b c', 'regex')).toBe(
+      'pages.pathExceptions.errorPathRegex',
+    )
+    expect(validatePathExceptionPath('x'.repeat(513), 'regex')).toBe(
+      'pages.pathExceptions.errorPathRegex',
+    )
+  })
 })
 
 describe('toggleSkipLayer', () => {

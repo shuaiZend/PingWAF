@@ -36,12 +36,13 @@ import {
   type PathMatchType,
 } from '@/api/types'
 
-const MATCH_TYPES: PathMatchType[] = ['prefix', 'exact', 'wildcard']
+const MATCH_TYPES: PathMatchType[] = ['prefix', 'exact', 'wildcard', 'regex']
 
-const MATCH_TONE: Record<string, 'info' | 'brand' | 'warning'> = {
+const MATCH_TONE: Record<string, 'info' | 'brand' | 'warning' | 'neutral'> = {
   prefix: 'info',
   exact: 'brand',
   wildcard: 'warning',
+  regex: 'info',
 }
 
 interface FormState {
@@ -378,7 +379,7 @@ export function PathExceptionsPanel() {
             label={t('pages.pathExceptions.path')}
             value={form.path}
             autoFocus
-            placeholder="/api/*"
+            placeholder={form.match_type === 'regex' ? '^/api/(v1|v2)/' : '/api/*'}
             hint={t('pages.pathExceptions.pathHint')}
             className="pw-mono"
             onChange={(e) => setForm((f) => ({ ...f, path: e.target.value }))}
@@ -410,6 +411,11 @@ export function PathExceptionsPanel() {
             {form.match_type === 'wildcard' && (
               <p className="mt-1.5 text-xs text-fg-subtle">
                 {t('pages.pathExceptions.wildcardHint')}
+              </p>
+            )}
+            {form.match_type === 'regex' && (
+              <p className="mt-1.5 text-xs text-fg-subtle">
+                {t('pages.pathExceptions.regexHint')}
               </p>
             )}
           </div>

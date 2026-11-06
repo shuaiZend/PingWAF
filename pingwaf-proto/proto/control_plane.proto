@@ -440,6 +440,11 @@ enum PathMatchType {
   PATH_MATCH_PREFIX = 0;    // `path` or `path/…`, never `/apix`
   PATH_MATCH_EXACT = 1;     // request path equals `path`
   PATH_MATCH_WILDCARD = 2;  // single trailing `*`, otherwise a prefix match
+  // Rust `regex` syntax, unanchored (`is_match`) and case-sensitive; anchor
+  // with `^…$` when the whole path must match. Agents that predate this value
+  // fall back to prefix semantics, so the exception simply stops applying
+  // (fail-safe) until the agent is upgraded.
+  PATH_MATCH_REGEX = 3;
 }
 
 // Global access-log filtering configuration. Carried on every `RuleBundle`

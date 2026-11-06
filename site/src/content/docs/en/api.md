@@ -48,12 +48,12 @@ One certificate (e.g. a wildcard) can serve several sites. A site sees its owned
 
 ## Path exceptions
 
-A site in observation mode (`waf_settings.mode = monitor`) can whitelist request paths that skip selected protection layers (`waf`, `bot`, `access`, `basic_auth`, `mtls`, `ai_bot`, `rate_limit`, `challenge`, or `*`). Saving in any other mode fails with `409`; the data plane also ignores exceptions on non-observing sites. Paused sites, fail-closed edges and dynamic IP bans are never bypassed. With `log_hits: true` each hit is recorded as a `path_bypass` security event.
+Operators can whitelist request paths that skip selected protection layers (`waf`, `bot`, `access`, `basic_auth`, `mtls`, `ai_bot`, `rate_limit`, `challenge`, or `*`). Path exceptions can be saved and are enforced in every WAF mode — an observation-mode site and a block-mode site honour the same rule. Paused sites, fail-closed edges and dynamic IP bans are never bypassed. With `log_hits: true` each hit is recorded as a `path_bypass` security event. `challenge` waives every challenge source (WAF rule/scoring challenges, CC and rate-limit challenge actions, bot protection, IP/geo rules and the standalone challenge plugin); blocks still enforce.
 
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /sites/{id}/path-exceptions` | List exceptions (≤64 per site, unique `path`) |
-| `POST /sites/{id}/path-exceptions` | Create: `path` (starts with `/`, ≤512), `match_type` (`prefix`/`exact`/`wildcard`), `skip_layers`, `note`, `log_hits`, `enabled` |
+| `POST /sites/{id}/path-exceptions` | Create: `path` (starts with `/`, ≤512; a pattern for `regex`), `match_type` (`prefix`/`exact`/`wildcard`/`regex` — unanchored, case-sensitive Rust regex), `skip_layers`, `note`, `log_hits`, `enabled` |
 | `GET|PUT|DELETE /sites/{id}/path-exceptions/{id}` | Read / partial update / delete (`204`) |
 
 ## Error page scopes

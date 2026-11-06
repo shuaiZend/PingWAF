@@ -48,12 +48,12 @@ curl -s https://localhost:9080/api/v1/sites -H "Authorization: Bearer $TOKEN"
 
 ## 路径例外
 
-处于观察模式（`waf_settings.mode = monitor`）的站点可以把若干请求路径加白，使其跳过选定的防护层（`waf`、`bot`、`access`、`basic_auth`、`mtls`、`ai_bot`、`rate_limit`、`challenge`，或 `*` 表示全部）。非观察模式下保存返回 `409`；数据面在非观察站点上也会完全忽略例外。暂停站点、fail-closed 边缘与动态 IP 封禁不可绕过。`log_hits: true` 时每次命中都会写入 `path_bypass` 安全事件。
+运营者可以把若干请求路径加白，使其跳过选定的防护层（`waf`、`bot`、`access`、`basic_auth`、`mtls`、`ai_bot`、`rate_limit`、`challenge`，或 `*` 表示全部）。路径例外在所有 WAF 模式（观察与拦截）下都可保存并生效。暂停站点、fail-closed 边缘与动态 IP 封禁不可绕过。`log_hits: true` 时每次命中都会写入 `path_bypass` 安全事件。`challenge` 放行所有质询来源（WAF 规则/评分、CC 与限速的挑战动作、Bot 防护、IP/地区规则、独立质询插件），拦截仍生效。
 
 | 端点 | 用途 |
 | --- | --- |
 | `GET /sites/{id}/path-exceptions` | 列出例外（每站最多 64 条，`path` 唯一） |
-| `POST /sites/{id}/path-exceptions` | 创建：`path`（以 `/` 开头，≤512）、`match_type`（`prefix`/`exact`/`wildcard`）、`skip_layers`、`note`、`log_hits`、`enabled` |
+| `POST /sites/{id}/path-exceptions` | 创建：`path`（以 `/` 开头，≤512；`regex` 时为正则表达式）、`match_type`（`prefix`/`exact`/`wildcard`/`regex`，其中 regex 为未锚定、区分大小写的 Rust 正则）、`skip_layers`、`note`、`log_hits`、`enabled` |
 | `GET|PUT|DELETE /sites/{id}/path-exceptions/{id}` | 读取 / 部分更新 / 删除（`204`） |
 
 ## 错误页作用域

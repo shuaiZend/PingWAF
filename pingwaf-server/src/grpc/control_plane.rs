@@ -354,6 +354,9 @@ impl ControlPlaneTrait for ControlPlaneService {
                     id: Set(agent_id),
                     site_id: Set(site_id),
                     hostname: Set(payload.hostname.clone()),
+                    // The label is the operator's: a registering agent never
+                    // supplies or clears it.
+                    display_name: Set(None),
                     ip_address: Set(payload.ip_address.clone()),
                     version: Set(optional(&payload.version)),
                     os_info: Set(optional(&payload.os_info)),

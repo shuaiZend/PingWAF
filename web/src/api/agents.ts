@@ -36,6 +36,13 @@ export const agentsApi = {
 
   remove: (id: string) => apiClient.delete<void>(`/agents/${id}`),
 
+  /**
+   * Updates the operator-assigned display name (`PATCH /agents/{id}`). An
+   * empty string or null clears it, falling back to the hostname.
+   */
+  update: (id: string, data: { display_name: string | null }) =>
+    apiClient.patch<Agent>(`/agents/${id}`, data),
+
   /** Mints an agent key and returns the command that brings a node online. */
   enroll: (data: AgentEnrollRequest = {}) =>
     apiClient.post<AgentEnrollResponse>('/agents/enroll', data),

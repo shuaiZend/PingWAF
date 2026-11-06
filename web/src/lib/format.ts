@@ -209,7 +209,15 @@ export function fromLocalInputValue(value: string): string | undefined {
 /** `bytes` → `1.4 MB`, with a fixed unit ladder so columns stay comparable. */
 export function formatSize(bytes: number | null | undefined): string {
   if (bytes === null || bytes === undefined || !Number.isFinite(bytes)) return '—'
-  if (bytes < 1024) return `${bytes} B`
+  // Sizes are non-negative; a negative reading means "unknown" upstream.
+  if (bytes < 0) return '—'
+  if (bytes < 1024) {
+    // Throughput arrives as floats — round to whole bytes, but never round up
+    // into a value that the ladder would print as "1024 B" (promote instead).
+    const rounded = Math.round(bytes)
+    if (rounded < 1024) return `${rounded} B`
+    bytes = rounded
+  }
   const units = ['KB', 'MB', 'GB', 'TB']
   let value = bytes / 1024
   let i = 0

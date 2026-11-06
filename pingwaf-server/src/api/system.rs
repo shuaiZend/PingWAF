@@ -477,7 +477,12 @@ fn agent_node(
     };
     AgentNode {
         id: row.id,
-        name: row.hostname.clone(),
+        // Same label as `GET /agents`: the operator's display name when one
+        // is set, the reported hostname otherwise.
+        name: row
+            .display_name
+            .clone()
+            .unwrap_or_else(|| row.hostname.clone()),
         status: row.status.clone(),
         cpu_percent,
         cpu_source: cpu_source.to_string(),
@@ -849,6 +854,7 @@ mod tests {
             id: Uuid::new_v4(),
             site_id: None,
             hostname: hostname.to_string(),
+            display_name: None,
             ip_address: "10.0.0.5".to_string(),
             public_ip: None,
             private_ip: None,
@@ -1029,6 +1035,23 @@ mod tests {
         // No figure, no source: the label never names `probe`/`heartbeat` for a
         // value the console renders as a dash.
         assert_eq!(json["cpu_source"], serde_json::json!("none"));
+    }
+
+    #[test]
+    fn agent_node_uses_the_display_name_when_set() {
+        let mut row = inventory_row("edge-2", "online", None);
+        row.display_name = Some("edge backup".to_string());
+        assert_eq!(
+            agent_node(&row, &NodeCounters::default(), 0).name,
+            "edge backup"
+        );
+
+        // Clearing the label falls back to the reported identity.
+        row.display_name = None;
+        assert_eq!(
+            agent_node(&row, &NodeCounters::default(), 0).name,
+            "edge-2"
+        );
     }
 
     /// A NaN sample (a platform whose CPU counters are unusable) is reported
