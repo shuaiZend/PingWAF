@@ -72,7 +72,7 @@ export function Pagination({
           })}
         </span>
         {pageSizeOptions && onPageSizeChange && (
-          <label className="flex items-center gap-1.5">
+          <label className="relative flex items-center gap-1.5">
             <span className="sr-only">{t('pagination.perPage')}</span>
             <select
               value={pageSize}
