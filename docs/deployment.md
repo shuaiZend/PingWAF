@@ -317,7 +317,7 @@ server-side log batch size (`500`) are compiled-in constants with no override.
 |-----|------|---------|-------------|
 | `server_url` | string | `http://localhost:9090` (`--server-url`); the compiled-in struct default is `https://localhost:9090` and applies when the key is absent from the file | Control plane gRPC URL |
 | `server_ca_cert` | string | — | PEM file with the CA that signed the control plane's TLS certificate (required for private CAs; bundled roots are used otherwise) |
-| `server_tls_name` | string | — | Name used for SNI and certificate verification when the control plane's certificate carries no SAN for the host in `server_url`. Requires a release that knows the flag/keys (0.32.16 does not); on older binaries, point the SAN name at the control plane via `/etc/hosts` instead |
+| `server_tls_name` | string | — | Name used for SNI and certificate verification when the control plane's certificate carries no SAN for the host in `server_url`. Requires 0.32.17 or newer; on older binaries, point the SAN name at the control plane via `/etc/hosts` instead |
 | `api_key` | string | `""` | Agent authentication key (empty = auto-register over loopback in all-in-one) |
 | `cache_dir` | string | `./data/cache` (`--cache-dir`); the compiled-in struct default is `/var/lib/pingwaf/cache` and applies when the key is absent from the file | Local rule cache directory |
 | `fail_open` | bool | `true` | Local fallback while disconnected: `true` keeps serving with the last synced rules; `false` answers 503 for hosts without synced rules. The per-site failover policy (console → site → basic) and the control-plane-wide default (settings → defense) take precedence once synced |
@@ -419,9 +419,9 @@ The gRPC listener serves TLS by default, so `server_url` should be `https://`
 with the CA that signed the control plane's certificate in
 `server_ca_cert` (self-signed control plane: download the CA from
 **Settings → Control plane HTTPS**). If the certificate's SANs do not include
-the host agents dial, set `server_tls_name` to a SAN it does carry — note the
-parameter needs a release that knows the flag (0.32.16 does not); on older
-binaries, point the SAN name at the control plane in `/etc/hosts` instead.
+the host agents dial, set `server_tls_name` to a SAN it does carry — the
+parameter requires 0.32.17 or newer; on older binaries, point the SAN name at
+the control plane in `/etc/hosts` instead.
 
 Generate an agent API key from the dashboard: **Settings → API Keys → Create Key**.
 
@@ -773,6 +773,21 @@ The API for all of this is documented in
   not trust (typically a self-signed control plane with no `server_ca_cert`);
 - `NotValidForName` — the certificate has no SAN for the host the agent dials.
 
+Besides `error` and `delay_ms`, the failure log now carries a `hint="..."`
+field, derived from the error chain, that names the most likely
+misconfiguration:
+
+| `hint` (abridged) | Meaning | Remedy |
+|-------------------|---------|--------|
+| `server_url uses http:// but ... serves TLS` | plaintext `http://` against the TLS gRPC port | switch to `https://` and set `server_ca_cert` |
+| `certificate is not trusted` | the signing CA is not trusted by the agent | download the control plane certificate (Settings → Control plane HTTPS) and set `agent.server_ca_cert` |
+| `certificate does not name the host` | no SAN for the host in `server_url` | set `agent.server_tls_name` to a SAN the certificate carries |
+| unreachable variants (connection refused / tcp connect error / timed out / connection reset) | the control plane cannot be reached at all | check `server_url`, port 9090 reachability and the firewall |
+
+An empty `hint` means the error was not recognized as a known configuration
+problem — the original `error` and backoff `delay_ms` fields are unchanged
+either way.
+
 **Diagnose:**
 
 ```bash
@@ -788,15 +803,22 @@ openssl s_client -connect <host>:9090 -servername <host> -verify_hostname <host>
 systemctl show pingwaf -p Environment
 ```
 
+`install.sh` prints the same three-part guidance when it sees a non-loopback
+`http://` server URL — the symptom to expect in the journal, the fix
+(`--server-url https://<host>:9090 --server-ca-cert <pem>`, plus
+`--server-tls-name <SAN>` when the certificate does not name the host) and the
+`openssl s_client -alpn h2` verification command. It is a **warning only**: the
+installer does not block the install, so a plaintext agent URL can still end up
+in the configuration file.
+
 **Fix:**
 
 1. Use `https://` in `server_url` (the gRPC listener serves TLS by default)
    and set `server_ca_cert` to the CA that signed the control plane's
    certificate (self-signed control plane: **Settings → Control plane HTTPS**).
 2. If the certificate has no SAN for the URL host, set `server_tls_name` to a
-   SAN it does carry (requires a release that knows the flag — 0.32.16 does
-   not; on older binaries, point the SAN name at the control plane via
-   `/etc/hosts`).
+   SAN it does carry (requires 0.32.17 or newer; on older binaries, point the
+   SAN name at the control plane via `/etc/hosts` as a transition).
 3. Remove stale `PINGWAF_*` overrides from the unit (`systemctl edit pingwaf`)
    and restart: `sudo systemctl restart pingwaf`.
 

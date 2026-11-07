@@ -41,6 +41,29 @@ fatal()   { error "$@"; exit 1; }
 
 has() { command -v "$1" >/dev/null 2>&1; }
 
+# Host part of a URL, without scheme, credentials, port or path. Handles both
+# `host:port` and `[IPv6]:port`, so the warning below can print a usable
+# `openssl s_client -connect host:9090` line.
+server_host() {
+    local rest="${1#*://}"
+    rest="${rest%%/*}"
+    rest="${rest##*@}"
+    if [[ "$rest" == \[* ]]; then
+        rest="${rest#[}"
+        printf '%s' "${rest%%]*}"
+    else
+        printf '%s' "${rest%%:*}"
+    fi
+}
+
+# Loopback control planes are the one place plaintext gRPC is expected.
+# `127.*` is deliberately a dotted-quad match, not a prefix: a host like
+# `127.evil.com` resolves over DNS and is not loopback.
+is_loopback_host() {
+    [[ "$1" == "localhost" || "$1" == "::1" ]] && return 0
+    [[ "$1" =~ ^127\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]
+}
+
 # ─── Constants ────────────────────────────────────────────────────────────────
 REPO="shuaiZend/PingWAF"
 BINARY_NAME="pingwaf"
@@ -476,8 +499,21 @@ if [[ "$MODE" == "agent" ]]; then
     if [[ -z "$API_KEY" ]]; then
         warn "No --api-key given: start the agent with PINGWAF_API_KEY set, or it cannot register."
     fi
-    if [[ "$SERVER_URL" == http:* ]]; then
-        warn "The control plane serves gRPC over TLS by default; a plain http:// server-url only works when the control plane sets grpc_tls_mode = \"off\". For TLS use https:// and configure agent.server_ca_cert with the control plane's certificate."
+    # Schemes are case-insensitive; `HTTP://` must not slip past the warning.
+    # `tr` rather than `${var,,}`: macOS ships bash 3.2, which lacks it.
+    _cp_scheme="$(printf '%s' "$SERVER_URL" | tr '[:upper:]' '[:lower:]')"
+    if [[ "$_cp_scheme" == http:* && -n "$_cp_scheme" ]]; then
+        _cp_host="$(server_host "$SERVER_URL")"
+        if [[ -z "$_cp_host" ]]; then
+            warn "Could not parse a host out of --server-url '${SERVER_URL}'; expected http://host:9090."
+        elif is_loopback_host "$_cp_host"; then
+            warn "Plain http:// is accepted only because ${_cp_host} is loopback: a control plane on another host serves gRPC over TLS by default."
+        else
+            warn "Plain http:// to ${_cp_host} fails against a default control plane: the gRPC port serves TLS, so the agent only reports an opaque h2 protocol error."
+            warn "  Symptom: journalctl -u pingwaf shows 'Connection to control plane failed' with FRAME_SIZE_ERROR."
+            warn "  Fix:     reinstall with --server-url https://${_cp_host}:9090 --server-ca-cert <control-plane.pem> (add --server-tls-name <SAN> when the certificate does not name ${_cp_host})."
+            warn "  Verify:  openssl s_client -connect ${_cp_host}:9090 -servername ${_cp_host} -alpn h2"
+        fi
     fi
     if [[ -n "$SERVER_CA_CERT" && ! -r "$SERVER_CA_CERT" ]]; then
         fatal "--server-ca-cert ${SERVER_CA_CERT} is not readable. Download the control plane certificate (Settings -> Control plane HTTPS) and point this option at the PEM file."
@@ -485,7 +521,7 @@ if [[ "$MODE" == "agent" ]]; then
     if [[ -n "$SERVER_TLS_NAME" && -z "$SERVER_CA_CERT" ]]; then
         warn "--server-tls-name only changes certificate verification; the control plane's CA still has to be trusted (use --server-ca-cert)."
     fi
-    if [[ -n "$SERVER_TLS_NAME" && "$SERVER_URL" == http:* ]]; then
+    if [[ -n "$SERVER_TLS_NAME" && "$_cp_scheme" == http:* ]]; then
         warn "--server-tls-name has no effect while --server-url is http:// (TLS is not in use)."
     fi
 fi

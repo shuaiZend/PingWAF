@@ -418,6 +418,10 @@ impl ControlPlaneClient {
                 Err(e) => {
                     warn!(
                         error = %e,
+                        hint = connection_hint_field(
+                            &e,
+                            &self.config.server_url
+                        ),
                         delay_ms = retry_delay.as_millis() as u64,
                         "Connection to control plane failed"
                     );
@@ -1684,7 +1688,7 @@ fn apply_client_tls(
     ca_cert_pem: &Option<String>,
     tls_name: &Option<String>,
 ) -> anyhow::Result<Endpoint> {
-    if !server_url.starts_with("https://") {
+    if !has_scheme(server_url, "https://") {
         return Ok(endpoint);
     }
     let mut tls = ClientTlsConfig::new();
@@ -1706,6 +1710,16 @@ fn apply_client_tls(
     Ok(endpoint.tls_config(tls)?)
 }
 
+/// Whether `url` starts with `scheme`, ignoring ASCII case.
+///
+/// URI schemes are case-insensitive (`HTTPS://host` is valid), so a
+/// case-sensitive `starts_with` would silently skip the TLS setup and send
+/// cleartext h2 to a TLS port again.
+fn has_scheme(url: &str, scheme: &str) -> bool {
+    url.get(..scheme.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(scheme))
+}
+
 /// Doubles the current reconnect backoff, capped at the configured maximum,
 /// then shrinks it to a random point in the lower half of that value.
 ///
@@ -1716,6 +1730,64 @@ fn next_backoff(current_ms: u64, max_ms: u64) -> u64 {
     let capped = current_ms.saturating_mul(2).min(max_ms);
     let factor = 0.5 + rand::random::<f64>() * 0.5;
     ((capped as f64 * factor) as u64).max(1)
+}
+
+/// Actionable advice for a control-plane connection failure, or `None` when
+/// the error does not match a known configuration mistake.
+///
+/// TLS misconfiguration otherwise surfaces as an opaque h2 error: the only
+/// visible symptom is `h2 protocol error` / `FRAME_SIZE_ERROR`, which sends
+/// operators looking at the wrong layer. The match runs over the whole anyhow
+/// chain (`{:#}`) because tonic wraps the rustls error several levels deep.
+fn connection_hint(
+    error: &anyhow::Error,
+    server_url: &str,
+) -> Option<&'static str> {
+    const PLAINTEXT: &str = "server_url uses http:// but the control plane's gRPC port serves TLS (symptom: h2 protocol error / FRAME_SIZE_ERROR); use https:// and set agent.server_ca_cert (or --server-ca-cert) to the control plane certificate";
+    const UNKNOWN_ISSUER: &str = "the control plane certificate is not trusted; download it (Settings -> Control plane HTTPS) and set agent.server_ca_cert (or --server-ca-cert)";
+    const NAME_MISMATCH: &str = "the certificate does not name the host in server_url; set agent.server_tls_name to one of its SANs, or dial a name the certificate carries";
+    const UNREACHABLE: &str = "the control plane is unreachable; check server_url, that the gRPC port (9090) is open, and the firewall";
+
+    let chain = format!("{error:#}").to_ascii_lowercase();
+    let h2_error = chain.contains("frame_size_error")
+        || chain.contains("h2 protocol error")
+        || chain.contains("http2 error");
+    // Only blame plaintext when the URL is plaintext: an h2 error over https
+    // is a protocol problem, not a scheme mistake.
+    if has_scheme(server_url, "http://") && h2_error {
+        return Some(PLAINTEXT);
+    }
+    if chain.contains("unknownissuer")
+        || chain.contains("unknown issuer")
+        || chain.contains("unable to get local issuer")
+    {
+        return Some(UNKNOWN_ISSUER);
+    }
+    // rustls's Display form is `certificate not valid for name "…"`; the
+    // variant spellings are defensive against a different rustls wording.
+    if chain.contains("notvalidforname")
+        || chain.contains("not valid for name")
+        || chain.contains("certificate not valid for")
+    {
+        return Some(NAME_MISMATCH);
+    }
+    if chain.contains("connection refused")
+        || chain.contains("tcp connect error")
+        || chain.contains("timed out")
+        || chain.contains("deadline has elapsed")
+        || chain.contains("connection reset")
+    {
+        return Some(UNREACHABLE);
+    }
+    None
+}
+
+/// The `hint` field written to the failure log: empty when unrecognised.
+fn connection_hint_field(
+    error: &anyhow::Error,
+    server_url: &str,
+) -> &'static str {
+    connection_hint(error, server_url).unwrap_or("")
 }
 
 /// The cadence the heartbeat sender ticks at.
@@ -2001,6 +2073,93 @@ mod tests {
         )
         .await;
         assert!(result.is_err(), "disabled shipper resolved too early");
+    }
+
+    #[test]
+    fn plaintext_url_hitting_a_tls_port_is_explained() {
+        // The exact shape a 0.32.16 agent logged when it spoke h2c to 9090.
+        let err = anyhow::anyhow!(
+            "transport error: h2 protocol error: http2 error: connection \
+             error detected: frame with invalid size: GoAway(b\"\", \
+             FRAME_SIZE_ERROR, Library)"
+        );
+        let hint =
+            connection_hint(&err, "http://waf.example.com:9090").unwrap();
+        assert!(hint.contains("https://"), "{hint}");
+        assert!(hint.contains("server_ca_cert"), "{hint}");
+        // URI schemes are case-insensitive; an uppercase scheme is still
+        // plaintext.
+        assert!(connection_hint(&err, "HTTP://waf.example.com:9090").is_some());
+    }
+
+    #[test]
+    fn tls_url_with_an_h2_error_is_not_blamed_on_plaintext() {
+        let err = anyhow::anyhow!(
+            "transport error: h2 protocol error: FRAME_SIZE_ERROR"
+        );
+        assert!(connection_hint(&err, "https://waf.example.com:9090").is_none());
+    }
+
+    #[test]
+    fn untrusted_certificate_points_at_the_ca_option() {
+        let err = anyhow::anyhow!(
+            "transport error: invalid peer certificate: UnknownIssuer"
+        );
+        let hint =
+            connection_hint(&err, "https://waf.example.com:9090").unwrap();
+        assert!(hint.contains("server_ca_cert"), "{hint}");
+    }
+
+    #[test]
+    fn name_mismatch_points_at_the_tls_name_option() {
+        // rustls maps webpki's `CertNotValidForName` to the `Context` variant,
+        // whose Display carries the offending name and the valid SANs.
+        let err = anyhow::anyhow!(
+            "transport error: invalid peer certificate: certificate not \
+             valid for name \"waf.example.com\"; certificate is only valid \
+             for pingwaf"
+        );
+        let hint =
+            connection_hint(&err, "https://waf.example.com:9090").unwrap();
+        assert!(hint.contains("server_tls_name"), "{hint}");
+    }
+
+    #[test]
+    fn the_logged_hint_field_is_empty_for_unrecognised_errors() {
+        let known = anyhow::anyhow!(
+            "transport error: invalid peer certificate: UnknownIssuer"
+        );
+        assert!(
+            connection_hint_field(&known, "https://waf.example.com:9090")
+                .contains("server_ca_cert")
+        );
+        let unknown = anyhow::anyhow!("transport error");
+        assert!(connection_hint_field(
+            &unknown,
+            "https://waf.example.com:9090"
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn unreachable_control_plane_points_at_the_port() {
+        for text in [
+            "tcp connect error: Connection refused (os error 111)",
+            "transport error: timed out",
+            "tcp connect error: connection reset by peer",
+        ] {
+            let err = anyhow::anyhow!(text.to_string());
+            let hint =
+                connection_hint(&err, "https://waf.example.com:9090").unwrap();
+            assert!(hint.contains("9090"), "{text}: {hint}");
+        }
+    }
+
+    #[test]
+    fn unrelated_errors_get_no_hint() {
+        let err =
+            anyhow::anyhow!("invalid server URL: relative URL without a base");
+        assert!(connection_hint(&err, "not-a-url").is_none());
     }
 
     #[test]

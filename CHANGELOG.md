@@ -23,6 +23,16 @@ verbatim for reference and attribution, and is not maintained here.
 
 ### Changed
 
+- **`install.sh` explains the plaintext-agent failure instead of letting the
+  install go out silently broken.** When agent mode sees a non-loopback
+  `http://` server URL, the installer now prints the symptom to expect in the
+  journal (`Connection to control plane failed` with `FRAME_SIZE_ERROR`), the
+  fix (`--server-url https://<host>:9090 --server-ca-cert <pem>`, plus
+  `--server-tls-name <SAN>` when the certificate does not name the host) and a
+  verification command (`openssl s_client -connect <host>:9090 -servername
+  <host> -alpn h2`). It still does **not** block the install — loopback URLs
+  keep the "local control plane only" note.
+
 - **Pingora upgraded from `0.9.0` to `0.9.1`.** The patch release fixes the
   `pingora-limits` estimator overflow (`wrapping_add`), keeps zero-capacity
   L4 read buffers working on tokio ≥ 1.54, and requires zstd 0.14.3 for
@@ -32,6 +42,17 @@ verbatim for reference and attribution, and is not maintained here.
   the panic that originally justified the pin.
 
 ### Added
+
+- **Agent connection failures now log a `hint`.** When the agent fails to
+  reach the control plane, the warning carries a `hint="..."` field generated
+  from the error chain, covering four classes of misconfiguration: plaintext
+  `http://` against the TLS gRPC port (`FRAME_SIZE_ERROR` / `h2 protocol
+  error`), an untrusted certificate authority (`UnknownIssuer`), a SAN mismatch
+  (`certificate not valid for name` → set `agent.server_tls_name`), and
+  unreachable control planes (connection refused / tcp connect error /
+  timed out / connection reset → check `server_url`, port 9090 and the
+  firewall). Unrecognized errors log an empty `hint`; the existing `error`
+  and `delay_ms` fields and the backoff behavior are unchanged.
 
 - **Upstream sync analysis** (`docs/upstream-sync.md`): the workspace and
   `vicanso/pingap` share no git ancestry, so the page records the closest
