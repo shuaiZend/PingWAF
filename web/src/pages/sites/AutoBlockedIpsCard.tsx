@@ -75,6 +75,7 @@ export function AutoBlockedIpsCard({ siteId }: { siteId: string }) {
       accessor: (r) => r.attack_count,
       sortable: true,
       width: '1%',
+      nowrap: true,
       cell: (r) => (
         <Badge tone="danger">{formatNumber(r.attack_count)}</Badge>
       ),
@@ -85,6 +86,7 @@ export function AutoBlockedIpsCard({ siteId }: { siteId: string }) {
       accessor: (r) => r.last_attack_at ?? '',
       sortable: true,
       width: '1%',
+      nowrap: true,
       cell: (r) =>
         r.last_attack_at ? (
           <span
@@ -102,6 +104,7 @@ export function AutoBlockedIpsCard({ siteId }: { siteId: string }) {
       header: t('pages.ipRules.autoBlocked.expiresAt'),
       accessor: (r) => r.expires_at ?? '',
       width: '1%',
+      nowrap: true,
       cell: (r) =>
         r.expires_at ? (
           <div className="text-right sm:text-left">
@@ -126,6 +129,7 @@ export function AutoBlockedIpsCard({ siteId }: { siteId: string }) {
       header: '',
       align: 'right',
       width: '1%',
+      nowrap: true,
       cell: (r) => (
         <Button
           size="sm"

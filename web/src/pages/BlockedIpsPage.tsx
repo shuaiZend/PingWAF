@@ -157,6 +157,7 @@ export function BlockedIpsPage() {
           />
         ),
         width: '1%',
+        nowrap: true,
         cell: (r) => (
           <input
             type="checkbox"
@@ -207,6 +208,7 @@ export function BlockedIpsPage() {
         accessor: (r) => r.attack_count,
         sortable: true,
         width: '1%',
+        nowrap: true,
         cell: (r) =>
           r.attack_count > 0 ? (
             <Badge tone="danger">{formatNumber(r.attack_count)}</Badge>
@@ -220,6 +222,7 @@ export function BlockedIpsPage() {
         accessor: (r) => r.last_attack_at ?? '',
         sortable: true,
         width: '1%',
+        nowrap: true,
         cell: (r) =>
           r.last_attack_at ? (
             <span
@@ -238,6 +241,7 @@ export function BlockedIpsPage() {
         accessor: (r) => r.blocked_at,
         sortable: true,
         width: '1%',
+        nowrap: true,
         cell: (r) => (
           <div className="min-w-0">
             <p
@@ -257,6 +261,7 @@ export function BlockedIpsPage() {
         header: t('pages.blockedIps.colExpiresAt'),
         accessor: (r) => r.expires_at ?? '',
         width: '1%',
+        nowrap: true,
         cell: (r) =>
           r.expires_at ? (
             <div className="min-w-0">
@@ -279,6 +284,7 @@ export function BlockedIpsPage() {
         header: t('pages.blockedIps.colAgents'),
         accessor: (r) => r.agent_count,
         width: '1%',
+        nowrap: true,
         cell: (r) => (
           <Badge tone="info">
             {t('pages.blockedIps.agentsCount', { count: r.agent_count })}
@@ -290,6 +296,7 @@ export function BlockedIpsPage() {
         header: '',
         align: 'right',
         width: '1%',
+        nowrap: true,
         cell: (r) => (
           <Button
             size="sm"

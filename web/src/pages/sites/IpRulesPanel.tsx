@@ -317,6 +317,7 @@ export function IpRulesPanel() {
       header: t('pages.waf.action'),
       accessor: (r) => r.action,
       width: '1%',
+      nowrap: true,
       cell: (r) => (
         <Badge tone={ACTION_TONE[r.action] ?? 'neutral'}>
           {t(`actions.${r.action}`, r.action)}
@@ -329,6 +330,7 @@ export function IpRulesPanel() {
       accessor: (r) => r.priority,
       sortable: true,
       width: '1%',
+      nowrap: true,
       cell: (r) => (
         <span className="text-[13px] text-fg-subtle">{r.priority}</span>
       ),
@@ -339,6 +341,7 @@ export function IpRulesPanel() {
       accessor: (r) => r.created_at,
       sortable: true,
       width: '1%',
+      nowrap: true,
       cell: (r) => (
         <span className="text-[13px] text-fg-subtle">{formatDateTime(r.created_at)}</span>
       ),
@@ -348,6 +351,7 @@ export function IpRulesPanel() {
       header: t('common.enabled'),
       accessor: (r) => (r.enabled ? 1 : 0),
       width: '1%',
+      nowrap: true,
       cell: (r) => (
         <Switch
           size="sm"
@@ -363,6 +367,7 @@ export function IpRulesPanel() {
       header: '',
       align: 'right',
       width: '1%',
+      nowrap: true,
       cell: (r) => (
         <div className="flex items-center justify-end gap-1">
           <Button

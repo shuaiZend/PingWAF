@@ -15,6 +15,12 @@ export interface Column<T> {
   sortable?: boolean
   align?: 'left' | 'right' | 'center'
   width?: string
+  /**
+   * Keep the value on one line. Use it for short, single-line content —
+   * counters, one-line timestamps, switches, action buttons — so a narrow
+   * column widens to fit instead of stacking characters vertically.
+   */
+  nowrap?: boolean
   className?: string
 }
 
@@ -107,7 +113,10 @@ export function Table<T>({
                     scope="col"
                     className={cn(
                       cellPad,
-                      'border-b border-line text-xs font-semibold tracking-wide text-fg-subtle uppercase',
+                      // Headers never wrap: a Chinese header has a line break
+                      // between every character, so the column could otherwise
+                      // shrink to a single glyph and read vertically.
+                      'border-b border-line text-xs font-semibold tracking-wide whitespace-nowrap text-fg-subtle uppercase',
                       alignClass[col.align ?? 'left'],
                       col.sortable && 'cursor-pointer select-none hover:text-fg',
                     )}
@@ -188,6 +197,7 @@ export function Table<T>({
                       className={cn(
                         cellPad,
                         'text-fg align-middle',
+                        col.nowrap && 'whitespace-nowrap',
                         alignClass[col.align ?? 'left'],
                         col.className,
                       )}
