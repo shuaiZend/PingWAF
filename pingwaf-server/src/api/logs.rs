@@ -433,6 +433,7 @@ pub struct AccessLogSummary {
     pub response_size: Option<i64>,
     pub upstream_addr: Option<String>,
     pub upstream_latency_ms: Option<i64>,
+    pub upstream_status: Option<i32>,
     pub total_latency_ms: Option<i64>,
     pub cache_status: Option<String>,
     pub user_agent: Option<String>,
@@ -453,7 +454,7 @@ pub struct AccessLogSummary {
 
 /// Columns backing [`AccessLogSummary`], kept next to the struct so the two
 /// cannot drift: the summary is exactly these fields.
-fn summary_columns() -> [access_log::Column; 27] {
+fn summary_columns() -> [access_log::Column; 28] {
     [
         access_log::Column::Id,
         access_log::Column::SiteId,
@@ -469,6 +470,7 @@ fn summary_columns() -> [access_log::Column; 27] {
         access_log::Column::ResponseSize,
         access_log::Column::UpstreamAddr,
         access_log::Column::UpstreamLatencyMs,
+        access_log::Column::UpstreamStatus,
         access_log::Column::TotalLatencyMs,
         access_log::Column::CacheStatus,
         access_log::Column::UserAgent,
@@ -605,7 +607,7 @@ async fn get_access(
     State(state): State<AppState>,
     current: AuthUser,
     axum::extract::Path(id): axum::extract::Path<i64>,
-) -> Result<Json<access_log::Model>, ApiError> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let row = access_log::Entity::find_by_id(id)
         .one(&state.db)
         .await?
@@ -633,7 +635,17 @@ async fn get_access(
             },
         }
     }
-    Ok(Json(row))
+    // The detail view exposes the upstream duration under its documented
+    // name as well; `upstream_latency_ms` stays for older clients.
+    let mut value = serde_json::to_value(&row)
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+    if let Some(object) = value.as_object_mut() {
+        // Never mask a real column if one is ever added under this name.
+        object
+            .entry("upstream_time")
+            .or_insert(serde_json::json!(row.upstream_latency_ms));
+    }
+    Ok(Json(value))
 }
 
 /// Rows deleted per statement by [`purge_logs`].

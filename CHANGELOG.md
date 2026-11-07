@@ -10,6 +10,8 @@ verbatim for reference and attribution, and is not maintained here.
 
 ## [Unreleased]
 
+## [PingWAF 0.32.18] — 2026-11-07
+
 ### Fixed
 
 - **Unmatched-host error pages render the configured HTML again.** The
@@ -22,6 +24,23 @@ verbatim for reference and attribution, and is not maintained here.
   and the pagination screen-reader label no longer stretches the document.
 
 ### Changed
+
+- **`GET /logs/access/{log_id}` now also returns `upstream_time`.** It is an
+  alias of the existing `upstream_latency_ms` (milliseconds, same value, no
+  new database column), added for clients that use the documented name;
+  `upstream_latency_ms` stays for older clients. The list endpoint
+  (`AccessLogSummary`) keeps only `upstream_latency_ms`.
+
+- **WAF site page layout and custom-rule dialog guidance.** The site detail
+  WAF page now shows the four detection items in a single left column with
+  the enforce-mode card on the right and full-width tabs. The custom-rule
+  dialog explains what the two fields mean: the **action** is what happens to
+  a request the rule matches (block / log / challenge / allow), the **rule
+  mode** decides whether that rule actually runs, and the **site mode** is
+  the master switch (observe/off sites only record). Recommended
+  combinations: enforce = action `block` + mode `block` (site also `block`);
+  observe first = `block` + `monitor`; whitelist = `allow` + `monitor` (an
+  allow rule cannot use mode `block`); record only = `log`.
 
 - **`install.sh` explains the plaintext-agent failure instead of letting the
   install go out silently broken.** When agent mode sees a non-loopback
@@ -42,6 +61,25 @@ verbatim for reference and attribution, and is not maintained here.
   the panic that originally justified the pin.
 
 ### Added
+
+- **Every response through the WAF carries a `Server-Timing` header.**
+  Format: `waf;dur=<ms>, upstream;dur=<ms>, cache;desc="<hit|miss|bypass|
+  expired>", total;dur=<ms>`. Proxied responses and WAF-generated pages
+  (block, challenge, rate limit, auth) all carry it. `upstream` appears only
+  when an upstream handled the request; `cache` only when the site enables
+  caching; `total` is counted from request creation. When the origin set its
+  own `Server-Timing`, PingWAF's timings are prepended to it (comma
+  separated), never overwritten. Serves the same debugging / cache-analysis
+  purpose as Cloudflare's `Server-Timing` / `cf-cache-status`; documented in
+  `docs/http-lifecycle.md`.
+
+- **Access logs expose the origin status as `upstream_status`.** New
+  `access_logs.upstream_status` column (migration 000094; proto
+  `LogEntry.upstream_status = 42`), returned by both the list and detail
+  endpoints. When an origin was contacted it holds the status the origin
+  returned; WAF blocks/challenges, cache hits and edge errors reuse the
+  final `status_code` the client received, so new rows always carry a value.
+  Rows written before the field existed (or by older agents) are `null`.
 
 - **Agent connection failures now log a `hint`.** When the agent fails to
   reach the control plane, the warning carries a `hint="..."` field generated

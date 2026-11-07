@@ -848,6 +848,10 @@ export interface AccessLogSummary {
   response_size: number | null
   upstream_addr: string | null
   upstream_latency_ms: number | null
+  /** Alias of `upstream_latency_ms`, returned by the single-log detail. */
+  upstream_time?: number | null
+  /** Origin status; repeats `status_code` when the edge answered itself. */
+  upstream_status?: number | null
   total_latency_ms: number | null
   cache_status: string | null
   user_agent: string | null

@@ -1098,6 +1098,10 @@ message LogEntry {
   // Upstream info
   string upstream_addr = 40;
   uint64 upstream_latency_ms = 41;
+  // Status returned by the origin. When no origin was contacted (WAF block,
+  // challenge, cache hit, edge error) the data plane repeats `response_status`
+  // so consumers always have a final status to show.
+  uint32 upstream_status = 42;
 
   // WAF info
   uint32 waf_score = 50;

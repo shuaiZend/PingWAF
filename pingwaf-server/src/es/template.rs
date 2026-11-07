@@ -180,6 +180,7 @@ fn performance_props() -> serde_json::Value {
     serde_json::json!({
         "upstream_addr": { "type": "keyword" },
         "upstream_latency_ms": { "type": "long" },
+        "upstream_status": { "type": "integer" },
         "total_latency_ms": { "type": "long" },
         "cache_status": { "type": "keyword" },
     })

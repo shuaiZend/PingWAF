@@ -1450,9 +1450,20 @@ export function LogsPage() {
                 [t('pages.logs.upstream'), selectedFull.upstream_addr],
                 [
                   t('pages.logs.upstreamLatency'),
+                  selectedFull.upstream_time != null ||
                   selectedFull.upstream_latency_ms != null
-                    ? formatLatency(selectedFull.upstream_latency_ms)
+                    ? formatLatency(
+                        selectedFull.upstream_time ??
+                          selectedFull.upstream_latency_ms!,
+                      )
                     : undefined,
+                ],
+                [
+                  t('pages.logs.upstreamStatus'),
+                  selectedFull.upstream_status != null &&
+                  selectedFull.upstream_status > 0
+                    ? String(selectedFull.upstream_status)
+                    : '—',
                 ],
                 [
                   t('pages.logs.latency'),

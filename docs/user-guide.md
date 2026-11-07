@@ -252,6 +252,24 @@ request, so the block mode would never apply; use 'monitor' or 'off'`. Choose
 This applies to editing an existing rule too, even when you only change one of
 the two fields.
 
+In short: the **action** decides what happens to a request the rule matches
+(`block` / `log` / `challenge` / `allow`), the **rule mode** decides whether
+this rule actually runs, and the **site mode** is the master switch — with the
+site in Detection (`monitor`) or Off, rules are only recorded, never enforced.
+The combinations that cover the common intentions:
+
+| Goal | Action | Rule mode | Site mode |
+|------|--------|-----------|-----------|
+| Enforce the block | `block` | `block` | `block` |
+| Watch first, block later | `block` | `monitor` | anything (`monitor` recommended) |
+| Whitelist (exempt a pattern) | `allow` | `monitor` | — (`allow` cannot use `block`) |
+| Record only | `log` | any | — |
+
+`allow` + `block` is rejected by the API (400), and the dialog falls back to
+`monitor` when you switch the action. An `allow` rule is an allowlist entry:
+it wins before every other rule and is not suppressed by the site mode, so a
+whitelisted path stays reachable even while the site is in monitor/off.
+
 ### Rule Groups
 
 Rules are organized into groups that execute in order:

@@ -375,6 +375,118 @@ struct PathExceptions {
     regex: Vec<(Regex, PathBypass)>,
 }
 
+/// Builds a Cloudflare-style `Server-Timing` value for a response the WAF
+/// handled: `waf`, `upstream` (when the origin was contacted), `cache` (when
+/// caching is enabled) and `total`.
+fn server_timing_value(
+    waf_ms: u64,
+    upstream_ms: Option<u64>,
+    cache_status: &str,
+    total_ms: u64,
+) -> String {
+    let mut parts = vec![format!("waf;dur={waf_ms}")];
+    if let Some(upstream_ms) = upstream_ms {
+        parts.push(format!("upstream;dur={upstream_ms}"));
+    }
+    if !cache_status.is_empty() {
+        parts.push(format!("cache;desc=\"{cache_status}\""));
+    }
+    parts.push(format!("total;dur={total_ms}"));
+    parts.join(", ")
+}
+
+/// Appends our timings to an existing `Server-Timing` header instead of
+/// overwriting one the origin set.
+fn merge_server_timing(existing: Option<&str>, value: &str) -> String {
+    match existing.filter(|existing| !existing.is_empty()) {
+        Some(existing) => format!("{value}, {existing}"),
+        None => value.to_string(),
+    }
+}
+
+/// Cache phase worth exposing in `Server-Timing`.
+///
+/// Early request phases (`uninitialized`, `key`) are omitted: a block page
+/// served before any cache decision must not claim a cache state, and the
+/// documented value set stays limited to the four final phases.
+fn cache_timing_desc(session: &Session) -> &'static str {
+    if !session.cache.enabled() {
+        return "";
+    }
+    match session.cache.phase().as_str() {
+        "hit" => "hit",
+        "miss" => "miss",
+        "bypass" => "bypass",
+        "expired" => "expired",
+        _ => "",
+    }
+}
+
+/// Request-phase time the WAF plugin spent on this request, as recorded by the
+/// proxy's plugin runner (`pingwaf:waf`).
+fn waf_processing_ms(ctx: &Ctx) -> u64 {
+    ctx.features
+        .as_ref()
+        .and_then(|features| features.plugin_processing_times.as_ref())
+        .map(|times| {
+            times
+                .iter()
+                .filter(|(name, _)| {
+                    name.as_ref() == "waf" || name.ends_with(":waf")
+                })
+                .map(|(_, time)| u64::from(*time))
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
+/// Stamps a WAF-generated response (block, challenge, rate limit, auth page)
+/// with the same timing header a proxied response carries.
+fn with_server_timing(
+    mut response: HttpResponse,
+    ctx: &Ctx,
+    session: &Session,
+    started: Instant,
+) -> HttpResponse {
+    // The body phase starts its clock late; fall back to the plugin time the
+    // proxy recorded during the request phase.
+    let waf_ms =
+        (started.elapsed().as_millis() as u64).max(waf_processing_ms(ctx));
+    let value = server_timing_value(
+        waf_ms,
+        None,
+        cache_timing_desc(session),
+        ctx.timing.created_at.elapsed().as_millis() as u64,
+    );
+    insert_server_timing(&mut response, &value);
+    response
+}
+
+/// Merges a timing value into an `HttpResponse`, which keeps a header vector
+/// rather than a `HeaderMap`.
+fn insert_server_timing(response: &mut HttpResponse, value: &str) {
+    let headers = response.headers.get_or_insert_with(Vec::new);
+    match headers
+        .iter_mut()
+        .find(|(name, _)| name.as_str() == "server-timing")
+    {
+        Some((_, existing)) => {
+            let merged = merge_server_timing(existing.to_str().ok(), value);
+            if let Ok(parsed) = http::HeaderValue::from_str(&merged) {
+                *existing = parsed;
+            }
+        },
+        None => {
+            if let Ok(parsed) = http::HeaderValue::from_str(value) {
+                headers.push((
+                    http::header::HeaderName::from_static("server-timing"),
+                    parsed,
+                ));
+            }
+        },
+    }
+}
+
 /// Compiles an operator pattern with the same automaton budget the WAF
 /// expression engine uses, so one pathological pattern cannot pin tens of
 /// megabytes on the data plane.
@@ -1813,6 +1925,9 @@ struct PendingAccess {
 /// Response facts gathered before the access entry is emitted.
 struct ResponseFacts {
     status_code: u32,
+    /// Status the origin returned. Equals `status_code` when the edge answered
+    /// itself (block/challenge/rate limit), per the access-log contract.
+    upstream_status: u32,
     upstream_addr: String,
     upstream_latency_ms: u64,
     headers: Vec<(String, String)>,
@@ -1842,6 +1957,7 @@ impl ResponseFacts {
     fn generated(status_code: u32) -> Self {
         Self {
             status_code,
+            upstream_status: status_code,
             upstream_addr: String::new(),
             upstream_latency_ms: 0,
             headers: Vec::new(),
@@ -2446,6 +2562,7 @@ fn emit_access(
         response_size,
         upstream_addr: response.upstream_addr,
         upstream_latency_ms: response.upstream_latency_ms,
+        upstream_status: response.upstream_status,
         total_latency_ms,
         cache_status: response.cache_status.clone(),
         user_agent: pending.user_agent,
@@ -3862,6 +3979,9 @@ impl Plugin for WafPlugin {
         if step != self.plugin_step {
             return Ok(RequestPluginResult::Skipped);
         }
+        // Request-phase start, used to stamp `Server-Timing` on responses this
+        // plugin generates itself (there is no upstream to time).
+        let started = Instant::now();
         // ACME http-01 validation requests are answered by the proxy before
         // the plugin chain runs; skip them here too, as a second line of
         // defense: no rule evaluation, no challenge, no block page — a CA
@@ -4124,7 +4244,9 @@ impl Plugin for WafPlugin {
         if context.as_ref().is_some_and(|site| site.paused) {
             let response = paused_page(&request_id);
             emit_generated_access(agent.as_ref(), &request_id, &response);
-            return Ok(RequestPluginResult::Respond(response));
+            return Ok(RequestPluginResult::Respond(with_server_timing(
+                response, ctx, session, started,
+            )));
         }
 
         // ── Fail-closed edges: an agent configured with `fail_open = false`
@@ -4144,7 +4266,9 @@ impl Plugin for WafPlugin {
                     &request_data,
                 );
             }
-            return Ok(RequestPluginResult::Respond(response));
+            return Ok(RequestPluginResult::Respond(with_server_timing(
+                response, ctx, session, started,
+            )));
         }
 
         // ── Dynamic IP blocks: an IP the edge already refused (an auto-block
@@ -4188,7 +4312,9 @@ impl Plugin for WafPlugin {
                     "IP temporarily blocked by WAF defense",
                 );
                 emit_generated_access(Some(agent), &request_id, &response);
-                return Ok(RequestPluginResult::Respond(response));
+                return Ok(RequestPluginResult::Respond(with_server_timing(
+                    response, ctx, session, started,
+                )));
             }
         }
 
@@ -4237,7 +4363,9 @@ impl Plugin for WafPlugin {
         {
             let response = block_page(&request_id, reason);
             emit_generated_access(agent.as_ref(), &request_id, &response);
-            return Ok(RequestPluginResult::Respond(response));
+            return Ok(RequestPluginResult::Respond(with_server_timing(
+                response, ctx, session, started,
+            )));
         }
 
         // ── Access restrictions: IP rules and geo stop a request before the
@@ -4327,7 +4455,9 @@ impl Plugin for WafPlugin {
                     });
                 let response = basic_auth_page(&request_id, realm, &reason);
                 emit_generated_access(agent.as_ref(), &request_id, &response);
-                return Ok(RequestPluginResult::Respond(response));
+                return Ok(RequestPluginResult::Respond(with_server_timing(
+                    response, ctx, session, started,
+                )));
             }
             if let Some(gate) = gate
                 && gate.hide_credentials
@@ -4590,7 +4720,9 @@ impl Plugin for WafPlugin {
                         &request_id,
                         &response,
                     );
-                    return Ok(RequestPluginResult::Respond(response));
+                    return Ok(RequestPluginResult::Respond(
+                        with_server_timing(response, ctx, session, started),
+                    ));
                 }
             }
         }
@@ -4631,7 +4763,9 @@ impl Plugin for WafPlugin {
                 bypasses("challenge"),
             );
             if let VerdictOutcome::Respond(response) = outcome {
-                return Ok(RequestPluginResult::Respond(response));
+                return Ok(RequestPluginResult::Respond(with_server_timing(
+                    response, ctx, session, started,
+                )));
             }
             outcome
         };
@@ -4686,13 +4820,16 @@ impl Plugin for WafPlugin {
                     site_id = %site_id,
                     "body stage pool exhausted; rejecting request"
                 );
-                return Ok(RequestPluginResult::Respond(
+                return Ok(RequestPluginResult::Respond(with_server_timing(
                     HttpResponse::builder(
                         http::StatusCode::SERVICE_UNAVAILABLE,
                     )
                     .no_store()
                     .finish(),
-                ));
+                    ctx,
+                    session,
+                    started,
+                )));
             }
             DEFERRED_BODY.insert(
                 request_id.clone(),
@@ -4768,7 +4905,7 @@ impl Plugin for WafPlugin {
 
     fn handle_request_body(
         &self,
-        _session: &mut Session,
+        session: &mut Session,
         ctx: &mut Ctx,
         body: &mut Option<bytes::Bytes>,
         end_of_stream: bool,
@@ -5005,7 +5142,12 @@ impl Plugin for WafPlugin {
                                 dv.skip_challenge,
                             );
                             if let VerdictOutcome::Respond(response) = outcome {
-                                return Ok(Some(response));
+                                return Ok(Some(with_server_timing(
+                                    response,
+                                    ctx,
+                                    session,
+                                    Instant::now(),
+                                )));
                             }
                             // The verdict passed: hand the staged bytes
                             // over and stop withholding. The entry is done
@@ -5067,7 +5209,12 @@ impl Plugin for WafPlugin {
                 // staged body is dropped with the aborted upstream
                 // exchange — the source never saw a byte of it.
                 if let VerdictOutcome::Respond(response) = outcome {
-                    return Ok(Some(response));
+                    return Ok(Some(with_server_timing(
+                        response,
+                        ctx,
+                        session,
+                        Instant::now(),
+                    )));
                 }
             }
             // Passed: hand the complete body upstream in one write, which
@@ -5086,6 +5233,34 @@ impl Plugin for WafPlugin {
         ctx: &mut Ctx,
         upstream_response: &mut ResponseHeader,
     ) -> pingora::Result<ResponsePluginResult> {
+        // Runs after `handle_cache_headers`, which stamped the same phase
+        // into `x-cache-status`: the phase is final here, and this is the
+        // only stage where the cache state is reachable (the body stage has
+        // no cache accessor).
+        let cache_status = if session.cache.enabled() {
+            session.cache.phase().as_str().to_string()
+        } else {
+            String::new()
+        };
+        // Every response that passed through the WAF carries the timings,
+        // including ones the plugin answers itself (block/challenge).
+        let timing = server_timing_value(
+            waf_processing_ms(ctx),
+            ctx.timing
+                .upstream_processing
+                .map(|value| value.max(0) as u64),
+            cache_timing_desc(session),
+            ctx.timing.created_at.elapsed().as_millis() as u64,
+        );
+        let merged = merge_server_timing(
+            upstream_response
+                .headers
+                .get("server-timing")
+                .and_then(|value| value.to_str().ok()),
+            &timing,
+        );
+        let _ = upstream_response.insert_header("server-timing", merged);
+
         let Some(request_id) = ctx.state.request_id.clone() else {
             return Ok(ResponsePluginResult::Unchanged);
         };
@@ -5096,15 +5271,6 @@ impl Plugin for WafPlugin {
         let status = upstream_response.status.as_u16();
         let upstream_latency_ms =
             ctx.timing.upstream_processing.unwrap_or(0).max(0) as u64;
-        // Runs after `handle_cache_headers`, which stamped the same phase
-        // into `x-cache-status`: the phase is final here, and this is the
-        // only stage where the cache state is reachable (the body stage has
-        // no cache accessor).
-        let cache_status = if session.cache.enabled() {
-            session.cache.phase().as_str().to_string()
-        } else {
-            String::new()
-        };
         let headers = cap_headers(upstream_response.headers.iter().filter_map(
             |(name, value)| {
                 value
@@ -5140,6 +5306,7 @@ impl Plugin for WafPlugin {
             if body_less {
                 HeaderOutcome::Immediate(ResponseFacts {
                     status_code: status as u32,
+                    upstream_status: status as u32,
                     upstream_addr: ctx.upstream.address.clone(),
                     upstream_latency_ms,
                     headers,
@@ -5164,6 +5331,7 @@ impl Plugin for WafPlugin {
                 );
                 entry.response = Some(ResponseFacts {
                     status_code: status as u32,
+                    upstream_status: status as u32,
                     upstream_addr: ctx.upstream.address.clone(),
                     upstream_latency_ms,
                     headers,
@@ -5724,6 +5892,17 @@ advanced_mode = true
             panic!("expected a block response");
         };
         assert_eq!(http::StatusCode::FORBIDDEN, resp.status);
+        // The block page carries the same timing header as a proxied response.
+        let timing = resp
+            .headers
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|(name, _)| name.as_str() == "server-timing")
+            .map(|(_, value)| value.to_str().unwrap().to_string())
+            .expect("server-timing on a block page");
+        assert!(timing.contains("waf;dur="), "{timing}");
+        assert!(timing.contains("total;dur="), "{timing}");
     }
 
     /// Reads one header off a generated response.
@@ -9459,6 +9638,46 @@ inspect_body = true"###,
             "ip_geo",
         );
         assert!(matches!(blocked, RequestPluginResult::Respond(_)));
+    }
+
+    #[test]
+    fn server_timing_lists_every_phase() {
+        assert_eq!(
+            server_timing_value(3, Some(8), "hit", 12),
+            "waf;dur=3, upstream;dur=8, cache;desc=\"hit\", total;dur=12"
+        );
+        // A generated answer has no upstream; cache is omitted when disabled.
+        assert_eq!(
+            server_timing_value(0, None, "", 1),
+            "waf;dur=0, total;dur=1"
+        );
+    }
+
+    #[test]
+    fn server_timing_is_appended_to_an_origin_header() {
+        assert_eq!(
+            merge_server_timing(Some("origin;dur=5"), "waf;dur=1, total;dur=2"),
+            "waf;dur=1, total;dur=2, origin;dur=5"
+        );
+        assert_eq!(merge_server_timing(None, "total;dur=1"), "total;dur=1");
+        assert_eq!(merge_server_timing(Some(""), "total;dur=1"), "total;dur=1");
+    }
+
+    #[test]
+    fn generated_response_merges_server_timing_headers() {
+        let mut response = block_page("req-1", "blocked");
+        insert_server_timing(&mut response, "waf;dur=1, total;dur=2");
+        insert_server_timing(&mut response, "waf;dur=3, total;dur=4");
+
+        let value = response
+            .headers
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|(name, _)| name.as_str() == "server-timing")
+            .map(|(_, value)| value.to_str().unwrap().to_string())
+            .unwrap();
+        assert_eq!(value, "waf;dur=3, total;dur=4, waf;dur=1, total;dur=2");
     }
 
     #[test]

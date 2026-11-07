@@ -61,6 +61,8 @@ pub struct AccessLogDocument {
     pub upstream_addr: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub upstream_latency_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_status: Option<u32>,
 
     // ── WAF ───────────────────────────────────────────────────────────────
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -184,6 +186,7 @@ mod tests {
             response_body_truncated: false,
             upstream_addr: None,
             upstream_latency_ms: None,
+            upstream_status: None,
             waf_score: None,
             waf_action: None,
             waf_rule_id: None,

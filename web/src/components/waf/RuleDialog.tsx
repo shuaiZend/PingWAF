@@ -477,6 +477,20 @@ export function RuleDialog({
           />
         </div>
 
+        <div className="rounded-md border border-line bg-recessed px-3 py-2 text-[13px] text-fg-subtle">
+          <p className="font-medium text-fg">
+            {t('pages.waf.actionModeGuideTitle')}
+          </p>
+          <p className="mt-1">{t('pages.waf.actionModeGuideIntro')}</p>
+          <ul className="mt-1.5 space-y-0.5">
+            <li>· {t('pages.waf.actionModeGuideBlock')}</li>
+            <li>· {t('pages.waf.actionModeGuideMonitor')}</li>
+            <li>· {t('pages.waf.actionModeGuideAllow')}</li>
+            <li>· {t('pages.waf.actionModeGuideLog')}</li>
+          </ul>
+          <p className="mt-1.5">{t('pages.waf.actionModeGuideSiteMode')}</p>
+        </div>
+
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <div>
             <p className="mb-2 text-[13px] font-medium text-fg">

@@ -160,6 +160,40 @@ site's cache rules (Site → Caching); a hit is decided in stage 3, after the
 WAF and rewrite plugins already ran, so cache hits cannot bypass security
 checks, and a WAF block always wins over a cached response.
 
+## Server-Timing
+
+Every response that passes through the WAF plugin carries a `Server-Timing`
+response header — proxied responses as well as pages the WAF answers itself
+(block, challenge, rate limit, auth). It serves the same purpose as
+Cloudflare's `Server-Timing` / `cf-cache-status`: debugging and cache-state
+analysis from the client side.
+
+```text
+Server-Timing: waf;dur=2, upstream;dur=41, cache;desc="miss", total;dur=44
+```
+
+| Metric | Meaning |
+|--------|---------|
+| `waf;dur` | Milliseconds the WAF plugin spent on the request |
+| `upstream;dur` | Milliseconds the origin spent; only present when an upstream handled the request |
+| `cache;desc` | Cache outcome, same value as `x-cache-status` (`hit`, `miss`, `bypass`, `expired`); only present when the site enables caching |
+| `total;dur` | Total milliseconds, counted from request creation |
+
+Notes:
+
+- `x-cache-status` remains the dedicated cache header; the `cache;desc` metric
+  repeats the same phase so one header covers both timing and cache state.
+- If the origin set its own `Server-Timing`, PingWAF's timings are **prepended**
+  to it (comma-separated), never overwritten.
+- Responses served without touching the WAF plugin (e.g. unmatched-host 404)
+  carry no PingWAF timings.
+
+Check it with curl:
+
+```sh
+curl -sD - -o /dev/null https://example.com/ | grep -i server-timing
+```
+
 ## Response modifications and the cache
 
 When a response is both cached and modified, *where* the modification happens

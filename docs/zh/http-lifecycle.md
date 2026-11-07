@@ -144,6 +144,37 @@ WAF 引擎（第 7 步）的结论由**模式**决定，站点级与规则级使
 缓存配置来自站点的缓存规则（站点 → 缓存）；命中与否在第 3 阶段决定，此时 WAF 与
 重写插件已经运行过，因此缓存命中无法绕过安全检查，WAF 的拦截也始终优先于缓存响应。
 
+## Server-Timing
+
+所有经过 WAF 插件的响应都携带 `Server-Timing` 响应头——正常代理的响应，以及
+WAF 自己生成的页面（拦截、质询、限流、认证页）。作用与 Cloudflare 的
+`Server-Timing` / `cf-cache-status` 类似：在客户端侧完成调试与缓存状态分析。
+
+```text
+Server-Timing: waf;dur=2, upstream;dur=41, cache;desc="miss", total;dur=44
+```
+
+| 指标 | 含义 |
+|------|------|
+| `waf;dur` | WAF 插件处理该请求耗时（毫秒） |
+| `upstream;dur` | 源站处理耗时（毫秒）；仅在有上游处理该请求时出现 |
+| `cache;desc` | 缓存结果，与 `x-cache-status` 同值（`hit`、`miss`、`bypass`、`expired`）；仅在站点启用缓存时出现 |
+| `total;dur` | 总耗时（毫秒），从请求创建起算 |
+
+说明：
+
+- `x-cache-status` 仍是专用的缓存状态响应头；`cache;desc` 重复同一个 phase，
+  让一个响应头同时覆盖耗时与缓存状态。
+- 若源站自带了 `Server-Timing`，PingWAF 的计时会**追加在它前面**（逗号分隔），
+  不会覆盖。
+- 未经过 WAF 插件的响应（如 unmatched-host 404）不带 PingWAF 计时。
+
+用 curl 查看：
+
+```sh
+curl -sD - -o /dev/null https://example.com/ | grep -i server-timing
+```
+
 ## 响应修改与缓存
 
 当一个响应既要被缓存、又要被修改时，**修改发生在哪个阶段**决定缓存里存的是什么：

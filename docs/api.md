@@ -2825,6 +2825,7 @@ List access logs, newest first.
       "response_size": 5120,
       "upstream_addr": "10.0.1.50:3000",
       "upstream_latency_ms": 12,
+      "upstream_status": 200,
       "total_latency_ms": 15,
       "cache_status": null,
       "user_agent": "curl/8.4.0",
@@ -2853,6 +2854,11 @@ Rows are only as complete as the agent that produced them: `scheme`, `protocol`
 and the response fields come from agents on 0.15.0 or newer. Against an older
 agent those columns stay `null` and the console shows the request side only.
 
+`upstream_status` is the status the **origin** returned. When no origin was
+contacted — a WAF block or challenge, a cache hit, an edge error — it repeats
+the final `status_code` the client received, so new rows always carry a value;
+rows written before the field existed (or by older agents) are `null`.
+
 ### GET /logs/access/{id}
 
 One access-log row by id, same shape as the list items above (the full
@@ -2861,6 +2867,11 @@ administrators see every row; every other account only rows belonging to
 sites it owns — another tenant's row, an unassigned row (`site_id: null`) and
 an unknown id all answer **404 `access log not found`** (a non-existent and
 an unreadable row are indistinguishable by design).
+
+The detail response also carries `upstream_time`, an alias of
+`upstream_latency_ms` (milliseconds — same value, no separate column) kept for
+clients that use the documented name; `upstream_latency_ms` stays for older
+clients. The list endpoint returns only `upstream_latency_ms`.
 
 ### GET /logs/control-plane
 

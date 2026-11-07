@@ -183,13 +183,14 @@ export function ProtectionPage() {
         )}
       </section>
 
-      {/* ── Detection ─────────────────────────────────────────────────── */}
-      <section className="mb-5">
+      {/* ── Detection and enforcement share one row on wide screens ────── */}
+      <div className="grid items-start gap-5 lg:grid-cols-2">
+      <section className="mb-5 lg:mb-0">
         <SectionHeading
           title={t('pages.protection.detectionTitle')}
           hint={t('pages.protection.detectionHint')}
         />
-        <div className="grid gap-4 lg:grid-cols-2">
+        <div className="grid gap-4">
         {challengeQuery.isPending ? (
           <SkeletonCard className="h-16" />
         ) : (
@@ -337,13 +338,16 @@ export function ProtectionPage() {
       </section>
 
       {/* ── Enforcement ───────────────────────────────────────────────── */}
-      <section>
+      <section className="mb-5 lg:mb-0">
         <SectionHeading
           title={t('pages.protection.enforcementTitle')}
           hint={t('pages.protection.enforcementHint')}
         />
         <EnforcementModeCard />
+      </section>
+      </div>
 
+      <section className="mt-5">
         <Tabs
           variant="pill"
           className="mb-5"
@@ -468,7 +472,7 @@ function EnforcementModeCard() {
   }
 
   return (
-    <Card className="mb-5 max-w-2xl">
+    <Card className="mb-0 max-w-none">
       <div className="flex items-center justify-between gap-3 px-4 pt-4">
         <div>
           <h3 className="text-sm font-semibold text-fg-strong">

@@ -78,6 +78,9 @@ pub mod access_logs {
         pub response_size: Option<i64>,
         pub upstream_addr: Option<String>,
         pub upstream_latency_ms: Option<i64>,
+        /// Status the origin returned; repeats `status_code` when the edge
+        /// answered itself (WAF block/challenge, cache hit, edge error).
+        pub upstream_status: Option<i32>,
         pub total_latency_ms: Option<i64>,
         pub cache_status: Option<String>,
         #[sea_orm(column_type = "Text")]

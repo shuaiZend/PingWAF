@@ -2456,10 +2456,21 @@ impl ProxyHttp for Server {
         // support request with the x-request-id is attributable in seconds.
         let _ = upstream_response.insert_header("server", "pingwaf");
 
-        // add server-timing response header
+        // add server-timing response header. Plugins (the WAF) may have
+        // stamped their own timings already: append instead of replacing, so
+        // enabling this switch cannot erase `waf;dur` / `cache;desc`.
         if self.enable_server_timing {
-            let _ = upstream_response
-                .insert_header("server-timing", ctx.generate_server_timing());
+            let generated = ctx.generate_server_timing();
+            let merged = match upstream_response
+                .headers
+                .get("server-timing")
+                .and_then(|value| value.to_str().ok())
+                .filter(|value| !value.is_empty())
+            {
+                Some(existing) => format!("{generated}, {existing}"),
+                None => generated,
+            };
+            let _ = upstream_response.insert_header("server-timing", merged);
         }
         Ok(())
     }

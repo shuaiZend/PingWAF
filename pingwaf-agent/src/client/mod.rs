@@ -45,6 +45,9 @@ pub struct LogEntry {
     pub response_body_truncated: bool,
     pub upstream_addr: String,
     pub upstream_latency_ms: u64,
+    /// Status returned by the origin; repeats `response_status` when the data
+    /// plane answered itself (block, challenge, cache hit, edge error).
+    pub upstream_status: u32,
     pub waf_score: u32,
     pub waf_action: String,
     pub waf_rule_id: String,
@@ -1222,6 +1225,7 @@ impl ControlPlaneClient {
             response_body_truncated: entry.response_body_truncated,
             upstream_addr: entry.upstream_addr.clone(),
             upstream_latency_ms: entry.upstream_latency_ms,
+            upstream_status: entry.upstream_status,
             waf_score: entry.waf_score,
             waf_action: entry.waf_action.clone(),
             waf_rule_id: entry.waf_rule_id.clone(),

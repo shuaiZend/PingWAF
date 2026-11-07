@@ -2439,6 +2439,13 @@ fn access_log_row(
         upstream_latency_ms: Set(positive_i64(
             entry.upstream_latency_ms as i64,
         )),
+        // Always present for new data: the data plane repeats the final
+        // status when no origin was contacted. An older agent sends 0.
+        upstream_status: Set(if entry.upstream_status == 0 {
+            None
+        } else {
+            Some(entry.upstream_status as i32)
+        }),
         total_latency_ms: Set(positive_i64(entry.total_latency_ms as i64)),
         cache_status: Set(truncate(&entry.cache_status, MAX_CACHE_STATUS)),
         user_agent: Set(optional(&entry.user_agent)),
@@ -2642,6 +2649,7 @@ fn access_log_document(
 
         upstream_addr: optional(&entry.upstream_addr),
         upstream_latency_ms: positive_u64(entry.upstream_latency_ms),
+        upstream_status: positive_u32(entry.upstream_status),
 
         waf_score: positive_u32(entry.waf_score),
         waf_action: optional(&entry.waf_action),
@@ -3365,6 +3373,33 @@ mod tests {
         let previous = sweep.load(Ordering::Relaxed);
         assert!(now.saturating_sub(previous) < 3600);
     }
+    #[test]
+    fn upstream_status_keeps_the_origin_and_nulls_old_agents() {
+        let entry = LogEntry {
+            upstream_status: 502,
+            response_status: 502,
+            ..Default::default()
+        };
+        let row = access_log_row(&entry, None, None, Utc::now());
+        assert!(matches!(
+            row.upstream_status,
+            sea_orm::ActiveValue::Set(Some(502))
+        ));
+
+        // Agents that predate the field send 0: leave the column NULL rather
+        // than storing a status that never happened.
+        let entry = LogEntry {
+            upstream_status: 0,
+            response_status: 403,
+            ..Default::default()
+        };
+        let row = access_log_row(&entry, None, None, Utc::now());
+        assert!(matches!(
+            row.upstream_status,
+            sea_orm::ActiveValue::Set(None)
+        ));
+    }
+
     #[test]
     fn log_batch_estimate_tracks_large_bodies() {
         let mut entry = LogEntry::default();
