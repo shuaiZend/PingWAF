@@ -18,6 +18,12 @@ pub struct Model {
     pub blocked_asns: Vec<String>,
     pub block_unknown: bool,
     pub action: String,
+    /// Empty = the whole site; otherwise geo restrictions only apply to
+    /// matching request paths.
+    #[serde(default)]
+    pub path: String,
+    #[serde(default = "default_match_type")]
+    pub match_type: String,
     pub updated_at: DateTimeUtc,
 }
 
@@ -25,3 +31,7 @@ pub struct Model {
 pub enum Relation {}
 
 impl ActiveModelBehavior for ActiveModel {}
+
+fn default_match_type() -> String {
+    "prefix".to_string()
+}

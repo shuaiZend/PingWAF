@@ -45,6 +45,8 @@ import {
   type OidcHeaderClaim,
   type SiteOidc,
 } from '@/api/types'
+import { normalizePathScope, validatePathScope } from '@/lib/pathScope'
+import { PathScopeFields } from '@/components/waf/PathScopeFields'
 
 /** A secret field being edited; `stored` marks a secret the API masked. */
 interface SecretState {
@@ -221,6 +223,7 @@ export function OidcPanel() {
         ),
         access_mode: payload.access_mode,
         access_rules: cleanedRules,
+        ...normalizePathScope(payload.path ?? '', payload.match_type ?? 'prefix'),
       })
     },
     onSuccess: (saved) => {
@@ -287,7 +290,18 @@ export function OidcPanel() {
             variant="primary"
             disabled={!dirty || save.isPending || Boolean(blockedReason)}
             loading={save.isPending}
-            onClick={() => config && save.mutate(config)}
+            onClick={() => {
+              if (!config) return
+              const error = validatePathScope(
+                config.path ?? '',
+                config.match_type ?? 'prefix',
+              )
+              if (error) {
+                toast.error(t('common.saveFailed'), t(error))
+                return
+              }
+              save.mutate(config)
+            }}
           >
             {t('common.save')}
           </Button>
@@ -448,6 +462,15 @@ export function OidcPanel() {
                   disabled={!canWrite}
                   hint={t('pages.oidc.redirectUrlHint')}
                   onChange={(e) => patch({ redirect_url: e.target.value })}
+                />
+                <PathScopeFields
+                  path={config.path ?? ''}
+                  matchType={config.match_type ?? 'prefix'}
+                  disabled={!canWrite}
+                  hint={t('pages.oidc.scopeHint')}
+                  onChange={(scope) =>
+                    patch({ path: scope.path, match_type: scope.match_type })
+                  }
                 />
               </CardBody>
             </Card>

@@ -267,6 +267,7 @@ mod key_auth;
 mod limit;
 mod mock;
 mod oidc;
+mod path_filter;
 mod ping;
 mod redirect;
 mod referer_restriction;

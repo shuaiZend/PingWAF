@@ -33,6 +33,8 @@ export function defaultSiteBasicAuth(siteId: string): SiteBasicAuth {
     credentials: [],
     delay_seconds: 1,
     hide_credentials: false,
+    path: '',
+    match_type: 'prefix',
     created_at: now,
     updated_at: now,
   }

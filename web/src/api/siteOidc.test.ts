@@ -127,6 +127,9 @@ describe('site OIDC API contract', () => {
       // before access rules existed.
       access_mode: 'allow_all',
       access_rules: [],
+      // Empty path = every path; the server stores `prefix` for it.
+      path: '',
+      match_type: 'prefix',
     })
     expect(created_at).toMatch(/^\d{4}-\d{2}-\d{2}T/)
     expect(updated_at).toMatch(/^\d{4}-\d{2}-\d{2}T/)

@@ -35,6 +35,7 @@ use crate::challenge::{
     resolve_cookie_secret,
 };
 use crate::host_cache::{HostCacheSweep, touch};
+use crate::path_filter::{MatchType, PathFilter};
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
 use dashmap::DashMap;
@@ -72,7 +73,6 @@ use pingwaf_waf::{
     StackSet, WafAction, WafEngine, WafEngineConfig, WafLevel, WafMode,
     WafVerdict,
 };
-use regex::{Regex, RegexBuilder};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
@@ -172,6 +172,8 @@ struct BasicAuthGate {
     credentials: Vec<Vec<u8>>,
     delay: Option<std::time::Duration>,
     hide_credentials: bool,
+    /// Empty scope = the gate applies to the whole site.
+    path: Option<PathFilter>,
 }
 
 /// Realm advertised when the site did not name one.
@@ -232,6 +234,18 @@ impl BasicAuthGate {
                 std::time::Duration::from_secs(u64::from(cfg.delay_seconds))
             }),
             hide_credentials: cfg.hide_credentials,
+            path: match PathFilter::compile(&cfg.path, &cfg.match_type) {
+                Ok(filter) => filter,
+                Err(err) => {
+                    // A broken scope keeps the gate site-wide (fail-closed).
+                    warn!(
+                        path = %cfg.path,
+                        error = %err,
+                        "basic auth path failed to compile; requiring auth site-wide"
+                    );
+                    None
+                },
+            },
         })
     }
 
@@ -363,16 +377,16 @@ struct PathBypass {
 /// entirely, so an exception can never weaken active enforcement.
 #[derive(Debug, Default)]
 struct PathExceptions {
-    exact: Vec<(String, PathBypass)>,
+    exact: Vec<(PathFilter, PathBypass)>,
     /// `path` itself or anything below it (`/api` matches `/api/x` but
     /// never `/apix`).
-    prefix: Vec<(String, PathBypass)>,
+    prefix: Vec<(PathFilter, PathBypass)>,
     /// Single trailing `*`: a segment prefix of the pattern with the `*`
     /// removed (`/api/*` matches `/api/x`, not `/api`).
-    wildcard: Vec<(String, PathBypass)>,
+    wildcard: Vec<(PathFilter, PathBypass)>,
     /// Operator-written `regex`, unanchored and case-sensitive. Consulted
     /// last so the older match types keep their precedence.
-    regex: Vec<(Regex, PathBypass)>,
+    regex: Vec<(PathFilter, PathBypass)>,
 }
 
 /// Builds a Cloudflare-style `Server-Timing` value for a response the WAF
@@ -487,25 +501,30 @@ fn insert_server_timing(response: &mut HttpResponse, value: &str) {
     }
 }
 
-/// Compiles an operator pattern with the same automaton budget the WAF
-/// expression engine uses, so one pathological pattern cannot pin tens of
-/// megabytes on the data plane.
-fn compile_path_regex(pattern: &str) -> Result<Regex, regex::Error> {
-    const MAX_REGEX_SIZE: usize = 4 * 1024 * 1024;
-    RegexBuilder::new(pattern)
-        .size_limit(MAX_REGEX_SIZE)
-        .dfa_size_limit(MAX_REGEX_SIZE)
-        .build()
-}
-
 impl PathExceptions {
     /// Compiles the site's exception list; `None` when nothing is enabled.
     fn build(rules: &[CachePathException]) -> Option<Self> {
         let mut compiled = Self::default();
         for rule in rules {
-            if !rule.enabled || rule.path.is_empty() {
+            if !rule.enabled {
                 continue;
             }
+            let filter = match PathFilter::compile(&rule.path, &rule.match_type)
+            {
+                Ok(Some(filter)) => filter,
+                Ok(None) => continue,
+                Err(err) => {
+                    // The control plane refuses these on save; this is the
+                    // defence for a bundle written by another version. The
+                    // exception simply stops applying, never widens.
+                    warn!(
+                        path = %rule.path,
+                        error = %err,
+                        "path exception regex failed to compile; rule ignored"
+                    );
+                    continue;
+                },
+            };
             let bypass = PathBypass {
                 id: rule.id.clone(),
                 name: if rule.note.is_empty() {
@@ -518,29 +537,11 @@ impl PathExceptions {
             };
             // Query strings are ignored by construction (only `path` is
             // matched) and no further normalisation is applied.
-            match rule.match_type.as_str() {
-                "exact" => compiled.exact.push((rule.path.clone(), bypass)),
-                "wildcard" => compiled.wildcard.push((
-                    rule.path.trim_end_matches('*').to_string(),
-                    bypass,
-                )),
-                "regex" => match compile_path_regex(&rule.path) {
-                    Ok(re) => compiled.regex.push((re, bypass)),
-                    Err(err) => {
-                        // The control plane refuses these on save; this is the
-                        // defence for a bundle written by another version. The
-                        // exception simply stops applying, never widens.
-                        warn!(
-                            path = %rule.path,
-                            error = %err,
-                            "path exception regex failed to compile; rule ignored"
-                        );
-                    },
-                },
-                // `prefix` and any unknown match type: the proto default is
-                // PATH_MATCH_PREFIX, so unknown degrades to the same
-                // semantics rather than to something broader.
-                _ => compiled.prefix.push((rule.path.clone(), bypass)),
+            match filter.match_type() {
+                MatchType::Exact => compiled.exact.push((filter, bypass)),
+                MatchType::Wildcard => compiled.wildcard.push((filter, bypass)),
+                MatchType::Regex => compiled.regex.push((filter, bypass)),
+                MatchType::Prefix => compiled.prefix.push((filter, bypass)),
             }
         }
         if compiled.exact.is_empty()
@@ -559,29 +560,24 @@ impl PathExceptions {
     fn match_path(&self, path: &str) -> Option<&PathBypass> {
         self.exact
             .iter()
-            .find(|(pattern, _)| pattern == path)
+            .find(|(filter, _)| filter.matches(path))
             .map(|(_, bypass)| bypass)
             .or_else(|| {
                 self.prefix
                     .iter()
-                    .find(|(pattern, _)| {
-                        path == pattern
-                            || path
-                                .strip_prefix(pattern.as_str())
-                                .is_some_and(|rest| rest.starts_with('/'))
-                    })
+                    .find(|(filter, _)| filter.matches(path))
                     .map(|(_, bypass)| bypass)
             })
             .or_else(|| {
                 self.wildcard
                     .iter()
-                    .find(|(pattern, _)| path.starts_with(pattern.as_str()))
+                    .find(|(filter, _)| filter.matches(path))
                     .map(|(_, bypass)| bypass)
             })
             .or_else(|| {
                 self.regex
                     .iter()
-                    .find(|(pattern, _)| pattern.is_match(path))
+                    .find(|(filter, _)| filter.matches(path))
                     .map(|(_, bypass)| bypass)
             })
     }
@@ -794,6 +790,8 @@ struct IpRule {
     name: String,
     action: IpRuleAction,
     ranges: IpRules,
+    /// Empty scope = the whole site.
+    path: Option<PathFilter>,
 }
 
 /// Geo restrictions with the country and ASN lists normalised once.
@@ -806,6 +804,8 @@ struct GeoRule {
     challenge: bool,
     /// The policy answers with a basic auth prompt instead of a block page.
     basic_auth: bool,
+    /// Empty scope = the whole site.
+    path: Option<PathFilter>,
 }
 
 /// Why a request was denied, and by which rule.
@@ -858,10 +858,8 @@ impl AccessPolicy {
             .ip_access_rules
             .iter()
             .filter(|rule| rule.enabled && !rule.ip_ranges.is_empty())
-            .map(|rule| IpRule {
-                id: rule.id.clone(),
-                name: rule.name.clone(),
-                action: match rule.action {
+            .filter_map(|rule| {
+                let action = match rule.action {
                     CacheIpAccessAction::Allow => IpRuleAction::Allow,
                     CacheIpAccessAction::Challenge
                     | CacheIpAccessAction::JsChallenge => {
@@ -869,8 +867,32 @@ impl AccessPolicy {
                     },
                     CacheIpAccessAction::Block => IpRuleAction::Block,
                     CacheIpAccessAction::BasicAuth => IpRuleAction::BasicAuth,
-                },
-                ranges: IpRules::new(&rule.ip_ranges),
+                };
+                let path = match PathFilter::compile(&rule.path, &rule.match_type)
+                {
+                    Ok(filter) => filter,
+                    Err(err) => {
+                        // A broken scope must not widen an allow rule; a denial
+                        // keeps enforcing site-wide (fail-closed).
+                        warn!(
+                            rule = %rule.name,
+                            path = %rule.path,
+                            error = %err,
+                            "ip access rule path failed to compile; using a safe default"
+                        );
+                        if action == IpRuleAction::Allow {
+                            return None;
+                        }
+                        None
+                    },
+                };
+                Some(IpRule {
+                    id: rule.id.clone(),
+                    name: rule.name.clone(),
+                    action,
+                    ranges: IpRules::new(&rule.ip_ranges),
+                    path,
+                })
             })
             .collect();
         Self {
@@ -887,9 +909,13 @@ impl AccessPolicy {
         ip: &str,
         addr: Option<IpAddr>,
         country: Option<&str>,
+        path: &str,
     ) -> PolicyOutcome {
         if let Some(addr) = addr {
             for rule in &self.ip_rules {
+                if !rule.path.as_ref().is_none_or(|scope| scope.matches(path)) {
+                    continue;
+                }
                 if !rule.ranges.is_match_addr(&addr) {
                     continue;
                 }
@@ -935,6 +961,10 @@ impl AccessPolicy {
         let Some(geo) = self.geo.as_ref().filter(|geo| geo.enabled) else {
             return PolicyOutcome::NoMatch;
         };
+        // A path scope limits the whole geo policy, not individual countries.
+        if !geo.path.as_ref().is_none_or(|scope| scope.matches(path)) {
+            return PolicyOutcome::NoMatch;
+        }
         let asn_denied = !geo.blocked_asns.is_empty()
             && addr.is_some_and(|addr| {
                 lookup_asn_addr(addr)
@@ -996,6 +1026,18 @@ impl GeoRule {
                 CacheWafAction::Challenge | CacheWafAction::JsChallenge
             ),
             basic_auth: matches!(cfg.action, CacheWafAction::BasicAuth),
+            path: match PathFilter::compile(&cfg.path, &cfg.match_type) {
+                Ok(filter) => filter,
+                Err(err) => {
+                    // Geo denials stay site-wide on a broken scope.
+                    warn!(
+                        path = %cfg.path,
+                        error = %err,
+                        "geo restriction path failed to compile; enforcing site-wide"
+                    );
+                    None
+                },
+            },
         }
     }
 }
@@ -4396,6 +4438,7 @@ impl Plugin for WafPlugin {
                 &request_data.client_ip,
                 client_addr,
                 request_data.country_code.as_deref(),
+                &path,
             );
             if let Some(denial) =
                 access.denial().filter(|denial| !denial.basic_auth)
@@ -4445,10 +4488,19 @@ impl Plugin for WafPlugin {
         // later verdict can skip it. An `allow` rule is the one exemption:
         // it means the client is trusted outright ──
         let gate = context.as_ref().and_then(|site| site.basic_auth.as_ref());
+        let gate_in_scope = gate.is_some_and(|gate| {
+            gate.path.as_ref().is_none_or(|scope| scope.matches(&path))
+        });
         let gate_required = match &access {
             PolicyOutcome::Allowed => false,
+            // A `basic_auth` rule already matched the client through its own
+            // path scope. The gate's scope only governs the *site-wide*
+            // switch; it must not turn a matched rule into a silent bypass.
+            // With no usable gate the request is still refused below.
             PolicyOutcome::Denied(denial) => denial.basic_auth,
-            PolicyOutcome::NoMatch => gate.is_some_and(|gate| gate.site_wide),
+            PolicyOutcome::NoMatch => {
+                gate.is_some_and(|gate| gate.site_wide) && gate_in_scope
+            },
         };
         let gate_required = gate_required && !bypasses("basic_auth");
         if gate_required {
@@ -6698,7 +6750,7 @@ inspect_body = true"###,
 
         // Without a clearance the challenge page answers.
         let RequestPluginResult::Respond(resp) =
-            run_path_request(&plugin, "/admin", None).await
+            run_path_request_from(&plugin, "/admin", "10.1.1.1").await
         else {
             panic!("expected the challenge page");
         };
@@ -6830,6 +6882,9 @@ inspect_body = true"###,
                                     as i32,
                                 note: String::new(),
                                 enabled: true,
+                                path: "/admin".to_string(),
+                                match_type: proto::PathMatchType::PathMatchPrefix
+                                    as i32,
                             },
                             proto::IpAccessRule {
                                 id: "block-all".to_string(),
@@ -6839,6 +6894,9 @@ inspect_body = true"###,
                                     as i32,
                                 note: String::new(),
                                 enabled: true,
+                                path: String::new(),
+                                match_type: proto::PathMatchType::PathMatchPrefix
+                                    as i32,
                             },
                         ],
                         ..Default::default()
@@ -6884,6 +6942,9 @@ inspect_body = true"###,
                             action: proto::IpAccessAction::IpAccessBlock as i32,
                             note: String::new(),
                             enabled: true,
+                            path: String::new(),
+                            match_type: proto::PathMatchType::PathMatchPrefix
+                                as i32,
                         }],
                         ..Default::default()
                     }),
@@ -7463,6 +7524,8 @@ inspect_body = true"###,
         /// (3 = allow, 4 = basic auth).
         rule: Option<(&'static str, i32)>,
         hide_credentials: bool,
+        /// Scope of the gate itself; empty = the whole site.
+        gate_path: &'static str,
     }
 
     /// Installs an agent whose only site carries `credentials` and the given
@@ -7486,6 +7549,8 @@ inspect_body = true"###,
                 action: *action,
                 note: String::new(),
                 enabled: true,
+                path: String::new(),
+                match_type: proto::PathMatchType::PathMatchPrefix as i32,
             })
             .collect();
         let config_hash = format!(
@@ -7522,6 +7587,9 @@ inspect_body = true"###,
                                 .collect(),
                             delay_seconds: 0,
                             hide_credentials: posture.hide_credentials,
+                            path: posture.gate_path.to_string(),
+                            match_type: proto::PathMatchType::PathMatchPrefix
+                                as i32,
                         }),
                         ..Default::default()
                     }),
@@ -7569,6 +7637,27 @@ inspect_body = true"###,
     /// The site-wide gate answers 401 with a challenge until the client
     /// presents a stored credential, and the attempt lands in the access log
     /// as a response the plugin generated itself.
+    #[test]
+    fn basic_auth_gate_scopes_to_its_path() {
+        let gate = BasicAuthGate::build(&CacheBasicAuthConfig {
+            enabled: true,
+            realm: "Restricted".to_string(),
+            credentials: vec![pingwaf_agent::cache::BasicAuthCredential {
+                username: "alice".to_string(),
+                authorization: base64_encode("alice:pw"),
+            }],
+            delay_seconds: 0,
+            hide_credentials: false,
+            path: "/admin".to_string(),
+            match_type: "prefix".to_string(),
+        })
+        .expect("gate with one credential");
+        let scope = gate.path.as_ref().expect("path scope");
+        assert!(scope.matches("/admin"));
+        assert!(scope.matches("/admin/users"));
+        assert!(!scope.matches("/public"));
+    }
+
     #[tokio::test]
     async fn test_basic_auth_gate_challenges_until_credentials_match() {
         let (_guard, agent, _dir) = install_basic_auth_agent(
@@ -7576,6 +7665,7 @@ inspect_body = true"###,
             BasicAuthPosture {
                 site_wide: true,
                 rule: None,
+                gate_path: "",
                 hide_credentials: false,
             },
         )
@@ -7628,6 +7718,7 @@ inspect_body = true"###,
             BasicAuthPosture {
                 site_wide: true,
                 rule: None,
+                gate_path: "",
                 hide_credentials: true,
             },
         )
@@ -7654,6 +7745,7 @@ inspect_body = true"###,
             BasicAuthPosture {
                 site_wide: false,
                 rule: Some(("10.1.1.0/24", 4)),
+                gate_path: "",
                 hide_credentials: false,
             },
         )
@@ -7681,6 +7773,33 @@ inspect_body = true"###,
         assert!(result == RequestPluginResult::Continue);
     }
 
+    /// A matched `basic_auth` rule is never downgraded to a bypass just
+    /// because the gate's own path scope names another path.
+    #[tokio::test]
+    async fn a_basic_auth_rule_is_not_bypassed_by_the_gate_scope() {
+        let (_guard, _agent, _dir) = install_basic_auth_agent(
+            &[("alice", "hunter2")],
+            BasicAuthPosture {
+                site_wide: false,
+                rule: Some(("10.1.1.0/24", 4)),
+                hide_credentials: false,
+                gate_path: "/admin",
+            },
+        )
+        .await;
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        let (result, _) =
+            run_request_with_auth(&plugin, "10.1.1.1", None).await;
+        let RequestPluginResult::Respond(resp) = result else {
+            panic!("a matched basic_auth rule must require credentials");
+        };
+        assert_eq!(http::StatusCode::UNAUTHORIZED, resp.status);
+    }
+
     /// A rule that requires authentication while the site stores no
     /// credential refuses the matched client outright.
     #[tokio::test]
@@ -7690,6 +7809,7 @@ inspect_body = true"###,
             BasicAuthPosture {
                 site_wide: false,
                 rule: Some(("10.1.1.0/24", 4)),
+                gate_path: "",
                 hide_credentials: false,
             },
         )
@@ -7717,6 +7837,7 @@ inspect_body = true"###,
                 site_wide: true,
                 rule: Some(("10.1.1.0/24", 3)),
                 hide_credentials: false,
+                gate_path: "",
             },
         )
         .await;
@@ -7735,6 +7856,25 @@ inspect_body = true"###,
             panic!("expected the gate to challenge an unlisted client");
         };
         assert_eq!(http::StatusCode::UNAUTHORIZED, resp.status);
+    }
+
+    /// A request on `path` from a specific client, for path-scope tests.
+    async fn run_path_request_from(
+        plugin: &WafPlugin,
+        path: &str,
+        client_ip: &str,
+    ) -> RequestPluginResult {
+        let input_header =
+            format!("GET {path} HTTP/1.1\r\nHost: example.com\r\n\r\n");
+        let mock_io = Builder::new().read(input_header.as_bytes()).build();
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+        let mut ctx = Ctx::default();
+        ctx.conn.client_ip = Some(client_ip.to_string());
+        plugin
+            .handle_request(PluginStep::EarlyRequest, &mut session, &mut ctx)
+            .await
+            .unwrap()
     }
 
     /// Builds one request against the plugin from `client_ip`.
@@ -7764,10 +7904,20 @@ inspect_body = true"###,
         )
         .unwrap();
 
+        // The allow rule is scoped to /admin: the whitelisted client passes
+        // there ...
         assert!(
-            run_request(&plugin, "10.1.1.1").await
+            run_path_request_from(&plugin, "/admin", "10.1.1.1").await
                 == RequestPluginResult::Continue
         );
+        // ... but the same client falls through to the catch-all block rule
+        // outside that path.
+        let RequestPluginResult::Respond(resp) =
+            run_path_request_from(&plugin, "/", "10.1.1.1").await
+        else {
+            panic!("expected the catch-all rule to answer outside /admin");
+        };
+        assert_eq!(http::StatusCode::FORBIDDEN, resp.status);
 
         let RequestPluginResult::Respond(resp) =
             run_request(&plugin, "203.0.113.7").await
@@ -7806,6 +7956,9 @@ inspect_body = true"###,
                                 as i32,
                             note: String::new(),
                             enabled: true,
+                            path: String::new(),
+                            match_type: proto::PathMatchType::PathMatchPrefix
+                                as i32,
                         }],
                         ..Default::default()
                     }),

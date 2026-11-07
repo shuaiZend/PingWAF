@@ -42,6 +42,8 @@ export function defaultGeoConfig(siteId: string): GeoConfig {
     blocked_asns: [],
     block_unknown: false,
     action: 'block',
+    path: '',
+    match_type: 'prefix',
   }
 }
 

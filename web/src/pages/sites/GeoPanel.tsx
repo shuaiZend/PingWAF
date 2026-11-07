@@ -42,6 +42,8 @@ import {
 import { useCanWrite } from '@/hooks'
 import { cn } from '@/lib/utils'
 import { formatCompactNumber, formatNumber } from '@/lib/format'
+import { normalizePathScope, validatePathScope } from '@/lib/pathScope'
+import { PathScopeFields } from '@/components/waf/PathScopeFields'
 import {
   GEO_ACTIONS,
   GEO_MODES,
@@ -107,6 +109,7 @@ export function GeoPanel() {
         blocked_asns: payload.blocked_asns,
         block_unknown: payload.block_unknown,
         action: payload.action,
+        ...normalizePathScope(payload.path, payload.match_type),
       }),
     onSuccess: (saved) => {
       setConfig(saved)
@@ -171,7 +174,18 @@ export function GeoPanel() {
             variant="primary"
             disabled={!dirty || save.isPending}
             loading={save.isPending}
-            onClick={() => config && save.mutate(config)}
+            onClick={() => {
+              if (!config) return
+              const error = validatePathScope(
+                config.path ?? '',
+                config.match_type ?? 'prefix',
+              )
+              if (error) {
+                toast.error(t('common.saveFailed'), t(error))
+                return
+              }
+              save.mutate(config)
+            }}
           >
             {t('common.save')}
           </Button>
@@ -239,6 +253,14 @@ export function GeoPanel() {
                   onCheckedChange={(block_unknown) => patch({ block_unknown })}
                   label={t('pages.geo.blockUnknown')}
                   description={t('pages.geo.blockUnknownHint')}
+                />
+                <PathScopeFields
+                  path={config.path ?? ''}
+                  matchType={config.match_type ?? 'prefix'}
+                  disabled={!canWrite}
+                  onChange={(scope) =>
+                    patch({ path: scope.path, match_type: scope.match_type })
+                  }
                 />
               </CardBody>
             </Card>

@@ -3364,9 +3364,21 @@ Create an IP rule. Set either `ip_ranges` (manual mode) or `group_id` (reference
 
 `action` is `block`, `allow`, `challenge`, `js_challenge` or `basic_auth`. Sending `group_id` instead of `ip_ranges` makes the rule track the group's latest ranges. A `basic_auth` rule challenges the matched clients and continues to the remaining checks once they authenticate; configure the credentials under [Basic Auth](#basic-auth) first.
 
+**Path scope (`path`, `match_type`):** every rule also accepts an optional
+path scope — empty `path` = the whole site; a non-empty scope applies the
+rule (whatever its action) only to requests whose path matches it. The two
+fields reuse the [path-exception](#path-exceptions) `match_type` semantics
+and validation: `prefix` (default) / `exact` / `wildcard` / `regex`, a
+`regex` scope is compile-checked on save (4 MiB budget; an invalid pattern
+is a `400`), and an empty `path` is stored with `match_type: "prefix"`.
+Existing rules without a `path` behave exactly as before. Agents that
+predate a `match_type` value degrade it to `prefix` — no visible change for
+an empty path — so a `regex` scope takes effect only after the agents are
+upgraded.
+
 ### PUT /sites/{site_id}/ip-rules/{rule_id}
 
-Update an IP rule (sending `ip_ranges` or `group_id` switches between manual and group mode).
+Update an IP rule (sending `ip_ranges` or `group_id` switches between manual and group mode). `path` and `match_type` are optional; sending either re-validates the pair with the other field falling back to the stored value, and `"path": ""` clears the scope back to the whole site.
 
 ### DELETE /sites/{site_id}/ip-rules/{rule_id}
 
@@ -3374,7 +3386,7 @@ Remove an IP rule.
 
 ### POST /sites/{site_id}/ip-rules/bulk
 
-Bulk import IP rules (one IP or CIDR per entry).
+Bulk import IP rules (one IP or CIDR per entry). Imported rules are site-wide — no path scope is taken from the request.
 
 **Request:**
 ```json
@@ -3667,11 +3679,22 @@ Update geo restrictions.
   "countries": ["CN", "RU", "IR"],
   "blocked_asns": ["AS13335"],
   "block_unknown": false,
-  "action": "block"
+  "action": "block",
+  "path": "",
+  "match_type": "prefix"
 }
 ```
 
 `mode` is `block_list` or `allow_list`; `blocked_asns` entries are ASN numbers, optionally prefixed with `AS`. `action` is `block`, `challenge`, `js_challenge` or `basic_auth`.
+
+**Path scope (`path`, `match_type`):** the policy also accepts an optional
+path scope — empty `path` = the whole site (stored with `match_type:
+"prefix"`); a non-empty scope skips the geo restriction for requests whose
+path does not match it. The fields follow the same
+[path-exception](#path-exceptions) `match_type` semantics and validation as
+the IP-rule scope, including the server-side compile check for `regex`
+(invalid pattern → `400`). Agents that predate a `match_type` value degrade
+it to `prefix`, so a `regex` scope needs an upgraded agent.
 
 ### GET /sites/{site_id}/geo/stats
 
@@ -3717,6 +3740,19 @@ request. It applies site-wide when `enabled` is true, and to the clients an IP
 or geo rule with the `basic_auth` action matches — an explicit `allow` rule
 exempts a client from the site-wide gate.
 
+**Path scope (`path`, `match_type`):** the gate itself also accepts an
+optional path scope — empty `path` = the whole site (stored with
+`match_type: "prefix"`); for the *site-wide* switch, requests outside the
+scope are not asked for credentials. An IP or geo rule with the
+`basic_auth` action is scoped by its own path only: once that rule matches,
+the request must authenticate even if the gate's own scope names another
+path (otherwise a matched rule would silently become a bypass). The fields
+follow the
+[path-exception](#path-exceptions) `match_type` semantics and validation
+(`regex` compile-checked within the 4 MiB budget, invalid pattern → `400`);
+old agents degrade unknown match types to `prefix`, so a `regex` scope needs
+an upgraded agent.
+
 Passwords are masked with `***` in responses; sending the mask back keeps the
 stored password instead of overwriting it. Site write permission is required.
 
@@ -3735,6 +3771,8 @@ site never saved one.
   "credentials": [{"username": "alice", "password": "***"}],
   "delay_seconds": 1,
   "hide_credentials": false,
+  "path": "",
+  "match_type": "prefix",
   "created_at": "2026-09-30T09:00:00Z",
   "updated_at": "2026-09-30T09:00:00Z"
 }
@@ -3745,6 +3783,9 @@ site never saved one.
 Update basic auth. `credentials` replaces the whole list when present; `realm`
 must be 1–200 characters, `delay_seconds` between 0 and 10, and usernames must
 be non-empty and unique. Enabling the gate with no credential is rejected.
+`path` and `match_type` are optional; sending either re-validates the pair
+with the other field falling back to the stored value, and `"path": ""`
+clears the scope back to the whole site.
 
 **Request:**
 ```json
@@ -3756,7 +3797,9 @@ be non-empty and unique. Enabling the gate with no credential is rejected.
     {"username": "bob", "password": "***"}
   ],
   "delay_seconds": 1,
-  "hide_credentials": true
+  "hide_credentials": true,
+  "path": "/admin",
+  "match_type": "prefix"
 }
 ```
 
@@ -3799,6 +3842,8 @@ never saved one.
   "cookie_name": "pingap_oidc",
   "session_ttl_seconds": 43200,
   "claims_to_headers": [],
+  "path": "",
+  "match_type": "prefix",
   "created_at": "2026-09-30T09:00:00Z",
   "updated_at": "2026-09-30T09:00:00Z"
 }
@@ -3822,6 +3867,16 @@ follow the mask rules above: sending `***` keeps the stored secret (rejected
 with `400` when nothing is stored — there is no old value to keep), and `""`
 clears it.
 
+**Path scope (`path`, `match_type`):** the fields scope the login gate —
+empty `path` = the whole site (stored with `match_type: "prefix"`); requests
+outside a configured scope are fully public: no redirect to the provider, no
+session check. `redirect_path` and `logout_path` are always handled first,
+so the callback and logout endpoints stay reachable regardless of the scope.
+The fields follow the [path-exception](#path-exceptions) `match_type`
+semantics and validation (`regex` compile-checked within the 4 MiB budget,
+invalid pattern → `400`); old agents degrade unknown match types to
+`prefix`, so a `regex` scope needs an upgraded agent.
+
 **Request:**
 ```json
 {
@@ -3836,7 +3891,9 @@ clears it.
   "scopes": ["openid", "profile", "email"],
   "cookie_name": "pingap_oidc",
   "session_ttl_seconds": 43200,
-  "claims_to_headers": [{"claim": "email", "header": "X-Auth-Email"}]
+  "claims_to_headers": [{"claim": "email", "header": "X-Auth-Email"}],
+  "path": "",
+  "match_type": "prefix"
 }
 ```
 

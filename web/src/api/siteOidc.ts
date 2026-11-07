@@ -86,6 +86,8 @@ export function defaultSiteOidc(siteId: string): SiteOidc {
     auth_mode: 'oidc',
     access_mode: 'allow_all',
     access_rules: [],
+    path: '',
+    match_type: 'prefix',
     created_at: now,
     updated_at: now,
   }

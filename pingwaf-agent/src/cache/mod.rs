@@ -298,6 +298,22 @@ fn default_true() -> bool {
     true
 }
 
+fn default_match_type() -> String {
+    "prefix".to_string()
+}
+
+/// Maps the proto enum to the string stored in the cache; an unknown value
+/// degrades to `prefix`, matching the control plane's default.
+fn path_match_type(value: i32) -> String {
+    match proto::PathMatchType::try_from(value) {
+        Ok(proto::PathMatchType::PathMatchExact) => "exact",
+        Ok(proto::PathMatchType::PathMatchWildcard) => "wildcard",
+        Ok(proto::PathMatchType::PathMatchRegex) => "regex",
+        _ => "prefix",
+    }
+    .to_string()
+}
+
 impl SiteRules {
     /// All domains this site responds to.
     pub fn all_domains(&self) -> impl Iterator<Item = &str> {
@@ -613,6 +629,11 @@ pub struct IpAccessRule {
     pub action: IpAccessAction,
     pub note: String,
     pub enabled: bool,
+    /// Empty = the whole site; otherwise only matching request paths.
+    #[serde(default)]
+    pub path: String,
+    #[serde(default = "default_match_type")]
+    pub match_type: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -659,6 +680,11 @@ pub struct GeoConfig {
     pub blocked_asns: Vec<String>,
     pub block_unknown: bool,
     pub action: WafAction,
+    /// Empty = the whole site.
+    #[serde(default)]
+    pub path: String,
+    #[serde(default = "default_match_type")]
+    pub match_type: String,
 }
 
 // ─── Cache Rules ────────────────────────────────────────────
@@ -863,6 +889,11 @@ pub struct BasicAuthConfig {
     pub delay_seconds: u32,
     /// Strip the `Authorization` header once the request is authenticated.
     pub hide_credentials: bool,
+    /// Empty = the whole site.
+    #[serde(default)]
+    pub path: String,
+    #[serde(default = "default_match_type")]
+    pub match_type: String,
 }
 
 /// One accepted credential, pre-encoded by the control plane.
@@ -928,6 +959,11 @@ pub struct OidcConfig {
     /// existed, which the plugin reads as `oidc`.
     #[serde(default)]
     pub auth_mode: String,
+    /// Empty = the whole site. Non-matching paths bypass login entirely.
+    #[serde(default)]
+    pub path: String,
+    #[serde(default = "default_match_type")]
+    pub match_type: String,
     /// Rules [`Self::access_mode`] applies. Empty with an enforcing mode
     /// denies everyone, which is why the control plane refuses to ship it.
     #[serde(default)]
@@ -2885,6 +2921,8 @@ impl RuleCache {
             action: IpAccessAction::from(r.action),
             note: r.note.clone(),
             enabled: r.enabled,
+            path: r.path.clone(),
+            match_type: path_match_type(r.match_type),
         }
     }
 
@@ -2896,6 +2934,8 @@ impl RuleCache {
             blocked_asns: g.blocked_asns.clone(),
             block_unknown: g.block_unknown,
             action: WafAction::from(g.action),
+            path: g.path.clone(),
+            match_type: path_match_type(g.match_type),
         }
     }
 
@@ -2954,6 +2994,8 @@ impl RuleCache {
                 .collect(),
             delay_seconds: b.delay_seconds,
             hide_credentials: b.hide_credentials,
+            path: b.path.clone(),
+            match_type: path_match_type(b.match_type),
         }
     }
 
@@ -2989,6 +3031,8 @@ impl RuleCache {
                 })
                 .collect(),
             auth_mode: c.auth_mode.clone(),
+            path: c.path.clone(),
+            match_type: path_match_type(c.match_type),
         }
     }
 
@@ -3295,6 +3339,8 @@ mod tests {
                 value: "waf-admins".to_string(),
             }],
             auth_mode: "both".to_string(),
+            path: "/admin".to_string(),
+            match_type: proto::PathMatchType::PathMatchRegex as i32,
         };
         let converted = RuleCache::convert_oidc(&proto_cfg);
         assert!(converted.enabled);
@@ -3307,6 +3353,8 @@ mod tests {
         assert_eq!(converted.redirect_url, proto_cfg.redirect_url);
         assert_eq!(converted.scopes, proto_cfg.scopes);
         assert_eq!(converted.cookie_name, proto_cfg.cookie_name);
+        assert_eq!(converted.path, proto_cfg.path);
+        assert_eq!(converted.match_type, "regex");
         assert_eq!(
             converted.session_ttl_seconds,
             proto_cfg.session_ttl_seconds

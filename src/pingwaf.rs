@@ -617,6 +617,13 @@ fn site_oidc_plugin(
         "logout_path".to_string(),
         toml::Value::String(oidc.logout_path.clone()),
     );
+    // Empty = the whole site. The plugin skips login on paths outside it,
+    // after handling its own callback/logout paths.
+    conf.insert("path".to_string(), toml::Value::String(oidc.path.clone()));
+    conf.insert(
+        "match_type".to_string(),
+        toml::Value::String(oidc.match_type.clone()),
+    );
     conf.insert(
         "redirect_url".to_string(),
         toml::Value::String(oidc.redirect_url.clone()),
@@ -3272,6 +3279,8 @@ mod tests {
                 },
             ],
             auth_mode: "both".to_string(),
+            path: "/admin".to_string(),
+            match_type: "prefix".to_string(),
         });
 
         let config = cached_rules_to_pingap_config(

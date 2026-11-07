@@ -199,6 +199,9 @@ pub struct OidcView {
     /// One of [`AccessMode::ALL`].
     pub access_mode: String,
     pub access_rules: Vec<OidcAccessRule>,
+    /// Empty = the whole site.
+    pub path: String,
+    pub match_type: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
@@ -233,6 +236,11 @@ pub struct UpdateOidcRequest {
     /// Replaces the whole list when present.
     #[serde(default)]
     pub access_rules: Option<Vec<OidcAccessRule>>,
+    /// Empty clears the scope (whole site).
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub match_type: Option<String>,
 }
 
 /// Distinguishes "the key is absent" from "the key is `null`".
@@ -266,6 +274,8 @@ struct ResolvedOidc {
     auth_mode: String,
     access_mode: String,
     access_rules: Vec<OidcAccessRule>,
+    path: String,
+    match_type: String,
 }
 
 /// Routes contributed to `/api/v1`.
@@ -321,6 +331,8 @@ async fn update(
         auth_mode: row.auth_mode.clone(),
         access_mode: row.access_mode.clone(),
         access_rules: stored_rules,
+        path: row.path.clone(),
+        match_type: row.match_type.clone(),
     };
 
     if let Some(enabled) = payload.enabled {
@@ -370,6 +382,20 @@ async fn update(
     if let Some(rules) = payload.access_rules {
         resolved.access_rules = validate_access_rules(rules)?;
     }
+    if payload.path.is_some() || payload.match_type.is_some() {
+        let (path, match_type) =
+            crate::api::path_exceptions::validate_optional_path(
+                payload.path.as_deref().unwrap_or(&resolved.path),
+                payload.match_type.as_deref().or_else(|| {
+                    payload
+                        .path
+                        .is_none()
+                        .then_some(resolved.match_type.as_str())
+                }),
+            )?;
+        resolved.path = path;
+        resolved.match_type = match_type;
+    }
 
     // Cross-field rules run on the fully merged values, whichever field
     // triggered the change.
@@ -403,6 +429,8 @@ async fn update(
     })?);
     active.auth_mode = Set(resolved.auth_mode);
     active.access_mode = Set(resolved.access_mode);
+    active.path = Set(resolved.path);
+    active.match_type = Set(resolved.match_type);
     active.access_rules = Set(serde_json::to_value(&resolved.access_rules)
         .map_err(|err| {
             ApiError::Internal(format!("failed to encode access_rules: {err}"))
@@ -831,6 +859,8 @@ async fn to_view(
         auth_mode: row.auth_mode.clone(),
         access_mode: row.access_mode.clone(),
         access_rules: decode_access_rules(&row.access_rules)?,
+        path: row.path.clone(),
+        match_type: row.match_type.clone(),
         created_at: row.created_at,
         updated_at: row.updated_at,
     })
@@ -860,6 +890,8 @@ fn default_row(site_id: Uuid) -> site_oidc_model::Model {
         auth_mode: AuthMode::OIDC.to_string(),
         access_mode: AccessMode::ALLOW_ALL.to_string(),
         access_rules: serde_json::json!([]),
+        path: String::new(),
+        match_type: "prefix".to_string(),
         created_at: now,
         updated_at: now,
     }
@@ -896,6 +928,8 @@ async fn find_or_create(
         auth_mode: Set(row.auth_mode),
         access_mode: Set(row.access_mode),
         access_rules: Set(row.access_rules),
+        path: Set(row.path),
+        match_type: Set(row.match_type),
         created_at: Set(row.created_at),
         updated_at: Set(row.updated_at),
     }
@@ -924,6 +958,8 @@ mod tests {
             auth_mode: AuthMode::OIDC.to_string(),
             access_mode: AccessMode::ALLOW_ALL.to_string(),
             access_rules: Vec::new(),
+            path: String::new(),
+            match_type: "prefix".to_string(),
         };
         fields(&mut value);
         value

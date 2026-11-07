@@ -159,12 +159,23 @@ pub struct Model {
     pub access_rules: Json,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
+    /// Empty = the gate applies to the whole site; otherwise only matching
+    /// request paths require login. `redirect_path`/`logout_path` stay
+    /// reachable regardless.
+    #[serde(default)]
+    pub path: String,
+    #[serde(default = "default_match_type")]
+    pub match_type: String,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {}
 
 impl ActiveModelBehavior for ActiveModel {}
+
+fn default_match_type() -> String {
+    "prefix".to_string()
+}
 
 #[cfg(test)]
 mod tests {

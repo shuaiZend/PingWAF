@@ -2081,6 +2081,10 @@ export interface IpRule {
   group_id: string | null
   group_name?: string | null
   action: IpRuleAction | string
+  /** Path scope; empty = every path of the site. */
+  path: string
+  /** How `path` matches; the server stores `prefix` when `path` is empty. */
+  match_type: PathMatchType | string
   note: string | null
   enabled: boolean
   priority: number
@@ -2094,6 +2098,9 @@ export interface CreateIpRuleRequest {
   group_id?: string
   ip_ranges?: string[]
   action?: IpRuleAction | string
+  /** Empty = every path (the server then stores `prefix`). */
+  path?: string
+  match_type?: PathMatchType | string
   note?: string | null
   enabled?: boolean
   priority?: number
@@ -2367,6 +2374,10 @@ export interface GeoConfig {
   blocked_asns: string[]
   block_unknown: boolean
   action: GeoAction | string
+  /** Path scope; empty = every path of the site. */
+  path: string
+  /** How `path` matches; the server stores `prefix` when `path` is empty. */
+  match_type: PathMatchType | string
 }
 
 export type UpdateGeoRequest = Partial<Omit<GeoConfig, 'site_id'>>
@@ -2391,6 +2402,10 @@ export interface SiteBasicAuth {
   delay_seconds: number
   /** Strip the `Authorization` header once a request is authenticated. */
   hide_credentials: boolean
+  /** Path scope; empty = every path of the site. */
+  path: string
+  /** How `path` matches; the server stores `prefix` when `path` is empty. */
+  match_type: PathMatchType | string
   created_at: string
   updated_at: string
 }
@@ -2403,6 +2418,8 @@ export type UpdateBasicAuthRequest = Partial<
     | 'credentials'
     | 'delay_seconds'
     | 'hide_credentials'
+    | 'path'
+    | 'match_type'
   >
 >
 
@@ -2781,6 +2798,10 @@ export interface SiteOidc {
   auth_mode: OidcAuthMode
   access_mode: OidcAccessMode
   access_rules: OidcAccessRule[]
+  /** Path scope; empty = every path of the site. */
+  path: string
+  /** How `path` matches; the server stores `prefix` when `path` is empty. */
+  match_type: PathMatchType | string
   created_at: string
   updated_at: string
 }
@@ -2806,6 +2827,8 @@ export type UpdateOidcRequest = Partial<
     | 'auth_mode'
     | 'access_mode'
     | 'access_rules'
+    | 'path'
+    | 'match_type'
   >
 > & {
   provider_id?: string | null

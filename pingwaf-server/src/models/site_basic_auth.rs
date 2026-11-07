@@ -23,6 +23,12 @@ pub struct Model {
     pub credentials: Json,
     pub delay_seconds: i32,
     pub hide_credentials: bool,
+    /// Empty = the whole site; otherwise the gate only applies to matching
+    /// request paths.
+    #[serde(default)]
+    pub path: String,
+    #[serde(default = "default_match_type")]
+    pub match_type: String,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
 }
@@ -31,3 +37,7 @@ pub struct Model {
 pub enum Relation {}
 
 impl ActiveModelBehavior for ActiveModel {}
+
+fn default_match_type() -> String {
+    "prefix".to_string()
+}

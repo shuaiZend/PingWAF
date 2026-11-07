@@ -196,6 +196,23 @@ fn validate_path(raw: &str, match_type: &str) -> Result<String, ApiError> {
     Ok(path.to_string())
 }
 
+/// Validates an optional access-restriction path scope.
+///
+/// An empty path means "the whole site" and normalises `match_type` to the
+/// `prefix` default. A non-empty path reuses the path-exception rules
+/// verbatim, including the regex budget.
+pub(crate) fn validate_optional_path(
+    path: &str,
+    match_type: Option<&str>,
+) -> Result<(String, String), ApiError> {
+    let match_type = validate_match_type(match_type)?;
+    let path = path.trim();
+    if path.is_empty() {
+        return Ok((String::new(), "prefix".to_string()));
+    }
+    Ok((validate_path(path, &match_type)?, match_type))
+}
+
 /// `*` collapses the list; unknown tokens are rejected rather than ignored.
 fn validate_skip_layers(raw: &[String]) -> Result<Vec<String>, ApiError> {
     if raw.is_empty() {
@@ -463,6 +480,33 @@ mod tests {
     fn prefix_and_exact_paths_reject_wildcards() {
         assert!(validate_path("/api/health", "prefix").is_ok());
         assert!(validate_path("/api/*", "prefix").is_err());
+    }
+
+    #[test]
+    fn optional_path_empty_means_the_whole_site() {
+        assert_eq!(
+            validate_optional_path("", Some("regex")).unwrap(),
+            (String::new(), "prefix".to_string())
+        );
+        assert_eq!(
+            validate_optional_path("   ", None).unwrap(),
+            (String::new(), "prefix".to_string())
+        );
+    }
+
+    #[test]
+    fn optional_path_reuses_the_exception_rules() {
+        assert_eq!(
+            validate_optional_path("/admin", None).unwrap(),
+            ("/admin".to_string(), "prefix".to_string())
+        );
+        assert_eq!(
+            validate_optional_path("^/api/(v1|v2)/", Some("regex")).unwrap(),
+            ("^/api/(v1|v2)/".to_string(), "regex".to_string())
+        );
+        assert!(validate_optional_path("admin", None).is_err());
+        assert!(validate_optional_path("^/broken(", Some("regex")).is_err());
+        assert!(validate_optional_path("/api", Some("glob")).is_err());
     }
 
     #[test]

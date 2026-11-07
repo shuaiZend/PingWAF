@@ -997,7 +997,7 @@ Switch between the **IP rules** and **Geo restrictions** tabs with `?tab=ip` / `
 | Rule name | Label for the rule (e.g., "Block scraper subnet") |
 | Target | A manual **IP / CIDR** list, or an **IP group reference** whose ranges always follow the group's latest contents |
 | IP/CIDR | Address or range (e.g., `192.168.1.0/24`) — manual mode only |
-| Action | `block`, `allow`, `challenge`, or `js_challenge` |
+| Action | `block`, `allow`, `challenge`, `js_challenge`, or `basic_auth` |
 | Note | Why this rule exists (audit) |
 | Priority | Lower values are matched first |
 
@@ -1031,6 +1031,31 @@ A background scheduler refreshes enabled subscriptions when their interval elaps
 One group, **Cloudflare**, is seeded on first boot: the official Cloudflare IP ranges from `https://api.cloudflare.com/client/v4/ips`, refreshed daily. It starts disabled — enable it once you know how it fits your traffic.
 
 Site IP rules can reference a group instead of enumerating ranges; see [IP Rules](#ip-rules) above.
+
+### Path Scopes for Access Restrictions
+
+All four access-control settings — **IP rules**, **geo restrictions**,
+**basic auth** and **OIDC** — accept an optional path scope made of two
+fields:
+
+| Field | Meaning |
+|-------|---------|
+| `path` | The paths the setting applies to. Empty (the default for existing settings) = the whole site. |
+| `match_type` | How `path` is interpreted: `prefix` (default) / `exact` / `wildcard` / `regex` — the same semantics as [Path Exceptions](#path-exceptions). An empty `path` is always stored as `prefix`. |
+
+Per setting, a non-matching path means:
+
+- **IP rules**: the rule does not apply — this works for the `allow`, `block`, `challenge` and `basic_auth` actions alike.
+- **Geo restrictions**: the geo policy is skipped entirely.
+- **Basic auth**: for the site-wide switch, no credentials are asked for outside the gate's scope. An IP or geo rule with the `basic_auth` action is scoped by its own path: once it matches, the request must authenticate even when the gate's scope names another path, so a matched rule is never silently turned into a bypass.
+- **OIDC**: the path is fully public — no redirect to the identity provider, no session check. The OIDC callback, logout and `both`-mode provider entry stay reachable regardless of the scope.
+
+Validation matches path exceptions: a `regex` scope is compile-checked when saved (invalid patterns are rejected with `400`), and agents that predate a `match_type` value degrade it to `prefix` — no visible change for empty paths, but a `regex` scope takes effect only after the agents are upgraded.
+
+Examples:
+
+- Ask for basic auth only under `/admin`: set the basic-auth `path` to `/admin` with `match_type: "prefix"`.
+- Restrict a country block list to the API only: set the geo `path` to `/api/*` with `match_type: "wildcard"`.
 
 ## Bot Protection
 

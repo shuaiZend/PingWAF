@@ -19,6 +19,13 @@ pub struct Model {
     pub action: String,
     pub note: Option<String>,
     pub enabled: bool,
+    /// Empty = the whole site; otherwise the rule only applies when the
+    /// request path matches `match_type`.
+    #[serde(default)]
+    pub path: String,
+    /// `prefix` (default), `exact`, `wildcard` or `regex`.
+    #[serde(default = "default_match_type")]
+    pub match_type: String,
     pub priority: i32,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
@@ -28,3 +35,7 @@ pub struct Model {
 pub enum Relation {}
 
 impl ActiveModelBehavior for ActiveModel {}
+
+fn default_match_type() -> String {
+    "prefix".to_string()
+}

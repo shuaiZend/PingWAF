@@ -1192,6 +1192,8 @@ fn ip_access_rule_to_proto(
         action: ip_action::to_proto(&row.action),
         note: row.note.clone().unwrap_or_default(),
         enabled: row.enabled,
+        path: row.path.clone(),
+        match_type: path_match_type(&row.match_type),
     })
 }
 
@@ -1205,6 +1207,9 @@ fn ip_group_to_proto(row: &ip_groups::Model) -> IpAccessRule {
         action: ip_action::to_proto(&row.action),
         note: row.description.clone().unwrap_or_default(),
         enabled: row.enabled,
+        // Group rules are fleet-wide and have no per-site path scope.
+        path: String::new(),
+        match_type: PathMatchType::PathMatchPrefix as i32,
     }
 }
 
@@ -1226,6 +1231,8 @@ fn geo_to_proto(row: Option<&geo_rules::Model>) -> GeoConfig {
             blocked_asns: g.blocked_asns.clone(),
             block_unknown: g.block_unknown,
             action: action::to_proto(&g.action),
+            path: g.path.clone(),
+            match_type: path_match_type(&g.match_type),
         },
         None => GeoConfig {
             enabled: false,
@@ -1234,6 +1241,8 @@ fn geo_to_proto(row: Option<&geo_rules::Model>) -> GeoConfig {
             blocked_asns: Vec::new(),
             block_unknown: false,
             action: action::to_proto(action::BLOCK),
+            path: String::new(),
+            match_type: PathMatchType::PathMatchPrefix as i32,
         },
     }
 }
@@ -1304,6 +1313,8 @@ fn basic_auth_to_proto(
         credentials,
         delay_seconds: row.delay_seconds.max(0) as u32,
         hide_credentials: row.hide_credentials,
+        path: row.path.clone(),
+        match_type: path_match_type(&row.match_type),
     })
 }
 
@@ -1499,6 +1510,8 @@ fn oidc_to_proto(
             })
             .collect(),
         auth_mode: row.auth_mode.clone(),
+        path: row.path.clone(),
+        match_type: path_match_type(&row.match_type),
     })
 }
 
@@ -2994,6 +3007,8 @@ mod tests {
             action: "block".into(),
             note: None,
             enabled: true,
+            path: String::new(),
+            match_type: "prefix".to_string(),
             priority: 0,
             group_id,
             created_at: Utc::now(),

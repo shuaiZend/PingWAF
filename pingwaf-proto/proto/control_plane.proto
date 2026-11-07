@@ -590,6 +590,9 @@ message BasicAuthConfig {
   uint32 delay_seconds = 4;
   // Strip the Authorization header before forwarding to the origin.
   bool hide_credentials = 5;
+  // Empty = the whole site.
+  string path = 6;
+  PathMatchType match_type = 7;
 }
 
 message BasicAuthCredential {
@@ -640,6 +643,10 @@ message OidcConfig {
   // account with a proof-of-work challenge) or "both". `access_mode` decides
   // who may enter *after* signing in; this decides how they sign in at all.
   string auth_mode = 15;
+  // Empty = the whole site. Non-matching paths bypass login entirely;
+  // redirect_path/logout_path are always handled first.
+  string path = 16;
+  PathMatchType match_type = 17;
 }
 
 // One `claim -> request header` rule of `OidcConfig`.
@@ -780,6 +787,10 @@ message IpAccessRule {
   IpAccessAction action = 4;
   string note = 5;
   bool enabled = 6;
+  // Empty = the whole site; otherwise the rule only applies to paths
+  // matching `match_type`.
+  string path = 7;
+  PathMatchType match_type = 8;
 }
 
 enum IpAccessAction {
@@ -798,6 +809,9 @@ message GeoConfig {
   repeated string blocked_asns = 4;
   bool block_unknown = 5;
   WafAction action = 6;
+  // Empty = the whole site.
+  string path = 7;
+  PathMatchType match_type = 8;
 }
 
 message CacheRule {

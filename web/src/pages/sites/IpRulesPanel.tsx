@@ -34,6 +34,7 @@ import {
 } from '@/api/ipRules'
 import { ipGroupsApi, ipGroupKeys } from '@/api/ipGroups'
 import { AutoBlockedIpsCard } from '@/pages/sites/AutoBlockedIpsCard'
+import { PathScopeFields } from '@/components/waf/PathScopeFields'
 import { useCanWrite } from '@/hooks'
 import { formatDateTime } from '@/lib/format'
 import {
@@ -42,6 +43,8 @@ import {
   type CreateIpRuleRequest,
   type IpRule,
 } from '@/api/types'
+import { normalizePathScope, pathScopeFrom } from '@/lib/pathScope'
+import { validatePathExceptionPath } from '@/lib/pathException'
 
 const ACTION_TONE: Record<string, 'danger' | 'warning' | 'success' | 'neutral'> = {
   block: 'danger',
@@ -62,6 +65,8 @@ interface FormState {
   note: string
   enabled: boolean
   priority: number
+  path: string
+  match_type: string
 }
 
 const emptyForm = (): FormState => ({
@@ -73,9 +78,12 @@ const emptyForm = (): FormState => ({
   note: '',
   enabled: true,
   priority: 0,
+  path: '',
+  match_type: 'prefix',
 })
 
 function formFromRule(rule: IpRule): FormState {
+  const scope = pathScopeFrom(rule.path, rule.match_type)
   return {
     mode: rule.group_id ? 'group' : 'manual',
     name: rule.name,
@@ -85,6 +93,8 @@ function formFromRule(rule: IpRule): FormState {
     note: rule.note ?? '',
     enabled: rule.enabled,
     priority: rule.priority,
+    path: scope.path,
+    match_type: scope.match_type,
   }
 }
 
@@ -180,6 +190,7 @@ export function IpRulesPanel() {
     note: form.note.trim() || null,
     enabled: form.enabled,
     priority: form.priority,
+    ...normalizePathScope(form.path, form.match_type),
     ...(form.mode === 'group'
       ? { group_id: form.group_id }
       : { ip_ranges: parseIpList(form.ranges).valid }),
@@ -246,6 +257,11 @@ export function IpRulesPanel() {
       setError(t('pages.ipRules.nameRequired'))
       return
     }
+    const scopeError = validatePathExceptionPath(form.path, form.match_type)
+    if (form.path.trim() !== '' && scopeError) {
+      setError(t(scopeError))
+      return
+    }
     if (form.mode === 'group') {
       if (!form.group_id) {
         setError(t('pages.ipRules.groupRequired'))
@@ -293,6 +309,11 @@ export function IpRulesPanel() {
           {r.note && (
             <p className="line-clamp-1 text-xs text-fg-subtle">{r.note}</p>
           )}
+          <p className="line-clamp-1 text-xs text-fg-subtle">
+            {r.path
+              ? `${t(`pages.pathExceptions.match_${r.match_type}`, r.match_type)} · ${r.path}`
+              : t('pages.waf.allPaths')}
+          </p>
         </div>
       ),
     },
@@ -584,6 +605,14 @@ export function IpRulesPanel() {
                 })}
               </p>
             )}
+            <PathScopeFields
+              path={form.path}
+              matchType={form.match_type}
+              disabled={!canWrite}
+              onChange={(scope) =>
+                setForm((f) => ({ ...f, path: scope.path, match_type: scope.match_type }))
+              }
+            />
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <Select
                 label={t('pages.waf.action')}

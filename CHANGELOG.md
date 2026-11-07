@@ -10,6 +10,33 @@ verbatim for reference and attribution, and is not maintained here.
 
 ## [Unreleased]
 
+## [PingWAF 0.32.20] — 2026-11-08
+
+### Added
+
+- **Path scopes for access restrictions.** IP access rules, geo
+  restrictions, basic auth and OIDC each accept an optional path scope
+  (`path` + `match_type`): an empty `path` keeps today's site-wide
+  behaviour, and a non-empty scope applies the setting only to request
+  paths that match it. `match_type` supports `prefix` (default) / `exact` /
+  `wildcard` / `regex` with the same semantics as path exceptions, and a
+  `regex` scope is compile-checked when saved (4 MiB budget; an invalid
+  pattern is a `400`). Scoping an OIDC gate makes non-matching paths fully
+  public — no login redirect, no session check — while the OIDC callback
+  and logout endpoints stay reachable. A basic-auth prompt for clients an
+  IP or geo rule singles out requires authentication whenever that rule's
+  own path scope matches; the gate's path scope only limits the site-wide
+  switch (a matched rule is never downgraded to a bypass).
+
+### Changed
+
+- **Empty path scopes keep the whole-site behaviour.** Configurations saved
+  before this release store no `path` and behave exactly as before; an
+  empty `path` is normalised to `match_type: "prefix"`. Agents that predate
+  a `match_type` value degrade it to `prefix` (no visible change for empty
+  paths), so `regex` scopes take effect only after the agents are upgraded
+  — upgrade agents before relying on them.
+
 ## [PingWAF 0.32.19] — 2026-11-07
 
 ### Fixed
