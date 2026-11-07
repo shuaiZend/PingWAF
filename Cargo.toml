@@ -467,7 +467,7 @@ TinyUFO = "0.9.0"
 # for this release only so the tokio upgrade can be tested on its own; it can
 # be raised to `>= 1.54` in a dedicated change (and the matching note in
 # .github/dependabot.yml removed then).
-tokio = { version = "=1.53.3", default-features = false, features = ["fs"] }
+tokio = { version = "=1.54.1", default-features = false, features = ["fs"] }
 toml = "1.1.6"
 hcl-rs = "0.19"
 kdl = "6.7.1"
