@@ -69,7 +69,7 @@ http.request.headers["user-agent"] contains "${jndi:"
 | `pow_difficulty` | `20` |
 | `submission_max_age_secs` | `300` |
 
-挑战等级为 `None`、`NonInteractive`、`Managed`（按请求风险自动选择）与 `Interactive`。工作量证明使用 SHA-256 前导零目标。通过结果存入 `__pingwaf_clearance` Cookie，值为 `base64(payload).base64(HMAC-SHA256)`，并绑定签发站点，因此无法重放到其他域名。
+挑战等级为 `None`、`NonInteractive`、`Managed`（按请求风险自动选择）与 `Interactive`。工作量证明使用 SHA-256 前导零目标。通过结果存入 `__pingwaf_clearance` Cookie，值为 `base64(payload).base64(HMAC-SHA256)`，并绑定签发它的 Host，因此无法重放到其他域名；同一站点的备用域名也需要分别完成一次质询。
 
 ## Bot 策略
 

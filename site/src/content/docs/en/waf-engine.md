@@ -69,7 +69,7 @@ Fifteen `PINGWAF-xxxx` rules ship in the binary and are loaded according to the 
 | `pow_difficulty` | `20` |
 | `submission_max_age_secs` | `300` |
 
-Challenge levels are `None`, `NonInteractive`, `Managed` (picks per request risk) and `Interactive`. Proof of work uses SHA-256 with a leading-zero target. A pass is stored in `__pingwaf_clearance`, a cookie whose value is `base64(payload).base64(HMAC-SHA256)` and which is bound to the issuing site, so it cannot be replayed against another hostname.
+Challenge levels are `None`, `NonInteractive`, `Managed` (picks per request risk) and `Interactive`. Proof of work uses SHA-256 with a leading-zero target. A pass is stored in `__pingwaf_clearance`, a cookie whose value is `base64(payload).base64(HMAC-SHA256)` and which is bound to the host that issued it, so it cannot be replayed against another hostname. Alternate domains of the same site each need their own pass.
 
 ## Bot policy
 

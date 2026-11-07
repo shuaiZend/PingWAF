@@ -1843,33 +1843,37 @@ static CLEARANCE_MANAGER: RwLock<Option<(PathBuf, CookieManager)>> =
 /// match so a clearance earned on one site cannot be replayed against
 /// another. Standalone (no agent) has no shared secret to verify against
 /// and stays exempt-free.
-fn clearance_valid(value: Option<String>, site_id: &str) -> bool {
+fn clearance_valid(value: Option<String>, site_key: &str) -> bool {
     let Some(value) = value else {
         return false;
     };
-    let Some(agent) = PingWafAgent::instance() else {
-        return false;
-    };
-    let secret_path =
-        Path::new(&agent.config.cache_dir).join("challenge_cookie_secret");
-    {
+    // The cache-dir secret is shared with the challenge plugin; standalone
+    // deployments have no agent but still sign with the process-wide fallback,
+    // so they can validate too. Returning false here used to make every
+    // challenge on a standalone deployment loop forever.
+    let secret_path = PingWafAgent::instance().map(|agent| {
+        Path::new(&agent.config.cache_dir).join("challenge_cookie_secret")
+    });
+    if let Some(path) = secret_path.as_ref() {
         let cached =
             CLEARANCE_MANAGER.read().unwrap_or_else(|e| e.into_inner());
-        if let Some((path, manager)) = cached.as_ref()
-            && *path == secret_path
+        if let Some((cached_path, manager)) = cached.as_ref()
+            && cached_path == path
         {
             return manager
                 .validate_clearance(&value)
-                .is_ok_and(|payload| payload.site_id == site_id);
+                .is_ok_and(|payload| payload.site_id == site_key);
         }
     }
     let secret = resolve_cookie_secret("");
     let manager = CookieManager::new(secret.as_bytes(), 3600);
     let valid = manager
         .validate_clearance(&value)
-        .is_ok_and(|payload| payload.site_id == site_id);
-    *CLEARANCE_MANAGER.write().unwrap_or_else(|e| e.into_inner()) =
-        Some((secret_path, manager));
+        .is_ok_and(|payload| payload.site_id == site_key);
+    if let Some(path) = secret_path {
+        *CLEARANCE_MANAGER.write().unwrap_or_else(|e| e.into_inner()) =
+            Some((path, manager));
+    }
     valid
 }
 
@@ -3601,14 +3605,17 @@ impl WafPlugin {
             // A client holding a valid clearance for this site already
             // solved its challenge: re-issuing it would loop forever, so
             // let it pass.
-            if clearance_valid(clearance_cookie(&request_data.headers), site_id)
-            {
+            // Bind the clearance to the host the challenge plugin also uses
+            // as its subject. The two plugins share one cookie name, so a
+            // UUID-vs-host mismatch makes each reject the other's cookie and
+            // re-challenge forever.
+            if clearance_valid(clearance_cookie(&request_data.headers), host) {
                 return RequestPluginResult::Continue;
             }
             build_challenge_response(
                 request_id,
                 original_url,
-                site_id,
+                host,
                 pow_difficulty,
                 ChallengeKind::Js,
             )
@@ -3802,8 +3809,7 @@ impl WafPlugin {
             // clearance for this site solved its challenge before: issuing
             // the same challenge again would loop forever, so let it
             // through.
-            if clearance_valid(clearance_cookie(&request_data.headers), site_id)
-            {
+            if clearance_valid(clearance_cookie(&request_data.headers), host) {
                 if let Some(agent) = agent {
                     agent.record_request(false);
                 }
@@ -3818,7 +3824,7 @@ impl WafPlugin {
             build_challenge_response(
                 request_id,
                 &original_url,
-                site_id,
+                host,
                 self.pow_difficulty,
                 ChallengeKind::Js,
             )
@@ -3989,6 +3995,16 @@ impl Plugin for WafPlugin {
         // a real token shape: a bare prefix would also release
         // `/.well-known/acme-challenge/../../admin` from every rule.
         if is_acme_challenge_path(session.req_header().uri.path()) {
+            return Ok(RequestPluginResult::Skipped);
+        }
+        // The clearance endpoint is served by the challenge plugin. A rule
+        // that matches every path (or `/_pingwaf/...`) must not challenge the
+        // verification POST itself — that turns the challenge page into a
+        // loop with no way to obtain a cookie. Exact path and method only, so
+        // `/_pingwaf/challenge/verify/../admin` is not exempted.
+        if session.req_header().method == http::Method::POST
+            && session.req_header().uri.path() == VERIFY_ENDPOINT
+        {
             return Ok(RequestPluginResult::Skipped);
         }
         // The visitor-auth endpoints are the site's own front door, and they run
@@ -4607,7 +4623,7 @@ impl Plugin for WafPlugin {
                 rate.rules.iter().any(|r| r.action == RateAction::Challenge)
                     && clearance_valid(
                         clearance_cookie(&request_data.headers),
-                        &site_id,
+                        &host,
                     );
             let outcome = rate.evaluate(
                 &self.rate_counters,
@@ -4704,7 +4720,7 @@ impl Plugin for WafPlugin {
                         build_challenge_response(
                             &request_id,
                             &original_url,
-                            &site_id,
+                            &host,
                             self.pow_difficulty,
                             ChallengeKind::Js,
                         )
@@ -6693,7 +6709,7 @@ inspect_body = true"###,
         let manager = CookieManager::new(secret.as_bytes(), 3600);
         let cookie = manager.issue_clearance(
             ClearanceLevel::NonInteractive,
-            "site-1",
+            "example.com",
             "fingerprint",
         );
         assert!(
@@ -6710,7 +6726,7 @@ inspect_body = true"###,
         // cookie's site id is checked against the request's site.
         let other = manager.issue_clearance(
             ClearanceLevel::NonInteractive,
-            "site-9",
+            "other.example",
             "fingerprint",
         );
         let RequestPluginResult::Respond(resp) = run_path_request(
@@ -9300,7 +9316,7 @@ inspect_body = true"###,
         let manager = CookieManager::new(secret.as_bytes(), 3600);
         let cookie = manager.issue_clearance(
             ClearanceLevel::NonInteractive,
-            "site-1",
+            "example.com",
             "fingerprint",
         );
         assert!(
@@ -9678,6 +9694,48 @@ inspect_body = true"###,
             .map(|(_, value)| value.to_str().unwrap().to_string())
             .unwrap();
         assert_eq!(value, "waf;dur=3, total;dur=4, waf;dur=1, total;dur=2");
+    }
+
+    /// Standalone deployments have no agent, but the challenge plugin still
+    /// signs with the process-wide fallback: clearance validation must use the
+    /// same key instead of rejecting every cookie.
+    #[tokio::test]
+    async fn clearance_is_valid_without_an_agent() {
+        let _guard = lock_agent().await;
+        PingWafAgent::set_agent_instance(None);
+
+        let secret = resolve_cookie_secret("");
+        let manager = CookieManager::new(secret.as_bytes(), 3600);
+        let cookie = manager.issue_clearance(
+            ClearanceLevel::NonInteractive,
+            "example.com",
+            "fingerprint",
+        );
+        assert!(clearance_valid(Some(cookie), "example.com"));
+    }
+
+    /// A broad rule must not challenge the endpoint that issues the clearance
+    /// cookie; otherwise the page can never finish.
+    #[tokio::test]
+    async fn verify_endpoint_is_not_evaluated_by_rules() {
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+        let input = "POST /_pingwaf/challenge/verify HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n\r\n";
+        let mock_io = Builder::new().read(input.as_bytes()).build();
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+
+        let result = plugin
+            .handle_request(
+                PluginStep::EarlyRequest,
+                &mut session,
+                &mut Ctx::default(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(result, RequestPluginResult::Skipped));
     }
 
     #[test]

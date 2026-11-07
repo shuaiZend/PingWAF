@@ -55,7 +55,7 @@ use pingwaf_challenge::{
 use std::borrow::Cow;
 use std::path::Path;
 use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, warn};
 
@@ -113,6 +113,12 @@ pub(crate) static FALLBACK_COOKIE_SECRET: LazyLock<String> =
         );
         uuid::Uuid::new_v4().simple().to_string()
     });
+
+/// Last-resort secret for a cache directory that exists but cannot be
+/// written. It must stay stable for the process: callers on both sides of the
+/// clearance contract (WAF verification and challenge signing) resolve it
+/// independently, and a fresh UUID per call would make every cookie invalid.
+static UNPERSISTED_COOKIE_SECRET: OnceLock<String> = OnceLock::new();
 
 #[inline]
 fn now_secs() -> i64 {
@@ -691,8 +697,11 @@ pub(crate) fn resolve_cookie_secret(configured: &str) -> String {
         secret
     } else {
         // Keep the clearance system working even on a read-only cache dir;
-        // cookies merely do not survive a restart.
-        uuid::Uuid::new_v4().simple().to_string()
+        // cookies merely do not survive a restart. The value is process-wide
+        // so the WAF and the challenge plugin agree on it.
+        UNPERSISTED_COOKIE_SECRET
+            .get_or_init(|| uuid::Uuid::new_v4().simple().to_string())
+            .clone()
     }
 }
 

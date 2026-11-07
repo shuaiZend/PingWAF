@@ -10,6 +10,32 @@ verbatim for reference and attribution, and is not maintained here.
 
 ## [Unreleased]
 
+## [PingWAF 0.32.19] — 2026-11-07
+
+### Fixed
+
+- **Challenge actions no longer loop forever on `/admin`-style rules.** The
+  WAF and the standalone challenge plugin share the `__pingwaf_clearance`
+  cookie but bound it to different subjects — the WAF to the site UUID, the
+  plugin to the request host. Each rejected the other's cookie and issued a
+  fresh challenge, so a solved page reloaded into another challenge. Both
+  sides now bind to the request host. Standalone deployments (no agent) also
+  validate clearances with the same process-wide fallback key instead of
+  rejecting every cookie, and an unwritable cache directory keeps one stable
+  secret per process rather than a fresh UUID per call.
+
+- **The clearance verification endpoint is exempt from WAF rules.** A rule
+  matching every path (or `/_pingwaf/...`) could challenge the
+  `POST /_pingwaf/challenge/verify` request itself, leaving the page with no
+  way to obtain a cookie. The exact path and method now bypass rule
+  evaluation.
+
+### Changed
+
+- **Clearance cookies are now bound to the host, not the site UUID.** Cookies
+  issued before this release stop validating once (visitors solve one more
+  challenge); alternate domains of the same site each need their own pass.
+
 ## [PingWAF 0.32.18] — 2026-11-07
 
 ### Fixed
