@@ -10,6 +10,8 @@ verbatim for reference and attribution, and is not maintained here.
 
 ## [Unreleased]
 
+## [PingWAF 0.32.21] — 2026-11-10
+
 ### Fixed
 
 - **Path exceptions that skip every layer now also suppress the standalone
