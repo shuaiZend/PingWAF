@@ -649,6 +649,7 @@
       "allowBlockConflict": "Action 'allow' only supports monitor mode. Switch the mode to monitor before saving.",
       "allowBlockFallback": "Allow rules only support monitor mode — the mode was switched to monitor (off would remove the whitelist and later rules would block again).",
       "allowModeHint": "Allow rules only support monitor mode; off removes the whitelist and later rules block again.",
+      "allowEnabledHint": "Disabling an allow rule removes its whitelist exemption; later block rules apply again.",
       "allowBlockConflictBadge": "Invalid combo",
       "blockWithAllowTitle": "Switch to block mode with {count} allow rule(s)?",
       "blockWithAllowDescription": "Allow rules cannot block. Legacy rules combining 'allow' with mode 'block' will silently stop blocking. Continue?"

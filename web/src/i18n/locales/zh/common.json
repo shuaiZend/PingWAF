@@ -649,6 +649,7 @@
       "allowBlockConflict": "动作「放行」只能使用观察模式。请先把模式切换为观察再保存。",
       "allowBlockFallback": "放行规则只能使用观察模式——已自动切换为观察（关闭会移除白名单，后续规则重新拦截）。",
       "allowModeHint": "放行规则只可选观察模式；关闭会移除白名单，后续规则会重新拦截。",
+      "allowEnabledHint": "禁用放行规则会移除白名单豁免，后续拦截规则将重新生效。",
       "allowBlockConflictBadge": "组合无效",
       "blockWithAllowTitle": "存在 {count} 条放行规则，仍切换到拦截模式？",
       "blockWithAllowDescription": "放行规则不会拦截。存量「放行 + 拦截模式」的组合规则将不再拦截。确定继续？"

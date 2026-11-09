@@ -534,7 +534,11 @@ export function RuleDialog({
           checked={form.enabled}
           onCheckedChange={(enabled) => setForm((f) => ({ ...f, enabled }))}
           label={t('common.enabled')}
-          description={t('pages.waf.enabledHint')}
+          description={
+            form.action === 'allow'
+              ? t('pages.waf.allowEnabledHint')
+              : t('pages.waf.enabledHint')
+          }
         />
 
         {modeHint && (

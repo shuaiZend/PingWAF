@@ -57,7 +57,8 @@ verbatim for reference and attribution, and is not maintained here.
   offers `monitor` for allow rules, and migration `000096` moves existing
   `allow + off` rows to `monitor` so saved whitelists keep working. The data
   plane also treats a legacy `allow + off` row as `monitor`, covering old agent
-  snapshots and restored backups until the next config sync.
+  snapshots until the next config sync, and configuration restore normalises
+  the rows before they are written back.
 
 ## [PingWAF 0.32.20] — 2026-11-08
 

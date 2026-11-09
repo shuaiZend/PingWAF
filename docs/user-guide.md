@@ -346,6 +346,11 @@ Sites → [site] → Web Protection → Path exceptions
 in the access log; only the layers named in `skip_layers` are skipped. When
 `rate_limit` is skipped, the standalone CC rate challenge is skipped too.
 
+`*` covers the layers enforced inside the WAF plugin (WAF engine including
+request-body inspection, bot protection, IP/geo restrictions, basic auth,
+mTLS and CC). The independent cache and OIDC/visitor-auth plugins are not
+part of this list; use their own configuration to scope them.
+
 **What an exception cannot bypass**, no matter which layers it names: a paused
 site (maintenance page), a fail-closed edge, and an active dynamic IP ban —
 those checks run before the exception and always enforce.

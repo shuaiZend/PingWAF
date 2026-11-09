@@ -906,6 +906,14 @@ pub async fn apply_restore(
             .rows_by_table
             .insert(prepared.spec.name.to_string(), prepared.rows.len());
     }
+    // A backup taken before the allow+off fix can restore a whitelist that
+    // the engine would drop. Normalise it here as well as in migration 000096
+    // and in the data plane, so a restore cannot reintroduce the regression.
+    txn.execute_unprepared(
+        "UPDATE rules SET mode = 'monitor' \
+         WHERE action = 'allow' AND mode = 'off'",
+    )
+    .await?;
     Ok(report)
 }
 
