@@ -45,6 +45,10 @@ verbatim for reference and attribution, and is not maintained here.
   The static-asset filter no longer drops `/static/...` exceptions before an
   operator can see that the exception applied.
 
+- **The rule builder's Header field generates a real header lookup.** It now
+  emits `http.request.headers["<name>"]` and asks for the header name instead
+  of the dead `http.request.headers contains "..."` form, which never matched.
+
 - **`*` no longer bypasses authentication layers.** It expands to the
   detection/rate/challenge layers only; `mtls` and `basic_auth` must be named
   explicitly, so a single "all" selection cannot remove client certificates

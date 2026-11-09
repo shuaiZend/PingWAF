@@ -210,6 +210,17 @@ export function RuleDialog({
       setError(t('pages.waf.expressionRequired'))
       return
     }
+    if (
+      editor === 'builder' &&
+      conditions.some(
+        (c) =>
+          c.field === 'http.request.headers' &&
+          !(c.headerName ?? '').trim(),
+      )
+    ) {
+      setError(t('pages.waf.headerNameRequired'))
+      return
+    }
     // Mirror the server-side rejection before the request goes out, so legacy
     // allow+block rules cannot be saved without first fixing the mode.
     if (isAllowBlockConflict(form.action, form.mode)) {
@@ -353,6 +364,29 @@ export function RuleDialog({
                           hint={t('pages.waf.setHint')}
                           onChange={(e) => updateCondition(index, { value: e.target.value })}
                         />
+                      ) : field?.headerName ? (
+                        <div className="flex gap-2">
+                          <Input
+                            aria-label={t('pages.waf.headerName')}
+                            className="h-9 w-32 shrink-0"
+                            value={condition.headerName ?? ''}
+                            placeholder={t('pages.waf.headerNamePlaceholder')}
+                            onChange={(e) =>
+                              updateCondition(index, {
+                                headerName: e.target.value,
+                              })
+                            }
+                          />
+                          <Input
+                            aria-label={t('pages.waf.value')}
+                            className="h-9 min-w-0 flex-1"
+                            value={condition.value}
+                            placeholder={field.placeholder}
+                            onChange={(e) =>
+                              updateCondition(index, { value: e.target.value })
+                            }
+                          />
+                        </div>
                       ) : field?.choices ? (
                         <Select
                           aria-label={t('pages.waf.value')}

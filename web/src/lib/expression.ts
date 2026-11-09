@@ -28,6 +28,8 @@ export interface ExpressionCondition {
   field: string
   operator: ExpressionOperator
   value: string
+  /** Header name when `field` is `http.request.headers`. */
+  headerName?: string
 }
 
 export interface ParsedExpression {
@@ -54,6 +56,8 @@ export interface ExpressionField {
   placeholder: string
   /** Values for this field are a fixed vocabulary — rendered as a select. */
   choices?: string[]
+  /** The field needs a header name and renders `http.request.headers["<name>"]`. */
+  headerName?: boolean
 }
 
 /**
@@ -106,6 +110,7 @@ export const REQUEST_FIELDS: ExpressionField[] = [
     value: 'http.request.headers',
     labelKey: 'headers',
     placeholder: 'x-forwarded-for',
+    headerName: true,
   },
   {
     value: 'ip.src',
@@ -182,13 +187,26 @@ export function renderConditionValue(condition: ExpressionCondition): string {
   return quoteValue(condition.value)
 }
 
+/** Field expression used by the builder; headers carry their name as an index. */
+export function conditionField(condition: ExpressionCondition): string {
+  if (condition.field === 'http.request.headers') {
+    return `http.request.headers[${quoteValue(condition.headerName ?? '')}]`
+  }
+  return condition.field
+}
+
 export function buildExpression(
   conditions: ExpressionCondition[],
   combinator: ExpressionCombinator,
 ): string {
-  const usable = conditions.filter((c) => c.field && c.value.trim().length > 0)
+  const usable = conditions.filter(
+    (c) =>
+      c.field &&
+      c.value.trim().length > 0 &&
+      (c.field !== 'http.request.headers' || (c.headerName ?? '').trim().length > 0),
+  )
   return usable
-    .map((c) => `${c.field} ${c.operator} ${renderConditionValue(c)}`)
+    .map((c) => `${conditionField(c)} ${c.operator} ${renderConditionValue(c)}`)
     .join(` ${combinator} `)
 }
 
@@ -238,14 +256,22 @@ function splitTopLevel(input: string, combinator: ExpressionCombinator): string[
 }
 
 const CONDITION_RE = /^(\S+)\s+(eq|ne|contains|not_contains|starts_with|ends_with|matches|in)\s+(.+)$/
+const HEADER_FIELD_RE = /^http\.request\.headers\["((?:[^"\\]|\\.)*)"\]$/
 
 function parseCondition(part: string): ExpressionCondition | null {
   const m = CONDITION_RE.exec(part.trim())
   if (!m) return null
-  const [, field, operator, rawValue] = m
+  const [, rawField, operator, rawValue] = m
+  const header = HEADER_FIELD_RE.exec(rawField)
+  const field = header ? 'http.request.headers' : rawField
   const value =
     operator === 'in' ? parseSetValue(rawValue).join('\n') : unquoteValue(rawValue)
-  return { field, operator: operator as ExpressionOperator, value }
+  return {
+    field,
+    operator: operator as ExpressionOperator,
+    value,
+    ...(header ? { headerName: header[1].replace(/\\"/g, '"') } : {}),
+  }
 }
 
 /**

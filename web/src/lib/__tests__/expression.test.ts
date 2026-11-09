@@ -5,6 +5,7 @@ import {
   REQUEST_FIELDS,
   RESPONSE_FIELDS,
   buildExpression,
+  parseExpression,
 } from '../expression'
 
 describe('expression field sets', () => {
@@ -22,5 +23,41 @@ describe('expression field sets', () => {
     expect(buildExpression([{ field: 'http.response.status', operator: 'eq', value: '404' }], 'and')).toBe(
       'http.response.status eq "404"',
     )
+  })
+
+  it('indexes a header field and round-trips it', () => {
+    const built = buildExpression(
+      [
+        {
+          field: 'http.request.headers',
+          headerName: 'x-api-key',
+          operator: 'contains',
+          value: 'secret',
+        },
+      ],
+      'and',
+    )
+    expect(built).toBe('http.request.headers["x-api-key"] contains "secret"')
+    expect(parseExpression(built)?.conditions[0]).toEqual({
+      field: 'http.request.headers',
+      headerName: 'x-api-key',
+      operator: 'contains',
+      value: 'secret',
+    })
+  })
+
+  it('drops a header condition without a header name instead of emitting a dead expression', () => {
+    expect(
+      buildExpression(
+        [
+          {
+            field: 'http.request.headers',
+            operator: 'contains',
+            value: 'secret',
+          },
+        ],
+        'and',
+      ),
+    ).toBe('')
   })
 })
