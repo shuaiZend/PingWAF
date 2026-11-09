@@ -415,9 +415,9 @@ message RuleBundle {
   // server: the agent never skips logging (fail-open).
   optional LogSettings log_settings = 32;
 
-  // Path exceptions: request paths that skip selected protection layers. Only
-  // honoured while the site is in observation mode. Absent = no exceptions
-  // (old servers never send them).
+  // Path exceptions: request paths that skip selected protection layers.
+  // Honoured in every WAF mode. Absent = no exceptions (old servers never
+  // send them).
   repeated PathException path_exceptions = 33;
 }
 

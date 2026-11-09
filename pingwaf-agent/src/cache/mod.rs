@@ -153,11 +153,11 @@ pub struct SiteRules {
     /// family actions. `None` for sites (and snapshots) without it.
     #[serde(default)]
     pub ai_crawl: Option<AiCrawlConfig>,
-    /// Operator-curated paths that skip selected protection layers. Only
-    /// honoured while the site observes (see the WAF plugin); absent — and
-    /// empty for every snapshot written before the field existed — means the
-    /// site has no exceptions. A local mirror: the proto type carries no
-    /// serde derives, and the cache snapshot must stay serializable.
+    /// Operator-curated paths that skip selected protection layers.
+    /// Honoured in every WAF mode; absent — and empty for every snapshot
+    /// written before the field existed — means the site has no exceptions.
+    /// A local mirror: the proto type carries no serde derives, and the cache
+    /// snapshot must stay serializable.
     #[serde(default)]
     pub path_exceptions: Vec<PathExceptionConfig>,
 }

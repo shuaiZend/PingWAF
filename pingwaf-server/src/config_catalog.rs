@@ -157,8 +157,8 @@ pub static SITE_TABLES: &[TableSpec] = &[
         order: "certificate_id",
         secrets: &[],
     },
-    // Operator-curated paths that skip selected protection layers in
-    // observation mode.
+    // Operator-curated paths that skip selected protection layers in every
+    // WAF mode.
     site("site_path_exceptions", 4, "path"),
     site("ip_access_rules", 3, "id"),
     TableSpec {

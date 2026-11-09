@@ -2367,8 +2367,10 @@ Create an exception. Requires write access; no observation-mode gate.
 }
 ```
 
-All fields except `path` are optional. `match_type` defaults to `prefix`,
-`skip_layers` defaults to `["*"]`, `log_hits` to `false`, `enabled` to `true`.
+`path` and `skip_layers` are required. `match_type` defaults to `prefix`,
+`log_hits` to `false`, `enabled` to `true`. `skip_layers` has no implicit
+default: omit it and the request is a `400`, so a forgotten field cannot
+silently create a total bypass (`["*"]` must be explicit).
 
 | Field | Validation (violations are `400` unless stated) |
 |-------|--------------------------------------------------|
@@ -2404,8 +2406,8 @@ belong to this site.
 
 ### PUT /sites/{site_id}/path-exceptions/{id}
 
-Partial update: omitted fields keep their value. The observation-mode gate and
-the same validation apply. Switching `match_type` re-validates the stored
+Partial update: omitted fields keep their value. The same validation applies;
+there is no observation-mode gate. Switching `match_type` re-validates the stored
 `path` against the new type (e.g. changing to `wildcard` without a trailing
 `*` on the path is rejected). Changing `path` to a value another exception
 already uses is a `409`.

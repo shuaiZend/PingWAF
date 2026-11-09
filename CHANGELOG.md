@@ -45,6 +45,21 @@ verbatim for reference and attribution, and is not maintained here.
   The static-asset filter no longer drops `/static/...` exceptions before an
   operator can see that the exception applied.
 
+- **Scope matching uses a canonical path.** Percent-decoding, `//` collapse and
+  `.`/`..` resolution run before path-exception/IP/geo/basic/OIDC scopes are
+  matched, so `/api/../admin` cannot satisfy a `/api` scope. Unparseable
+  forms (`#`, `..;`) match no scope (fail-safe); the original path is still
+  logged and proxied.
+
+- **`skip_layers` is required when creating a path exception.** Omitting it
+  used to default to `["*"]` (a total bypass); it now returns `400`, and `*`
+  must be explicit. The console always sends an explicit list.
+
+- **Disabling a rule group no longer disables the whole WAF.** Rules in a
+  disabled group are omitted from the bundle, but managed rules and the
+  engine switch stay on. An unknown rule `mode` now degrades to `monitor`
+  rather than `off`.
+
 - **Regex path exceptions can be saved again.** Migration 000086 constrained
   `match_type` to prefix/exact/wildcard while the API, console and data plane
   already accepted `regex`; saving one violated the CHECK and surfaced as a

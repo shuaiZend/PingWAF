@@ -3000,6 +3000,7 @@
       "deleteTitle": "Delete path exception",
       "deleteDescription": "Requests on this path will be inspected again.",
       "errorPathRequired": "Path is required.",
+      "errorLayersRequired": "Select at least one protection layer, or “All”.",
       "errorPathRooted": "The path must start with “/”.",
       "errorPathWildcardSuffix": "Wildcard paths must end with “*”.",
       "errorPathRegex": "Invalid regular expression: it must be non-empty, contain no whitespace or control characters, and compile."

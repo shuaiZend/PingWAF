@@ -6,6 +6,7 @@
 //! drifting between features.
 
 use regex::{Regex, RegexBuilder};
+use std::borrow::Cow;
 
 /// Maximum automaton size, matching the WAF expression engine.
 const MAX_REGEX_SIZE: usize = 4 * 1024 * 1024;
@@ -79,6 +80,14 @@ impl PathFilter {
     }
 
     pub(crate) fn matches(&self, path: &str) -> bool {
+        // Scope decisions must use the same canonical view the WAF engine
+        // inspects. Matching the raw URI would let `/api/../admin` satisfy a
+        // `/api` exception while the origin resolves it to `/admin`.
+        let Some(path) = canonical_path(path) else {
+            // A suspicious path that cannot be canonicalised safely matches
+            // no scope: fail-safe beats guessing what the origin will do.
+            return false;
+        };
         match self.match_type {
             MatchType::Exact => path == self.pattern,
             MatchType::Prefix => {
@@ -91,9 +100,36 @@ impl PathFilter {
             MatchType::Regex => self
                 .regex
                 .as_ref()
-                .is_some_and(|pattern| pattern.is_match(path)),
+                .is_some_and(|pattern| pattern.is_match(&path)),
         }
     }
+}
+
+/// Canonical path for scope matching, without touching the original path used
+/// for logging and proxying. Decoding and dot-segment resolution only run when
+/// the raw path could hide a different path (`%`, `..`, `//`, `/.`), so the
+/// common case stays an allocation-free borrow.
+fn canonical_path(path: &str) -> Option<Cow<'_, str>> {
+    // `normalize` treats `#` as a fragment and truncates there; a request
+    // target should never carry one, and truncating it could turn a
+    // non-matching path into a matching one. Refuse to scope it instead.
+    if path.contains('#') || path.contains("..;") {
+        return None;
+    }
+    if !(path.contains('%')
+        || path.contains("..")
+        || path.contains("//")
+        || path.contains("/."))
+    {
+        return Some(Cow::Borrowed(path));
+    }
+    // Keep this in lock-step with the engine's default decode depth. A site
+    // configured for more layers may see a more-decoded path in the engine;
+    // the conservative safe reading is to scope what three layers expose.
+    let decoded = pingwaf_waf::normalize::url::multi_decode(path, 3);
+    Some(Cow::Owned(pingwaf_waf::normalize::path::normalize(
+        &decoded,
+    )))
 }
 
 /// The same automaton budget the WAF expression engine uses: one pathological
@@ -139,6 +175,20 @@ mod tests {
         assert!(filter.matches("/static/app.js"));
         assert!(!filter.matches("/static"));
         assert!(!filter.matches("/other"));
+    }
+
+    #[test]
+    fn scope_matching_uses_the_canonical_path() {
+        let api = PathFilter::compile("/api", "prefix").unwrap().unwrap();
+        assert!(!api.matches("/api/../admin"));
+        assert!(!api.matches("/api/%2e%2e/admin"));
+        assert!(!api.matches("/api#/../admin"));
+        assert!(!api.matches("/api/..;/admin"));
+        assert!(api.matches("/api//v1"));
+        assert!(api.matches("/api/v1"));
+
+        let admin = PathFilter::compile("/admin", "exact").unwrap().unwrap();
+        assert!(!admin.matches("/admin/"));
     }
 
     #[test]

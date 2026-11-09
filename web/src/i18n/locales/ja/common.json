@@ -2991,6 +2991,7 @@
       "deleteTitle": "パス例外を削除",
       "deleteDescription": "このパスのリクエストは再び検査されます。",
       "errorPathRequired": "パスは必須です。",
+      "errorLayersRequired": "少なくとも 1 つの保護レイヤー、または「すべて」を選択してください。",
       "errorPathRooted": "パスは「/」で始まる必要があります。",
       "errorPathWildcardSuffix": "ワイルドカード パスは「*」で終わる必要があります。",
       "errorPathRegex": "正規表現が無効です：空でないこと、空白や制御文字を含まないこと、コンパイルできることが必要です。"

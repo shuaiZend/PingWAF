@@ -539,7 +539,8 @@ impl PathExceptions {
                 log_hits: rule.log_hits,
             };
             // Query strings are ignored by construction (only `path` is
-            // matched) and no further normalisation is applied.
+            // matched); `PathFilter::matches` canonicalises the path before
+            // comparing, so traversal forms cannot satisfy a broader scope.
             match filter.match_type() {
                 MatchType::Exact => compiled.exact.push((filter, bypass)),
                 MatchType::Wildcard => compiled.wildcard.push((filter, bypass)),
@@ -4456,10 +4457,9 @@ impl Plugin for WafPlugin {
         // ── Path exceptions: an operator-curated path skips the protection
         // layers it names. Evaluated only after the three branches above —
         // a paused site, a fail-closed agent and an active IP ban are
-        // enforced decisions no exception may bypass. The exception itself
-        // is honoured only while the site observes (`resolve_path_bypass`
-        // already gates on observation mode), so it can never weaken a
-        // block-mode site. The access-log entry has been registered above,
+        // enforced decisions no exception may bypass. The exception is
+        // honoured in every WAF mode, including block mode; only those hard
+        // gates run first. The access-log entry has been registered above,
         // so bypassed requests remain visible. ──
         if let Some(bypass) = &path_bypass {
             // The exception itself is an auditable decision: keep the access

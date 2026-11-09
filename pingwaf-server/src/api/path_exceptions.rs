@@ -308,8 +308,16 @@ async fn create_exception(
         })?,
         &match_type,
     )?;
+    // Never infer "skip everything" from a missing field: a script that
+    // forgets `skip_layers` must not create a total bypass. The console
+    // always sends an explicit list, and `*` remains available on request.
     let skip_layers = validate_skip_layers(
-        payload.skip_layers.as_deref().unwrap_or(&["*".to_string()]),
+        payload.skip_layers.as_deref().ok_or_else(|| {
+            ApiError::BadRequest(
+                "skip_layers is required; use [\"*\"] to skip every layer"
+                    .to_string(),
+            )
+        })?,
     )?;
     let note = validate_note(payload.note.as_deref())?;
 

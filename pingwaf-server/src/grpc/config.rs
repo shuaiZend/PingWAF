@@ -1046,7 +1046,7 @@ fn routes_to_proto(
 /// **floors at monitor**, never `off` (see [`waf_config_to_proto`]).
 fn waf_config_to_proto(
     rules: &[WafRule],
-    groups: &[rule_groups::Model],
+    _groups: &[rule_groups::Model],
     settings: Option<&waf_settings::Model>,
 ) -> WafConfig {
     let active: Vec<&WafRule> = rules.iter().filter(|r| r.enabled).collect();
@@ -1075,9 +1075,6 @@ fn waf_config_to_proto(
                 .any(|tag| tag.to_ascii_lowercase().contains(needle))
         })
     };
-
-    let any_group_enabled =
-        groups.is_empty() || groups.iter().any(|group| group.enabled);
 
     let (
         waf_enabled,
@@ -1117,7 +1114,7 @@ fn waf_config_to_proto(
 
     // The engine switch is explicit; rules only feed the mode fallback and
     // the per-category switches below.
-    let enabled = waf_enabled && any_group_enabled;
+    let enabled = waf_enabled;
 
     WafConfig {
         enabled,
@@ -1748,8 +1745,22 @@ pub async fn build_rule_bundle(
                 static_suffixes: row.static_suffixes,
             });
 
-    let custom_rules: Vec<WafRule> =
-        rules_rows.iter().map(rule_to_proto).collect();
+    // Groups control which custom rules are delivered. They are not a second
+    // master switch: disabling the last group must not turn off the managed
+    // ruleset (or the whole engine) with it.
+    let enabled_groups: HashSet<Uuid> = groups
+        .iter()
+        .filter(|group| group.enabled)
+        .map(|group| group.id)
+        .collect();
+    let custom_rules: Vec<WafRule> = rules_rows
+        .iter()
+        .filter(|rule| {
+            rule.group_id
+                .is_none_or(|group_id| enabled_groups.contains(&group_id))
+        })
+        .map(rule_to_proto)
+        .collect();
 
     let mut bundle = RuleBundle {
         site_id: site_row.id.to_string(),

@@ -76,8 +76,8 @@ function formFromException(e: PathException): FormState {
 
 /**
  * Per-site path exceptions: request paths that bypass named protection
- * layers. Writes are only accepted while the site's WAF mode is `monitor`,
- * so the panel fronts an observation-mode gate.
+ * layers. Exceptions apply in every WAF mode; this panel only needs the
+ * caller's write permission.
  */
 export function PathExceptionsPanel() {
   const { t } = useTranslation()
@@ -128,8 +128,8 @@ export function PathExceptionsPanel() {
       invalidate()
     },
     onError: (e) => {
-      // The server answers 409 (observation mode) / 400 (validation) with a
-      // human-readable message — surface it instead of a generic failure.
+      // Validation failures carry a human-readable message; surface it
+      // instead of a generic failure.
       setFormError(errorMessage(e))
     },
   })

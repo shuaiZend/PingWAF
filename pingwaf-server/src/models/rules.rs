@@ -64,12 +64,16 @@ pub mod mode {
     }
 
     /// `pingwaf::WafMode` enum values as defined in control_plane.proto.
+    ///
+    /// An unknown value (a hand-edited row, an old restore) degrades to
+    /// `monitor`, not `off`: the rule keeps detecting and logging, while a
+    /// typo cannot silently remove protection.
     pub fn to_proto(mode: &str) -> i32 {
         match mode {
             OFF => 0,
             MONITOR => 1,
             BLOCK => 2,
-            _ => 0,
+            _ => 1,
         }
     }
 }
@@ -300,5 +304,12 @@ mod tests {
         assert!(action::is_valid_geo(action::BASIC_AUTH));
         assert!(!action::is_valid(action::BASIC_AUTH));
         assert_eq!(5, action::to_proto(action::BASIC_AUTH));
+    }
+
+    #[test]
+    fn an_unknown_mode_degrades_to_monitor_not_off() {
+        assert_eq!(1, mode::to_proto("enforced"));
+        assert_eq!(0, mode::to_proto(mode::OFF));
+        assert_eq!(2, mode::to_proto(mode::BLOCK));
     }
 }

@@ -351,6 +351,11 @@ request-body inspection, bot protection, IP/geo restrictions, basic auth,
 mTLS and CC). The independent cache and OIDC/visitor-auth plugins are not
 part of this list; use their own configuration to scope them.
 
+Scope matching uses a canonical path: percent-decoding, `//` collapse and
+`.`/`..` resolution run before the exception is matched, so `/api/../admin`
+cannot satisfy a `/api` exception. The original path is still what gets
+logged and proxied.
+
 **What an exception cannot bypass**, no matter which layers it names: a paused
 site (maintenance page), a fail-closed edge, and an active dynamic IP ban —
 those checks run before the exception and always enforce.

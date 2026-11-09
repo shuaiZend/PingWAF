@@ -3000,6 +3000,7 @@
       "deleteTitle": "删除路径例外",
       "deleteDescription": "该路径的请求将重新接受检查。",
       "errorPathRequired": "请填写路径。",
+      "errorLayersRequired": "请至少选择一个防护层，或选择「全部」。",
       "errorPathRooted": "路径必须以「/」开头。",
       "errorPathWildcardSuffix": "通配路径必须以「*」结尾。",
       "errorPathRegex": "正则表达式无效：不能为空、不能包含空白或控制字符，且必须可以编译。"
