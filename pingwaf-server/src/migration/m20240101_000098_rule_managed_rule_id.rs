@@ -69,11 +69,14 @@ impl MigrationTrait for Migration {
         conn.execute_unprepared(&format!(
             "UPDATE rules SET managed_rule_id = v.mid \
              FROM (VALUES {}) AS v(name, mid) \
-             JOIN rule_groups g ON g.id = rules.group_id \
              WHERE rules.name = v.name \
-               AND g.name = 'PingWAF 内置防护' \
-               AND g.phase = 'request' \
-               AND rules.managed_rule_id IS NULL",
+               AND rules.managed_rule_id IS NULL \
+               AND EXISTS ( \
+                   SELECT 1 FROM rule_groups g \
+                   WHERE g.id = rules.group_id \
+                     AND g.name = 'PingWAF 内置防护' \
+                     AND g.phase = 'request' \
+               )",
             values.join(", ")
         ))
         .await?;
