@@ -173,7 +173,8 @@ pub struct PathExceptionConfig {
     /// `prefix`.
     #[serde(default)]
     pub match_type: String,
-    /// `*` collapses the list; empty means every layer (old-server shape).
+    /// `*` skips every layer; an empty list skips nothing (the control plane
+    /// rejects it, and a corrupt row must not become a total bypass).
     #[serde(default)]
     pub skip_layers: Vec<String>,
     #[serde(default)]

@@ -60,6 +60,7 @@ use pingwaf_agent::cache::{
     RateLimitRule as CacheRateLimitRule, SiteRules as CacheSiteRules,
     SslConfig as CacheSslConfig, WafAction as CacheWafAction,
     WafConfig as CacheWafConfig, WafMode as CacheWafMode,
+    WafRule as CacheWafRule,
 };
 use pingwaf_agent::{AccessLogEntry, PingWafAgent, SecurityEvent};
 use pingwaf_challenge::{
@@ -372,9 +373,8 @@ struct PathBypass {
 }
 
 /// The site's enabled path exceptions, precompiled per config fingerprint
-/// into the three match groups. Only honoured while the site observes —
-/// a block-mode site (or one not in observation mode) ignores them
-/// entirely, so an exception can never weaken active enforcement.
+/// into the three match groups. Honoured in every WAF mode: an operator
+/// exception is explicit configuration, not something block mode overrides.
 #[derive(Debug, Default)]
 struct PathExceptions {
     exact: Vec<(PathFilter, PathBypass)>,
@@ -505,10 +505,13 @@ impl PathExceptions {
     /// Compiles the site's exception list; `None` when nothing is enabled.
     fn build(rules: &[CachePathException]) -> Option<Self> {
         let mut compiled = Self::default();
-        for rule in rules {
-            if !rule.enabled {
-                continue;
-            }
+        // Longest pattern first: `/api/admin` must beat `/api` for an
+        // operator who wrote both. The control plane only de-duplicates
+        // identical paths, so overlapping prefixes are a normal case.
+        let mut ordered: Vec<&CachePathException> =
+            rules.iter().filter(|rule| rule.enabled).collect();
+        ordered.sort_by_key(|rule| std::cmp::Reverse(rule.path.len()));
+        for rule in ordered {
             let filter = match PathFilter::compile(&rule.path, &rule.match_type)
             {
                 Ok(Some(filter)) => filter,
@@ -591,6 +594,66 @@ fn resolve_path_bypass(site: &SiteContext, path: &str) -> Option<PathBypass> {
     site.path_exceptions.as_ref()?.match_path(path).cloned()
 }
 
+/// Compiled path exceptions per host, keyed by the exact `SiteRules` value
+/// they were built from. The WAF keeps the same compilation in `SiteContext`;
+/// the challenge plugin is a sibling plugin and cannot reach it, so it keeps
+/// its own copy and rebuilds only when the agent swaps the rules Arc. Without
+/// this cache a site with a `regex` exception paid up to 64 regex compilations
+/// on every request (each with a 4 MiB automaton budget).
+type PathExceptionCacheEntry =
+    (Arc<CacheSiteRules>, Option<Arc<PathExceptions>>);
+
+static PATH_EXCEPTION_CACHE: LazyLock<
+    DashMap<String, PathExceptionCacheEntry>,
+> = LazyLock::new(DashMap::new);
+
+/// Whether the site's path exceptions skip the challenge layer for `path`.
+///
+/// The standalone challenge plugin has no site-rule context of its own and
+/// must not rely on the WAF having registered a pending-access entry: that
+/// handshake is absent when the WAF is not in the chain or the pending table
+/// is full. It reads the same site rules the WAF uses; the compiled result is
+/// cached by the rules Arc so a config change rebuilds it once.
+///
+/// `rate_limit` is part of the answer because the standalone challenge plugin
+/// shares its rate window with CC: skipping that layer must also suppress the
+/// plugin's own rate challenge, exactly like the WAF's pending flag does.
+pub(crate) fn path_exception_skips_challenge(host: &str, path: &str) -> bool {
+    let Some(agent) = PingWafAgent::instance() else {
+        return false;
+    };
+    let Some(site_rules) = agent.get_rules_for_domain(host) else {
+        return false;
+    };
+    if site_rules.path_exceptions.is_empty() {
+        return false;
+    }
+    let cached = PATH_EXCEPTION_CACHE
+        .get(host)
+        .filter(|entry| Arc::ptr_eq(&entry.0, &site_rules))
+        .map(|entry| entry.1.clone());
+    let compiled = match cached {
+        Some(compiled) => compiled,
+        None => {
+            let compiled = PathExceptions::build(&site_rules.path_exceptions)
+                .map(Arc::new);
+            if PATH_EXCEPTION_CACHE.len() > 256 {
+                PATH_EXCEPTION_CACHE.clear();
+            }
+            PATH_EXCEPTION_CACHE.insert(
+                host.to_string(),
+                (Arc::clone(&site_rules), compiled.clone()),
+            );
+            compiled
+        },
+    };
+    compiled.is_some_and(|compiled| {
+        compiled.match_path(path).is_some_and(|bypass| {
+            bypass.layers.skips_challenge() || bypass.layers.skips("rate_limit")
+        })
+    })
+}
+
 /// Site data resolved from the agent cache, compiled once per config
 /// fingerprint: the WAF engine, the access restrictions and the custom rule
 /// names used to label security events.
@@ -634,7 +697,7 @@ struct SiteContext {
     /// key on the resolved address.
     proxy_trust: ProxyTrust,
     /// Operator-curated path exceptions, compiled; `None` when the site has
-    /// none enabled. Only consulted while `observation_mode` is on.
+    /// none enabled. Honoured in every WAF mode, including block mode.
     path_exceptions: Option<Arc<PathExceptions>>,
 }
 
@@ -3085,11 +3148,22 @@ fn build_site_engine(cfg: &CacheWafConfig) -> WafEngine {
     //   never carries its action (downgraded, no enforcement).
     // - `block`: the rule is evaluated and enforced.
     // The site-level engine mode stays the master switch on top of this.
+    // A legacy `allow + off` row is kept as an allow rule: `off` used to make
+    // the whitelist disappear and later block rules match again. The API now
+    // rejects the pair and migration 000096 backfills it, but old agent
+    // snapshots and restored backups can still contain it.
+    let effective_mode = |r: &CacheWafRule| {
+        if r.action == CacheWafAction::Allow && r.mode == CacheWafMode::Off {
+            CacheWafMode::Monitor
+        } else {
+            r.mode
+        }
+    };
     let monitor_custom_rules: std::collections::HashSet<String> = cfg
         .custom_rules
         .iter()
-        // Only `monitor` rules participate in the event/score stream.
-        .filter(|r| r.enabled && r.mode == CacheWafMode::Monitor)
+        // Only monitor rules participate in the event/score stream.
+        .filter(|r| r.enabled && effective_mode(r) == CacheWafMode::Monitor)
         .map(|r| r.id.clone())
         .collect();
     // Active rules: enabled and not off. Off rules must not be compiled or
@@ -3097,8 +3171,11 @@ fn build_site_engine(cfg: &CacheWafConfig) -> WafEngine {
     let rules: Vec<CompiledRule> = cfg
         .custom_rules
         .iter()
-        .filter(|r| r.enabled && r.mode != CacheWafMode::Off)
+        .filter(|r| r.enabled)
         .filter_map(|r| {
+            if effective_mode(r) == CacheWafMode::Off {
+                return None;
+            }
             let action = match r.action {
                 CacheWafAction::Block => RuleAction::Block,
                 CacheWafAction::Log => RuleAction::Log,
@@ -4385,6 +4462,10 @@ impl Plugin for WafPlugin {
         // block-mode site. The access-log entry has been registered above,
         // so bypassed requests remain visible. ──
         if let Some(bypass) = &path_bypass {
+            // The exception itself is an auditable decision: keep the access
+            // entry even when `log_hits=false` (the static-asset filter would
+            // otherwise drop `/static/...` exceptions without a trace).
+            mark_waf_triggered(&request_id);
             if bypass.log_hits
                 && let Some(agent) = &agent
             {
@@ -4844,6 +4925,7 @@ impl Plugin for WafPlugin {
         // reaches the filter and creates no entry.
         if wants_body
             && has_body
+            && !bypasses("waf")
             && !(request_data.method == "POST"
                 && request_data.path == VERIFY_ENDPOINT)
         {
@@ -4852,7 +4934,7 @@ impl Plugin for WafPlugin {
                 EngineChoice::Base => self.mode != WafMode::Off,
                 EngineChoice::Disabled | EngineChoice::FailClosed => false,
             };
-            let inspect = should_inspect && engine_runs;
+            let inspect = should_inspect && engine_runs && !bypasses("waf");
             let max_entries = deferred_body_max_entries(self.max_body_size);
             // One site must not be able to exhaust the process-wide pool and
             // turn every other site into a 503. The per-site scan is only
@@ -5758,6 +5840,23 @@ ml_threshold = 0.75
             mode,
             priority: 0,
         }
+    }
+
+    /// Old agents or restored backups can still carry `allow + off`; dropping
+    /// it would silently turn the whitelist back into a block.
+    #[test]
+    fn legacy_allow_off_still_whitelists() {
+        let mut cfg = cache_waf_config(false, Vec::new(), Vec::new());
+        let mut allow =
+            custom_rule("legacy-allow", CacheWafMode::Off, "allowmark");
+        allow.action = CacheWafAction::Allow;
+        cfg.custom_rules = vec![
+            allow,
+            custom_rule("block-same", CacheWafMode::Block, "allowmark"),
+        ];
+        let engine = build_site_engine(&cfg);
+        let verdict = engine.inspect(&probe("?q=allowmark"));
+        assert_eq!(verdict.action, WafAction::Pass);
     }
 
     #[test]
@@ -9889,6 +9988,62 @@ inspect_body = true"###,
             .await
             .unwrap();
         assert!(matches!(result, RequestPluginResult::Skipped));
+    }
+
+    /// The standalone challenge plugin resolves the same site exceptions
+    /// itself, so an "all layers" row must suppress its gate even without a
+    /// WAF pending-access entry (standalone / pre-0.32.17 agents).
+    #[tokio::test]
+    async fn path_exception_all_layers_is_visible_to_the_challenge_gate() {
+        let (_guard, agent, _dir) = install_test_agent().await;
+        agent
+            .rule_cache
+            .update_from_site_config(&proto::SiteConfig {
+                sites: vec![proto::Site {
+                    id: "site-1".to_string(),
+                    name: "example".to_string(),
+                    domain: "example.com".to_string(),
+                    alternate_domains: Vec::new(),
+                    status: 0,
+                    rules: Some(proto::RuleBundle {
+                        site_id: "site-1".to_string(),
+                        config_hash: "hash-1".to_string(),
+                        path_exceptions: vec![proto::PathException {
+                            id: "all-api".to_string(),
+                            path: "/api".to_string(),
+                            match_type: proto::PathMatchType::PathMatchPrefix
+                                as i32,
+                            skip_layers: vec!["*".to_string()],
+                            enabled: true,
+                            log_hits: false,
+                            note: String::new(),
+                        }],
+                        ..Default::default()
+                    }),
+                    trust_proxy_headers: false,
+                    trusted_header: String::new(),
+                    trust_last_hop: false,
+                    trusted_proxy_ranges: Vec::new(),
+                    downstream_timeout_secs: 60,
+                }],
+                config_hash: "hash-1".to_string(),
+                updated_at: None,
+            })
+            .unwrap();
+
+        assert!(path_exception_skips_challenge("example.com", "/api/x"));
+        assert!(!path_exception_skips_challenge("example.com", "/other"));
+        assert!(!path_exception_skips_challenge("unknown.example", "/api"));
+    }
+
+    #[test]
+    fn path_exception_prefers_the_most_specific_prefix() {
+        let compiled = PathExceptions::build(&[
+            path_exception("wide", "/api", "prefix", &["waf"]),
+            path_exception("deep", "/api/admin", "prefix", &["challenge"]),
+        ])
+        .unwrap();
+        assert_eq!(compiled.match_path("/api/admin/x").unwrap().id, "deep");
     }
 
     #[test]

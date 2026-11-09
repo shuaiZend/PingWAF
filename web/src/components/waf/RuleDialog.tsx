@@ -439,8 +439,8 @@ export function RuleDialog({
             onChange={(e) => {
               const action = e.target.value
               setForm((f) => {
-                // allow cannot run in block mode — fall back to monitor and
-                // explain why, mirroring the server-side 400.
+                // An allow rule is the exemption itself: neither block nor
+                // off can apply. Fall back to monitor and explain why.
                 const mode =
                   isAllowBlockConflict(action, f.mode) ? ALLOW_FALLBACK_MODE : f.mode
                 return { ...f, action, mode }

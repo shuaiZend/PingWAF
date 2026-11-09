@@ -55,6 +55,7 @@ use tracing::{debug, warn};
 use super::{
     Error, get_hash_key, get_step_conf, get_str_conf, get_str_slice_conf,
 };
+use crate::path_filter::PathFilter;
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -205,6 +206,10 @@ pub struct VisitorAuth {
     /// on every request — the two plugins would each consider the other's
     /// session absent.
     oidc_cookie_name: Option<String>,
+    /// OIDC's path scope on a `both` site. Outside it the OIDC plugin is
+    /// public, so this gate must step aside too; otherwise the local login
+    /// page contradicts the OIDC scope.
+    scope: Option<PathFilter>,
 }
 
 impl VisitorAuth {
@@ -1365,6 +1370,11 @@ impl TryFrom<&PluginConf> for VisitorAuth {
         // tells this plugin it is the site's only gate.
         let oidc_cookie_name = Some(get_str_conf(value, "oidc_cookie_name"))
             .filter(|name| !name.is_empty());
+        let scope = PathFilter::compile(
+            &get_str_conf(value, "scope_path"),
+            &get_str_conf(value, "scope_match_type"),
+        )
+        .map_err(|error| invalid(format!("scope_path: {error}")))?;
         // The session cookie is signed with a key derived from the site's
         // `cookie_secret` — the same secret the OIDC session uses, so a site
         // has one secret to rotate rather than two. It is required: a cookie
@@ -1390,6 +1400,7 @@ impl TryFrom<&PluginConf> for VisitorAuth {
             key,
             delegated_paths,
             oidc_cookie_name,
+            scope,
         })
     }
 }
@@ -1443,6 +1454,13 @@ impl Plugin for VisitorAuth {
         // never be exchanged) and a visitor holding an OIDC session would be
         // sent back to the local login page on every request.
         if is_delegated(&path, &self.delegated_paths) {
+            return Ok(RequestPluginResult::Skipped);
+        }
+        // On a `both` site the OIDC gate is public outside its scope; this
+        // plugin is first in the chain, so it has to honour the same scope.
+        if let Some(scope) = &self.scope
+            && !scope.matches(&path)
+        {
             return Ok(RequestPluginResult::Skipped);
         }
         if !owns_path(&path) {

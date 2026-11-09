@@ -1487,15 +1487,16 @@ impl WafEngine {
                     unreachable!("allow rules handled in pre-pass")
                 },
                 RuleAction::Log => {
-                    // OWASP CRS anomaly-scoring semantics, kept deliberately:
-                    // a log-action hit feeds the same aggregate (including
-                    // the blocking subset), so several low-severity log hits
-                    // — or log hits stacked on signature hits — can cross
-                    // the threshold and block. Operators who want a rule to
-                    // never contribute to blocking use the per-rule monitor
-                    // switch instead, which routes through
-                    // `add_severity_hit_ex(monitored=true)`.
-                    self.scorer.add_severity_hit(&mut breakdown, rule.severity);
+                    // The action is "record only": the hit stays visible in
+                    // the aggregate score and event stream, but it must not
+                    // push the blocking subset over the threshold. A single
+                    // log rule used to be able to turn several stacked
+                    // warnings into a 403.
+                    self.scorer.add_severity_hit_ex(
+                        &mut breakdown,
+                        rule.severity,
+                        true,
+                    );
                 },
                 RuleAction::Block => {
                     self.scorer.add_severity_hit_ex(

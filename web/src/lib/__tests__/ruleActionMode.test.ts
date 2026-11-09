@@ -19,7 +19,7 @@ describe('isModeAllowedForAction', () => {
   it('disables only block for allow rules', () => {
     expect(isModeAllowedForAction('allow', 'block')).toBe(false)
     expect(isModeAllowedForAction('allow', 'monitor')).toBe(true)
-    expect(isModeAllowedForAction('allow', 'off')).toBe(true)
+    expect(isModeAllowedForAction('allow', 'off')).toBe(false)
     expect(isModeAllowedForAction('challenge', 'block')).toBe(true)
   })
 })

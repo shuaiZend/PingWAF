@@ -253,15 +253,25 @@ fn validate_action_mode(
     rule_action: &str,
     rule_mode: &str,
 ) -> Result<(), ApiError> {
-    if rule_action == action::ALLOW && rule_mode == mode::BLOCK {
-        return Err(ApiError::BadRequest(
+    if rule_action != action::ALLOW {
+        return Ok(());
+    }
+    match rule_mode {
+        mode::MONITOR => Ok(()),
+        mode::BLOCK => Err(ApiError::BadRequest(
             "action 'allow' cannot use mode 'block': an allow rule always \
              passes the request, so the block mode would never apply; use \
-             'monitor' or 'off'"
+             'monitor'"
                 .to_string(),
-        ));
+        )),
+        mode::OFF => Err(ApiError::BadRequest(
+            "action 'allow' cannot use mode 'off': off disables the rule and \
+             its whitelist exemption, so later block rules run again; use \
+             'monitor' to keep the allow rule active"
+                .to_string(),
+        )),
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 fn validate_rule(
@@ -700,6 +710,12 @@ mod tests {
         assert!(message.contains("off|monitor|block"), "{message}");
         assert!(message.contains("use 'block'"), "{message}");
         assert!(validate_rule("r", OK_EXPR, "block", "block", 9).is_err());
+
+        // An allow rule is the exemption itself: off would remove it and let
+        // later block rules run, so only monitor is accepted.
+        assert!(validate_rule("r", OK_EXPR, "allow", "off", 3).is_err());
+        assert!(validate_rule("r", OK_EXPR, "allow", "monitor", 3).is_ok());
+        assert!(validate_rule("r", OK_EXPR, "allow", "block", 3).is_err());
     }
 
     #[test]

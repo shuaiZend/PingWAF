@@ -579,6 +579,18 @@ fn site_oidc_plugin(
                 "oidc_cookie_name".to_string(),
                 toml::Value::String(oidc.cookie_name.clone()),
             );
+            // `both` puts this gate first: outside the OIDC scope it must
+            // step aside exactly like the OIDC plugin does.
+            if !oidc.path.is_empty() {
+                visitor.insert(
+                    "scope_path".to_string(),
+                    toml::Value::String(oidc.path.clone()),
+                );
+                visitor.insert(
+                    "scope_match_type".to_string(),
+                    toml::Value::String(oidc.match_type.clone()),
+                );
+            }
         }
         let name = format!("{site_id}_visitor_auth");
         plugins.insert(name.clone(), visitor);
@@ -3377,6 +3389,15 @@ mod tests {
             visitor.get("oidc_cookie_name").and_then(|v| v.as_str()),
             Some("pingap_oidc"),
             "the visitor gate must recognise the other kind of session"
+        );
+        assert_eq!(
+            visitor.get("scope_path").and_then(|v| v.as_str()),
+            Some("/admin"),
+            "outside the OIDC scope the first gate must step aside"
+        );
+        assert_eq!(
+            visitor.get("scope_match_type").and_then(|v| v.as_str()),
+            Some("prefix")
         );
         let visitor_index =
             index("site1_visitor_auth").expect("visitor gate referenced");

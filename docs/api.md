@@ -2200,17 +2200,22 @@ rule name and never edits an existing row.
 
 ### Action / mode combination check
 
-An `action: "allow"` rule always passes the request, so pairing it with
-`mode: "block"` promises enforcement that can never happen. The combination is
+An `action: "allow"` rule is the whitelist exemption itself, so it only
+supports `mode: "monitor"`. Pairing it with `mode: "block"` promises
+enforcement that can never happen, while `mode: "off"` removes the rule from
+the engine and lets later block rules match again. Both combinations are
 rejected on create **and** on update — including an update that changes only
-one side, where the stored value of the other completes the pair — with:
+one side, where the stored value of the other completes the pair — with a
+`400`:
 
 ```
 400 action 'allow' cannot use mode 'block': an allow rule always passes the
-request, so the block mode would never apply; use 'monitor' or 'off'
-```
+request, so the block mode would never apply; use 'monitor'
 
-`allow` is accepted with `mode: "monitor"` or `mode: "off"` only.
+400 action 'allow' cannot use mode 'off': off disables the rule and its
+whitelist exemption, so later block rules run again; use 'monitor' to keep
+the allow rule active
+```
 
 ### POST /sites/{site_id}/waf/defaults
 

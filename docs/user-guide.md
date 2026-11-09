@@ -243,14 +243,12 @@ security event shows both sides — `action: monitor` with `waf_details` ending 
 own `rule_action=block`. If the event has no `downgraded=true`, the rule itself
 was configured to observe.
 
-One combination is always rejected: an **allow** rule cannot use mode
-**block**. An allow rule passes the request before any block rule can run, so
-"block" would never apply — the console refuses the save with
-`action 'allow' cannot use mode 'block': an allow rule always passes the
-request, so the block mode would never apply; use 'monitor' or 'off'`. Choose
-**Detection** (`monitor`) to watch an allow rule, or **Off** to disable it.
-This applies to editing an existing rule too, even when you only change one of
-the two fields.
+An **allow** rule is the whitelist exemption itself, so it only supports
+**Detection** (`monitor`). Mode **block** would never apply, and mode **Off**
+would remove the rule from the engine — the whitelist disappears and later
+block rules match again. The console only offers `monitor` for `allow`, and the
+API rejects both other modes with a `400`. This applies to editing an existing
+rule too, even when you only change one of the two fields.
 
 In short: the **action** decides what happens to a request the rule matches
 (`block` / `log` / `challenge` / `allow`), the **rule mode** decides whether

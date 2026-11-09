@@ -426,7 +426,8 @@ message PathException {
   string id = 1;
   string path = 2;
   PathMatchType match_type = 3;
-  // `*` collapses the list; empty means every layer (old-server shape).
+  // `*` skips every layer. An empty list skips nothing (the control plane
+  // rejects it on save; a corrupt/old row must not become a total bypass).
   repeated string skip_layers = 4;
   bool enabled = 5;
   // Write a `security_events` row on every hit. Off by default: a health

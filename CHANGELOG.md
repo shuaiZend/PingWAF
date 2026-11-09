@@ -10,6 +10,55 @@ verbatim for reference and attribution, and is not maintained here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Path exceptions that skip every layer now also suppress the standalone
+  challenge plugin.** The WAF already skipped its own challenge, but the
+  challenge plugin only learned about the exception through a pending-access
+  entry the WAF wrote when an agent was installed; deployments where that entry
+  was absent (WAF not in the chain, pending table full) still issued a
+  challenge. The plugin now resolves the site's `path_exceptions` directly
+  (same rules, same matcher, compiled once per config update) before its own
+  gate. A `rate_limit` exception suppresses the plugin's CC rate challenge too,
+  matching the WAF's pending-flag semantics.
+
+- **`skip_layers` also covers the request-body inspection stage.** A path
+  exception with `waf` or `*` skipped the request-phase verdict but the body
+  stage still registered and enforced it, so a deep-inspection body could
+  still be blocked (or rejected with 415/408) on an excepted path.
+
+- **`action=log` no longer contributes to the blocking score.** Log hits
+  still count toward the aggregate score and the event stream, but no longer
+  push the blocking subset, so stacked log rules cannot produce a 403.
+
+- **OIDC path scopes now apply to `both`-mode sites.** The visitor-auth gate
+  runs before the OIDC plugin and used to gate every path, so paths outside
+  the OIDC scope were still sent to the local login page. The generated
+  visitor gate now receives the same `path` / `match_type` and steps aside
+  outside it; callback, logout and the provider entry stay delegated.
+
+- **Overlapping path exceptions pick the most specific pattern.** Longest
+  prefix/wildcard first instead of the order the bundle happened to carry, so
+  `/api/admin` is no longer shadowed by a broader `/api` exception.
+
+- **A path exception keeps its access-log entry even with `log_hits=false`.**
+  The static-asset filter no longer drops `/static/...` exceptions before an
+  operator can see that the exception applied.
+
+- **Regex path exceptions can be saved again.** Migration 000086 constrained
+  `match_type` to prefix/exact/wildcard while the API, console and data plane
+  already accepted `regex`; saving one violated the CHECK and surfaced as a
+  generic 500. Migration 000097 widens the constraint.
+
+- **Allow rules can no longer be switched off.** `mode = "off"` removes a
+  rule from the engine, so an allow rule's whitelist exemption disappeared and
+  later block rules matched again — the console showed this as "the rule became
+  a block". The API now rejects `allow + off` with `400`, the console only
+  offers `monitor` for allow rules, and migration `000096` moves existing
+  `allow + off` rows to `monitor` so saved whitelists keep working. The data
+  plane also treats a legacy `allow + off` row as `monitor`, covering old agent
+  snapshots and restored backups until the next config sync.
+
 ## [PingWAF 0.32.20] — 2026-11-08
 
 ### Added

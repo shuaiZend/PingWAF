@@ -646,9 +646,9 @@
       "restoreNothingHint": "Every built-in rule already exists for this site.",
       "restoreDone": "Restored {{count}} built-in rules",
       "restoreDoneHint": "They ship in monitor mode so you can see what they catch before blocking anything.",
-      "allowBlockConflict": "Action 'allow' cannot use mode 'block'. Switch the mode to monitor or off before saving.",
-      "allowBlockFallback": "Allow rules cannot run in block mode — the mode was switched to monitor.",
-      "allowModeHint": "Allow rules skip blocking; only monitor or off is available.",
+      "allowBlockConflict": "Action 'allow' only supports monitor mode. Switch the mode to monitor before saving.",
+      "allowBlockFallback": "Allow rules only support monitor mode — the mode was switched to monitor (off would remove the whitelist and later rules would block again).",
+      "allowModeHint": "Allow rules only support monitor mode; off removes the whitelist and later rules block again.",
       "allowBlockConflictBadge": "Invalid combo",
       "blockWithAllowTitle": "Switch to block mode with {count} allow rule(s)?",
       "blockWithAllowDescription": "Allow rules cannot block. Legacy rules combining 'allow' with mode 'block' will silently stop blocking. Continue?"
