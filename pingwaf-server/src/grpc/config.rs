@@ -522,9 +522,16 @@ async fn load_error_pages(
 }
 
 /// Turns a stored WAF rule into its protocol representation.
+///
+/// A seeded row mirroring a managed rule carries its stable `PINGWAF-*` id as
+/// the proto id (instead of the row's UUID) so that overrides and telemetry
+/// name the same rule the engine evaluates. Custom rules keep their UUID.
 pub fn rule_to_proto(row: &rule::Model) -> WafRule {
     WafRule {
-        id: row.id.to_string(),
+        id: row
+            .managed_rule_id
+            .clone()
+            .unwrap_or_else(|| row.id.to_string()),
         name: row.name.clone(),
         description: row.description.clone().unwrap_or_default(),
         expression: row.expression.clone(),
@@ -1046,10 +1053,18 @@ fn routes_to_proto(
 /// **floors at monitor**, never `off` (see [`waf_config_to_proto`]).
 fn waf_config_to_proto(
     rules: &[WafRule],
+    managed: &[WafRule],
     _groups: &[rule_groups::Model],
     settings: Option<&waf_settings::Model>,
 ) -> WafConfig {
-    let active: Vec<&WafRule> = rules.iter().filter(|r| r.enabled).collect();
+    // Detection switches see both populations: a managed-linked seed row
+    // (e.g. the scanner rule, tag `bot`) no longer travels as a custom rule,
+    // but its tags must keep enabling the family switch on the engine.
+    let active: Vec<&WafRule> = rules
+        .iter()
+        .chain(managed.iter())
+        .filter(|r| r.enabled)
+        .collect();
 
     // A posture row is the only source of `off`: without one, a site lands on
     // `monitor` at worst. The old derivation fell through to `off` when no
@@ -1112,6 +1127,21 @@ fn waf_config_to_proto(
             )
         });
 
+    // A managed-linked seed row can carry the restore-path `monitor` mode.
+    // Its rule no longer travels as a custom rule, so forward that per-rule
+    // downgrade through `monitor_managed_rules`; otherwise the always-loaded
+    // managed rule would enforce block and the restore would silently
+    // promote the site.
+    let mut monitor_managed_rules = monitor_managed_rules;
+    for rule in managed {
+        if rule.enabled
+            && rule.mode == WAF_MODE_MONITOR
+            && !monitor_managed_rules.contains(&rule.id)
+        {
+            monitor_managed_rules.push(rule.id.clone());
+        }
+    }
+
     // The engine switch is explicit; rules only feed the mode fallback and
     // the per-category switches below.
     let enabled = waf_enabled;
@@ -1132,15 +1162,14 @@ fn waf_config_to_proto(
         // Built-in managed rules travel as overrides, not `custom_rules`: the
         // data plane always loads the managed set, so a built-in rule switched
         // to `off` (or disabled) must be carried as an explicit override or it
-        // would keep being evaluated and logged on the agent. Only built-in
-        // ids (`PINGWAF-*`) land here; custom rules keep their `custom_rules`
-        // path and are filtered engine-side.
-        managed_overrides: rules
+        // would keep being evaluated and logged on the agent. `managed` holds
+        // exactly the rows whose `managed_rule_id` maps them onto a managed
+        // rule, with the proto id set to the stable `PINGWAF-*` id by
+        // `rule_to_proto`; custom rules keep their `custom_rules` path and are
+        // filtered engine-side.
+        managed_overrides: managed
             .iter()
-            .filter(|r| {
-                r.id.starts_with("PINGWAF-")
-                    && (!r.enabled || r.mode == WAF_MODE_OFF)
-            })
+            .filter(|r| !r.enabled || r.mode == WAF_MODE_OFF)
             .map(|r| RuleOverride {
                 rule_id: r.id.clone(),
                 // `enabled = false` is the minimal "off" expression; the
@@ -1753,11 +1782,26 @@ pub async fn build_rule_bundle(
         .filter(|group| group.enabled)
         .map(|group| group.id)
         .collect();
+    // Seed rows that mirror a managed rule (`managed_rule_id` set) are
+    // override-only: the managed engine already evaluates that detection, and
+    // shipping the row as a custom rule would judge the same payload twice and
+    // dodge the managed rule's category/stack monitor switches. They are also
+    // deliberately exempt from the group gate — the built-in group being
+    // disabled must not mute an operator's per-rule off switch on the managed
+    // set (disabling groups is not a master switch for managed rules either
+    // way).
+    let managed_rules: Vec<WafRule> = rules_rows
+        .iter()
+        .filter(|rule| rule.managed_rule_id.is_some())
+        .map(rule_to_proto)
+        .collect();
     let custom_rules: Vec<WafRule> = rules_rows
         .iter()
         .filter(|rule| {
-            rule.group_id
-                .is_none_or(|group_id| enabled_groups.contains(&group_id))
+            rule.managed_rule_id.is_none()
+                && rule
+                    .group_id
+                    .is_none_or(|group_id| enabled_groups.contains(&group_id))
         })
         .map(rule_to_proto)
         .collect();
@@ -1769,6 +1813,7 @@ pub async fn build_rule_bundle(
         updated_at: to_timestamp(site_row.updated_at),
         waf: Some(waf_config_to_proto(
             &custom_rules,
+            &managed_rules,
             &groups,
             waf_settings.as_ref(),
         )),
@@ -2261,51 +2306,129 @@ mod tests {
             enabled: true,
             mode: mode::MONITOR.into(),
             priority: 0,
+            managed_rule_id: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
 
-        // A built-in rule switched off emits a disable override, whether via
-        // `mode = off` or `enabled = false`.
+        // A managed-linked seed rule switched off emits a disable override,
+        // whether via `mode = off` or `enabled = false`. The override names
+        // the stable managed id, not the row's UUID — the engine knows no
+        // rule by the UUID, so that is what makes the switch bite.
         let mut off_builtin = base.clone();
-        off_builtin.id = Uuid::nil();
-        off_builtin.name = "PINGWAF-1010".into();
+        off_builtin.managed_rule_id = Some("PINGWAF-1010".into());
+        off_builtin.mode = mode::OFF.into();
         let proto = rule_to_proto(&off_builtin);
-        let mut proto = proto;
-        proto.id = "PINGWAF-1010".into();
-        proto.mode = WAF_MODE_OFF;
+        assert_eq!(proto.id, "PINGWAF-1010");
+        let config = waf_config_to_proto(&[], &[proto], &[], None);
+        assert_eq!(config.managed_overrides.len(), 1);
+        assert_eq!(config.managed_overrides[0].rule_id, "PINGWAF-1010");
+        assert!(!config.managed_overrides[0].enabled);
+
+        let mut disabled_builtin = off_builtin.clone();
+        disabled_builtin.mode = mode::MONITOR.into();
+        disabled_builtin.enabled = false;
         let config = waf_config_to_proto(
-            &[proto.clone(), rule_to_proto(&base)],
+            &[],
+            &[rule_to_proto(&disabled_builtin)],
             &[],
             None,
         );
         assert_eq!(config.managed_overrides.len(), 1);
         assert_eq!(config.managed_overrides[0].rule_id, "PINGWAF-1010");
-        assert!(!config.managed_overrides[0].enabled);
-
-        let mut disabled_builtin = proto.clone();
-        disabled_builtin.mode = WAF_MODE_MONITOR;
-        disabled_builtin.enabled = false;
-        let config = waf_config_to_proto(&[disabled_builtin], &[], None);
-        assert_eq!(config.managed_overrides.len(), 1);
-        assert_eq!(config.managed_overrides[0].rule_id, "PINGWAF-1010");
 
         // Enabled built-in rules produce no override.
-        let mut on_builtin = proto;
+        let mut on_builtin = off_builtin.clone();
         on_builtin.enabled = true;
-        on_builtin.mode = WAF_MODE_MONITOR;
-        let config = waf_config_to_proto(&[on_builtin], &[], None);
+        on_builtin.mode = mode::MONITOR.into();
+        let config =
+            waf_config_to_proto(&[], &[rule_to_proto(&on_builtin)], &[], None);
         assert!(config.managed_overrides.is_empty());
 
         // A disabled custom rule never produces an override — custom rules
-        // travel through `custom_rules` and are filtered engine-side.
+        // travel through `custom_rules` and are filtered engine-side. Its
+        // proto id stays the row UUID.
         let mut off_custom = base.clone();
         off_custom.enabled = false;
         off_custom.mode = mode::OFF.into();
-        let config =
-            waf_config_to_proto(&[rule_to_proto(&off_custom)], &[], None);
+        let custom_proto = rule_to_proto(&off_custom);
+        assert_eq!(custom_proto.id, off_custom.id.to_string());
+        let config = waf_config_to_proto(&[custom_proto], &[], &[], None);
         assert!(config.managed_overrides.is_empty());
         assert_eq!(config.custom_rules.len(), 1);
+    }
+
+    #[test]
+    fn managed_linked_seed_rows_never_enter_custom_rules() {
+        // The original defect: seed rows duplicating managed rules travelled
+        // as custom rules, so every site evaluated the same payload twice and
+        // the UUID-vs-`PINGWAF-*` id assumption made managed_overrides
+        // permanently empty.
+        let seed = rule::Model {
+            managed_rule_id: Some("PINGWAF-1002".into()),
+            name: "SQL 注入检测".into(),
+            expression: "cf.waf.score.sqli ge 40".into(),
+            tags: vec!["sqli".into()],
+            ..waf_rule_row()
+        };
+        let custom = rule::Model {
+            name: "自定义规则".into(),
+            ..waf_rule_row()
+        };
+        let rows = [seed, custom];
+
+        let managed: Vec<WafRule> = rows
+            .iter()
+            .filter(|r| r.managed_rule_id.is_some())
+            .map(rule_to_proto)
+            .collect();
+        let custom_rules: Vec<WafRule> = rows
+            .iter()
+            .filter(|r| r.managed_rule_id.is_none())
+            .map(rule_to_proto)
+            .collect();
+        let config = waf_config_to_proto(&custom_rules, &managed, &[], None);
+        // Only the genuinely custom rule is pushed; the seed survives solely
+        // as (empty) override control over the managed rule.
+        assert_eq!(config.custom_rules.len(), 1);
+        assert_eq!(config.custom_rules[0].name, "自定义规则");
+        assert!(config.managed_overrides.is_empty());
+        // The seed's tags still drive the family detection switch.
+        assert!(config.sqli_detection);
+    }
+
+    #[test]
+    fn a_monitor_seed_forwards_the_managed_downgrade() {
+        let mut seed = rule::Model {
+            managed_rule_id: Some("PINGWAF-1002".into()),
+            name: "SQL 注入检测".into(),
+            ..waf_rule_row()
+        };
+        seed.mode = mode::MONITOR.into();
+        let managed = vec![rule_to_proto(&seed)];
+        let config = waf_config_to_proto(&[], &managed, &[], None);
+        assert_eq!(config.monitor_managed_rules, vec!["PINGWAF-1002"]);
+        assert!(config.managed_overrides.is_empty());
+    }
+
+    fn waf_rule_row() -> rule::Model {
+        rule::Model {
+            id: Uuid::new_v4(),
+            group_id: None,
+            site_id: Uuid::nil(),
+            name: String::new(),
+            description: None,
+            expression: "true".into(),
+            action: action::BLOCK.into(),
+            severity: 3,
+            tags: Vec::new(),
+            enabled: true,
+            mode: mode::MONITOR.into(),
+            priority: 0,
+            managed_rule_id: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
     }
 
     #[test]
@@ -2323,11 +2446,12 @@ mod tests {
             enabled: true,
             mode: mode::MONITOR.into(),
             priority: 0,
+            managed_rule_id: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
         let monitoring = vec![rule_to_proto(&base)];
-        let config = waf_config_to_proto(&monitoring, &[], None);
+        let config = waf_config_to_proto(&monitoring, &[], &[], None);
         assert!(config.enabled);
         assert_eq!(config.mode, WAF_MODE_MONITOR);
         assert!(config.sqli_detection);
@@ -2341,13 +2465,13 @@ mod tests {
         let mut blocking = base.clone();
         blocking.mode = mode::BLOCK.into();
         let config =
-            waf_config_to_proto(&[rule_to_proto(&blocking)], &[], None);
+            waf_config_to_proto(&[rule_to_proto(&blocking)], &[], &[], None);
         assert_eq!(config.mode, WAF_MODE_BLOCK);
 
         let mut disabled = base.clone();
         disabled.enabled = false;
         let config =
-            waf_config_to_proto(&[rule_to_proto(&disabled)], &[], None);
+            waf_config_to_proto(&[rule_to_proto(&disabled)], &[], &[], None);
         // The engine switch is explicit now: a disabled rule only drops the
         // derived mode to its floor, the managed engine itself stays on. The
         // floor is monitor — a site without a posture row never loses
@@ -2359,7 +2483,7 @@ mod tests {
         let mut off =
             waf_settings_row(Uuid::nil(), true, Vec::new(), Vec::new());
         off.waf_enabled = false;
-        let config = waf_config_to_proto(&monitoring, &[], Some(&off));
+        let config = waf_config_to_proto(&monitoring, &[], &[], Some(&off));
         assert!(!config.enabled);
     }
 
@@ -2416,6 +2540,7 @@ mod tests {
             enabled: true,
             mode: mode::MONITOR.into(),
             priority: 0,
+            managed_rule_id: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -2425,7 +2550,7 @@ mod tests {
         // the data plane spins up the strict managed engine.
         let advanced =
             waf_settings_row(Uuid::nil(), true, Vec::new(), Vec::new());
-        let config = waf_config_to_proto(&rules, &[], Some(&advanced));
+        let config = waf_config_to_proto(&rules, &[], &[], Some(&advanced));
         assert!(config.enabled);
         assert!(config.advanced_mode);
 
@@ -2437,7 +2562,7 @@ mod tests {
             vec!["sqli".into(), "ssti".into()],
             vec!["java".into()],
         );
-        let config = waf_config_to_proto(&rules, &[], Some(&monitored));
+        let config = waf_config_to_proto(&rules, &[], &[], Some(&monitored));
         assert!(config.enabled);
         assert!(!config.advanced_mode);
         assert_eq!(config.monitor_categories, vec!["sqli", "ssti"]);
@@ -2452,14 +2577,14 @@ mod tests {
             Vec::new(),
             vec!["PINGWAF-1010".into()],
         );
-        let config = waf_config_to_proto(&[], &[], Some(&per_rule));
+        let config = waf_config_to_proto(&[], &[], &[], Some(&per_rule));
         assert!(config.enabled);
         assert_eq!(config.monitor_managed_rules, vec!["PINGWAF-1010"]);
 
         // No rules and no settings row: the engine defaults to on — the
         // managed ruleset ships enabled for every site until switched off —
         // and the mode floors at monitor, not off.
-        let config = waf_config_to_proto(&[], &[], None);
+        let config = waf_config_to_proto(&[], &[], &[], None);
         assert!(config.enabled);
         assert_eq!(config.mode, WAF_MODE_MONITOR);
     }
@@ -2483,6 +2608,7 @@ mod tests {
             enabled: false,
             mode: mode::BLOCK.into(),
             priority: 0,
+            managed_rule_id: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -2490,7 +2616,7 @@ mod tests {
         let empty: Vec<WafRule> = Vec::new();
         let all_disabled = vec![rule_to_proto(&disabled)];
         for rules in [&empty, &all_disabled] {
-            let config = waf_config_to_proto(rules, &[], None);
+            let config = waf_config_to_proto(rules, &[], &[], None);
             assert!(config.enabled, "engine must stay on");
             assert_eq!(config.mode, WAF_MODE_MONITOR, "rules: {rules:?}");
         }
@@ -2500,17 +2626,17 @@ mod tests {
         let mut row =
             waf_settings_row(Uuid::nil(), false, Vec::new(), Vec::new());
         assert_eq!(
-            waf_config_to_proto(&[], &[], Some(&row)).mode,
+            waf_config_to_proto(&[], &[], &[], Some(&row)).mode,
             WAF_MODE_OFF
         );
         row.mode = mode::MONITOR.into();
         assert_eq!(
-            waf_config_to_proto(&[], &[], Some(&row)).mode,
+            waf_config_to_proto(&[], &[], &[], Some(&row)).mode,
             WAF_MODE_MONITOR
         );
         row.mode = mode::BLOCK.into();
         assert_eq!(
-            waf_config_to_proto(&[], &[], Some(&row)).mode,
+            waf_config_to_proto(&[], &[], &[], Some(&row)).mode,
             WAF_MODE_BLOCK
         );
     }
@@ -2530,6 +2656,7 @@ mod tests {
             enabled: true,
             mode: mode::BLOCK.into(),
             priority: 0,
+            managed_rule_id: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -2540,7 +2667,7 @@ mod tests {
         let mut row =
             waf_settings_row(Uuid::nil(), false, Vec::new(), Vec::new());
         row.mode = mode::MONITOR.into();
-        let config = waf_config_to_proto(&rules, &[], Some(&row));
+        let config = waf_config_to_proto(&rules, &[], &[], Some(&row));
         assert_eq!(config.mode, WAF_MODE_MONITOR);
 
         // A site without custom rules but with an explicit block mode runs
@@ -2549,7 +2676,7 @@ mod tests {
         let mut row =
             waf_settings_row(Uuid::nil(), false, Vec::new(), Vec::new());
         row.mode = mode::BLOCK.into();
-        let config = waf_config_to_proto(&[], &[], Some(&row));
+        let config = waf_config_to_proto(&[], &[], &[], Some(&row));
         assert!(config.enabled);
         assert_eq!(config.mode, WAF_MODE_BLOCK);
 
@@ -2559,12 +2686,12 @@ mod tests {
             waf_settings_row(Uuid::nil(), false, Vec::new(), Vec::new());
         row.mode = mode::BLOCK.into();
         row.paranoia_level = 1;
-        let config = waf_config_to_proto(&rules, &[], Some(&row));
+        let config = waf_config_to_proto(&rules, &[], &[], Some(&row));
         assert_eq!(config.paranoia_level, 1);
 
         // Out-of-range stored values are clamped to the protocol range.
         row.paranoia_level = 9;
-        let config = waf_config_to_proto(&rules, &[], Some(&row));
+        let config = waf_config_to_proto(&rules, &[], &[], Some(&row));
         assert_eq!(config.paranoia_level, 4);
     }
 
@@ -2574,12 +2701,12 @@ mod tests {
         // answer, and it must travel explicitly rather than as the wire's
         // "unset" 0 — the agent reads 0 as "use my default", which would
         // hide a control-plane/agent default mismatch.
-        let config = waf_config_to_proto(&[], &[], None);
+        let config = waf_config_to_proto(&[], &[], &[], None);
         assert_eq!(config.body_stage_timeout_secs, 30);
 
         // A row created by the API carries the same default.
         let row = waf_settings_row(Uuid::nil(), false, Vec::new(), Vec::new());
-        let config = waf_config_to_proto(&[], &[], Some(&row));
+        let config = waf_config_to_proto(&[], &[], &[], Some(&row));
         assert_eq!(config.body_stage_timeout_secs, 30);
     }
 
@@ -2590,30 +2717,30 @@ mod tests {
 
         // A site-level value flows through unchanged inside 1..=30.
         row.body_stage_timeout_secs = 1;
-        let config = waf_config_to_proto(&[], &[], Some(&row));
+        let config = waf_config_to_proto(&[], &[], &[], Some(&row));
         assert_eq!(config.body_stage_timeout_secs, 1);
 
         row.body_stage_timeout_secs = 30;
-        let config = waf_config_to_proto(&[], &[], Some(&row));
+        let config = waf_config_to_proto(&[], &[], &[], Some(&row));
         assert_eq!(config.body_stage_timeout_secs, 30);
 
         // Out-of-band rows (a hand-edited database, a row written before the
         // column existed) can never widen or zero the window: 0 reads as
         // unset, anything above the ceiling is clamped.
         row.body_stage_timeout_secs = 0;
-        let config = waf_config_to_proto(&[], &[], Some(&row));
+        let config = waf_config_to_proto(&[], &[], &[], Some(&row));
         assert_eq!(config.body_stage_timeout_secs, 30);
 
         row.body_stage_timeout_secs = -5;
-        let config = waf_config_to_proto(&[], &[], Some(&row));
+        let config = waf_config_to_proto(&[], &[], &[], Some(&row));
         assert_eq!(config.body_stage_timeout_secs, 30);
 
         row.body_stage_timeout_secs = 31;
-        let config = waf_config_to_proto(&[], &[], Some(&row));
+        let config = waf_config_to_proto(&[], &[], &[], Some(&row));
         assert_eq!(config.body_stage_timeout_secs, 30);
 
         row.body_stage_timeout_secs = 3600;
-        let config = waf_config_to_proto(&[], &[], Some(&row));
+        let config = waf_config_to_proto(&[], &[], &[], Some(&row));
         assert_eq!(config.body_stage_timeout_secs, 30);
     }
 

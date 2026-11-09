@@ -189,7 +189,7 @@ async fn seed_defaults(
 /// value that enforces is `block`. A bare "unknown mode 'enforce'" left them
 /// guessing, so the rejection lists `off` | `monitor` | `block` and spells the
 /// confusion out when it recognises the near-miss.
-fn validate_mode(rule_mode: &str) -> Result<(), ApiError> {
+pub(crate) fn validate_mode(rule_mode: &str) -> Result<(), ApiError> {
     if mode::is_valid(rule_mode) {
         return Ok(());
     }
@@ -249,7 +249,7 @@ fn validate_group(name: &str, phase: &str) -> Result<(), ApiError> {
 /// Rejects action/mode pairs whose runtime meaning contradicts the label the
 /// operator sees. `allow` short-circuits before every block rule, so pairing it
 /// with `mode=block` promises enforcement that can never happen.
-fn validate_action_mode(
+pub(crate) fn validate_action_mode(
     rule_action: &str,
     rule_mode: &str,
 ) -> Result<(), ApiError> {
@@ -274,7 +274,7 @@ fn validate_action_mode(
     }
 }
 
-fn validate_rule(
+pub(crate) fn validate_rule(
     name: &str,
     expression: &str,
     rule_action: &str,
@@ -492,6 +492,10 @@ async fn create_rule(
     let model = rule::ActiveModel {
         id: Set(Uuid::new_v4()),
         group_id: Set(group_id),
+        // `managed_rule_id` is control-plane-internal: the API never accepts
+        // it from a client, so a custom rule can never claim to mirror a
+        // managed rule (which would stop it being pushed as a custom rule).
+        managed_rule_id: Set(None),
         site_id: Set(id),
         name: Set(payload.name.trim().to_string()),
         description: Set(non_empty(&payload.description)),
@@ -539,6 +543,25 @@ async fn update_rule(
     load_site_write(&state.db, id, &current).await?;
 
     let row = find_rule(&state, id, target).await?;
+    // A managed-linked seed row is now an override, not a custom rule: only
+    // its enabled/mode switch is delivered. Reject silent no-op edits instead
+    // of returning 200 while the expression/action never reach the edge.
+    if row.managed_rule_id.is_some()
+        && (payload.name.is_some()
+            || payload.description.is_some()
+            || payload.expression.is_some()
+            || payload.action.is_some()
+            || payload.severity.is_some()
+            || payload.tags.is_some()
+            || payload.priority.is_some()
+            || payload.group_id.is_some()
+            || payload.clear_group.is_some())
+    {
+        return Err(ApiError::BadRequest(
+            "this rule controls a built-in managed rule; only enabled and mode can be changed"
+                .to_string(),
+        ));
+    }
     // Effective values for the combination check: a PATCH that changes only one
     // side must still be validated against the stored other side.
     let mut effective_action = row.action.clone();

@@ -115,6 +115,16 @@ pub struct DefaultWafRule {
     /// Tags drive the detection switches in `grpc::config`; keep the English
     /// keywords (`sqli`, `xss`, `rce`, `lfi`, `ssrf`, `bot`) intact.
     pub tags: &'static [&'static str],
+    /// Stable `PINGWAF-*` id of the managed rule this spec mirrors.
+    ///
+    /// Seed rules that duplicate a rule from the data plane's always-loaded
+    /// managed set carry the id so the config builder can treat the row as
+    /// *override-only*: it stops travelling as a custom rule (which would
+    /// evaluate the same payload twice and bypass the managed rule's
+    /// category/stack monitor switches) and instead only disables the managed
+    /// rule when the operator switches the row off. Specs without a genuine
+    /// managed counterpart keep `None` and stay honest custom rules.
+    pub managed_rule_id: Option<&'static str>,
 }
 
 /// A built-in cache rule. Disabled until caching is switched on for the site.
@@ -142,6 +152,10 @@ pub fn waf_rules() -> Vec<DefaultWafRule> {
             action: "block",
             severity: 5,
             tags: &["sqli", "anomaly"],
+            // PINGWAF-1002 gates on the same SQLi sub-score (the managed
+            // family gate is 60/50, the seeded expression 40 — the managed
+            // rule decides; the seed only carries the on/off switch).
+            managed_rule_id: Some("PINGWAF-1002"),
         },
         DefaultWafRule {
             name: "XSS 跨站脚本检测",
@@ -150,6 +164,7 @@ pub fn waf_rules() -> Vec<DefaultWafRule> {
             action: "block",
             severity: 5,
             tags: &["xss", "anomaly"],
+            managed_rule_id: Some("PINGWAF-1003"),
         },
         DefaultWafRule {
             name: "命令注入检测",
@@ -158,6 +173,9 @@ pub fn waf_rules() -> Vec<DefaultWafRule> {
             action: "block",
             severity: 5,
             tags: &["rce", "command-injection"],
+            // No managed counterpart: the strict-only PINGWAF-1061 is a
+            // score gate, not this pattern rule. Stays a custom rule.
+            managed_rule_id: None,
         },
         DefaultWafRule {
             name: "Log4Shell 检测",
@@ -166,6 +184,7 @@ pub fn waf_rules() -> Vec<DefaultWafRule> {
             action: "block",
             severity: 5,
             tags: &["rce", "log4shell"],
+            managed_rule_id: Some("PINGWAF-1050"),
         },
         DefaultWafRule {
             name: "路径穿越 / 文件包含检测",
@@ -174,6 +193,8 @@ pub fn waf_rules() -> Vec<DefaultWafRule> {
             action: "block",
             severity: 5,
             tags: &["lfi", "file-inclusion"],
+            // No managed counterpart: PINGWAF-1020 covers dotfiles only.
+            managed_rule_id: None,
         },
         DefaultWafRule {
             name: "SSRF 检测",
@@ -182,6 +203,8 @@ pub fn waf_rules() -> Vec<DefaultWafRule> {
             action: "block",
             severity: 4,
             tags: &["ssrf"],
+            // No managed counterpart exists for SSRF at all.
+            managed_rule_id: None,
         },
         DefaultWafRule {
             name: "恶意扫描器识别",
@@ -190,6 +213,7 @@ pub fn waf_rules() -> Vec<DefaultWafRule> {
             action: "block",
             severity: 4,
             tags: &["bot", "scanner", "user-agent"],
+            managed_rule_id: Some("PINGWAF-1010"),
         },
         DefaultWafRule {
             name: "敏感文件探测",
@@ -198,6 +222,7 @@ pub fn waf_rules() -> Vec<DefaultWafRule> {
             action: "block",
             severity: 4,
             tags: &["recon", "dotfile"],
+            managed_rule_id: Some("PINGWAF-1020"),
         },
         DefaultWafRule {
             name: "备份文件探测",
@@ -206,6 +231,7 @@ pub fn waf_rules() -> Vec<DefaultWafRule> {
             action: "block",
             severity: 3,
             tags: &["recon", "backup"],
+            managed_rule_id: Some("PINGWAF-1021"),
         },
         DefaultWafRule {
             name: "危险 HTTP 方法",
@@ -214,6 +240,7 @@ pub fn waf_rules() -> Vec<DefaultWafRule> {
             action: "block",
             severity: 3,
             tags: &["method"],
+            managed_rule_id: Some("PINGWAF-1030"),
         },
         DefaultWafRule {
             name: "超长 URI",
@@ -222,6 +249,9 @@ pub fn waf_rules() -> Vec<DefaultWafRule> {
             action: "block",
             severity: 3,
             tags: &["size"],
+            // The managed twin (PINGWAF-1051) logs instead of blocking after
+            // the false-positive replay; the managed rule wins.
+            managed_rule_id: Some("PINGWAF-1051"),
         },
     ]
 }
@@ -298,17 +328,14 @@ async fn seed_waf_defaults_with_mode(
     let timestamp = Utc::now();
     let group = ensure_waf_group(db, site_id, timestamp).await?;
 
-    let existing: Vec<String> = rule::Entity::find()
+    let existing: Vec<rule::Model> = rule::Entity::find()
         .filter(rule::Column::SiteId.eq(site_id))
         .all(db)
-        .await?
-        .into_iter()
-        .map(|row| row.name)
-        .collect();
+        .await?;
 
     let mut inserted = 0;
     for (index, spec) in waf_rules().into_iter().enumerate() {
-        if existing.iter().any(|name| name == spec.name) {
+        if seeded_row_present(&existing, spec.name, spec.managed_rule_id) {
             continue;
         }
         rule::ActiveModel {
@@ -327,6 +354,7 @@ async fn seed_waf_defaults_with_mode(
             // restore path so an existing site is never silently promoted.
             mode: Set(rule_mode.to_string()),
             priority: Set(index as i32),
+            managed_rule_id: Set(spec.managed_rule_id.map(String::from)),
             created_at: Set(timestamp),
             updated_at: Set(timestamp),
         }
@@ -391,6 +419,27 @@ pub async fn seed_site_defaults(
     seed_waf_defaults_with_mode(db, site_id, NEW_SITE_WAF_RULE_MODE).await?;
     seed_cache_defaults(db, site_id).await?;
     Ok(())
+}
+
+/// Decides whether a built-in rule already exists on the site, so seeding
+/// stays idempotent. Keys, in order of reliability:
+///
+/// 1. the stable `managed_rule_id` — survives an operator renaming the seed
+///    rule in the dashboard (a rename must not make restore re-insert a
+///    second copy of the same protection);
+/// 2. the rule *name* — covers rows written before the column existed; the
+///    000098 migration backfills those, but a restore must stay idempotent
+///    even when run against a not-yet-migrated row.
+fn seeded_row_present(
+    existing: &[rule::Model],
+    name: &str,
+    managed_rule_id: Option<&str>,
+) -> bool {
+    existing.iter().any(|row| {
+        managed_rule_id
+            .is_some_and(|mid| row.managed_rule_id.as_deref() == Some(mid))
+            || row.name == name
+    })
 }
 
 /// Finds the built-in group, creating it when the site does not have one yet.
@@ -515,5 +564,78 @@ mod tests {
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), total, "duplicate built-in WAF rule name");
+    }
+
+    #[test]
+    fn seeded_row_present_matches_by_id_or_name() {
+        use crate::models::rule;
+
+        let row = |name: &str, mid: Option<&str>| rule::Model {
+            id: uuid::Uuid::new_v4(),
+            group_id: None,
+            site_id: uuid::Uuid::nil(),
+            name: name.to_string(),
+            description: None,
+            expression: "true".into(),
+            action: crate::models::action::BLOCK.into(),
+            severity: 3,
+            tags: Vec::new(),
+            enabled: true,
+            mode: crate::models::mode::MONITOR.into(),
+            priority: 0,
+            managed_rule_id: mid.map(String::from),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let existing = vec![
+            row("改名后的扫描器规则", Some("PINGWAF-1010")),
+            row("旧版未回填行", None),
+            row("普通自定义规则", None),
+        ];
+
+        // A renamed seed row is still recognised by its managed id: restore
+        // must not re-insert a second copy.
+        assert!(seeded_row_present(
+            &existing,
+            "恶意扫描器识别",
+            Some("PINGWAF-1010")
+        ));
+        // A pre-migration row is recognised by name even without the id.
+        assert!(seeded_row_present(
+            &existing,
+            "旧版未回填行",
+            Some("PINGWAF-1021")
+        ));
+        // A genuinely missing built-in rule and an unrelated custom rule do
+        // not block the seed.
+        assert!(!seeded_row_present(
+            &existing,
+            "危险 HTTP 方法",
+            Some("PINGWAF-1030")
+        ));
+    }
+
+    #[test]
+    fn managed_rule_ids_reference_real_managed_rules() {
+        // A seeded row may only claim a managed id the data plane actually
+        // ships: an unknown id would make the override target nothing, and
+        // the mirrored detection would silently disappear from the site.
+        let known: &[&str] = &pingwaf_waf::MANAGED_RULE_IDS;
+        let mut ids: Vec<&str> = Vec::new();
+        for spec in waf_rules() {
+            let Some(mid) = spec.managed_rule_id else {
+                continue;
+            };
+            assert!(
+                known.contains(&mid),
+                "seed rule '{}' references unknown managed rule {mid}",
+                spec.name
+            );
+            ids.push(mid);
+        }
+        let total = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), total, "two seed rules mirror the same rule");
     }
 }

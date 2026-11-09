@@ -126,6 +126,11 @@ pub mod rules {
         pub enabled: bool,
         pub mode: String,
         pub priority: i32,
+        /// Stable identifier of the built-in managed rule a seeded row mirrors
+        /// (e.g. `PINGWAF-1010`). `None` for operator-created rules and for
+        /// seed rules without a managed counterpart — those travel to the
+        /// data plane as ordinary custom rules.
+        pub managed_rule_id: Option<String>,
         pub created_at: DateTimeUtc,
         pub updated_at: DateTimeUtc,
     }

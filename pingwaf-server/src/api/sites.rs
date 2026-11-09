@@ -25,7 +25,10 @@ use crate::api::common::{
 };
 use crate::api::error::ApiError;
 use crate::api::state::AppState;
-use crate::api::validation::validate_pem_bundle;
+use crate::api::validation::{
+    check_path_exception_fields, check_rule_fields, validate_pem_bundle,
+    RuleRowFix,
+};
 use crate::auth::AuthUser;
 use crate::grpc::notify_config_changed;
 use crate::models::{
@@ -1443,6 +1446,11 @@ pub(crate) const CLONE_INTENTIONALLY_SKIPPED: &[&str] = &[];
 /// inside the caller's transaction (C4/L2-001). Groups are inserted first so
 /// each rule's `group_id` can be remapped to the clone's own group rows,
 /// keeping the same grouping semantics. Returns (groups, rules) copied.
+///
+/// Every rule row passes the same validation the rules API enforces
+/// (P0-9): a clone cannot carry a rule the write path would reject. Invalid
+/// rows are skipped with a warning, and the historical `allow`+`off`
+/// combination is repaired to `monitor` instead of dropped.
 async fn clone_site_rules<C>(
     txn: &C,
     source_id: Uuid,
@@ -1467,13 +1475,54 @@ where
         .filter(rule::Column::SiteId.eq(source_id))
         .all(txn)
         .await?;
-    let rule_count = source_rules.len();
+    let mut copied = 0usize;
     for row in source_rules {
-        clone_rule_row(row, new_id, &group_ids, timestamp)
-            .insert(txn)
-            .await?;
+        let row_id = row.id;
+        match check_rule_fields(
+            &row.name,
+            &row.expression,
+            &row.action,
+            &row.mode,
+            row.severity,
+        ) {
+            Ok(RuleRowFix::Keep) => {
+                clone_rule_row(row, new_id, &group_ids, timestamp)
+                    .insert(txn)
+                    .await?;
+                copied += 1;
+            },
+            Ok(RuleRowFix::AllowOffMonitor) => {
+                let mut node =
+                    clone_rule_row(row, new_id, &group_ids, timestamp);
+                node.mode = Set(crate::models::mode::MONITOR.to_string());
+                node.insert(txn).await?;
+                copied += 1;
+                tracing::warn!(
+                    source_rule = %row_id,
+                    "clone: rule with action=allow and mode=off was normalised to mode=monitor"
+                );
+            },
+            Err(reason) => {
+                // Cloning must not silently produce a site with less
+                // enforcement than the source. A malformed blocking rule is
+                // a configuration error to surface, not a row to skip.
+                if matches!(
+                    row.action.as_str(),
+                    "block" | "challenge" | "js_challenge"
+                ) {
+                    return Err(sea_orm::DbErr::Custom(format!(
+                        "clone: source rule {row_id} is an enforcing rule that cannot be copied ({reason})"
+                    )));
+                }
+                tracing::warn!(
+                    source_rule = %row_id,
+                    reason = %reason,
+                    "clone: source rule failed validation and was not copied"
+                );
+            },
+        }
     }
-    Ok((group_ids.len(), rule_count))
+    Ok((group_ids.len(), copied))
 }
 
 /// Builds the clone's `rule_groups` row from the source row: new id, new site,
@@ -1505,6 +1554,9 @@ fn clone_rule_row(
     let mut node: rule::ActiveModel = row.into();
     node.id = Set(Uuid::new_v4());
     node.site_id = Set(new_id);
+    // The clone has its own seed rows; carrying a managed link over would
+    // create duplicate override-only rows for the same PINGWAF id.
+    node.managed_rule_id = Set(None);
     // A group the map does not know belongs to another site (or was deleted
     // between the two reads). Carrying its id over would attach the clone's
     // rule to a foreign group, and deleting that group would then cascade into
@@ -1777,7 +1829,38 @@ async fn clone_site(
     clone_site_rows!(&txn, rate_limit_rules, source_id, new_id);
     clone_site_rows!(&txn, site_ai_crawl_settings, source_id, new_id);
     clone_site_rows!(&txn, site_ai_bot_policies, source_id, new_id);
-    clone_site_rows!(&txn, path_exceptions, source_id, new_id);
+    // Path exceptions are copied through the same validation the
+    // path-exceptions API enforces (P0-9): a clone must not inherit a row
+    // the write path would reject (empty skip_layers, unknown layer, a path
+    // that does not compile). Invalid rows are skipped with a warning.
+    let source_exceptions = path_exceptions::Entity::find()
+        .filter(path_exceptions::Column::SiteId.eq(source_id))
+        .all(&txn)
+        .await?;
+    for row in source_exceptions {
+        let row_id = row.id;
+        match check_path_exception_fields(
+            &row.path,
+            Some(&row.match_type),
+            &row.skip_layers,
+        ) {
+            Ok(_) => {
+                let mut active: path_exceptions::ActiveModel = row.into();
+                active.id = Set(Uuid::new_v4());
+                active.site_id = Set(new_id);
+                active.created_at = Set(timestamp);
+                active.updated_at = Set(timestamp);
+                active.insert(&txn).await?;
+            },
+            Err(reason) => {
+                tracing::warn!(
+                    source_exception = %row_id,
+                    reason = %reason,
+                    "clone: source path exception failed validation and was not copied"
+                );
+            },
+        }
+    }
     // Credentials and identity configuration are copied on request: the clone
     // is paused, and the operator is warned in the UI/docs that Basic Auth
     // passwords, the OIDC cookie secret and visitor grants travel with it.
@@ -4124,6 +4207,7 @@ mod tests {
             enabled: true,
             mode: "block".to_string(),
             priority: 10,
+            managed_rule_id: None,
             created_at: now,
             updated_at: now,
         };

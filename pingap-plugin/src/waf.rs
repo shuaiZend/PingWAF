@@ -718,6 +718,11 @@ struct SiteContext {
     /// Operator-curated path exceptions, compiled; `None` when the site has
     /// none enabled. Honoured in every WAF mode, including block mode.
     path_exceptions: Option<Arc<PathExceptions>>,
+    /// True when any enabled custom `allow` rule reads `http.request.body`:
+    /// such a rule can only flip to Pass once the body has arrived, so a
+    /// header-phase Block verdict must not answer before the body phase has
+    /// re-run the verdict with the complete body.
+    allow_rules_need_body: bool,
 }
 
 impl SiteContext {
@@ -781,6 +786,16 @@ impl SiteContext {
             ),
             path_exceptions: PathExceptions::build(&site_rules.path_exceptions)
                 .map(Arc::new),
+            allow_rules_need_body: waf_cfg
+                .filter(|cfg| cfg.enabled && cfg.mode != CacheWafMode::Off)
+                .is_some_and(|cfg| {
+                    cfg.custom_rules.iter().any(|rule| {
+                        rule.enabled
+                            && rule.action == CacheWafAction::Allow
+                            // Also covers the canonical `http.request.body`.
+                            && rule.expression.contains("request.body")
+                    })
+                }),
         }
     }
 
@@ -2375,6 +2390,10 @@ enum VerdictOutcome {
     /// The request passed (or the verdict was only recorded); proxying
     /// continues.
     Continue,
+    /// The header phase found a Block/Challenge, but a body-based allow rule
+    /// may still flip it. The request continues; the deferred body phase must
+    /// deliver the final verdict or fall back to this decision on timeout.
+    Deferred,
     /// The plugin answers the request itself (block or challenge page).
     Respond(HttpResponse),
 }
@@ -2388,6 +2407,10 @@ struct DeferredVerdict {
     /// A path exception skipped the challenge layer for this request, so a
     /// Challenge verdict from the body phase must not serve a challenge page.
     skip_challenge: bool,
+    /// The header phase already decided Block/Challenge, but the body-based
+    /// allow rule may flip it. Used as a fail-closed fallback if the body
+    /// stage times out or never reaches the final verdict.
+    header_block: bool,
     site_id: String,
     host: String,
     request_data: RequestData,
@@ -3769,6 +3792,15 @@ impl WafPlugin {
     /// verdict onto proxy behaviour. Shared by the request phase (headers
     /// only — the body has not arrived yet) and the request-body filter
     /// (complete body, or the staged prefix of an over-cap body).
+    ///
+    /// `defer_events`: the body phase will re-run this verdict on the
+    /// complete body and ship the final security event and request count
+    /// there, so the request-phase pass must not log or count — otherwise
+    /// one request produces two events and two counts (P0-8).
+    /// `defer_block`: the site has an `allow` rule that reads the request
+    /// body, so a header-phase Block verdict is not final — the body may
+    /// still flip the request to Pass. The request continues and the staged
+    /// body decides (P0-9).
     #[allow(clippy::too_many_arguments)]
     fn enforce_verdict(
         &self,
@@ -3781,16 +3813,22 @@ impl WafPlugin {
         context: Option<&Arc<SiteContext>>,
         observe: bool,
         skip_challenge: bool,
+        defer_events: bool,
+        defer_block: bool,
     ) -> VerdictOutcome {
         match choice {
             EngineChoice::Disabled => {
-                if let Some(agent) = agent {
+                if let Some(agent) = agent
+                    && !defer_events
+                {
                     agent.record_request(false);
                 }
                 return VerdictOutcome::Continue;
             },
             EngineChoice::Base if self.mode == WafMode::Off => {
-                if let Some(agent) = agent {
+                if let Some(agent) = agent
+                    && !defer_events
+                {
                     agent.record_request(false);
                 }
                 return VerdictOutcome::Skipped;
@@ -3814,6 +3852,8 @@ impl WafPlugin {
         if self.encoded_body_policy == EncodedBodyPolicy::Reject
             && verdict.details.contains("body=uninspected")
         {
+            // 415 is terminal: the body stage will not run to do the deferred
+            // count, so count here even when the caller deferred events.
             if let Some(agent) = agent {
                 agent.record_request(false);
             }
@@ -3845,19 +3885,22 @@ impl WafPlugin {
         };
 
         if verdict.action == WafAction::Pass {
-            if let Some(event_type) = Self::body_inspection_event(&verdict) {
-                Self::log_event(
-                    site_id,
-                    request_id,
-                    host,
-                    request_data,
-                    &verdict,
-                    "body_inspection",
-                    event_type,
-                );
-            }
-            if let Some(agent) = agent {
-                agent.record_request(false);
+            if !defer_events {
+                if let Some(event_type) = Self::body_inspection_event(&verdict)
+                {
+                    Self::log_event(
+                        site_id,
+                        request_id,
+                        host,
+                        request_data,
+                        &verdict,
+                        "body_inspection",
+                        event_type,
+                    );
+                }
+                if let Some(agent) = agent {
+                    agent.record_request(false);
+                }
             }
             return VerdictOutcome::Continue;
         }
@@ -3865,15 +3908,17 @@ impl WafPlugin {
         // Monitor: log the event but let the request through.
         if verdict.action == WafAction::Monitor {
             let rule_name = rule_name_of(&verdict);
-            Self::log_event(
-                site_id,
-                request_id,
-                host,
-                request_data,
-                &verdict,
-                &rule_name,
-                Self::engine_event_type(&verdict),
-            );
+            if !defer_events {
+                Self::log_event(
+                    site_id,
+                    request_id,
+                    host,
+                    request_data,
+                    &verdict,
+                    &rule_name,
+                    Self::engine_event_type(&verdict),
+                );
+            }
             return VerdictOutcome::Continue;
         }
 
@@ -3895,21 +3940,33 @@ impl WafPlugin {
                 enforced_rule_id: None,
                 ..verdict.clone()
             };
-            Self::log_event(
-                site_id,
-                request_id,
-                host,
-                request_data,
-                &observed,
-                &rule_name,
-                Self::engine_event_type(&observed),
-            );
+            if !defer_events {
+                Self::log_event(
+                    site_id,
+                    request_id,
+                    host,
+                    request_data,
+                    &observed,
+                    &rule_name,
+                    Self::engine_event_type(&observed),
+                );
+            }
             return VerdictOutcome::Continue;
         }
 
         // Block / Challenge: log the security event, then emit the access
         // entry with the real status — a Respond result never reaches
         // handle_response, so this is the only chance to log it.
+        //
+        // A body-based `allow` rule is the one exception (P0-9): its
+        // whitelist exemption reads `http.request.body`, which the request
+        // phase has not seen. Blocking here would answer with a 403 before
+        // the body phase could re-run the verdict and flip it to Pass, so
+        // the block is deferred: the request continues, the body is staged,
+        // and the body phase delivers the final verdict.
+        if defer_block {
+            return VerdictOutcome::Deferred;
+        }
         let rule_name = rule_name_of(&verdict);
         Self::log_event(
             site_id,
@@ -4912,6 +4969,29 @@ impl Plugin for WafPlugin {
         // A `waf` bypass keeps the request-phase accounting (every other
         // path through here records via the verdict pipeline) but skips the
         // engine verdict entirely.
+        //
+        // When the engine will re-run on the complete body (a staged body
+        // the request-body filter inspects), the request-phase pass must not
+        // log events or count the request: the body phase is the final
+        // verdict and ships both exactly once (P0-8). The exception to the
+        // exception: a Block verdict is still final here — the response goes
+        // out and the body never arrives — unless the site has a body-based
+        // `allow` rule that could still flip it (P0-9).
+        let engine_runs = match &choice {
+            EngineChoice::Site(_) => true,
+            EngineChoice::Base => self.mode != WafMode::Off,
+            EngineChoice::Disabled | EngineChoice::FailClosed => false,
+        };
+        let body_inspected = wants_body
+            && has_body
+            && !bypasses("waf")
+            && should_inspect
+            && engine_runs;
+        let defer_events = body_inspected;
+        let defer_block = body_inspected
+            && context
+                .as_ref()
+                .is_some_and(|site| site.allow_rules_need_body);
         let outcome = if bypasses("waf") {
             if let Some(agent) = &agent {
                 agent.record_request(false);
@@ -4928,6 +5008,8 @@ impl Plugin for WafPlugin {
                 context.as_ref(),
                 observe,
                 bypasses("challenge"),
+                defer_events,
+                defer_block,
             );
             if let VerdictOutcome::Respond(response) = outcome {
                 return Ok(RequestPluginResult::Respond(with_server_timing(
@@ -4935,6 +5017,15 @@ impl Plugin for WafPlugin {
                 )));
             }
             outcome
+        };
+        // The header phase found a Block/Challenge but a body-based allow
+        // rule may still flip it. Record the fallback decision and let the
+        // request reach the body stage; that stage (or the timeout handler)
+        // owns the final answer.
+        let deferred_header_block = matches!(outcome, VerdictOutcome::Deferred);
+        let outcome = match outcome {
+            VerdictOutcome::Deferred => VerdictOutcome::Continue,
+            other => other,
         };
 
         // The request is on its way to the upstream: register the body
@@ -5011,6 +5102,7 @@ impl Plugin for WafPlugin {
                         context: context.clone(),
                         observe,
                         skip_challenge: bypasses("challenge"),
+                        header_block: deferred_header_block,
                         site_id: site_id.clone(),
                         host: host.clone(),
                         request_data: request_data.clone(),
@@ -5053,6 +5145,7 @@ impl Plugin for WafPlugin {
                             context: context.clone(),
                             observe,
                             skip_challenge: bypasses("challenge"),
+                            header_block: false,
                             site_id: site_id.clone(),
                             host: host.clone(),
                             request_data: request_data.clone(),
@@ -5063,7 +5156,9 @@ impl Plugin for WafPlugin {
         }
 
         Ok(match outcome {
-            VerdictOutcome::Continue => RequestPluginResult::Continue,
+            VerdictOutcome::Continue | VerdictOutcome::Deferred => {
+                RequestPluginResult::Continue
+            },
             VerdictOutcome::Skipped => RequestPluginResult::Skipped,
             VerdictOutcome::Respond(_) => {
                 unreachable!("handled above")
@@ -5167,6 +5262,38 @@ impl Plugin for WafPlugin {
                 request_id = %request_id,
                 "body stage timeout; flushing withheld body upstream (fail-open)"
             );
+            // The header phase may already have decided Block/Challenge and
+            // only deferred it for a body-based allow rule. If the body stage
+            // times out, the allow rule can no longer flip that decision:
+            // re-evaluate the headers and enforce the fallback instead of
+            // forwarding a known-bad request upstream.
+            let mut fallback_counted = false;
+            if let Some(dv) = entry.deferred.as_ref()
+                && dv.header_block
+            {
+                let outcome = self.enforce_verdict(
+                    PingWafAgent::instance().as_ref(),
+                    &dv.site_id,
+                    &request_id,
+                    &dv.host,
+                    &dv.request_data,
+                    &dv.choice,
+                    dv.context.as_ref(),
+                    dv.observe,
+                    dv.skip_challenge,
+                    false,
+                    false,
+                );
+                if let VerdictOutcome::Respond(response) = outcome {
+                    return Ok(Some(with_server_timing(
+                        response,
+                        ctx,
+                        session,
+                        Instant::now(),
+                    )));
+                }
+                fallback_counted = true;
+            }
             if let Some(agent) = PingWafAgent::instance()
                 && let Some(dv) = entry.deferred.as_ref()
             {
@@ -5213,6 +5340,11 @@ impl Plugin for WafPlugin {
                     // where the identity appears.
                     user_identity: String::new(),
                 });
+            }
+            if !fallback_counted && let Some(agent) = PingWafAgent::instance() {
+                // The request phase deferred its count to the body phase;
+                // this timeout is the body phase's final word.
+                agent.record_request(false);
             }
             let (log_body, log_body_size, log_truncated) =
                 entry.log_prefix.finish();
@@ -5308,6 +5440,10 @@ impl Plugin for WafPlugin {
                                 dv.context.as_ref(),
                                 dv.observe,
                                 dv.skip_challenge,
+                                // The body phase is the final verdict: it
+                                // logs and counts here, exactly once.
+                                false,
+                                false,
                             );
                             if let VerdictOutcome::Respond(response) = outcome {
                                 return Ok(Some(with_server_timing(
@@ -5372,6 +5508,10 @@ impl Plugin for WafPlugin {
                     dv.context.as_ref(),
                     dv.observe,
                     dv.skip_challenge,
+                    // The body phase is the final verdict: it logs and
+                    // counts here, exactly once.
+                    false,
+                    false,
                 );
                 // The block page goes back through the proxy; the
                 // staged body is dropped with the aborted upstream
@@ -8538,6 +8678,308 @@ inspect_body = true"###,
                 .find(|(name, _)| *name == "content-type")
                 .map(|(_, value)| value.as_str())
         );
+    }
+
+    /// Installs an agent whose site runs the WAF engine with the given
+    /// custom rules. `advanced_mode` body inspection is on, so POST bodies
+    /// are staged and inspected in the request-body filter.
+    async fn install_waf_agent(
+        mode: proto::WafMode,
+        rules: Vec<proto::WafRule>,
+    ) -> (
+        tokio::sync::MutexGuard<'static, ()>,
+        Arc<PingWafAgent>,
+        tempfile::TempDir,
+    ) {
+        let installed = install_test_agent().await;
+        installed
+            .1
+            .rule_cache
+            .update_from_site_config(&proto::SiteConfig {
+                sites: vec![proto::Site {
+                    id: "site-1".to_string(),
+                    name: "example".to_string(),
+                    domain: "example.com".to_string(),
+                    alternate_domains: Vec::new(),
+                    status: 0,
+                    rules: Some(proto::RuleBundle {
+                        site_id: "site-1".to_string(),
+                        config_hash: "hash-1".to_string(),
+                        waf: Some(proto::WafConfig {
+                            enabled: true,
+                            mode: mode as i32,
+                            advanced_mode: true,
+                            // Tests that exercise the fail-open timeout need a
+                            // short window; immediate-body tests are unaffected.
+                            body_stage_timeout_secs: 1,
+                            custom_rules: rules,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
+                    trust_proxy_headers: false,
+                    trusted_header: String::new(),
+                    trust_last_hop: false,
+                    trusted_proxy_ranges: Vec::new(),
+                    downstream_timeout_secs: 60,
+                }],
+                config_hash: "hash-1".to_string(),
+                updated_at: None,
+            })
+            .unwrap();
+        installed
+    }
+
+    /// Drives one POST through the request phase and, when it was not
+    /// answered there, the full body through the request-body filter. The
+    /// second element is the response the body phase answered with, if any.
+    async fn run_post_with_body(
+        plugin: &WafPlugin,
+        target: &str,
+        user_agent: &str,
+        body: &str,
+    ) -> (RequestPluginResult, Option<HttpResponse>, Session, Ctx) {
+        let input = format!(
+            "POST {target} HTTP/1.1\r\nHost: example.com\r\n\
+             User-Agent: {user_agent}\r\n\
+             Content-Type: text/plain\r\n\
+             Content-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let mock_io = Builder::new().read(input.as_bytes()).build();
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+        let mut ctx = Ctx::default();
+        let result = plugin
+            .handle_request(PluginStep::EarlyRequest, &mut session, &mut ctx)
+            .await
+            .unwrap();
+        let mut answered = None;
+        if result == RequestPluginResult::Continue {
+            answered = plugin
+                .handle_request_body(
+                    &mut session,
+                    &mut ctx,
+                    &mut Some(bytes::Bytes::from(body.to_string())),
+                    true,
+                )
+                .unwrap();
+        }
+        (result, answered, session, ctx)
+    }
+
+    /// P0-8 regression: a request inspected in both phases ships exactly one
+    /// security event and one request count — the request-phase pass defers
+    /// to the body phase, which runs the final verdict on the complete body.
+    #[tokio::test]
+    async fn test_body_inspection_produces_one_event_and_one_count() {
+        let (_guard, agent, _dir) =
+            install_waf_agent(proto::WafMode::Monitor, Vec::new()).await;
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "monitor""###).unwrap(),
+        )
+        .unwrap();
+
+        let (result, answered, _session, _ctx) = run_post_with_body(
+            &plugin,
+            "/api?id=1'%20OR%201=1%20--",
+            "check",
+            "payload",
+        )
+        .await;
+        assert!(result == RequestPluginResult::Continue);
+        assert!(answered.is_none(), "monitor mode answers nothing");
+
+        assert_eq!(
+            1,
+            agent.metrics.requests_total(),
+            "the request is counted once, not once per phase"
+        );
+        assert_eq!(
+            0,
+            agent.metrics.blocked_requests_total(),
+            "monitor mode never blocks"
+        );
+        let event = agent.client.pop_log().await.unwrap();
+        assert_eq!("waf", event.waf_event_type);
+        assert!(agent.client.pop_log().await.is_none());
+    }
+
+    /// Without a body-based `allow` rule a header-phase Block verdict stays
+    /// final: the request is answered in the request phase and the body is
+    /// never exposed to inspection (behaviour preserved by P0-8/P0-9).
+    #[tokio::test]
+    async fn test_request_phase_block_still_answers_before_body() {
+        let (_guard, agent, _dir) =
+            install_waf_agent(proto::WafMode::Block, Vec::new()).await;
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        let (result, answered, _session, _ctx) = run_post_with_body(
+            &plugin,
+            "/api?id=1'%20OR%201=1%20--",
+            "check",
+            "payload",
+        )
+        .await;
+        let RequestPluginResult::Respond(resp) = result else {
+            panic!("expected the header-phase block to answer");
+        };
+        assert_eq!(http::StatusCode::FORBIDDEN, resp.status);
+        assert!(answered.is_none(), "the body was never staged");
+        assert_eq!(1, agent.metrics.requests_total());
+        assert_eq!(1, agent.metrics.blocked_requests_total());
+        let event = agent.client.pop_log().await.unwrap();
+        assert_eq!("block", event.waf_action);
+        // The block answered the request: one event and one access row, and
+        // no second verdict from a body that was never staged.
+        let access = agent.client.pop_log().await.unwrap();
+        assert_eq!(403, access.response_status);
+        assert!(agent.client.pop_log().await.is_none());
+    }
+
+    /// A deferred header block must not be lost when the body stage times
+    /// out: the timeout path re-applies the header verdict instead of
+    /// forwarding a known-bad request upstream.
+    #[tokio::test]
+    async fn deferred_block_is_enforced_on_body_timeout() {
+        let rules = vec![
+            proto::WafRule {
+                id: "allow-safe".to_string(),
+                name: "allow safe payload".to_string(),
+                description: String::new(),
+                expression: r#"http.request.body contains "safe""#.to_string(),
+                action: proto::WafAction::Allow as i32,
+                severity: 3,
+                tags: Vec::new(),
+                enabled: true,
+                mode: proto::WafMode::Monitor as i32,
+                priority: 1,
+            },
+            proto::WafRule {
+                id: "block-evil".to_string(),
+                name: "block evil client".to_string(),
+                description: String::new(),
+                expression:
+                    r#"http.request.headers["user-agent"] contains "evilbot""#
+                        .to_string(),
+                action: proto::WafAction::Block as i32,
+                severity: 5,
+                tags: Vec::new(),
+                enabled: true,
+                mode: proto::WafMode::Block as i32,
+                priority: 2,
+            },
+        ];
+        let (_guard, _agent, _dir) =
+            install_waf_agent(proto::WafMode::Block, rules).await;
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        let input = "POST /upload HTTP/1.1\r\nHost: example.com\r\n\
+                     User-Agent: evilbot/1.0\r\n\
+                     Content-Length: 1024\r\n\r\n";
+        let mock_io = Builder::new().read(input.as_bytes()).build();
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+        let mut ctx = Ctx::default();
+        let result = plugin
+            .handle_request(PluginStep::EarlyRequest, &mut session, &mut ctx)
+            .await
+            .unwrap();
+        assert_eq!(result, RequestPluginResult::Continue);
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+
+        let answered = plugin
+            .handle_request_body(&mut session, &mut ctx, &mut None, true)
+            .unwrap()
+            .expect("the deferred block must be enforced on timeout");
+        assert_eq!(http::StatusCode::FORBIDDEN, answered.status);
+    }
+
+    /// P0-9 regression: a site whose `allow` rule reads `http.request.body`
+    /// must not be blocked on headers alone — the header-phase block is
+    /// deferred and the body phase flips the verdict to Pass.
+    #[tokio::test]
+    async fn test_body_allow_rule_defeats_header_block() {
+        let rules = vec![
+            proto::WafRule {
+                id: "allow-safe".to_string(),
+                name: "allow safe payload".to_string(),
+                description: String::new(),
+                expression: r#"http.request.body contains "safe""#.to_string(),
+                action: proto::WafAction::Allow as i32,
+                severity: 3,
+                tags: Vec::new(),
+                enabled: true,
+                mode: proto::WafMode::Monitor as i32,
+                priority: 1,
+            },
+            proto::WafRule {
+                id: "block-evil".to_string(),
+                name: "block evil client".to_string(),
+                description: String::new(),
+                expression:
+                    r#"http.request.headers["user-agent"] contains "evilbot""#
+                        .to_string(),
+                action: proto::WafAction::Block as i32,
+                severity: 5,
+                tags: Vec::new(),
+                enabled: true,
+                mode: proto::WafMode::Block as i32,
+                priority: 2,
+            },
+        ];
+        let (_guard, agent, _dir) =
+            install_waf_agent(proto::WafMode::Block, rules).await;
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        // The header block matches, but the body satisfies the allow rule:
+        // the request must pass, once counted, without a block event.
+        let (result, answered, _session, _ctx) = run_post_with_body(
+            &plugin,
+            "/upload",
+            "evilbot/1.0",
+            "safe payload",
+        )
+        .await;
+        assert!(
+            result == RequestPluginResult::Continue,
+            "the body-based allow must win over the header block"
+        );
+        assert!(answered.is_none(), "the passed body flows upstream");
+        assert_eq!(1, agent.metrics.requests_total());
+        assert_eq!(0, agent.metrics.blocked_requests_total());
+        assert!(
+            agent.client.pop_log().await.is_none(),
+            "a passed request ships no security event"
+        );
+
+        // Same headers, body without the allow marker: the deferred verdict
+        // confirms the block in the body phase.
+        let (result, answered, _session, _ctx) = run_post_with_body(
+            &plugin,
+            "/upload",
+            "evilbot/1.0",
+            "hostile payload",
+        )
+        .await;
+        assert!(result == RequestPluginResult::Continue);
+        let resp =
+            answered.expect("expected the body phase to confirm the block");
+        assert_eq!(http::StatusCode::FORBIDDEN, resp.status);
+        assert_eq!(2, agent.metrics.requests_total());
+        assert_eq!(1, agent.metrics.blocked_requests_total());
+        let event = agent.client.pop_log().await.unwrap();
+        assert_eq!("block", event.waf_action);
+        assert_eq!("block-evil", event.waf_rule_id);
     }
 
     /// Builds one request with an explicit user agent header.

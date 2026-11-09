@@ -2195,8 +2195,13 @@ before this change they were seeded as `monitor` and a fresh site answered 200
 to SQLi/XSS payloads while only logging them. The restore endpoint
 (`POST /sites/{site_id}/waf/defaults`) is the deliberate exception: rules it
 re-adds come back in `monitor`, so repairing an existing site never starts
-blocking traffic that site was serving unfiltered. Seeding is matched on the
-rule name and never edits an existing row.
+blocking traffic that site was serving unfiltered. Seeding matches a stable
+managed id first and falls back to the historical rule name; it never edits an
+existing row. Seeded rows that mirror a managed rule are override-only: the
+data plane loads the managed rule itself, and the row's `enabled` / `mode`
+controls whether that managed rule is disabled or downgraded to monitor. Its
+expression, action and tags are not delivered and cannot be edited through
+the custom-rule API.
 
 ### Action / mode combination check
 

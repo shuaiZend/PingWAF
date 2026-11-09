@@ -45,6 +45,25 @@ verbatim for reference and attribution, and is not maintained here.
   The static-asset filter no longer drops `/static/...` exceptions before an
   operator can see that the exception applied.
 
+- **Seeded built-in rules now control the managed rules instead of duplicating
+  them.** A new `rules.managed_rule_id` links the eight seeded rules that
+  mirror a `PINGWAF-*` rule; those rows no longer travel as custom rules, so
+  each payload is evaluated once and category/stack/rule monitor switches
+  apply. Disabling or setting such a row to `off` now really disables the
+  managed rule on that site; restore-path `monitor` rows forward to
+  `monitor_managed_rules`. Renaming a seed still falls back to the name key.
+
+- **Body-stage event counting is deferred to the final verdict.** A request
+  inspected in both phases now writes one security event and one request
+  count; a header block stays immediate unless an `allow` rule reads the body.
+  If that body stage times out, the deferred header block is enforced rather
+  than forwarded, and a 415 terminal response still counts.
+
+- **Restore/clone validate rule and path-exception rows.** Invalid
+  `allow+off` rows are normalised, malformed non-enforcing rows are skipped
+  with a warning, and a malformed blocking/challenge rule aborts the restore
+  or clone instead of silently dropping protection.
+
 - **The rule builder's Header field generates a real header lookup.** It now
   emits `http.request.headers["<name>"]` and asks for the header name instead
   of the dead `http.request.headers contains "..."` form, which never matched.

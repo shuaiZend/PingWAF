@@ -12,6 +12,9 @@ use sea_orm::{
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+use crate::api::validation::{
+    check_path_exception_fields, check_rule_fields, RuleRowFix,
+};
 use crate::config_catalog::{
     merge_shallow, normalise_tables, query_rows, rows_for, spec_for,
     tables_for, Filter, TableSpec, VersionScope, INSTANCE_SETTING_KEYS,
@@ -486,6 +489,82 @@ async fn validate_references<C: ConnectionTrait>(
     Ok(())
 }
 
+/// What [`sanitise_restored_row`] decided about one snapshot row.
+#[derive(Debug, PartialEq, Eq)]
+enum RowSanitisation {
+    /// The row is valid; restore it as it stands.
+    Keep,
+    /// The row was repaired in place (historical state the data plane can
+    /// no longer express); restore it and report the rewrite.
+    Rewritten(&'static str),
+    /// The row violates the write-path validation and must not be restored.
+    /// The reason is reported as a warning — never silently dropped.
+    Skip(String),
+}
+
+/// Validates one restored rule or path-exception row against the same
+/// checks the write API applies (P0-9): a restore must not bypass
+/// `api/rules.rs` and `api/path_exceptions.rs` validation just because the
+/// rows arrive from a snapshot instead of a handler.
+///
+/// `allow`+`off` rules are repaired to `monitor` — the same normalisation
+/// migration 000096 and the restore transaction apply — rather than dropped,
+/// because that combination is a known historical state, not garbage. Every
+/// other violation skips the row and names it in the plan's warnings.
+fn sanitise_restored_row(table: &str, row: &mut Value) -> RowSanitisation {
+    match table {
+        "rules" => {
+            let name = json_key(row, "name").unwrap_or_default();
+            let expression = json_key(row, "expression").unwrap_or_default();
+            let rule_action = json_key(row, "action").unwrap_or_default();
+            let rule_mode = json_key(row, "mode").unwrap_or_default();
+            let severity =
+                row.get("severity").and_then(Value::as_i64).unwrap_or(3) as i32;
+            match check_rule_fields(
+                &name,
+                &expression,
+                &rule_action,
+                &rule_mode,
+                severity,
+            ) {
+                Ok(RuleRowFix::AllowOffMonitor) => {
+                    row["mode"] = json!(crate::models::mode::MONITOR);
+                    RowSanitisation::Rewritten(
+                        "action=allow with mode=off normalised to monitor",
+                    )
+                },
+                Ok(RuleRowFix::Keep) => RowSanitisation::Keep,
+                Err(reason) => RowSanitisation::Skip(reason),
+            }
+        },
+        "site_path_exceptions" => {
+            let path = json_key(row, "path").unwrap_or_default();
+            let match_type = row.get("match_type").and_then(Value::as_str);
+            let empty: Vec<String> = Vec::new();
+            let skip_layers: Vec<String> = row
+                .get("skip_layers")
+                .and_then(Value::as_array)
+                .map(|layers| {
+                    layers
+                        .iter()
+                        .filter_map(|layer| layer.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or(empty);
+            match check_path_exception_fields(&path, match_type, &skip_layers) {
+                Ok((path, match_type, layers)) => {
+                    row["path"] = json!(path);
+                    row["match_type"] = json!(match_type);
+                    row["skip_layers"] = json!(layers);
+                    RowSanitisation::Keep
+                },
+                Err(reason) => RowSanitisation::Skip(reason),
+            }
+        },
+        _ => RowSanitisation::Keep,
+    }
+}
+
 fn compute_change(
     spec: &TableSpec,
     live: &[Value],
@@ -571,6 +650,7 @@ pub async fn prepare_restore<C: ConnectionTrait>(
     let mut prepared = Vec::new();
     let mut owner_changes = Vec::new();
     let mut columns = HashMap::new();
+    let mut warnings = Vec::new();
 
     for spec in tables_for(scope) {
         let Some(rows) = rows_for(schema, &tables, spec.name)? else {
@@ -647,7 +727,43 @@ pub async fn prepare_restore<C: ConnectionTrait>(
             })
             .unwrap_or_default();
         let mut merged = Vec::with_capacity(rows.len());
-        for row in rows {
+        for mut row in rows {
+            // Rule and path-exception rows must satisfy the same validation
+            // the write API enforces: a restore cannot smuggle in what
+            // `api/rules.rs` / `api/path_exceptions.rs` would reject. Invalid
+            // rows are skipped and reported, not silently dropped; the
+            // historical `allow`+`off` rule state is repaired instead.
+            let row_id = json_key(&row, "id").unwrap_or_default();
+            match sanitise_restored_row(spec.name, &mut row) {
+                RowSanitisation::Keep => {},
+                RowSanitisation::Rewritten(what) => warnings.push(format!(
+                    "{spec_name} row {row_id}: {what}",
+                    spec_name = spec.name
+                )),
+                RowSanitisation::Skip(reason) => {
+                    // Dropping a blocking/challenge rule tightens the site;
+                    // dropping an invalid one is different: the restore first
+                    // deletes the site's whole rule set, so silently skipping
+                    // it would erase a real security rule. Fail the whole
+                    // restore instead of reporting success with less cover.
+                    if spec.name == "rules"
+                        && matches!(
+                            json_key(&row, "action").as_deref(),
+                            Some("block" | "challenge" | "js_challenge")
+                        )
+                    {
+                        return Err(DbErr::Custom(format!(
+                            "{} row {row_id} is an enforcing rule that cannot be restored ({reason}); restore aborted",
+                            spec.name
+                        )));
+                    }
+                    warnings.push(format!(
+                        "{spec_name} row {row_id}: invalid ({reason}); skipped",
+                        spec_name = spec.name
+                    ));
+                    continue;
+                },
+            }
             let restored = merge_row(
                 db,
                 spec,
@@ -699,7 +815,6 @@ pub async fn prepare_restore<C: ConnectionTrait>(
 
     validate_references(db, &prepared).await?;
 
-    let mut warnings = Vec::new();
     let mut prune_site_ids = Vec::new();
     if scope == VersionScope::Deployment {
         for row in live_sites {
@@ -990,5 +1105,151 @@ mod tests {
     fn certificate_tables_are_the_only_key_match_checks() {
         assert!(is_certificate_table("site_certificates"));
         assert!(!is_certificate_table("visitor_passkeys"));
+    }
+
+    fn rule_row(action: &str, mode: &str, expression: &str) -> Value {
+        json!({
+            "id": Uuid::new_v4(),
+            "site_id": Uuid::new_v4(),
+            "name": "block admin scanners",
+            "expression": expression,
+            "action": action,
+            "severity": 3,
+            "mode": mode,
+            "enabled": true,
+        })
+    }
+
+    /// A fully legal rule row restores untouched.
+    #[test]
+    fn valid_rule_rows_are_kept() {
+        let mut row = rule_row(
+            "block",
+            "block",
+            r#"http.request.path contains "/admin""#,
+        );
+        assert_eq!(
+            RowSanitisation::Keep,
+            sanitise_restored_row("rules", &mut row)
+        );
+    }
+
+    /// P0-9: the historical `allow`+`off` combination is repaired to
+    /// `monitor` — the same normalisation migration 000096 and the restore
+    /// transaction apply — instead of being dropped or restored as-is.
+    #[test]
+    fn allow_off_rules_are_normalised_to_monitor() {
+        let mut row = rule_row(
+            "allow",
+            "off",
+            r#"http.request.headers["user-agent"] contains "friend""#,
+        );
+        match sanitise_restored_row("rules", &mut row) {
+            RowSanitisation::Rewritten(_) => {},
+            other => panic!("expected a rewrite, got {other:?}"),
+        }
+        assert_eq!("monitor", row["mode"]);
+    }
+
+    #[test]
+    fn invalid_rule_rows_are_skipped_and_named() {
+        // allow cannot promise enforcement with mode=block.
+        let mut row = rule_row(
+            "allow",
+            "block",
+            r#"http.request.headers["user-agent"] contains "friend""#,
+        );
+        assert!(matches!(
+            sanitise_restored_row("rules", &mut row),
+            RowSanitisation::Skip(_)
+        ));
+        // Unknown mode.
+        let mut row = rule_row("block", "enforce", r#"true"#);
+        assert!(matches!(
+            sanitise_restored_row("rules", &mut row),
+            RowSanitisation::Skip(_)
+        ));
+        // Unknown action.
+        let mut row = rule_row("quarantine", "block", r#"true"#);
+        assert!(matches!(
+            sanitise_restored_row("rules", &mut row),
+            RowSanitisation::Skip(_)
+        ));
+        // An expression the data plane would drop.
+        let mut row = rule_row("block", "block", "and and");
+        assert!(matches!(
+            sanitise_restored_row("rules", &mut row),
+            RowSanitisation::Skip(_)
+        ));
+    }
+
+    fn exception_row(
+        path: &str,
+        match_type: &str,
+        skip_layers: Value,
+    ) -> Value {
+        json!({
+            "id": Uuid::new_v4(),
+            "site_id": Uuid::new_v4(),
+            "path": path,
+            "match_type": match_type,
+            "skip_layers": skip_layers,
+            "enabled": true,
+        })
+    }
+
+    /// A valid path exception is kept, with the list normalisation applied.
+    #[test]
+    fn valid_path_exceptions_are_kept() {
+        let mut row = exception_row(
+            "/health",
+            "exact",
+            json!(["waf", "rate_limit", "waf"]),
+        );
+        assert_eq!(
+            RowSanitisation::Keep,
+            sanitise_restored_row("site_path_exceptions", &mut row)
+        );
+        assert_eq!(json!(["waf", "rate_limit"]), row["skip_layers"]);
+    }
+
+    #[test]
+    fn invalid_path_exceptions_are_skipped_and_named() {
+        // skip_layers must not be empty — an empty list would restore a row
+        // that skips nothing but still looks like a bypass in the console.
+        let mut row = exception_row("/health", "exact", json!([]));
+        assert!(matches!(
+            sanitise_restored_row("site_path_exceptions", &mut row),
+            RowSanitisation::Skip(_)
+        ));
+        // Unknown layer names are rejected, not ignored.
+        let mut row = exception_row("/health", "exact", json!(["everything"]));
+        assert!(matches!(
+            sanitise_restored_row("site_path_exceptions", &mut row),
+            RowSanitisation::Skip(_)
+        ));
+        // A regex that does not compile.
+        let mut row = exception_row("(", "regex", json!(["waf"]));
+        assert!(matches!(
+            sanitise_restored_row("site_path_exceptions", &mut row),
+            RowSanitisation::Skip(_)
+        ));
+        // A wildcard needs one trailing `*`.
+        let mut row =
+            exception_row("/api/*/status", "wildcard", json!(["waf"]));
+        assert!(matches!(
+            sanitise_restored_row("site_path_exceptions", &mut row),
+            RowSanitisation::Skip(_)
+        ));
+    }
+
+    /// Tables without row-level validation pass through untouched.
+    #[test]
+    fn other_tables_are_not_touched() {
+        let mut row = json!({"id": 1, "anything": "goes"});
+        assert_eq!(
+            RowSanitisation::Keep,
+            sanitise_restored_row("waf_settings", &mut row)
+        );
     }
 }

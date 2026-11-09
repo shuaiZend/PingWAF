@@ -107,7 +107,9 @@ impl From<path_exceptions::Model> for PathExceptionView {
 }
 
 /// Validates and normalises the match type (`prefix` is the default).
-fn validate_match_type(raw: Option<&str>) -> Result<String, ApiError> {
+pub(crate) fn validate_match_type(
+    raw: Option<&str>,
+) -> Result<String, ApiError> {
     let value = raw
         .map(str::trim)
         .filter(|v| !v.is_empty())
@@ -124,7 +126,7 @@ fn validate_match_type(raw: Option<&str>) -> Result<String, ApiError> {
 /// engine uses (`pingwaf-waf/src/rules/expression.rs`), so a pathological
 /// pattern is refused at save time instead of being dropped — or pinning
 /// memory — on the data plane.
-fn validate_regex(pattern: &str) -> Result<(), ApiError> {
+pub(crate) fn validate_regex(pattern: &str) -> Result<(), ApiError> {
     const MAX_REGEX_SIZE: usize = 4 * 1024 * 1024;
     regex::RegexBuilder::new(pattern)
         .size_limit(MAX_REGEX_SIZE)
@@ -142,7 +144,10 @@ fn validate_regex(pattern: &str) -> Result<(), ApiError> {
 /// `regex` is the exception: `^/api` does not start with `/` and `*`/`?` are
 /// operators there, so only the shared limits (length, no whitespace/control
 /// characters) apply in addition to a compile check.
-fn validate_path(raw: &str, match_type: &str) -> Result<String, ApiError> {
+pub(crate) fn validate_path(
+    raw: &str,
+    match_type: &str,
+) -> Result<String, ApiError> {
     let path = raw.trim();
     if path.is_empty() {
         return Err(ApiError::BadRequest("path must not be empty".to_string()));
@@ -214,7 +219,9 @@ pub(crate) fn validate_optional_path(
 }
 
 /// `*` collapses the list; unknown tokens are rejected rather than ignored.
-fn validate_skip_layers(raw: &[String]) -> Result<Vec<String>, ApiError> {
+pub(crate) fn validate_skip_layers(
+    raw: &[String],
+) -> Result<Vec<String>, ApiError> {
     if raw.is_empty() {
         return Err(ApiError::BadRequest(
             "skip_layers must not be empty; use [\"*\"] to skip every layer"
