@@ -1430,7 +1430,18 @@ impl WafEngine {
         );
 
         // ----- Fast-path Block on critical Stage-1 hit -----
-        if self.fast_path_block_on_critical && critical_hit {
+        // A managed rule downgraded to monitor must be able to suppress this
+        // shortcut: the fast path runs before stage 2, where the per-rule
+        // monitor switch lives. Let stage 2 decide when any loaded managed
+        // rule is monitored (the branch is an optimisation, not enforcement).
+        let stage2_must_decide = self.rules.iter().any(|rule| {
+            rule.id.starts_with("PINGWAF-")
+                && self.monitor_managed_rules.contains(rule.id.as_str())
+        });
+        if self.fast_path_block_on_critical
+            && critical_hit
+            && !stage2_must_decide
+        {
             let mut details = self.details_from(&recs, &[]);
             if let Some(note) = body_inspection.detail() {
                 details.push(note);
@@ -2047,6 +2058,19 @@ mod tests {
         assert_eq!(v.action, WafAction::Monitor);
         assert!(v.matched_rules.contains(&"PINGWAF-1002".to_string()));
         assert!(v.breakdown.total > 0);
+        assert!(v.details.contains("[monitored]"));
+
+        // The production configuration enables the critical fast path; the
+        // per-rule monitor switch must still win over it.
+        let cfg = WafEngineConfig {
+            monitor_managed_rules: ["PINGWAF-1002".to_string()]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let v = WafEngine::new(&cfg).inspect(&r);
+        assert_eq!(v.action, WafAction::Monitor);
+        assert!(v.matched_rules.contains(&"PINGWAF-1002".to_string()));
         assert!(v.details.contains("[monitored]"));
     }
 
