@@ -2376,7 +2376,7 @@ silently create a total bypass (`["*"]` must be explicit).
 |-------|--------------------------------------------------|
 | `path` | Required on create. 1–512 characters, must start with `/`, no whitespace or control characters. `*` is only allowed with `match_type: "wildcard"`, and there only as a single trailing `*` (`/api/*`); a bare `*` is rejected (`use path '/' with match_type prefix instead of '*'`). With `match_type: "regex"` the value is a regular expression instead — the leading-`/` and wildcard rules do not apply there, only the shared length/whitespace limits plus a compile check (see below). |
 | `match_type` | `prefix` (default) / `exact` / `wildcard` / `regex`; anything else → `unknown match_type '<x>'; expected one of prefix, exact, wildcard, regex`. |
-| `skip_layers` | Array of tokens: `*`, `waf`, `bot`, `access`, `basic_auth`, `mtls`, `ai_bot`, `rate_limit`, `challenge`. Empty array → `skip_layers must not be empty; use ["*"] to skip every layer`; unknown token → named in the error; `*` collapses the list to every layer. |
+| `skip_layers` | Array of tokens: `*`, `waf`, `bot`, `access`, `basic_auth`, `mtls`, `ai_bot`, `rate_limit`, `challenge`. Empty array → `skip_layers must not be empty; use ["*"] to skip every layer`; unknown token → named in the error; `*` collapses the list to every detection/rate/challenge layer, but never implies `mtls` or `basic_auth` (name those explicitly). |
 | `note` | At most 200 characters. |
 | `log_hits` | Default `false`. When `true`, every hit is recorded (see [Hit behaviour](#path-exception-hit-behaviour)). |
 | `enabled` | Default `true`; disabled exceptions are neither compiled nor matched. |

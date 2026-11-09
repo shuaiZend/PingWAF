@@ -521,11 +521,23 @@ impl TryFrom<&PluginConf> for Oidc {
                 "logout_path can not be the redirect_path".to_string(),
             ));
         }
-        let path_scope = PathFilter::compile(
+        let path_scope = match PathFilter::compile(
             &get_str_conf(value, "path"),
             &get_str_conf(value, "match_type"),
-        )
-        .map_err(|err| invalid(format!("path: {err}")))?;
+        ) {
+            Ok(scope) => scope,
+            Err(err) => {
+                // Dropping the whole plugin would make the site's login gate
+                // disappear (fail-open). Gate the whole site instead; the
+                // control plane refuses invalid regexes on save, so this is
+                // only reachable through a restored/hand-written row.
+                warn!(
+                    error = %err,
+                    "oidc path scope failed to compile; gating the whole site"
+                );
+                None
+            },
+        };
         let redirect_url = Some(get_str_conf(value, "redirect_url"))
             .filter(|url| !url.is_empty());
         if let Some(url) = &redirect_url {
@@ -3153,15 +3165,17 @@ Pz7glwkTfq+X/7U/TTdWanLivIQqzKjyNBu3kgzx7GeUYcjtuw4RKof6
     }
 
     #[test]
-    fn an_invalid_path_regex_is_rejected_at_build_time() {
+    fn an_invalid_path_regex_falls_back_to_the_whole_site() {
+        let plugin = plugin_from(
+            "auth_mode = \"local\"\n\
+             cookie_secret = \"0123456789abcdef0123456789abcdef\"\n\
+             path = \"^/broken(\"\n\
+             match_type = \"regex\"\n",
+        )
+        .expect("a bad scope must not remove the login gate");
         assert!(
-            plugin_from(
-                "auth_mode = \"local\"\n\
-                 cookie_secret = \"0123456789abcdef0123456789abcdef\"\n\
-                 path = \"^/broken(\"\n\
-                 match_type = \"regex\"\n",
-            )
-            .is_err()
+            plugin.path.is_none(),
+            "fallback is the whole site, not a disabled plugin"
         );
     }
 

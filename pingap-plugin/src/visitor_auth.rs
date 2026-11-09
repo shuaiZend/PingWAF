@@ -1370,11 +1370,22 @@ impl TryFrom<&PluginConf> for VisitorAuth {
         // tells this plugin it is the site's only gate.
         let oidc_cookie_name = Some(get_str_conf(value, "oidc_cookie_name"))
             .filter(|name| !name.is_empty());
-        let scope = PathFilter::compile(
+        let scope = match PathFilter::compile(
             &get_str_conf(value, "scope_path"),
             &get_str_conf(value, "scope_match_type"),
-        )
-        .map_err(|error| invalid(format!("scope_path: {error}")))?;
+        ) {
+            Ok(scope) => scope,
+            Err(err) => {
+                // A missing visitor gate would expose the site. If the scope
+                // cannot compile, gate the whole site rather than dropping
+                // the plugin.
+                warn!(
+                    error = %err,
+                    "visitor-auth scope failed to compile; gating the whole site"
+                );
+                None
+            },
+        };
         // The session cookie is signed with a key derived from the site's
         // `cookie_secret` — the same secret the OIDC session uses, so a site
         // has one secret to rotate rather than two. It is required: a cookie

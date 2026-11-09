@@ -314,8 +314,10 @@ fn access_rules_require_basic_auth(site_rules: &CacheSiteRules) -> bool {
     ip_rule || geo_rule
 }
 
-/// The protection layers an operator-curated path exception skips. An empty
-/// `skip_layers` list (or one containing `*`) collapses to "every layer".
+/// The protection layers an operator-curated path exception skips. `*`
+/// expands to the detection/dispatch layers only; authentication layers
+/// (`mtls`, `basic_auth`) must be named explicitly, so one click cannot
+/// silently disable client certificates or the login gate.
 #[derive(Debug, Clone, PartialEq)]
 struct BypassLayers {
     all: bool,
@@ -326,9 +328,10 @@ impl BypassLayers {
     /// Compiles the wire list. Unknown layer names are kept (the control
     /// plane defines the vocabulary) but can never match a check below.
     fn build(raw: &[String]) -> Self {
-        // `*` is the explicit "skip every layer" spelling. An empty list is a
-        // malformed rule (the control plane rejects it), and compiling it to
-        // "skip everything" would turn a corrupt row into a total bypass.
+        // `*` is the explicit "skip every detection layer" spelling. An empty
+        // list is a malformed rule (the control plane rejects it), and
+        // compiling it to "skip everything" would turn a corrupt row into a
+        // total bypass.
         if raw.iter().any(|layer| layer == "*") {
             return Self {
                 all: true,
@@ -342,8 +345,23 @@ impl BypassLayers {
     }
 
     /// Whether the named protection layer is skipped for this request.
+    ///
+    /// `*` deliberately excludes `mtls` and `basic_auth`: an exception that
+    /// bypasses detection must not also remove authentication unless the
+    /// operator named that layer explicitly.
     fn skips(&self, layer: &str) -> bool {
-        self.all || self.named.iter().any(|name| name == layer)
+        if self.all {
+            return matches!(
+                layer,
+                "waf"
+                    | "bot"
+                    | "access"
+                    | "ai_bot"
+                    | "rate_limit"
+                    | "challenge"
+            );
+        }
+        self.named.iter().any(|name| name == layer)
     }
 
     /// Whether every challenge flavour is skipped, including the standalone
@@ -10076,9 +10094,13 @@ inspect_body = true"###,
         )])
         .unwrap();
         let bypass = compiled.match_path("/api").unwrap();
-        for layer in ["mtls", "access", "basic_auth", "bot", "waf"] {
+        for layer in ["access", "bot", "waf", "rate_limit"] {
             assert!(bypass.layers.skips(layer));
         }
+        // Authentication layers require an explicit name; `*` is detection
+        // only, so one click cannot remove client certificates or the gate.
+        assert!(!bypass.layers.skips("mtls"));
+        assert!(!bypass.layers.skips("basic_auth"));
         assert!(bypass.layers.skips_challenge());
 
         // An empty list is malformed (the API rejects it). Compiling it must

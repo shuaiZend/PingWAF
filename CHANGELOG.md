@@ -45,6 +45,16 @@ verbatim for reference and attribution, and is not maintained here.
   The static-asset filter no longer drops `/static/...` exceptions before an
   operator can see that the exception applied.
 
+- **`*` no longer bypasses authentication layers.** It expands to the
+  detection/rate/challenge layers only; `mtls` and `basic_auth` must be named
+  explicitly, so a single "all" selection cannot remove client certificates
+  or the login gate.
+
+- **OIDC / visitor-auth scope compilation failures gate the whole site.** A
+  restored or hand-written invalid regex used to make the auth plugin fail to
+  construct and disappear from the chain (fail-open); it now logs a warning
+  and falls back to a whole-site gate.
+
 - **Scope matching uses a canonical path.** Percent-decoding, `//` collapse and
   `.`/`..` resolution run before path-exception/IP/geo/basic/OIDC scopes are
   matched, so `/api/../admin` cannot satisfy a `/api` scope. Unparseable
