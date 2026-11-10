@@ -345,6 +345,41 @@ fn handle_special_headers(
     None
 }
 
+/// Rewrites `::ffff:a.b.c.d` — what a dual-stack (`[::]`) listener reports for
+/// an IPv4 peer — to its IPv4 form.
+///
+/// The data plane binds the IPv6 wildcard by default, so without this every
+/// IPv4 client would show up as a v6 address: `192.0.2.0/24` access rules
+/// would stop matching it, rate-limit buckets would split per representation,
+/// and the auto-ban map would store a key the next request cannot look up.
+/// A real IPv6 client is never inside `::ffff:0:0/96`, so nothing else moves.
+#[inline]
+pub fn canonical_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => {
+            v6.to_ipv4_mapped().map_or(IpAddr::V6(v6), IpAddr::V4)
+        },
+        v4 => v4,
+    }
+}
+
+/// [`canonical_ip`] for an IP that is still a string.
+///
+/// Values without a `:` are already IPv4 literals and are returned untouched —
+/// the parse is only paid when the input could actually be a mapped form.
+fn canonical_ip_str(value: &str) -> String {
+    let trimmed = value.trim();
+    if !trimmed.contains(':') {
+        return trimmed.to_string();
+    }
+    match trimmed.parse::<IpAddr>() {
+        Ok(ip) => canonical_ip(ip).to_string(),
+        // Not an IP (a hostname, a malformed header): hand it back as-is, the
+        // callers that parse it already handle the failure.
+        Err(_) => trimmed.to_string(),
+    }
+}
+
 /// Gets the remote address (IP and port) from the session.
 pub fn get_remote_addr(session: &Session) -> Option<(String, u16)> {
     session
@@ -352,7 +387,7 @@ pub fn get_remote_addr(session: &Session) -> Option<(String, u16)> {
         // Ensure the address is an IP address (v4 or v6).
         .and_then(|addr| addr.as_inet())
         // Map it to a tuple of (String, u16).
-        .map(|addr| (addr.ip().to_string(), addr.port()))
+        .map(|addr| (canonical_ip(addr.ip()).to_string(), addr.port()))
 }
 
 /// Parsed trusted downstream proxy addresses: individual IPs plus CIDR
@@ -480,6 +515,11 @@ pub fn get_client_ip(session: &Session) -> String {
         Some(ip) => ip,
         None => return forwarded_client_ip(session),
     };
+    // Canonicalise before any decision: a `[::]` listener reports IPv4 peers
+    // as `::ffff:a.b.c.d`, and an operator's `trusted_proxies` list holds
+    // ordinary v4 ranges. Comparing the raw form would silently stop honouring
+    // forwarded headers for every IPv4 load balancer.
+    let peer = canonical_ip(peer);
     if TRUSTED_PROXIES_ENABLED.load(Ordering::Relaxed) {
         // Compare the address itself; formatting it only to parse it back
         // would cost an allocation per request.
@@ -507,13 +547,13 @@ fn forwarded_client_ip(session: &Session) -> String {
         {
             let trimmed_ip = ip.trim();
             if !trimmed_ip.is_empty() {
-                return trimmed_ip.to_string();
+                return canonical_ip_str(trimmed_ip);
             }
         }
     }
     // 2. Check `X-Real-IP`.
     if let Some(value) = session.get_header(HTTP_HEADER_X_REAL_IP) {
-        return value.to_str().unwrap_or_default().to_string();
+        return canonical_ip_str(value.to_str().unwrap_or_default());
     }
     // 3. Fall back to the direct connection's remote address.
     if let Some((addr, _)) = get_remote_addr(session) {
@@ -596,10 +636,14 @@ pub fn resolve_client_ip_with_trust(
     if !trust.enabled || trust.header.is_empty() {
         return None;
     }
-    let peer = session
-        .client_addr()
-        .and_then(|addr| addr.as_inet())
-        .map(|addr| addr.ip())?;
+    // Same reason as `get_client_ip`: the trusted ranges are written in the
+    // operator's own family, so a dual-stack peer has to be collapsed first.
+    let peer = canonical_ip(
+        session
+            .client_addr()
+            .and_then(|addr| addr.as_inet())
+            .map(|addr| addr.ip())?,
+    );
     if !trust.peer_is_trusted(peer) {
         return Some(peer.to_string());
     }
@@ -617,10 +661,10 @@ pub fn resolve_client_ip_with_trust(
         value
     };
     match raw.trim().parse::<IpAddr>() {
-        Ok(ip) => Some(ip.to_string()),
+        Ok(ip) => Some(canonical_ip(ip).to_string()),
         // A trusted proxy sent something unusable: fall back to its own
         // address rather than to a spoofable header.
-        Err(_) => Some(peer.to_string()),
+        Err(_) => Some(canonical_ip(peer).to_string()),
     }
 }
 
@@ -1470,6 +1514,98 @@ mod tests {
         )
         .await;
         assert_eq!(get_client_ip(&session), "192.168.1.1");
+    }
+
+    #[test]
+    fn canonical_ip_collapses_only_mapped_v4() {
+        // A dual-stack listener reports an IPv4 peer this way.
+        assert_eq!(
+            canonical_ip("::ffff:192.0.2.7".parse().unwrap()),
+            "192.0.2.7".parse::<IpAddr>().unwrap()
+        );
+        // The hex spelling of the same address.
+        assert_eq!(
+            canonical_ip("::ffff:c000:207".parse().unwrap()),
+            "192.0.2.7".parse::<IpAddr>().unwrap()
+        );
+        // A real IPv6 client and an IPv4 peer are untouched.
+        assert_eq!(
+            canonical_ip("2001:db8::1".parse().unwrap()),
+            "2001:db8::1".parse::<IpAddr>().unwrap()
+        );
+        assert_eq!(
+            canonical_ip("192.0.2.7".parse().unwrap()),
+            "192.0.2.7".parse::<IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn canonical_ip_str_leaves_non_ip_values_alone() {
+        assert_eq!(canonical_ip_str("::ffff:192.0.2.7"), "192.0.2.7");
+        assert_eq!(canonical_ip_str(" 192.0.2.7 "), "192.0.2.7");
+        assert_eq!(canonical_ip_str("2001:db8::1"), "2001:db8::1");
+        // Not an address: handed back unchanged so callers keep their own
+        // error handling.
+        assert_eq!(canonical_ip_str("unknown"), "unknown");
+    }
+
+    /// An IPv4 client behind the dual-stack `[::]` listener must still resolve
+    /// to its IPv4 form: every IP-keyed feature (access rules, rate limits,
+    /// auto-ban, logs) compares that string.
+    ///
+    /// The trusted-proxy scenarios go through `resolve_client_ip_with_trust`
+    /// with an explicit `ProxyTrust`, because the process-global trusted list
+    /// is mutated by other tests in this module and would make the assertion
+    /// order-dependent.
+    #[tokio::test]
+    async fn test_mapped_peer_resolves_to_ipv4() {
+        // A public mapped peer resolves to itself, in v4 form, whatever the
+        // global trust list happens to be: an untrusted peer never reads its
+        // own forwarded headers.
+        let session = new_test_session_with_peer(
+            &["X-Forwarded-For:192.168.1.1"],
+            "/",
+            "::ffff:93.184.216.34".parse().unwrap(),
+        )
+        .await;
+        assert_eq!(get_client_ip(&session), "93.184.216.34");
+        assert_eq!(
+            get_remote_addr(&session).map(|(ip, _)| ip),
+            Some("93.184.216.34".to_string())
+        );
+
+        // `trusted_proxies = ["10.0.0.0/8"]` must still trust a peer that the
+        // dual-stack listener reports as `::ffff:10.0.0.9`, or every IPv4 load
+        // balancer silently stops being honoured.
+        let trust = ProxyTrust::new(
+            true,
+            "x-forwarded-for",
+            false,
+            &["10.0.0.0/8".to_string()],
+        );
+        let session = new_test_session_with_peer(
+            &["X-Forwarded-For:192.168.1.1"],
+            "/",
+            "::ffff:10.0.0.9".parse().unwrap(),
+        )
+        .await;
+        assert_eq!(
+            resolve_client_ip_with_trust(&session, &trust).as_deref(),
+            Some("192.168.1.1")
+        );
+
+        // An untrusted mapped peer falls back to itself, and a mapped value in
+        // the forwarded header is canonicalised before it is returned.
+        let session = new_test_session_with_peer(
+            &["X-Forwarded-For:::ffff:192.168.1.1"],
+            "/",
+            "::ffff:203.0.113.9".parse().unwrap(),
+        )
+        .await;
+        assert_eq!(
+            resolve_client_ip_with_trust(&session, &trust).as_deref(),
+            Some("203.0.113.9")
+        );
     }
 
     #[tokio::test]
