@@ -56,8 +56,20 @@ unprivileged `pingwaf` user. Binding a port below 1024 therefore needs
 
 ```
 thread 'Pingora HTTP Proxy Service' panicked at …/pingora-core-0.9.x/src/services/listening.rs:293:14:
-Failed to build listeners: … PermissionDenied … bind() failed on 0.0.0.0:443
+Failed to build listeners: … PermissionDenied … bind() failed on [::]:443
 ```
+
+Both listeners bind the IPv6 wildcard `[::]` by default with
+`IPV6_V6ONLY=false`, so one socket serves IPv4 and IPv6: an IPv4 client simply
+arrives as `::ffff:a.b.c.d` and the data plane canonicalises it back to
+`a.b.c.d` before IP access rules, rate-limit keys, auto-ban and logs see it. Two
+consequences worth knowing:
+
+- A host with IPv6 disabled at the kernel level cannot bind `[::]`, so the
+  default falls back to `0.0.0.0` automatically instead of failing to start.
+- To pin one family, set `PINGWAF_LISTEN_HTTP_ADDR` / `PINGWAF_LISTEN_HTTPS_ADDR`
+  (e.g. `0.0.0.0:80`), which is also what the `bind() failed on [::]:443`
+  message above is telling you to look at.
 
 Images built from this repository grant that capability to the binary at build
 time (`setcap cap_net_bind_service=+ep /usr/local/bin/pingwaf`, asserted with
@@ -380,6 +392,8 @@ are listed against it below; the dash in a table entry means the setting has no
 | `PINGWAF_API_KEY` | `agent.api_key` |
 | `PINGWAF_CACHE_DIR` | `agent.cache_dir` |
 | `PINGWAF_FAIL_OPEN` | `agent.fail_open` |
+| `PINGWAF_LISTEN_HTTP_ADDR` | — (data-plane `:80` listener; default `[::]:80`, automatic `0.0.0.0:80` fallback) |
+| `PINGWAF_LISTEN_HTTPS_ADDR` | — (data-plane `:443` listener; default `[::]:443`, automatic `0.0.0.0:443` fallback) |
 | `PINGWAF_METRICS_SHIP_INTERVAL` | `agent.metrics_ship_interval_secs` |
 | `PINGWAF_ES_ENABLED` | — Elasticsearch shipper toggle |
 | `PINGWAF_ES_URLS` | — Elasticsearch URLs (comma-separated) |

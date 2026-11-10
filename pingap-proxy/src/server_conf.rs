@@ -98,6 +98,12 @@ pub struct ServerConf {
     /// See the [man page](https://man7.org/linux/man-pages/man7/socket.7.html) for more information.
     pub reuse_port: Option<bool>,
 
+    /// `IPV6_V6ONLY` for an IPv6 listener. `false` makes one `[::]` socket
+    /// serve IPv4 and IPv6 (the dual-stack default the data plane asks for);
+    /// `true` restricts it to IPv6. None leaves the OS default, which is
+    /// v6-only on macOS/BSD.
+    pub ipv6_only: Option<bool>,
+
     // Whether to use globally configured TLS certificates
     // False means the server is using http protocol
     pub global_certificates: bool,
@@ -367,6 +373,7 @@ pub fn parse_from_conf(conf: PingapConfig) -> Vec<ServerConf> {
             tcp_keepalive,
             tcp_fastopen: item.tcp_fastopen,
             reuse_port: item.reuse_port,
+            ipv6_only: item.ipv6_only,
             prometheus_metrics: item.prometheus_metrics,
             otlp_exporter: item.otlp_exporter.clone(),
             modules: item.modules.clone(),

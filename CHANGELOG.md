@@ -10,6 +10,19 @@ verbatim for reference and attribution, and is not maintained here.
 
 ## [Unreleased]
 
+### Changed
+
+- **The data plane listens on IPv6 by default.** The public listeners were
+  hard-coded to `0.0.0.0:80` / `0.0.0.0:443`; they now default to `[::]:80` /
+  `[::]:443` with `ipv6_only = false`, so a single socket serves IPv4 and IPv6.
+  A host that cannot bind `[::]` (IPv6 disabled at the kernel) falls back to the
+  IPv4 wildcard instead of failing to start, and
+  `PINGWAF_LISTEN_HTTP_ADDR` / `PINGWAF_LISTEN_HTTPS_ADDR` pin either family.
+  The ACME HTTP-01 fallback listener follows the same default.
+- `rules.server.ipv6_only` (`ServerConf`) is now a supported setting; the
+  configuration is rejected when it is combined with an IPv4 `addr`, because
+  `IPV6_V6ONLY` does not exist on an AF_INET socket.
+
 ### Fixed
 
 - **The rules table's enable switch now refreshes the row.** The mutation wrote
@@ -37,6 +50,13 @@ verbatim for reference and attribution, and is not maintained here.
 - The console's stores tolerate a `localStorage` global that exists but is not a
   usable `Storage` (Node's experimental Web Storage), which crashed every test
   that imported the API client.
+- IPv4 peers arriving on the dual-stack listener (`::ffff:a.b.c.d`) are
+  canonicalised back to `a.b.c.d` before IP access rules, trusted-proxy
+  matching, rate-limit keys, auto-ban and logs see them; without it every IPv4
+  allow/deny rule and every IPv4 `trusted_proxies` entry would have stopped
+  matching the moment the listener switched family.
+- The agent's local-IP probe no longer binds a hard-coded IPv4 socket, so an
+  IPv6-only node reports its real address instead of `127.0.0.1`.
 - A rules table that only holds the first page now says so (`Showing the first N
   of M rules`) instead of silently hiding the remainder; the search box is the
   way to reach them.

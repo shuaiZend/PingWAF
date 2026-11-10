@@ -1878,14 +1878,12 @@ fn get_hostname() -> String {
 }
 
 fn get_local_ip() -> String {
-    // Attempt to determine local IP by connecting to a public address
-    std::net::UdpSocket::bind("0.0.0.0:0")
-        .and_then(|socket| {
-            socket.connect("8.8.8.8:80")?;
-            socket.local_addr()
-        })
-        .map(|addr| addr.ip().to_string())
-        .unwrap_or_else(|_| "127.0.0.1".to_string())
+    // Same egress probe the metrics sampler uses: it tries an IPv4 then an
+    // IPv6 destination, so an IPv6-only node reports its real address instead
+    // of the loopback fallback the hard-coded `0.0.0.0` socket produced.
+    crate::probe::egress_ip()
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| "127.0.0.1".to_string())
 }
 
 fn get_system_info() -> (u32, u64, String) {

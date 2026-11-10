@@ -474,11 +474,15 @@ impl Server {
         let tcp_socket_options = if conf.tcp_fastopen.is_some()
             || conf.tcp_keepalive.is_some()
             || conf.reuse_port.is_some()
+            || conf.ipv6_only.is_some()
         {
             let mut opts = TcpSocketOptions::default();
             opts.tcp_fastopen = conf.tcp_fastopen;
             opts.tcp_keepalive.clone_from(&conf.tcp_keepalive);
             opts.so_reuseport = conf.reuse_port;
+            // Only meaningful for an AF_INET6 socket; `validate_with_locations`
+            // rejects the combination with an IPv4 address before this runs.
+            opts.ipv6_only = conf.ipv6_only;
             Some(opts)
         } else {
             None

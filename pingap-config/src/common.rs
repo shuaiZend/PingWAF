@@ -1315,6 +1315,16 @@ pub struct ServerConf {
     /// See the [man page](https://man7.org/linux/man-pages/man7/socket.7.html) for more information.
     pub reuse_port: Option<bool>,
 
+    /// `IPV6_V6ONLY` for a listener bound to an IPv6 address.
+    ///
+    /// `false` makes a single `[::]` socket serve both families (the Linux
+    /// default, and what a dual-stack deployment wants); `true` restricts it
+    /// to IPv6. Unset leaves the OS default, which is v6-only on macOS/BSD —
+    /// so a wildcard listener that must also accept IPv4 has to say `false`
+    /// explicitly. The option is only applied when every address in `addr`
+    /// parses as IPv6: `setsockopt(IPV6_V6ONLY)` on an AF_INET socket fails.
+    pub ipv6_only: Option<bool>,
+
     /// Path to expose Prometheus metrics on
     pub prometheus_metrics: Option<String>,
 
@@ -1347,11 +1357,33 @@ impl ServerConf {
     /// 2. Check the locations are exists.
     /// 3. Parse access log layout success.
     fn validate_with_locations(&self, location_names: &[String]) -> Result<()> {
+        let mut v6_addrs = 0usize;
+        let mut total = 0usize;
+        // Every entry must parse, including an empty one: an empty `addr` is a
+        // configuration error, not "nothing to listen on".
         for addr in self.addr.split(',') {
-            let _ = addr.to_socket_addrs().map_err(|e| Error::Io {
-                source: e,
-                file: self.addr.clone(),
-            })?;
+            total += 1;
+            let mut resolved =
+                addr.to_socket_addrs().map_err(|e| Error::Io {
+                    source: e,
+                    file: self.addr.clone(),
+                })?;
+            // pingora binds the first resolved address, so that is the one the
+            // socket option will be applied to.
+            if resolved.next().is_some_and(|sa| sa.is_ipv6()) {
+                v6_addrs += 1;
+            }
+        }
+        // `IPV6_V6ONLY` is a setsockopt on AF_INET6: applying it to a mixed or
+        // IPv4-only address list fails at bind time, which is far harder to
+        // diagnose than a rejected config.
+        if self.ipv6_only.is_some() && total > 0 && v6_addrs != total {
+            return Err(Error::Invalid {
+                message: format!(
+                    "ipv6_only requires every address in addr to be IPv6, got {}",
+                    self.addr
+                ),
+            });
         }
         if !location_names.is_empty()
             && let Some(locations) = &self.locations
@@ -2999,6 +3031,45 @@ h1_upgrade = "preserve"
         conf.locations = Some(vec!["lo".to_string()]);
         let result = conf.validate_with_locations(&location_names);
         assert_eq!(true, result.is_ok());
+    }
+
+    #[test]
+    fn test_server_ipv6_only_requires_an_ipv6_addr() {
+        let location_names = vec!["lo".to_string()];
+        let mut conf = ServerConf {
+            addr: "[::]:80".to_string(),
+            locations: Some(vec!["lo".to_string()]),
+            ipv6_only: Some(false),
+            ..Default::default()
+        };
+
+        // Dual-stack wildcard: accepted.
+        assert!(conf.validate_with_locations(&location_names).is_ok());
+
+        // A v6-only listener is accepted too; the flag is just explicit.
+        conf.ipv6_only = Some(true);
+        assert!(conf.validate_with_locations(&location_names).is_ok());
+
+        // `setsockopt(IPV6_V6ONLY)` does not exist on an AF_INET socket, so an
+        // IPv4 address with the flag must be rejected here rather than at bind.
+        conf.addr = "127.0.0.1:80".to_string();
+        conf.ipv6_only = Some(false);
+        let err = conf
+            .validate_with_locations(&location_names)
+            .expect_err("ipv4 with ipv6_only must fail");
+        assert!(
+            err.to_string().contains("ipv6_only requires every address"),
+            "{err}"
+        );
+
+        // A mixed list is rejected for the same reason.
+        conf.addr = "[::]:80,127.0.0.1:80".to_string();
+        assert!(conf.validate_with_locations(&location_names).is_err());
+
+        // Without the flag an IPv4 listener stays valid.
+        conf.addr = "127.0.0.1:80".to_string();
+        conf.ipv6_only = None;
+        assert!(conf.validate_with_locations(&location_names).is_ok());
     }
 
     #[test]

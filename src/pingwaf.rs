@@ -18,6 +18,7 @@
 //! Agent (data plane only), and AllInOne (both in a single process).
 
 use std::collections::{BTreeMap, HashMap};
+use std::net::ToSocketAddrs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -184,9 +185,73 @@ fn agent_config_from_all_in_one(opts: &AllInOneOpts) -> AgentConfig {
     }
 }
 
-/// Extract port from an address string like "0.0.0.0:9090".
+/// Extract port from an address string like "0.0.0.0:9090" or "[::]:9090".
 fn extract_port(addr: &str) -> &str {
     addr.rsplit(':').next().unwrap_or("9090")
+}
+
+/// Whether this host can bind the IPv6 wildcard at all.
+///
+/// Probed once: a host with IPv6 disabled (`ipv6.disable=1`) or built without
+/// AF_INET6 refuses `bind("[::]:0")`, and the data plane must not fail to
+/// start there just because the default changed.
+fn ipv6_wildcard_bindable() -> bool {
+    static BINDABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *BINDABLE.get_or_init(|| std::net::TcpListener::bind("[::]:0").is_ok())
+}
+
+/// Publishes the listen address for a public data-plane port.
+///
+/// The default is the IPv6 wildcard `[::]`. The generated server config sets
+/// `ipv6_only = false` on it, so a single socket serves IPv4 and IPv6 alike —
+/// IPv4 peers simply arrive as `::ffff:a.b.c.d`, which the client-IP resolver
+/// canonicalises back to `a.b.c.d`. Hosts that cannot bind IPv6 fall back to
+/// the IPv4 wildcard instead of failing to start.
+///
+/// Overrides, in order: `env_key`, then `legacy_key` (the `PINGWAF_ANALYSIS_*`
+/// spelling the dhat analysis harness still sets), then the default.
+pub(crate) fn public_listen_addr(
+    env_key: &str,
+    legacy_key: &str,
+    port: u16,
+) -> String {
+    for key in [env_key, legacy_key] {
+        if let Ok(value) = std::env::var(key) {
+            let value = value.trim();
+            if !value.is_empty() {
+                return value.to_string();
+            }
+        }
+    }
+    if ipv6_wildcard_bindable() {
+        format!("[::]:{port}")
+    } else {
+        format!("0.0.0.0:{port}")
+    }
+}
+
+/// True when every address in a comma-separated listen list is IPv6.
+///
+/// `IPV6_V6ONLY` only applies to an AF_INET6 socket, so a list mixing
+/// families must not carry it (`pingap-config` rejects that combination).
+pub(crate) fn all_addrs_ipv6(addr: &str) -> bool {
+    let mut seen = false;
+    for item in addr.split(',').map(str::trim).filter(|a| !a.is_empty()) {
+        seen = true;
+        let mut resolved = match item.to_socket_addrs() {
+            Ok(resolved) => resolved,
+            // Unresolvable input is left to the config validator; do not add
+            // an option that would only confuse its error message.
+            Err(_) => return false,
+        };
+        // pingora binds the *first* resolved address, so that is the one whose
+        // family decides whether `IPV6_V6ONLY` can be applied.
+        match resolved.next() {
+            Some(sa) if sa.is_ipv6() => {},
+            _ => return false,
+        }
+    }
+    seen
 }
 
 /// Parses an environment flag with the same truthy spellings used by the
@@ -1353,18 +1418,27 @@ fn cached_rules_to_pingap_config(
              fail until one is issued or uploaded"
         );
     }
-    // Analysis-only override: a non-root macOS run cannot bind 80/443.
-    // These variables are intentionally read only in the dhat analysis branch;
-    // production continues to use the fixed public listener addresses.
-    let analysis_http_addr = std::env::var("PINGWAF_ANALYSIS_HTTP_ADDR")
-        .unwrap_or_else(|_| "0.0.0.0:80".to_string());
-    let analysis_https_addr = std::env::var("PINGWAF_ANALYSIS_HTTPS_ADDR")
-        .unwrap_or_else(|_| "0.0.0.0:443".to_string());
+    // Dual-stack by default: `[::]` plus `ipv6_only = false` serves IPv4 and
+    // IPv6 from one socket, and IPv4 peers stay recognisable because the
+    // client-IP resolver canonicalises their `::ffff:` form. A host without
+    // IPv6 falls back to the IPv4 wildcard (see `public_listen_addr`); both
+    // ports remain overridable for a non-root run or a split-family setup.
+    let public_http_addr = public_listen_addr(
+        "PINGWAF_LISTEN_HTTP_ADDR",
+        "PINGWAF_ANALYSIS_HTTP_ADDR",
+        80,
+    );
+    let public_https_addr = public_listen_addr(
+        "PINGWAF_LISTEN_HTTPS_ADDR",
+        "PINGWAF_ANALYSIS_HTTPS_ADDR",
+        443,
+    );
     let mut servers: HashMap<String, PingapServerConf> = HashMap::new();
     servers.insert(
         "pingwaf".to_string(),
         PingapServerConf {
-            addr: analysis_http_addr,
+            ipv6_only: all_addrs_ipv6(&public_http_addr).then_some(false),
+            addr: public_http_addr,
             locations: Some(location_names.clone()),
             global_certificates: Some(false),
             ..Default::default()
@@ -1373,7 +1447,8 @@ fn cached_rules_to_pingap_config(
     servers.insert(
         "pingwaf_tls".to_string(),
         PingapServerConf {
-            addr: analysis_https_addr,
+            ipv6_only: all_addrs_ipv6(&public_https_addr).then_some(false),
+            addr: public_https_addr,
             locations: Some(location_names),
             global_certificates: Some(true),
             client_ca_pem: (!mtls_ca_bundle.is_empty())
@@ -2292,6 +2367,27 @@ fn log_directives(rust_log: Option<&str>) -> String {
 mod tests {
     use super::*;
     use clap::Parser as _;
+
+    /// Whether some generated listener serves `port`.
+    ///
+    /// The public listeners default to the IPv6 wildcard and fall back to the
+    /// IPv4 one on a host that cannot bind it, so the assertions below check
+    /// the port (and the dual-stack flag) rather than a family-specific
+    /// literal that would make the suite host-dependent.
+    fn listens_on<'a>(
+        addrs: impl IntoIterator<Item = &'a str>,
+        port: u16,
+    ) -> bool {
+        addrs
+            .into_iter()
+            .any(|addr| extract_port(addr).parse::<u16>() == Ok(port))
+    }
+
+    /// `ipv6_only` must be explicit (`false`, i.e. dual-stack) for a v6
+    /// listener and absent otherwise.
+    fn expected_ipv6_only(addr: &str) -> Option<bool> {
+        all_addrs_ipv6(addr).then_some(false)
+    }
     use pingwaf_agent::cache::{
         CacheRule as AgentCacheRule, CachedRules, GlobalCacheSettings,
         OidcAccessRule, OidcHeaderClaim, ProxyTrustConfig, ResponseReplaceRule,
@@ -3589,8 +3685,10 @@ mod tests {
         // The configuration must survive the same parser used by the data
         // plane: a certificate-only site still needs its 80/443 listeners.
         let servers = parse_from_conf(config);
-        assert!(servers.iter().any(|server| server.addr == "0.0.0.0:80"));
-        assert!(servers.iter().any(|server| server.addr == "0.0.0.0:443"));
+        let addrs: Vec<&str> =
+            servers.iter().map(|server| server.addr.as_str()).collect();
+        assert!(listens_on(addrs.iter().copied(), 80), "{servers:?}");
+        assert!(listens_on(addrs.iter().copied(), 443), "{servers:?}");
     }
 
     #[test]
@@ -3850,10 +3948,12 @@ mod tests {
 
         assert_eq!(config.servers.len(), 2);
         let http = config.servers.get("pingwaf").expect("http server");
-        assert_eq!(http.addr, "0.0.0.0:80");
+        assert_eq!(extract_port(&http.addr), "80");
+        assert_eq!(http.ipv6_only, expected_ipv6_only(&http.addr));
         assert_eq!(http.global_certificates, Some(false));
         let tls = config.servers.get("pingwaf_tls").expect("tls server");
-        assert_eq!(tls.addr, "0.0.0.0:443");
+        assert_eq!(extract_port(&tls.addr), "443");
+        assert_eq!(tls.ipv6_only, expected_ipv6_only(&tls.addr));
         assert_eq!(tls.global_certificates, Some(true));
         let names = tls.locations.as_deref().expect("tls locations");
         assert_eq!(names, http.locations.as_deref().expect("http locations"));
@@ -3989,10 +4089,12 @@ mod tests {
 
         assert_eq!(config.servers.len(), 2);
         let server = config.servers.get("pingwaf").expect("server");
-        assert_eq!(server.addr, "0.0.0.0:80");
+        assert_eq!(extract_port(&server.addr), "80");
+        assert_eq!(server.ipv6_only, expected_ipv6_only(&server.addr));
         assert_eq!(server.global_certificates, Some(false));
         let tls = config.servers.get("pingwaf_tls").expect("tls server");
-        assert_eq!(tls.addr, "0.0.0.0:443");
+        assert_eq!(extract_port(&tls.addr), "443");
+        assert_eq!(tls.ipv6_only, expected_ipv6_only(&tls.addr));
         assert_eq!(tls.global_certificates, Some(true));
     }
 
@@ -4438,5 +4540,54 @@ tls_key = \"NEWKEY\"
         )
         .expect("config should build");
         assert!(!config.plugins.contains_key(CACHE_PLUGIN_NAME));
+    }
+
+    #[test]
+    fn all_addrs_ipv6_rejects_mixed_families() {
+        assert!(all_addrs_ipv6("[::]:80"));
+        assert!(all_addrs_ipv6("[::]:80, [2001:db8::1]:80"));
+        assert!(!all_addrs_ipv6("0.0.0.0:80"));
+        // `IPV6_V6ONLY` is a per-socket option and cannot be applied to a
+        // list that also contains an IPv4 listener.
+        assert!(!all_addrs_ipv6("[::]:80,0.0.0.0:80"));
+        assert!(!all_addrs_ipv6(""));
+    }
+
+    #[test]
+    fn public_listen_addr_defaults_to_the_dual_stack_wildcard() {
+        // `std::env` is process-global; hold the lock while switching keys so
+        // no other test observes a half-configured environment.
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        const KEYS: [&str; 2] =
+            ["PINGWAF_LISTEN_HTTP_ADDR", "PINGWAF_ANALYSIS_HTTP_ADDR"];
+        fn clear() {
+            for key in KEYS {
+                unsafe { std::env::remove_var(key) };
+            }
+        }
+        clear();
+
+        let default = public_listen_addr(KEYS[0], KEYS[1], 80);
+        if ipv6_wildcard_bindable() {
+            assert_eq!(default, "[::]:80");
+        } else {
+            // A host with IPv6 disabled must still start.
+            assert_eq!(default, "0.0.0.0:80");
+        }
+
+        unsafe { std::env::set_var(KEYS[0], "127.0.0.1:8080") };
+        assert_eq!(public_listen_addr(KEYS[0], KEYS[1], 80), "127.0.0.1:8080");
+
+        // The older analysis spelling still works, and the newer key wins.
+        clear();
+        unsafe { std::env::set_var(KEYS[1], "0.0.0.0:8000") };
+        assert_eq!(public_listen_addr(KEYS[0], KEYS[1], 80), "0.0.0.0:8000");
+        unsafe { std::env::set_var(KEYS[0], "[::1]:8001") };
+        assert_eq!(public_listen_addr(KEYS[0], KEYS[1], 80), "[::1]:8001");
+
+        clear();
     }
 }

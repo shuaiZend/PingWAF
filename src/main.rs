@@ -1064,9 +1064,18 @@ fn run() -> Result<(), Box<dyn Error>> {
 
     // no server listen 80 and lets encrypt domains is not empty
     if !exits_80_server && enabled_http_challenge {
+        // Same default as the data plane: dual-stack `[::]:80` where the host
+        // can bind it, IPv4 wildcard where it cannot. ACME HTTP-01 challenges
+        // must answer on whichever family the CA dials.
+        let addr = crate::pingwaf::public_listen_addr(
+            "PINGWAF_LISTEN_HTTP_ADDR",
+            "PINGWAF_ANALYSIS_HTTP_ADDR",
+            80,
+        );
         server_conf_list.push(ServerConf {
             name: "lets encrypt".to_string(),
-            addr: "0.0.0.0:80".to_string(),
+            ipv6_only: crate::pingwaf::all_addrs_ipv6(&addr).then_some(false),
+            addr,
             ..Default::default()
         });
     }

@@ -131,7 +131,7 @@ fn is_cgnat(v4: std::net::Ipv4Addr) -> bool {
 /// A UDP `connect` sends nothing but makes the kernel pick a source address,
 /// which is exactly the hint needed: on a NAT'd node this is the private
 /// address it owns, not a public one it merely reaches the internet through.
-fn egress_ip() -> Option<IpAddr> {
+pub fn egress_ip() -> Option<IpAddr> {
     for probe in ["8.8.8.8:80", "[2001:4860:4860::8888]:80"] {
         let bind = if probe.starts_with('[') {
             "[::]:0"
