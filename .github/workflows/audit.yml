@@ -41,13 +41,23 @@ jobs:
           toolchain: stable
 
       # `.cargo/audit.toml` accepts RUSTSEC-2026-0459 (libsqlite3-sys) because
-      # that crate is only an optional-dependency record in Cargo.lock and never
+      # that crate is only a record of sqlx's optional `sqlite` feature and never
       # reaches a build. That reasoning dies the moment a manifest enables a
       # sqlite backend, so assert it here rather than trust a comment.
       - name: Assert libsqlite3-sys stays out of the build graph
         run: |
-          if cargo tree --locked --all-features -i libsqlite3-sys 2>&1 | grep -q "libsqlite3-sys v"; then
+          # Print the evidence either way: a guard that only fails or says
+          # nothing cannot be debugged from the run log.
+          cargo tree --locked --all-features -i libsqlite3-sys > sqlite-tree.txt 2>&1 || true
+          cat sqlite-tree.txt
+          if grep -q "libsqlite3-sys v" sqlite-tree.txt; then
             echo "::error::libsqlite3-sys entered the build graph (a sqlite backend was enabled). Revisit the RUSTSEC-2026-0459 ignore in .cargo/audit.toml."
+            exit 1
+          fi
+          # Belt and braces: no manifest may reference a sqlite feature, so the
+          # crate cannot be compiled even if the tree check above is ever wrong.
+          if grep -rn --include=Cargo.toml -E 'sqlx-sqlite|sqlite' .; then
+            echo "::error::a Cargo.toml references sqlite; revisit RUSTSEC-2026-0459."
             exit 1
           fi
 
