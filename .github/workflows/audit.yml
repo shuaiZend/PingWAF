@@ -33,5 +33,23 @@ jobs:
         with:
           tool: cargo-audit
 
+      # `cargo tree` is only needed by the guard below; pin the toolchain the
+      # same way ci.yml does instead of relying on the runner image.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      # `.cargo/audit.toml` accepts RUSTSEC-2026-0459 (libsqlite3-sys) because
+      # that crate is only an optional-dependency record in Cargo.lock and never
+      # reaches a build. That reasoning dies the moment a manifest enables a
+      # sqlite backend, so assert it here rather than trust a comment.
+      - name: Assert libsqlite3-sys stays out of the build graph
+        run: |
+          if cargo tree --locked --all-features -i libsqlite3-sys 2>&1 | grep -q "libsqlite3-sys v"; then
+            echo "::error::libsqlite3-sys entered the build graph (a sqlite backend was enabled). Revisit the RUSTSEC-2026-0459 ignore in .cargo/audit.toml."
+            exit 1
+          fi
+
       - name: Run cargo audit
         run: cargo audit
