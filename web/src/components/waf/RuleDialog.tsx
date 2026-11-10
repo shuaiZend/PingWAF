@@ -17,6 +17,7 @@ import {
   isModeAllowedForAction,
 } from '@/lib/ruleActionMode'
 import { rulesApi, ruleKeys } from '@/api/rules'
+import { buildRulePayload, type RuleFormState } from '@/lib/ruleCache'
 import { siteKeys } from '@/api/sites'
 import {
   buildExpression,
@@ -27,7 +28,9 @@ import {
   type ExpressionCombinator,
   type ExpressionCondition,
 } from '@/lib/expression'
-import { RULE_ACTIONS, RULE_MODES, type CreateRuleRequest, type Rule, type RuleGroup } from '@/api/types'
+import {
+  RULE_ACTIONS, RULE_MODES, type CreateRuleRequest, type Rule, type RuleGroup, type UpdateRuleRequest,
+} from '@/api/types'
 
 /** Tag suggestions surfaced by the tag editor, grouped by what agents detect. */
 const TAG_SUGGESTIONS = [
@@ -49,18 +52,6 @@ const emptyCondition = (): ExpressionCondition => ({
   operator: 'contains',
   value: '',
 })
-
-interface RuleFormState {
-  name: string
-  description: string
-  groupId: string
-  action: string
-  severity: number
-  mode: string
-  priority: number
-  tags: string[]
-  enabled: boolean
-}
 
 const emptyForm = (): RuleFormState => ({
   name: '',
@@ -169,6 +160,12 @@ export function RuleDialog({
   )
   const expression = editor === 'builder' ? builtExpression : raw.trim()
 
+  /**
+   * Built-in seed rules can only be toggled or re-moded from the UI — the
+   * server rejects any other field for override rows.
+   */
+  const isManaged = Boolean(rule?.managed_rule_id)
+
   const groupOptions = useMemo(
     () => [
       { value: '', label: t('pages.waf.noGroup') },
@@ -183,8 +180,10 @@ export function RuleDialog({
   }
 
   const save = useMutation({
-    mutationFn: (payload: CreateRuleRequest) =>
-      rule ? rulesApi.update(siteId, rule.id, payload) : rulesApi.create(siteId, payload),
+    mutationFn: (payload: CreateRuleRequest | UpdateRuleRequest) =>
+      rule
+        ? rulesApi.update(siteId, rule.id, payload)
+        : rulesApi.create(siteId, payload as CreateRuleRequest),
     onSuccess: (saved) => {
       toast.success(
         rule ? t('pages.waf.ruleUpdated') : t('pages.waf.ruleCreated'),
@@ -197,29 +196,33 @@ export function RuleDialog({
 
   const submit = () => {
     setError(null)
-    const name = form.name.trim()
-    if (!name) {
-      setError(t('pages.waf.nameRequired'))
-      return
-    }
-    if (!expression) {
-      setError(t('pages.waf.expressionRequired'))
-      return
-    }
-    if (editor === 'builder' && conditions.length === 0) {
-      setError(t('pages.waf.expressionRequired'))
-      return
-    }
-    if (
-      editor === 'builder' &&
-      conditions.some(
-        (c) =>
-          c.field === 'http.request.headers' &&
-          !(c.headerName ?? '').trim(),
-      )
-    ) {
-      setError(t('pages.waf.headerNameRequired'))
-      return
+    // Managed-rule override rows only accept enabled/mode on the server;
+    // skip the create/edit validations that other fields cannot satisfy.
+    if (!isManaged) {
+      const name = form.name.trim()
+      if (!name) {
+        setError(t('pages.waf.nameRequired'))
+        return
+      }
+      if (!expression) {
+        setError(t('pages.waf.expressionRequired'))
+        return
+      }
+      if (editor === 'builder' && conditions.length === 0) {
+        setError(t('pages.waf.expressionRequired'))
+        return
+      }
+      if (
+        editor === 'builder' &&
+        conditions.some(
+          (c) =>
+            c.field === 'http.request.headers' &&
+            !(c.headerName ?? '').trim(),
+        )
+      ) {
+        setError(t('pages.waf.headerNameRequired'))
+        return
+      }
     }
     // Mirror the server-side rejection before the request goes out, so legacy
     // allow+block rules cannot be saved without first fixing the mode.
@@ -227,18 +230,7 @@ export function RuleDialog({
       setError(t('pages.waf.allowBlockConflict'))
       return
     }
-    save.mutate({
-      name,
-      group_id: form.groupId || null,
-      description: form.description.trim() || null,
-      expression,
-      action: form.action,
-      severity: form.severity,
-      tags: form.tags,
-      enabled: form.enabled,
-      mode: form.mode,
-      priority: Number.isFinite(form.priority) ? form.priority : 0,
-    })
+    save.mutate(buildRulePayload(rule, form, expression))
   }
 
   const updateCondition = (index: number, patch: Partial<ExpressionCondition>) => {
@@ -264,14 +256,22 @@ export function RuleDialog({
       }
     >
       <div className="flex flex-col gap-4">
+        {isManaged && (
+          <p className="rounded-md border border-brand/40 bg-brand-soft px-3 py-2 text-[13px] text-fg">
+            {t('pages.waf.managedOverrideNotice')}
+          </p>
+        )}
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <Input
             label={t('common.name')}
             value={form.name}
             placeholder={t('pages.waf.ruleNamePlaceholder')}
             onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
-            autoFocus
+            // A disabled input cannot take focus, so a managed override hands
+            // the initial focus to the mode picker instead.
+            autoFocus={!isManaged}
             required
+            disabled={isManaged}
           />
           <Select
             label={t('pages.waf.group')}
@@ -279,6 +279,7 @@ export function RuleDialog({
             options={groupOptions}
             hint={t('pages.waf.groupHint')}
             onChange={(e) => setForm((f) => ({ ...f, groupId: e.target.value }))}
+            disabled={isManaged}
           />
         </div>
 
@@ -287,6 +288,7 @@ export function RuleDialog({
           value={form.description}
           placeholder={t('pages.waf.descriptionPlaceholder')}
           onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))}
+          disabled={isManaged}
         />
 
         {/* ── Expression ─────────────────────────────────────────────── */}
@@ -300,6 +302,7 @@ export function RuleDialog({
                 <button
                   key={mode}
                   type="button"
+                  disabled={isManaged}
                   onClick={() => {
                     if (mode === 'raw' && editor === 'builder') setRaw(builtExpression)
                     setEditor(mode)
@@ -322,7 +325,11 @@ export function RuleDialog({
             </div>
           </div>
 
-          {editor === 'builder' ? (
+          {isManaged ? (
+            <p className="pw-mono break-all rounded-md border border-line bg-recessed px-3 py-2 text-xs text-fg-subtle">
+              {rule?.expression}
+            </p>
+          ) : editor === 'builder' ? (
             <div className="flex flex-col gap-2 rounded-lg border border-line bg-recessed/60 p-3">
               {conditions.map((condition, index) => {
                 const field = EXPRESSION_FIELDS.find((f) => f.value === condition.field)
@@ -371,6 +378,7 @@ export function RuleDialog({
                             className="h-9 w-32 shrink-0"
                             value={condition.headerName ?? ''}
                             placeholder={t('pages.waf.headerNamePlaceholder')}
+                            required
                             onChange={(e) =>
                               updateCondition(index, {
                                 headerName: e.target.value,
@@ -470,6 +478,7 @@ export function RuleDialog({
             label={t('pages.waf.action')}
             value={form.action}
             options={RULE_ACTIONS.map((a) => ({ value: a, label: t(`actions.${a}`, a) }))}
+            disabled={isManaged}
             onChange={(e) => {
               const action = e.target.value
               setForm((f) => {
@@ -489,6 +498,10 @@ export function RuleDialog({
           <Select
             label={t('pages.waf.mode')}
             value={form.mode}
+            // Everything before this field is read-only for a managed
+            // override, so the mode picker is the first control the dialog's
+            // own focus logic can land on.
+            autoFocus={isManaged}
             hint={
               form.action === 'allow'
                 ? t('pages.waf.allowModeHint')
@@ -507,6 +520,7 @@ export function RuleDialog({
             value={form.priority}
             min={0}
             hint={t('pages.waf.priorityHint')}
+            disabled={isManaged}
             onChange={(e) => setForm((f) => ({ ...f, priority: Number(e.target.value) }))}
           />
         </div>
@@ -535,6 +549,7 @@ export function RuleDialog({
                 <button
                   key={level}
                   type="button"
+                  disabled={isManaged}
                   onClick={() => setForm((f) => ({ ...f, severity: level }))}
                   aria-label={`${t('pages.waf.severity')} ${level}`}
                   aria-pressed={form.severity === level}
@@ -561,6 +576,7 @@ export function RuleDialog({
             suggestions={TAG_SUGGESTIONS}
             placeholder={t('pages.waf.tagPlaceholder')}
             onChange={(tags) => setForm((f) => ({ ...f, tags }))}
+            disabled={isManaged}
           />
         </div>
 
@@ -575,6 +591,10 @@ export function RuleDialog({
           }
         />
 
+        {isManaged && (
+          <p className="text-xs text-fg-subtle">{t('pages.waf.managedDisableHint')}</p>
+        )}
+
         {modeHint && (
           <p className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-[13px] text-fg-warning">
             {modeHint}
@@ -582,7 +602,10 @@ export function RuleDialog({
         )}
 
         {error && (
-          <p role="alert" className="rounded-md border border-danger/40 bg-danger/8 px-3 py-2 text-[13px] text-fg-danger">
+          <p
+            role="alert"
+            className="sticky bottom-0 z-10 rounded-md border border-danger/40 bg-danger/8 px-3 py-2 text-[13px] text-fg-danger"
+          >
             {error}
           </p>
         )}

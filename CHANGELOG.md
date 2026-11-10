@@ -10,6 +10,42 @@ verbatim for reference and attribution, and is not maintained here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The rules table's enable switch now refreshes the row.** The mutation wrote
+  a bare `Rule[]` into a cache entry that holds a `Page<Rule>`, so `select`
+  resolved `page.items` to `undefined` and the list (and the switch) kept the
+  old state until a refetch.
+- **Built-in seed rows are editable again.** Editing one sent the whole rule
+  payload, which the control plane rejects (`only enabled and mode can be
+  changed`). The dialog now submits `{ enabled, mode }` for a row that carries
+  `managed_rule_id`, shows what the override controls, and renders the other
+  fields read-only.
+- **The rules table no longer overflows the viewport.** The expression cell's
+  `truncate` combined with `table-layout: auto` stretched the name column to the
+  full expression width (2274 px on the demo), pushing the switch and the row
+  actions off screen. The name column now absorbs the remaining width and keeps
+  the full expression in a tooltip.
+- Rule validation errors are pinned to the bottom of the dialog body, so a
+  collapsed expression section can no longer hide why the save failed.
+- Deleting a rule group asks for confirmation and states how many rules the
+  cascade removes; the header-name field of the expression builder is marked
+  required.
+- `POST`/`PUT /sites/{id}/rules` reject unknown keys instead of silently
+  dropping them (a read-modify-write client echoing `managed_rule_id` looked
+  like a successful edit that changed nothing).
+- The console's stores tolerate a `localStorage` global that exists but is not a
+  usable `Storage` (Node's experimental Web Storage), which crashed every test
+  that imported the API client.
+- A rules table that only holds the first page now says so (`Showing the first N
+  of M rules`) instead of silently hiding the remainder; the search box is the
+  way to reach them.
+- The console and the user guide no longer imply that disabling a built-in rule
+  stops that attack class. Disabling removes the rule from the compiled set, but
+  the signature layer it shares with the rest of its family keeps running, so a
+  disabled "SQL injection" row still sees SQLi blocked by `libinjection-sqli`.
+  Log-only (`monitor`) is the switch for "observe without blocking".
+
 ## [PingWAF 0.32.21] — 2026-11-10
 
 ### Fixed

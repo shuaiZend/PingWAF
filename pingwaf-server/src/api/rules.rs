@@ -69,7 +69,11 @@ pub struct UpdateGroupRequest {
     pub enabled: Option<bool>,
 }
 
+/// Rejecting unknown keys keeps a read-modify-write client honest: echoing a
+/// server-owned field back (for example `managed_rule_id`) or a typo used to be
+/// dropped silently, which looked like a successful edit that changed nothing.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateRuleRequest {
     pub name: String,
     #[serde(default)]
@@ -109,6 +113,7 @@ fn default_mode() -> String {
 }
 
 #[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateRuleRequest {
     #[serde(default)]
     pub name: Option<String>,
@@ -739,6 +744,30 @@ mod tests {
         assert!(validate_rule("r", OK_EXPR, "allow", "off", 3).is_err());
         assert!(validate_rule("r", OK_EXPR, "allow", "monitor", 3).is_ok());
         assert!(validate_rule("r", OK_EXPR, "allow", "block", 3).is_err());
+    }
+
+    #[test]
+    fn rule_payloads_reject_unknown_fields() {
+        // A client that echoes a server-owned field back (or typos one) used to
+        // have it silently dropped, which looked like a successful edit.
+        assert!(serde_json::from_str::<CreateRuleRequest>(
+            r#"{"name":"r","expression":"http.request.method eq \"GET\""}"#
+        )
+        .is_ok());
+        assert!(
+            serde_json::from_str::<CreateRuleRequest>(
+                r#"{"name":"r","expression":"http.request.method eq \"GET\"","managed_rule_id":"PINGWAF-1002"}"#
+            )
+            .is_err()
+        );
+        assert!(serde_json::from_str::<UpdateRuleRequest>(
+            r#"{"enabled":false}"#
+        )
+        .is_ok());
+        assert!(serde_json::from_str::<UpdateRuleRequest>(
+            r#"{"enabled":false,"managed_rule_id":"PINGWAF-1002"}"#
+        )
+        .is_err());
     }
 
     #[test]

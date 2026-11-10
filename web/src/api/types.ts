@@ -514,6 +514,12 @@ export interface RuleGroup {
 /** `models::rules::rules::Model` */
 export interface Rule {
   id: string
+  /**
+   * Set when this row overrides a built-in (seed) rule. The server only
+   * accepts `enabled`/`mode` changes for such rows and the original rule's
+   * URL/expression are read-only — the dialog must not submit other fields.
+   */
+  managed_rule_id?: string | null
   group_id: string | null
   site_id: string
   name: string

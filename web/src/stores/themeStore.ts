@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { webStorage } from '@/lib/storage'
 
 export type ThemeMode = 'light' | 'dark' | 'system'
 export type ResolvedTheme = 'light' | 'dark'
@@ -15,8 +16,7 @@ function resolve(mode: ThemeMode): ResolvedTheme {
 }
 
 function readInitial(): ThemeMode {
-  if (typeof localStorage === 'undefined') return 'system'
-  const stored = localStorage.getItem(STORAGE_KEY) as ThemeMode | null
+  const stored = webStorage()?.getItem(STORAGE_KEY) as ThemeMode | null
   return stored === 'light' || stored === 'dark' || stored === 'system' ? stored : 'system'
 }
 

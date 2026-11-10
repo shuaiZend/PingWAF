@@ -7,7 +7,6 @@ import {
   ShieldCheck,
   ShieldWarning,
   Plus,
-  PencilSimple,
   Trash,
   MagnifyingGlass,
   ArrowClockwise,
@@ -19,28 +18,21 @@ import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { Dialog } from '@/components/ui/Dialog'
-import { Table, type Column } from '@/components/ui/Table'
+import { Table } from '@/components/ui/Table'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { SkeletonRows, SkeletonStat } from '@/components/ui/Skeleton'
 import { useToast } from '@/components/ui/Toast'
 import { ErrorState } from '@/components/ErrorState'
 import { RuleDialog } from '@/components/waf/RuleDialog'
+import { buildRuleColumns } from './ruleColumns'
 import { deriveWafConfig, ruleKeys, rulesApi } from '@/api/rules'
 import { wafSettingsApi, wafSettingsKeys } from '@/api/wafSettings'
 import { siteKeys } from '@/api/sites'
 import { useCanWrite, useDebouncedValue } from '@/hooks'
-import { isAllowBlockConflict } from '@/lib/ruleActionMode'
+import { applyRuleToPage } from '@/lib/ruleCache'
 import { cn } from '@/lib/utils'
-import { type Rule, type RuleGroup } from '@/api/types'
-
-const ACTION_TONE: Record<string, 'danger' | 'warning' | 'info' | 'success' | 'neutral'> = {
-  block: 'danger',
-  challenge: 'warning',
-  js_challenge: 'warning',
-  log: 'info',
-  allow: 'success',
-}
+import { type Page, type Rule, type RuleGroup } from '@/api/types'
 
 const MODE_TONE: Record<string, 'danger' | 'warning' | 'neutral'> = {
   block: 'danger',
@@ -65,6 +57,7 @@ export function CustomRulesPanel() {
   const [editing, setEditing] = useState<Rule | null>(null)
   const [presetTags, setPresetTags] = useState<string[] | undefined>(undefined)
   const [pendingDelete, setPendingDelete] = useState<Rule | null>(null)
+  const [pendingGroupDelete, setPendingGroupDelete] = useState<RuleGroup | null>(null)
   const [groupDialogOpen, setGroupDialogOpen] = useState(false)
   const [groupName, setGroupName] = useState('')
   const [groupPhase, setGroupPhase] = useState('request')
@@ -72,7 +65,9 @@ export function CustomRulesPanel() {
   const rulesQuery = useQuery({
     queryKey: ruleKeys.list(siteId, { search: debouncedSearch || undefined }),
     queryFn: () => rulesApi.list(siteId, { search: debouncedSearch || undefined }),
-    select: (page) => page.items,
+    // Keep the page envelope: `total` tells the table whether it is showing
+    // everything or only the first page, which a bare `items` array cannot.
+    select: (page) => page,
     enabled: Boolean(siteId),
   })
 
@@ -83,7 +78,8 @@ export function CustomRulesPanel() {
     enabled: Boolean(siteId),
   })
 
-  const allRules = useMemo(() => rulesQuery.data ?? [], [rulesQuery.data])
+  const allRules = useMemo(() => rulesQuery.data?.items ?? [], [rulesQuery.data])
+  const totalRules = rulesQuery.data?.total ?? allRules.length
   const groups = useMemo(() => groupsQuery.data ?? [], [groupsQuery.data])
 
   /** Derived exactly the way the control plane derives it for the agents. */
@@ -134,9 +130,11 @@ export function CustomRulesPanel() {
     mutationFn: ({ rule, enabled }: { rule: Rule; enabled: boolean }) =>
       rulesApi.toggleEnabled(siteId, rule.id, enabled),
     onSuccess: (saved) => {
-      queryClient.setQueryData<Rule[]>(
+      // The cache stores the raw `Page<Rule>` returned by `queryFn`; writing
+      // a bare `Rule[]` here would corrupt `select: (page) => page.items`.
+      queryClient.setQueryData<Page<Rule>>(
         ruleKeys.list(siteId, { search: debouncedSearch || undefined }),
-        (prev) => (prev ? prev.map((r) => (r.id === saved.id ? saved : r)) : prev),
+        (prev) => applyRuleToPage(prev, saved),
       )
       invalidate()
     },
@@ -178,6 +176,7 @@ export function CustomRulesPanel() {
     mutationFn: (groupId: string) => rulesApi.deleteGroup(siteId, groupId),
     onSuccess: () => {
       toast.success(t('pages.waf.groupDeleted'))
+      setPendingGroupDelete(null)
       invalidate()
     },
   })
@@ -235,158 +234,15 @@ export function CustomRulesPanel() {
 
   /* ── Columns ─────────────────────────────────────────────────────── */
 
-  const columns: Column<Rule>[] = [
-    {
-      key: 'priority',
-      header: t('common.priority'),
-      accessor: (r) => r.priority,
-      sortable: true,
-      align: 'right',
-      width: '1%',
-      cell: (r) => (
-        <span className="pw-mono tabular-nums text-xs text-fg-subtle">{r.priority}</span>
-      ),
-    },
-    {
-      key: 'name',
-      header: t('common.name'),
-      accessor: (r) => r.name,
-      sortable: true,
-      cell: (r) => (
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <p className="truncate text-[13px] font-medium text-fg-strong">{r.name}</p>
-            {isAllowBlockConflict(r.action, r.mode) && (
-              <Badge tone="warning" size="sm" dot>
-                {t('pages.waf.allowBlockConflictBadge')}
-              </Badge>
-            )}
-            {r.group_id && (
-              <span className="shrink-0 rounded border border-line px-1.5 py-px text-[10px] text-fg-subtle">
-                {groups.find((g) => g.id === r.group_id)?.name ?? t('pages.waf.noGroup')}
-              </span>
-            )}
-          </div>
-          <p className="pw-mono truncate text-xs text-fg-subtle">{r.expression}</p>
-        </div>
-      ),
-    },
-    {
-      key: 'action',
-      header: t('pages.waf.action'),
-      accessor: (r) => r.action,
-      cell: (r) => (
-        <Badge tone={ACTION_TONE[r.action] ?? 'neutral'}>
-          {t(`actions.${r.action}`, r.action)}
-        </Badge>
-      ),
-    },
-    {
-      key: 'mode',
-      header: t('pages.waf.mode'),
-      accessor: (r) => r.mode,
-      cell: (r) => (
-        <Badge
-          tone={MODE_TONE[r.mode] ?? 'neutral'}
-          dot
-          title={
-            r.mode === 'monitor' && r.action === 'block'
-              ? t('pages.waf.modeMonitorHint')
-              : undefined
-          }
-        >
-          {t(`pages.waf.mode_${r.mode}`, r.mode)}
-        </Badge>
-      ),
-    },
-    {
-      key: 'severity',
-      header: t('pages.waf.severity'),
-      accessor: (r) => r.severity,
-      sortable: true,
-      align: 'center',
-      width: '1%',
-      cell: (r) => (
-        <div className="flex items-center justify-center gap-0.5" title={`${r.severity}/5`}>
-          {[1, 2, 3, 4, 5].map((n) => (
-            <span
-              key={n}
-              className={cn(
-                'h-1.5 w-3 rounded-full',
-                n <= r.severity
-                  ? r.severity >= 4
-                    ? 'bg-danger'
-                    : 'bg-brand'
-                  : 'bg-fill',
-              )}
-            />
-          ))}
-        </div>
-      ),
-    },
-    {
-      key: 'tags',
-      header: t('pages.waf.tags'),
-      width: '1%',
-      cell: (r) => (
-        <div className="flex max-w-[180px] flex-wrap gap-1">
-          {(r.tags ?? []).slice(0, 3).map((tag) => (
-            <span
-              key={tag}
-              className="pw-mono rounded border border-line bg-recessed px-1.5 py-px text-[10px] text-fg-subtle"
-            >
-              {tag}
-            </span>
-          ))}
-          {(r.tags ?? []).length > 3 && (
-            <span className="text-[10px] text-fg-subtle">+{r.tags.length - 3}</span>
-          )}
-        </div>
-      ),
-    },
-    {
-      key: 'enabled',
-      header: t('common.enabled'),
-      accessor: (r) => (r.enabled ? 1 : 0),
-      width: '1%',
-      cell: (r) => (
-        <Switch
-          size="sm"
-          checked={r.enabled}
-          disabled={!canWrite || toggleRule.isPending}
-          aria-label={`${t('common.enabled')}: ${r.name}`}
-          onCheckedChange={(enabled) => toggleRule.mutate({ rule: r, enabled })}
-        />
-      ),
-    },
-    {
-      key: 'row-actions',
-      header: '',
-      align: 'right',
-      width: '1%',
-      cell: (r) => (
-        <div className="flex items-center justify-end gap-1">
-          <Button
-            size="icon"
-            variant="ghost"
-            aria-label={t('common.edit')}
-            disabled={!canWrite}
-            onClick={() => openEdit(r)}
-            icon={<PencilSimple weight="duotone" className="h-4 w-4" />}
-          />
-          <Button
-            size="icon"
-            variant="ghost"
-            className="hover:text-fg-danger"
-            aria-label={t('common.delete')}
-            disabled={!canWrite}
-            onClick={() => setPendingDelete(r)}
-            icon={<Trash weight="duotone" className="h-4 w-4" />}
-          />
-        </div>
-      ),
-    },
-  ]
+  const columns = buildRuleColumns({
+    t,
+    groups,
+    canWrite,
+    toggleBusy: toggleRule.isPending,
+    onToggle: (rule, enabled) => toggleRule.mutate({ rule, enabled }),
+    onEdit: openEdit,
+    onDelete: setPendingDelete,
+  })
 
   const groupOptions = useMemo(
     () => [
@@ -565,7 +421,7 @@ export function CustomRulesPanel() {
                             className="hover:text-fg-danger"
                             aria-label={t('common.delete')}
                             disabled={deleteGroup.isPending}
-                            onClick={() => deleteGroup.mutate(group.id)}
+                            onClick={() => setPendingGroupDelete(group)}
                             icon={<Trash weight="duotone" className="h-3.5 w-3.5" />}
                           />
                         )}
@@ -683,13 +539,26 @@ export function CustomRulesPanel() {
                   }
                 />
               ) : (
-                <Table
-                  columns={columns}
-                  data={visibleRules}
-                  rowKey={(r) => r.id}
-                  dense
-                  onRowClick={canWrite ? (r) => openEdit(r) : undefined}
-                />
+                <>
+                  <Table
+                    columns={columns}
+                    data={visibleRules}
+                    rowKey={(r) => r.id}
+                    dense
+                    onRowClick={canWrite ? (r) => openEdit(r) : undefined}
+                  />
+                  {totalRules > allRules.length && (
+                    <p
+                      role="status"
+                      className="border-t border-line px-3 py-2 text-xs text-fg-subtle"
+                    >
+                      {t('pages.waf.listTruncated', {
+                        shown: allRules.length,
+                        total: totalRules,
+                      })}
+                    </p>
+                  )}
+                </>
               )}
             </CardBody>
           </Card>
@@ -763,6 +632,24 @@ export function CustomRulesPanel() {
             <p className="pw-mono mt-0.5 break-all text-xs text-fg-subtle">
               {pendingDelete.expression}
             </p>
+          </div>
+        )}
+      </ConfirmDialog>
+
+      <ConfirmDialog
+        open={pendingGroupDelete !== null}
+        onClose={() => setPendingGroupDelete(null)}
+        onConfirm={() => pendingGroupDelete && deleteGroup.mutate(pendingGroupDelete.id)}
+        title={t('pages.waf.groupDeleteConfirmTitle')}
+        description={t('pages.waf.groupDeleteConfirmDescription', {
+          count: allRules.filter((r) => r.group_id === pendingGroupDelete?.id).length,
+        })}
+        confirmLabel={t('common.delete')}
+        loading={deleteGroup.isPending}
+      >
+        {pendingGroupDelete && (
+          <div className="rounded-md border border-line bg-recessed px-3 py-2">
+            <p className="text-[13px] font-medium text-fg-strong">{pendingGroupDelete.name}</p>
           </div>
         )}
       </ConfirmDialog>

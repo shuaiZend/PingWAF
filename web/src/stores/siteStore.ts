@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import type { Site } from '@/api/types'
+import { webStorage } from '@/lib/storage'
 
 const SITE_KEY = 'pingwaf.currentSiteId'
 
@@ -11,8 +12,7 @@ interface SiteState {
   currentSite: () => Site | undefined
 }
 
-const initialSiteId =
-  typeof localStorage !== 'undefined' ? localStorage.getItem(SITE_KEY) : null
+const initialSiteId = webStorage()?.getItem(SITE_KEY) ?? null
 
 export const useSiteStore = create<SiteState>((set, get) => ({
   currentSiteId: initialSiteId,
