@@ -10,6 +10,8 @@ verbatim for reference and attribution, and is not maintained here.
 
 ## [Unreleased]
 
+## [PingWAF 0.32.22] — 2026-11-10
+
 ### Changed
 
 - **The data plane listens on IPv6 by default.** The public listeners were
