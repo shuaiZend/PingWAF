@@ -45,12 +45,21 @@ jobs:
       # reaches a build. That reasoning dies the moment a manifest enables a
       # sqlite backend, so assert it here rather than trust a comment.
       - name: Assert libsqlite3-sys stays out of the build graph
+        env:
+          # Keep the tree on one line per package: coloured output wraps the
+          # name in escapes, which breaks a plain substring match.
+          CARGO_TERM_COLOR: never
         run: |
-          # Print the evidence either way: a guard that only fails or says
-          # nothing cannot be debugged from the run log.
-          cargo tree --locked --all-features -i libsqlite3-sys > sqlite-tree.txt 2>&1 || true
-          cat sqlite-tree.txt
-          if grep -q "libsqlite3-sys v" sqlite-tree.txt; then
+          # Only stdout is the graph. stderr carries download progress (which
+          # includes a literal "Downloaded libsqlite3-sys v0.30.1" line) and the
+          # "nothing to print" notice — mixing the two once made this guard fail
+          # on a tree that had no such edge at all.
+          cargo tree --locked --all-features -i libsqlite3-sys > graph.out 2> graph.err || true
+          echo "--- cargo tree (stderr) ---"
+          cat graph.err
+          echo "--- cargo tree (stdout) ---"
+          cat graph.out
+          if grep -q "libsqlite3-sys v" graph.out; then
             echo "::error::libsqlite3-sys entered the build graph (a sqlite backend was enabled). Revisit the RUSTSEC-2026-0459 ignore in .cargo/audit.toml."
             exit 1
           fi
