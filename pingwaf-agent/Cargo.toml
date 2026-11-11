@@ -42,6 +42,10 @@ uuid = { workspace = true }
 prost-types = { workspace = true }
 dashmap = { workspace = true }
 arc-swap = { workspace = true }
+# Self-upgrade downloads the control plane's own build over HTTPS; the gRPC
+# channel cannot serve a file, and `sha2`/`hex` are already used elsewhere.
+reqwest = { workspace = true }
+sha2 = { workspace = true }
 # CRC32 of the persisted sites snapshot, checked against metadata.json on load
 # so a torn or corrupted snapshot is detected instead of silently parsed.
 crc32fast = { workspace = true }

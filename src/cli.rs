@@ -240,6 +240,25 @@ pub struct AgentOpts {
     /// Metrics shipping interval in seconds (0 disables metric shipping)
     #[arg(long, env = "PINGWAF_METRICS_SHIP_INTERVAL", default_value = "30")]
     pub metrics_ship_interval_secs: u64,
+
+    /// Install the control plane's build automatically when the versions
+    /// differ. The swap replaces this binary and restarts the process, so it
+    /// is off unless asked for; it also requires --upgrade-url
+    #[arg(
+        long,
+        env = "PINGWAF_AUTO_UPGRADE",
+        default_value = "false",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set
+    )]
+    pub auto_upgrade: bool,
+
+    /// Control plane REST base URL for self-upgrade, e.g.
+    /// https://cp.example.com:9080. It cannot be derived from the gRPC URL, so
+    /// auto-upgrade stays disabled while this is unset
+    #[arg(long, env = "PINGWAF_UPGRADE_URL")]
+    pub upgrade_url: Option<String>,
 }
 
 /// All-in-one mode options (server + agent in one process).

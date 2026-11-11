@@ -135,6 +135,8 @@ fn agent_config_from_opts(opts: &AgentOpts) -> AgentConfig {
         probe_interval_secs: pingwaf_agent::probe::DEFAULT_INTERVAL_SECS,
         probe_disk_path: "/".to_string(),
         metrics_ship_interval_secs: opts.metrics_ship_interval_secs,
+        auto_upgrade: opts.auto_upgrade,
+        upgrade_url: opts.upgrade_url.clone(),
     }
 }
 
@@ -182,6 +184,10 @@ fn agent_config_from_all_in_one(opts: &AllInOneOpts) -> AgentConfig {
         probe_interval_secs: pingwaf_agent::probe::DEFAULT_INTERVAL_SECS,
         probe_disk_path: "/".to_string(),
         metrics_ship_interval_secs: opts.metrics_ship_interval_secs,
+        // Never: the embedded agent shares the control plane's process, so an
+        // "upgrade" here would replace and restart the control plane itself.
+        auto_upgrade: false,
+        upgrade_url: None,
     }
 }
 
@@ -2157,6 +2163,9 @@ pub async fn run(mode: RunMode) -> anyhow::Result<()> {
                 "starting PingWAF in Agent mode (data plane only)"
             );
             let agent = pingwaf_agent::start_agent(*config).await?;
+            // Opt-in self-upgrade: follows the control plane's build, then
+            // re-execs this process (see `pingwaf_agent::upgrade`).
+            let upgrade = pingwaf_agent::upgrade::spawn(Arc::clone(&agent));
             info!("PingWAF agent is running, starting data plane proxy");
 
             // Start the data plane proxy in the background
@@ -2169,6 +2178,7 @@ pub async fn run(mode: RunMode) -> anyhow::Result<()> {
 
             // Wait for shutdown signal
             shutdown_signal().await;
+            upgrade.abort();
             agent.shutdown().await;
             proxy_handle.abort();
             Ok(())

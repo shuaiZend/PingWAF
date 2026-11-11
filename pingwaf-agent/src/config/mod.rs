@@ -48,6 +48,15 @@ pub struct AgentConfig {
     /// Maximum request body size to log (bytes), 0 = no body logging
     #[serde(default = "default_max_body_log_size")]
     pub max_body_log_size: usize,
+    /// Install the control plane's build automatically when the versions
+    /// differ. Off by default: the swap restarts the process.
+    #[serde(default)]
+    pub auto_upgrade: bool,
+    /// REST base URL of the control plane (`https://host:9080`), used only by
+    /// the self-upgrade endpoints. Auto-upgrade stays disabled without it —
+    /// the gRPC URL is not enough to derive it safely.
+    #[serde(default)]
+    pub upgrade_url: Option<String>,
     /// Initial reconnection delay in milliseconds
     #[serde(default = "default_reconnect_initial_delay")]
     pub reconnect_initial_delay_ms: u64,
@@ -123,6 +132,8 @@ impl Default for AgentConfig {
             log_batch_size: default_log_batch_size(),
             log_flush_interval_secs: default_log_flush_interval(),
             max_body_log_size: default_max_body_log_size(),
+            auto_upgrade: false,
+            upgrade_url: None,
             reconnect_initial_delay_ms: default_reconnect_initial_delay(),
             reconnect_max_delay_ms: default_reconnect_max_delay(),
             fail_open: default_fail_open(),

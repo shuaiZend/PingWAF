@@ -140,6 +140,15 @@ pub struct ControlPlaneClient {
 }
 
 impl ControlPlaneClient {
+    /// The agent token minted at registration, once it succeeded.
+    ///
+    /// The self-upgrade loop authenticates against the REST API with the same
+    /// credential the gRPC stream carries, so it needs the value this client
+    /// already holds rather than a second registration.
+    pub fn current_agent_token(&self) -> Option<String> {
+        self.agent_token.load_full().map(|token| (*token).clone())
+    }
+
     /// Create a new control plane client.
     ///
     /// The client does not connect immediately — call `connect()` or `start()` to begin.
