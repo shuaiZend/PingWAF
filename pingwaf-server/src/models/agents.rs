@@ -47,6 +47,13 @@ pub mod agents {
         pub public_ip: Option<String>,
         /// First non-virtual LAN address reported by the probe.
         pub private_ip: Option<String>,
+        /// Transport peer of the agent's heartbeat stream: the address the
+        /// control plane accepted the connection from, which is the closest
+        /// thing to "the agent's public IP" when it sits behind NAT. Written
+        /// from the RPC's `remote_addr`, not from anything the agent claims.
+        pub peer_ip: Option<String>,
+        /// When `peer_ip` was last observed on a live stream.
+        pub peer_ip_seen_at: Option<DateTimeUtc>,
         pub version: Option<String>,
         pub os_info: Option<String>,
         pub cpu_cores: Option<i32>,

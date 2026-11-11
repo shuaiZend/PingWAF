@@ -63,7 +63,15 @@
     "memShareHint": "该方法内存占所属模块内存的比例；各方法份额之和不超过 1。",
     "shareHint": "模块耗时占全部归因时间的比例，非 CPU 占比。",
     "samplingHint": "内存列为当前持有值（0 表示尚未上报，—/peak 为峰值口径）；各占比为占所属模块/全部归因时间的比例，子阶段份额不应相加。",
-    "heldHint": "记账式估算：仅统计已埋点的持有内存，非堆分配归因。"
+    "heldHint": "记账式估算：仅统计已埋点的持有内存，非堆分配归因。",
+    "systemVersionTitle": "版本",
+    "systemVersionControlPlane": "控制平面",
+    "systemVersionApi": "REST API 前缀",
+    "systemVersionAgents": "代理",
+    "systemVersionAgentsOutdated": "{{total}} 个代理中有 {{count}} 个版本与控制平面不一致",
+    "systemVersionAgentsCurrent": "全部 {{total}} 个代理与控制平面版本一致",
+    "systemVersionNoAgents": "暂无代理注册",
+    "systemVersionAgentsUnknown": "{{count}} 个代理尚未上报版本"
   },
   "app": {
     "name": "PingWAF",
@@ -1665,7 +1673,10 @@
       "hostMemory": "主机内存容量",
       "command_flush_logs": "刷新日志",
       "flushResult": "已通知 {delivered}，离线 {offline}",
-      "flushFailed": "刷新日志失败"
+      "flushFailed": "刷新日志失败",
+      "peerIp": "连接来源地址",
+      "peerIpHint": "控制面实际接受该代理连接时看到的对端地址；代理位于 NAT 之后时，这是最接近其公网地址的一项。",
+      "peerVia": "连接自 {{ip}}"
     },
     "notifications": {
       "title": "通知",

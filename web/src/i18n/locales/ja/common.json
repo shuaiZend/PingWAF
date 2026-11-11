@@ -63,7 +63,15 @@
     "memShareHint": "このメソッドが所属モジュールのメモリに占める割合（合計は 1 以下）。",
     "shareHint": "帰属時間全体に占める割合（CPU 使用率ではありません）。",
     "samplingHint": "メモリ列は現在の保持値（0 は未報告、—/peak はピーク値）。比率は所属モジュールまたは帰属時間全体に対する割合で、子ステージの比率は合算できません。",
-    "heldHint": "計測ベースの推定値です。計測点で保持しているメモリのみを集計しており、ヒープ割り当ての帰属ではありません。"
+    "heldHint": "計測ベースの推定値です。計測点で保持しているメモリのみを集計しており、ヒープ割り当ての帰属ではありません。",
+    "systemVersionTitle": "バージョン",
+    "systemVersionControlPlane": "コントロールプレーン",
+    "systemVersionApi": "REST API ベース",
+    "systemVersionAgents": "エージェント",
+    "systemVersionAgentsOutdated": "{{total}} 台中 {{count}} 台のバージョンがコントロールプレーンと一致しません",
+    "systemVersionAgentsCurrent": "{{total}} 台すべてがコントロールプレーンと一致しています",
+    "systemVersionNoAgents": "登録済みのエージェントはありません",
+    "systemVersionAgentsUnknown": "{{count}} 台のエージェントがまだバージョンを報告していません"
   },
   "app": {
     "name": "PingWAF",
@@ -1665,7 +1673,10 @@
       "hostMemory": "ホストメモリ容量",
       "command_flush_logs": "ログをフラッシュ",
       "flushResult": "通知 {delivered}、オフライン {offline}",
-      "flushFailed": "ログのフラッシュに失敗しました"
+      "flushFailed": "ログのフラッシュに失敗しました",
+      "peerIp": "接続元アドレス",
+      "peerIpHint": "コントロールプレーンがこのエージェントの接続を受け付けたときの対向アドレスです。NAT 配下の場合は実質的なグローバル IP になります。",
+      "peerVia": "{{ip}} 経由"
     },
     "notifications": {
       "title": "通知",

@@ -88,6 +88,14 @@ pub struct AgentResponse {
     pub public_ip: Option<String>,
     /// First LAN address that is not loopback or a container/bridge interface.
     pub private_ip: Option<String>,
+    /// Address the control plane accepted the agent's heartbeat stream from.
+    ///
+    /// Different from `public_ip`: that one is the agent's own guess at its
+    /// egress address, while this is the TCP peer the control plane actually
+    /// saw, so it survives NAT and a lying/broken probe.
+    pub peer_ip: Option<String>,
+    /// When `peer_ip` was last observed on a live stream.
+    pub peer_ip_seen_at: Option<DateTime<Utc>>,
     pub version: Option<String>,
     pub os_info: Option<String>,
     pub cpu_cores: Option<i32>,
@@ -738,6 +746,8 @@ async fn enrich(
             ip_address: row.ip_address,
             public_ip: row.public_ip,
             private_ip: row.private_ip,
+            peer_ip: row.peer_ip,
+            peer_ip_seen_at: row.peer_ip_seen_at,
             version: row.version,
             os_info: row.os_info,
             cpu_cores: row.cpu_cores,

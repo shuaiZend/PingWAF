@@ -63,7 +63,15 @@
     "memShareHint": "This method's share of its module's memory; the shares add up to at most 1.",
     "shareHint": "Share of the total attributed time (not CPU usage).",
     "samplingHint": "Memory is the value currently held (0 = not reported; —/peak show the high-water mark). Shares are relative to the module or the total attributed time; stage shares must not be added.",
-    "heldHint": "Bookkeeping estimate: only instrumented holders are counted, not a heap-allocation attribution."
+    "heldHint": "Bookkeeping estimate: only instrumented holders are counted, not a heap-allocation attribution.",
+    "systemVersionTitle": "Version",
+    "systemVersionControlPlane": "Control plane",
+    "systemVersionApi": "REST API base",
+    "systemVersionAgents": "Agents",
+    "systemVersionAgentsOutdated": "{{count}} of {{total}} agents report another version",
+    "systemVersionAgentsCurrent": "All {{total}} agents match the control plane",
+    "systemVersionNoAgents": "No agent has registered yet",
+    "systemVersionAgentsUnknown": "{{count}} agents have not reported a version yet"
   },
   "app": {
     "name": "PingWAF",
@@ -1665,7 +1673,10 @@
       "hostMemory": "Host memory capacity",
       "command_flush_logs": "Flush logs",
       "flushResult": "Notified {delivered}, offline {offline}",
-      "flushFailed": "Failed to flush logs"
+      "flushFailed": "Failed to flush logs",
+      "peerIp": "Connection source",
+      "peerIpHint": "Address the control plane accepted this agent's connection from — the closest thing to its public IP when the agent sits behind NAT.",
+      "peerVia": "via {{ip}}"
     },
     "notifications": {
       "title": "Notifications",

@@ -1113,6 +1113,15 @@ export interface Agent {
   public_ip: string | null
   /** LAN address, with loopback and container bridges filtered out. */
   private_ip: string | null
+  /**
+   * Address the control plane accepted the agent's gRPC stream from.
+   *
+   * The one address the agent cannot misreport: unlike `public_ip` (its own
+   * egress probe) this is the TCP peer, so it survives NAT.
+   */
+  peer_ip: string | null
+  /** When `peer_ip` was last observed on a live stream. */
+  peer_ip_seen_at: string | null
   version: string | null
   os_info: string | null
   cpu_cores: number | null

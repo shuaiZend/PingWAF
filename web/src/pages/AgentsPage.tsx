@@ -256,6 +256,17 @@ export function AgentsPage() {
             ) : (
               <p className="pw-mono truncate text-xs text-fg-subtle">{a.ip_address}</p>
             )}
+            {/* The address the control plane accepted the stream from. Shown
+                only when it differs from the self-reported one — otherwise the
+                line is noise, and a NAT'd agent is exactly where it matters. */}
+            {a.peer_ip && a.peer_ip !== a.ip_address && (
+              <p
+                className="pw-mono truncate text-[11px] text-fg-subtle"
+                title={t('pages.agents.peerIpHint')}
+              >
+                {t('pages.agents.peerVia', { ip: a.peer_ip })}
+              </p>
+            )}
           </div>
         </div>
       ),
@@ -680,6 +691,19 @@ export function AgentsPage() {
               <DetailRow label={t('pages.agents.publicIp')} value={detail.public_ip} mono />
               <DetailRow label={t('pages.agents.privateIp')} value={detail.private_ip} mono />
               <DetailRow label={t('pages.agents.ipAddress')} value={detail.ip_address} />
+              <DetailRow
+                label={t('pages.agents.peerIp')}
+                value={
+                  detail.peer_ip
+                    ? `${detail.peer_ip}${
+                        detail.peer_ip_seen_at
+                          ? ` · ${formatRelative(detail.peer_ip_seen_at, now)}`
+                          : ''
+                      }`
+                    : t('pages.agents.neverSeen')
+                }
+                mono
+              />
               <DetailRow
                 label={t('pages.agents.lastHeartbeat')}
                 value={

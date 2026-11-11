@@ -268,6 +268,11 @@ impl ControlPlaneTrait for ControlPlaneService {
         &self,
         request: Request<RegisterAgentRequest>,
     ) -> Result<Response<RegisterAgentResponse>, Status> {
+        // Recorded here as well as on the heartbeat stream: an agent whose
+        // stream never opens still shows the address it registered from.
+        let peer_ip = request
+            .remote_addr()
+            .map(|addr| canonical_peer_ip(addr.ip()));
         // The RPC is unauthenticated until the key is verified; cap attempts
         // per peer so the DB lookup plus bcrypt cannot be driven unbounded.
         if let Some(addr) = request.remote_addr() {
@@ -342,6 +347,8 @@ impl ControlPlaneTrait for ControlPlaneService {
                 active.last_heartbeat = Set(Some(now));
                 active.public_ip = Set(optional(&payload.public_ip));
                 active.private_ip = Set(optional(&payload.private_ip));
+                active.peer_ip = Set(peer_ip.clone());
+                active.peer_ip_seen_at = Set(peer_ip.as_ref().map(|_| now));
                 let updated =
                     active.update(&self.db).await.map_err(db_status)?;
                 tracing::info!(%agent_id, hostname = %payload.hostname, "agent re-registered");
@@ -374,6 +381,8 @@ impl ControlPlaneTrait for ControlPlaneService {
                     last_policy_sync_at: Set(None),
                     public_ip: Set(optional(&payload.public_ip)),
                     private_ip: Set(optional(&payload.private_ip)),
+                    peer_ip: Set(peer_ip.clone()),
+                    peer_ip_seen_at: Set(peer_ip.as_ref().map(|_| now)),
                 }
                 .insert(&self.db)
                 .await
@@ -406,6 +415,13 @@ impl ControlPlaneTrait for ControlPlaneService {
         &self,
         request: Request<Streaming<AgentHeartbeat>>,
     ) -> Result<Response<Self::HeartbeatStream>, Status> {
+        // The transport peer is the one address here the agent cannot
+        // misreport; read it before `into_inner` consumes the request. A
+        // dual-stack listener reports IPv4 peers as `::ffff:a.b.c.d`, so it is
+        // canonicalised the same way the data plane does it.
+        let peer_ip = request
+            .remote_addr()
+            .map(|addr| canonical_peer_ip(addr.ip()));
         let mut inbound = request.into_inner();
 
         // The first message identifies the agent; refusing to open a stream
@@ -457,6 +473,9 @@ impl ControlPlaneTrait for ControlPlaneService {
             .record_heartbeat(agent_id, heartbeat_metrics(&first))
             .await;
         tokio::spawn(async move {
+            if let Some(peer) = peer_ip {
+                persist_peer_ip(&db, agent_id, &peer).await;
+            }
             persist_heartbeat(&db, agent_id, &first, &registry).await;
             persist_host_samples(&db, agent_id, &first.host_samples).await;
             persist_blocked_ips(
@@ -1173,6 +1192,36 @@ fn heartbeat_metrics(message: &AgentHeartbeat) -> HeartbeatMetrics {
 }
 
 /// Persists the runtime counters of one heartbeat.
+/// What a dual-stack listener reports for an IPv4 peer is `::ffff:a.b.c.d`;
+/// operators type `a.b.c.d` into firewalls, so collapse the mapped form.
+fn canonical_peer_ip(ip: std::net::IpAddr) -> String {
+    match ip {
+        std::net::IpAddr::V6(v6) => v6
+            .to_ipv4_mapped()
+            .map_or_else(|| ip.to_string(), |v4| v4.to_string()),
+        v4 => v4.to_string(),
+    }
+}
+
+/// Records the address a heartbeat stream arrived from.
+///
+/// Written on every stream open, not on every heartbeat message: the peer can
+/// only change by reconnecting, so one UPDATE per connection is enough, and
+/// `peer_ip_seen_at` then means "when this address was last seen live".
+async fn persist_peer_ip(db: &DatabaseConnection, agent_id: Uuid, peer: &str) {
+    let result = agent::Entity::update_many()
+        .col_expr(agent::Column::PeerIp, Expr::value(peer))
+        .col_expr(agent::Column::PeerIpSeenAt, Expr::value(Utc::now()))
+        .filter(agent::Column::Id.eq(agent_id))
+        .exec(db)
+        .await;
+    if let Err(err) = result {
+        // Losing this observation must not take the stream down: the agent is
+        // still serving traffic, the console just shows a stale address.
+        tracing::warn!(%agent_id, error = %err, "failed to record agent peer ip");
+    }
+}
+
 async fn persist_heartbeat(
     db: &DatabaseConnection,
     agent_id: Uuid,
@@ -2894,6 +2943,24 @@ fn positive_i32(value: i64) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A dual-stack listener reports an IPv4 peer as `::ffff:a.b.c.d`; the
+    /// console has to show the address an operator can paste into a firewall.
+    #[test]
+    fn peer_ip_collapses_the_mapped_form() {
+        assert_eq!(
+            canonical_peer_ip("::ffff:203.0.113.7".parse().unwrap()),
+            "203.0.113.7"
+        );
+        assert_eq!(
+            canonical_peer_ip("2001:db8::1".parse().unwrap()),
+            "2001:db8::1"
+        );
+        assert_eq!(
+            canonical_peer_ip("203.0.113.7".parse().unwrap()),
+            "203.0.113.7"
+        );
+    }
 
     /// The OIDC alerts are raised from inside the ingest loop, which drops any
     /// entry stamped with a site the agent does not serve — an entry with an
