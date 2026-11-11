@@ -42,6 +42,7 @@ describe('GET /api/v1/system/nodes contract', () => {
         connections: 12,
         rps: null,
         sites: 3,
+        version: '0.32.22',
         last_seen: null,
       },
     ],

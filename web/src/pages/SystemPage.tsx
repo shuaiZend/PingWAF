@@ -1,3 +1,4 @@
+import { useMemo } from 'react'
 import { ArrowClockwise } from '@phosphor-icons/react'
 import { useTranslation } from 'react-i18next'
 import { useQuery } from '@tanstack/react-query'
@@ -12,6 +13,7 @@ import { ModuleTable } from '@/components/system/ModuleTable'
 import { MethodTable } from '@/components/system/MethodTable'
 import { NodeSection } from '@/components/system/NodeSection'
 import { fetchSystemMetrics, fetchSystemNodes, fetchSystemProfile, debugKeys } from '@/api/debug'
+import systemApi from '@/api/system'
 import { formatDateTime } from '@/lib/format'
 
 /** metrics 轮询周期（10s），staleTime 取一半。 */
@@ -51,7 +53,32 @@ export function SystemPage() {
     retry: false,
   })
 
+  const build = useQuery({
+    queryKey: debugKeys.version(),
+    queryFn: systemApi.version,
+    // Only a deploy changes it; one fetch per visit is enough.
+    staleTime: 5 * 60_000,
+    retry: false,
+  })
+
   const collectedAt = metrics.data?.cpu.collected_at_ms ?? metrics.data?.memory.collected_at_ms
+
+  /**
+   * Agents whose reported build differs from this control plane.
+   *
+   * Compared against the console's own build metadata rather than a hard-coded
+   * string: `null` means "never reported", which is not a mismatch but is worth
+   * showing, so those rows are kept in a separate bucket.
+   */
+  const fleet = useMemo(() => {
+    const rows = nodes.data?.agents ?? []
+    const current = build.data?.version
+    return {
+      total: rows.length,
+      unknown: rows.filter((a) => !a.version),
+      outdated: current ? rows.filter((a) => a.version && a.version !== current) : [],
+    }
+  }, [nodes.data, build.data])
 
   return (
     <div>
@@ -85,6 +112,76 @@ export function SystemPage() {
           </>
         }
       />
+
+      {/* Build identity: this control plane, and how many agents are not on
+          it. A node that fails to auto-upgrade shows up here first. */}
+      <div className="mb-4">
+        <Card>
+          <CardHeader title={t('system.versionTitle')} />
+          <CardBody>
+            <dl className="grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-3">
+              <div>
+                <dt className="text-[11px] uppercase tracking-wide text-fg-subtle">
+                  {t('system.systemVersionControlPlane')}
+                </dt>
+                <dd className="pw-mono text-[13px] text-fg-strong">
+                  {build.data?.version ?? '—'}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-[11px] uppercase tracking-wide text-fg-subtle">
+                  {t('system.systemVersionApi')}
+                </dt>
+                <dd className="pw-mono text-[13px] text-fg">{build.data?.api ?? '—'}</dd>
+              </div>
+              <div>
+                <dt className="text-[11px] uppercase tracking-wide text-fg-subtle">
+                  {t('system.systemVersionAgents')}
+                </dt>
+                <dd className="text-[13px]">
+                  {fleet.total === 0 ? (
+                    <span className="text-fg-subtle">
+                      {t('system.systemVersionNoAgents')}
+                    </span>
+                  ) : fleet.outdated.length > 0 ? (
+                    <span className="text-fg-warning">
+                      {t('system.systemVersionAgentsOutdated', {
+                        count: fleet.outdated.length,
+                        total: fleet.total,
+                      })}
+                    </span>
+                  ) : (
+                    <span className="text-fg">
+                      {t('system.systemVersionAgentsCurrent', {
+                        total: fleet.total,
+                      })}
+                    </span>
+                  )}
+                </dd>
+              </div>
+            </dl>
+            {fleet.outdated.length > 0 && (
+              <div className="mt-3 flex flex-wrap gap-1.5">
+                {fleet.outdated.map((agent) => (
+                  <span
+                    key={agent.id}
+                    className="pw-mono rounded border border-warning/40 bg-warning/10 px-1.5 py-0.5 text-[11px] text-fg-warning"
+                  >
+                    {agent.name} · {agent.version}
+                  </span>
+                ))}
+              </div>
+            )}
+            {fleet.unknown.length > 0 && (
+              <p className="mt-2 text-[11px] text-fg-subtle">
+                {t('system.systemVersionAgentsUnknown', {
+                  count: fleet.unknown.length,
+                })}
+              </p>
+            )}
+          </CardBody>
+        </Card>
+      </div>
 
       {metrics.isError ? (
         <div className="mb-4">

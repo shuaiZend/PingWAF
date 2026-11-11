@@ -224,6 +224,14 @@ pub struct AgentNode {
     /// (unbound) agent every site of its API key's owner — the same
     /// visibility the config push uses.
     pub sites: u64,
+    /// Version the agent reported at registration, e.g. `0.32.22`. `None` =
+    /// never reported.
+    ///
+    /// Shipped so the fleet view can point out a node running another build
+    /// without opening the inventory page: the control plane knows its own
+    /// `CARGO_PKG_VERSION`, so "this agent is not on my build" is a comparison
+    /// the console can make on its own.
+    pub version: Option<String>,
     /// Last heartbeat, in server time. `None` = never heard from.
     pub last_seen: Option<DateTime<Utc>>,
 }
@@ -497,6 +505,7 @@ fn agent_node(
         connections: counters.connections,
         rps: counters.rps,
         sites,
+        version: row.version.clone(),
         last_seen: row.last_heartbeat,
     }
 }
@@ -858,6 +867,8 @@ mod tests {
             ip_address: "10.0.0.5".to_string(),
             public_ip: None,
             private_ip: None,
+            peer_ip: None,
+            peer_ip_seen_at: None,
             version: Some("0.28.1".to_string()),
             os_info: Some("linux x86_64".to_string()),
             cpu_cores: Some(4),
@@ -1264,6 +1275,9 @@ mod tests {
             "connections",
             "rps",
             "sites",
+            // The console compares it with `/version` to flag an edge running
+            // other rule semantics.
+            "version",
             "last_seen",
         ];
         let object = agent.as_object().expect("object");

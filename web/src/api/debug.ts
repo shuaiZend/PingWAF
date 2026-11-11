@@ -225,6 +225,8 @@ export interface SystemAgentNode {
   rps: number | null
   /** 节点承载的站点数。 */
   sites: number
+  /** 节点注册时上报的版本号；null = 从未上报。与 `GET /version` 比对即可发现未升级节点。 */
+  version: string | null
   /** 末次心跳（RFC3339）；null = 从未心跳。 */
   last_seen: string | null
 }
@@ -275,4 +277,6 @@ export const debugKeys = {
   metrics: () => [...debugKeys.all, 'metrics'] as const,
   profile: () => [...debugKeys.all, 'profile'] as const,
   nodes: () => [...debugKeys.all, 'nodes'] as const,
+  /** Build metadata (`GET /version`), cached longer: it only changes on deploy. */
+  version: () => [...debugKeys.all, 'version'] as const,
 }
