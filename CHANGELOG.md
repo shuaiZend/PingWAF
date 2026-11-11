@@ -10,6 +10,32 @@ verbatim for reference and attribution, and is not maintained here.
 
 ## [Unreleased]
 
+### Added
+
+- **The agent inventory shows the connection source.** Each row now carries
+  `peer_ip` — the address the control plane accepted the heartbeat stream from —
+  alongside the agent's self-reported `ip_address`, `public_ip` and `private_ip`.
+  This is the only address an agent cannot misreport, so it is what identifies a
+  node behind NAT; `peer_ip_seen_at` says when it was last observed live, and
+  IPv4 peers are canonicalised out of the dual-stack `::ffff:` form. The console
+  prints `via <address>` under the hostname when it differs from the reported
+  one, and the detail panel shows it with its age.
+- **Agents can upgrade themselves to the control plane's build.** Opt in with
+  `agent.auto_upgrade = true` plus `agent.upgrade_url`
+  (`PINGWAF_AUTO_UPGRADE`, `PINGWAF_UPGRADE_URL`). Every five minutes the agent
+  asks `GET /api/v1/agent-upgrade/manifest` what the control plane runs, and if
+  the versions differ it downloads the control plane's own executable from
+  `GET /api/v1/agent-upgrade/artifact` (both require the agent token), verifies
+  size and SHA-256, keeps the previous binary as `<exe>.prev`, and re-execs.
+  Nothing is guessed: without `upgrade_url` the loop stays off, a digest
+  mismatch aborts before anything is replaced, and all-in-one/containers ignore
+  the flag by construction.
+- **The System page reports versions.** A new Version card shows the control
+  plane's own build, the REST API prefix, how many agents are on that build, and
+  names the ones that are not — the fastest way to spot an edge running
+  different rule semantics. `GET /system/nodes` carries `version` per agent to
+  back it.
+
 ## [PingWAF 0.32.22] — 2026-11-10
 
 ### Changed

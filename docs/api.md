@@ -1821,6 +1821,10 @@ List registered agents.
       "display_name": "edge-01 (backup)",
       "name": "edge-01",
       "ip_address": "10.0.1.5",
+      "public_ip": "203.0.113.7",
+      "private_ip": "10.0.1.5",
+      "peer_ip": "203.0.113.7",
+      "peer_ip_seen_at": "2024-01-01T12:00:00Z",
       "version": "0.25.0",
       "os_info": "Linux 6.1.0",
       "cpu_cores": 4,
@@ -1847,6 +1851,52 @@ node, and the node view (`GET /system/nodes`) names it `name`; carrying both
 keeps one shape for the console without breaking callers that read
 `hostname`. `last_seen` is likewise an alias of `last_heartbeat`
 (`null` = the agent has never heartbeated).
+
+Three address fields describe a node from different vantage points, and they
+answer different questions:
+
+| Field | Source | Use it when |
+|-------|--------|-------------|
+| `ip_address` | the agent's own report at registration | you want what the node calls itself |
+| `public_ip` / `private_ip` | the agent's egress/LAN probe | you want its guess at its own topology (can be stale or empty) |
+| `peer_ip` | the TCP peer of the agent's heartbeat stream, as seen by the control plane | you need the address that actually reaches the node — the only one the agent cannot misreport, and the one that survives NAT. `peer_ip_seen_at` says when that address was last observed on a live stream; IPv4 peers are canonicalised out of the dual-stack `::ffff:` form |
+
+A node behind NAT therefore shows a different `peer_ip` than `private_ip`, and
+the console prints it under the hostname.
+
+### GET /agent-upgrade/manifest
+
+Self-upgrade metadata for an agent. Requires an **agent token**
+(`Authorization: Bearer <agent token>`, the one `RegisterAgent` minted); a
+revoked agent is rejected even with a well-formed signature.
+
+**Response (200):**
+```json
+{
+  "version": "0.32.22",
+  "sha256": "9f2c…",
+  "size": 48219136,
+  "url": "/api/v1/agent-upgrade/artifact"
+}
+```
+
+`version` is the control plane's own build. `sha256` and `size` describe exactly
+the bytes `GET /agent-upgrade/artifact` will serve and are measured once from
+the running executable, so an agent can pin what it receives.
+
+### GET /agent-upgrade/artifact
+
+Streams the control plane's own executable as `application/octet-stream`.
+PingWAF ships one binary whose role is selected by `PINGWAF_MODE`, so "the
+control plane's build" *is* the artifact an agent should run. Requires an agent
+token.
+
+Response headers: `x-pingwaf-version`, `x-pingwaf-sha256`, `Content-Length`.
+
+Agents use it only when `PINGWAF_AUTO_UPGRADE=true` and `PINGWAF_UPGRADE_URL`
+names this API; they verify size and digest before replacing their binary, keep
+the previous one as `<exe>.prev`, and then re-exec. See
+[deployment.md](deployment.md#agent-self-upgrade).
 
 ### POST /agents/enroll
 
@@ -5457,6 +5507,7 @@ is the fleet" in one call.
       "connections": 128,
       "rps": null,
       "sites": 1,
+      "version": "0.32.22",
       "last_seen": "2024-01-01T12:00:00Z"
     }
   ],

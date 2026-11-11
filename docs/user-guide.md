@@ -966,6 +966,19 @@ The Agents page shows:
 - Agent version
 - Pending commands
 
+**Which address you are looking at.** A row carries three, and they answer
+different questions:
+
+- the address under the hostname (`ip_address`) is what the agent reports about
+  itself;
+- **Public IP / Private IP** (detail panel) come from the agent's own egress and
+  LAN probes — a useful guess, empty when the probe failed;
+- **Connection source** (`peer_ip`) is the address the control plane actually
+  accepted the agent's stream from. It is the one value the agent cannot
+  misreport, so it is what you need when a node sits behind NAT: the row shows
+  `via <address>` whenever it differs from the reported one, and the detail
+  panel adds how long ago that address was seen live.
+
 **Where the CPU number comes from.** The fleet view
 (`GET /api/v1/system/nodes`) labels each agent's CPU figure with a
 `cpu_source` field, and the three values read differently:
@@ -989,6 +1002,19 @@ Push commands to connected agents:
 - **Unblock IP**: Remove a temporary block
 - **Purge Cache**: Clear local cache
 - **Restart Agent**: Graceful agent restart
+
+### Fleet versions
+
+The System page (observability) now opens with a **Version** card: the control
+plane's own build, the REST API prefix, and how many agents report that same
+build. Agents on another version are listed by name and version, and agents that
+have never reported one are counted separately.
+
+This is the first thing to check when a rule behaves differently on one edge
+than another: two builds can disagree on defaults, rule semantics or config
+keys, and the card makes that visible without opening the inventory. Edges that
+opt into [self-upgrade](deployment.md#agent-self-upgrade) close the gap
+on their own; the card shows them converging.
 
 ## Access Control
 

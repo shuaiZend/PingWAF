@@ -338,11 +338,14 @@ server-side log batch size (`500`) are compiled-in constants with no override.
 | `log_flush_interval_secs` | int | `5` | Max time between flushes |
 | `max_body_log_size` | int | `8192` | Max request body bytes to log |
 | `metrics_ship_interval_secs` | int | `30` | Edge-metrics ship interval; `0` disables shipping |
+| `auto_upgrade` | bool | `false` | Install the control plane's build automatically when the versions differ. Replaces the binary and restarts the process — see [Agent Self-Upgrade](#agent-self-upgrade) |
+| `upgrade_url` | string | — | Control plane REST base (`https://cp.example.com:9080`) used only by the upgrade endpoints. Auto-upgrade stays disabled while this is unset |
 
 Environment variables: `PINGWAF_SERVER_URL`, `PINGWAF_SERVER_CA_CERT`,
 `PINGWAF_SERVER_TLS_NAME`, `PINGWAF_API_KEY`,
 `PINGWAF_CACHE_DIR`, `PINGWAF_FAIL_OPEN`, `PINGWAF_HEARTBEAT_INTERVAL`,
-`PINGWAF_METRICS_SHIP_INTERVAL`. The three log settings and the reconnect
+`PINGWAF_METRICS_SHIP_INTERVAL`, `PINGWAF_AUTO_UPGRADE`,
+`PINGWAF_UPGRADE_URL`. The three log settings and the reconnect
 backoff constants (`1 s` doubling to `60 s`) have no environment variable.
 
 In **agent mode the configuration file wins over these environment
@@ -1043,12 +1046,50 @@ sudo systemctl restart pingwaf
 
 Database migrations run automatically on startup.
 
+### Agent Self-Upgrade
+
+A distributed deployment has two moving parts, and the console's fleet view now
+shows both. To let the edges follow the control plane by themselves:
+
+```toml
+[agent]
+auto_upgrade = true
+upgrade_url = "https://cp.example.com:9080"   # the REST API, not the gRPC port
+```
+
+or `PINGWAF_AUTO_UPGRADE=true PINGWAF_UPGRADE_URL=https://cp.example.com:9080`.
+
+What happens: every 5 minutes (first check after 1 minute) the agent asks
+`/api/v1/agent-upgrade/manifest` what this control plane is running. If the
+version differs it downloads **the control plane's own binary** — PingWAF is one
+binary whose role comes from `PINGWAF_MODE`, so that is the artifact to install
+— verifies `size` and `sha256` against the manifest, keeps the current binary as
+`<exe>.prev`, then re-execs itself. In-flight connections drop at that moment;
+that is the cost of an in-place restart, and the reason this is opt-in.
+
+Properties worth knowing before turning it on:
+
+- It only trusts the control plane that authenticated the agent: the artifact is
+  served over the same API, with the same token, and there is no release feed.
+- A digest or size mismatch aborts before anything is replaced, and a failed
+  download leaves the running build untouched.
+- Rollback is manual and local: stop the service, `mv <exe>.prev <exe>`, start.
+- The certificate must cover the host in `upgrade_url` — the agent verifies it
+  with the same CA (`server_ca_cert` / the injected all-in-one PEM) the gRPC
+  channel uses. Point `upgrade_url` at a name in the certificate, not at the raw
+  IP of a self-signed control plane.
+- **Containers and all-in-one are out of scope.** A container's binary lives in
+  an image layer, so the replacement is lost on the next `docker compose up`;
+  update containers by pulling a new tag. In all-in-one the embedded agent
+  shares the control plane's process, so upgrading would restart the control
+  plane and the flag is ignored there by construction.
+
 > ⚠️ **Do not upgrade with `--no-systemd` on an older unit.** Older versions of
 > this document suggested `./install.sh --version NEW_VERSION --no-systemd` to
 > skip touching the unit file. That skips the rewrite, so a unit installed
 > before the `CAP_NET_BIND_SERVICE` change keeps running without it — and the
 > unprivileged `pingwaf` user then fails to bind 80/443 with
-> `Permission denied` (`bind() failed on 0.0.0.0:443`). Two fixes:
+> `Permission denied` (`bind() failed on [::]:443`). Two fixes:
 >
 > 1. Preferred: upgrade **without** `--no-systemd` so the script refreshes the
 >    unit file with the capability included. This **rewrites**
