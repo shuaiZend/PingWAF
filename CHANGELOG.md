@@ -10,6 +10,8 @@ verbatim for reference and attribution, and is not maintained here.
 
 ## [Unreleased]
 
+## [PingWAF 0.32.23] — 2026-11-12
+
 ### Added
 
 - **The agent inventory shows the connection source.** Each row now carries
