@@ -637,14 +637,28 @@ fn ceremony_error(err: PasskeyError) -> ApiError {
 
 /// `passkey-server` appends the authenticator's AAGUID to the label it was
 /// given; the dashboard shows the operator's own wording instead.
+///
+/// `name` comes from the client and may be multi-byte, so the suffix is only
+/// sliced off after checking that the split point is a character boundary.
+/// `str::split_at` panics on a non-boundary index, and a panic in this process
+/// aborts the whole control plane (`panic = "abort"` in the release profile) —
+/// the 2026-11-13 audit turned a 38-byte multi-byte label into a remote DoS.
 fn strip_aaguid_suffix(name: &str) -> &str {
-    if name.len() > 37 {
-        let (head, tail) = name.split_at(name.len() - 36);
-        if head.ends_with('-') && Uuid::parse_str(tail).is_ok() {
-            return head.trim_end_matches('-');
-        }
+    // The suffix is exactly "-{uuid}": 36 ASCII bytes plus the dash. Anything
+    // shorter cannot carry it.
+    if name.len() <= 37 {
+        return name;
     }
-    name
+    let suffix_start = name.len() - 36;
+    if !name.is_char_boundary(suffix_start) {
+        return name;
+    }
+    let (head, tail) = name.split_at(suffix_start);
+    if head.ends_with('-') && Uuid::parse_str(tail).is_ok() {
+        head.trim_end_matches('-')
+    } else {
+        name
+    }
 }
 
 /// Normalises a stored label into something the dashboard can show.
@@ -1036,6 +1050,32 @@ mod tests {
             display_name("laptop-not-a-uuid-but-long"),
             "laptop-not-a-uuid-but-long"
         );
+    }
+
+    /// Regression (2026-11-13 audit, P0): a multi-byte label long enough to
+    /// reach the suffix branch used to make `split_at` land inside a UTF-8
+    /// character and panic, aborting the control plane on a single request.
+    #[test]
+    fn multi_byte_labels_never_panic() {
+        // 12 * 3 + 2 = 38 bytes; `len - 36 == 2` is inside the first CJK char.
+        let cjk = format!("{}ab", "密".repeat(12));
+        assert_eq!(38, cjk.len());
+        assert_eq!(cjk, display_name(&cjk));
+
+        // 4-byte characters hit the same boundary: 9 * 4 + 2 = 38 bytes.
+        let emoji = format!("{}ab", "😀".repeat(9));
+        assert_eq!(38, emoji.len());
+        assert_eq!(emoji, display_name(&emoji));
+
+        // 39 bytes puts the split on a valid boundary; the tail is not a UUID,
+        // so the label is kept verbatim.
+        let cjk_13 = "密".repeat(13);
+        assert_eq!(39, cjk_13.len());
+        assert_eq!(cjk_13, display_name(&cjk_13));
+
+        // A real suffix appended to a multi-byte label is still stripped.
+        let aaguid = "08987058-cadc-4b81-b6e1-30de50dcbe96";
+        assert_eq!(display_name(&format!("密鑰-{aaguid}")), "密鑰".to_string());
     }
 
     #[test]

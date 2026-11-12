@@ -401,6 +401,35 @@ async fn get_request_body(session: &mut Session) -> pingora::Result<BytesMut> {
     Ok(buf)
 }
 
+/// Paths the admin router dispatches itself, as opposed to the static bundle.
+///
+/// They are checked before the asset lookup so a future bundle file whose name
+/// happens to look like an API path can never regain the auth skip.
+fn is_admin_route(path: &str) -> bool {
+    path.starts_with("/api")
+        || path.starts_with("/configs")
+        || path.starts_with("/config-history")
+        || path == "/basic"
+        || path == "/restart"
+        || path == "/aes"
+        || path == "/certificates"
+}
+
+/// `true` only when the embedded dashboard bundle actually serves `path`.
+///
+/// `path` is the request path after the admin prefix has been stripped, which
+/// is what both `auth_validate` and `route_admin_request` see. The check is the
+/// same `AdminAsset::get` lookup the static handler performs, so "auth may be
+/// skipped" and "the static handler answers" cannot drift apart again.
+fn is_public_asset(path: &str) -> bool {
+    if is_admin_route(path) {
+        return false;
+    }
+    let file = path.strip_prefix('/').unwrap_or(path);
+    let file = if file.is_empty() { "index.html" } else { file };
+    AdminAsset::get(file).is_some()
+}
+
 impl AdminServe {
     pub fn new(params: &PluginConf) -> Result<Self> {
         debug!(target: LOG_TARGET, params = params.to_string(), "new admin server plugin");
@@ -413,19 +442,13 @@ impl AdminServe {
             return true;
         }
         let path = req_header.uri.path();
-        // The login UI's own static assets (js/css/png) and the index page must
-        // load before the user authenticates. But API routes must ALWAYS require
-        // auth: otherwise auth is bypassed by suffixing an API URL with a
-        // static-looking extension, e.g. `GET /api/configs/x.js`. The auth skip
-        // and the `/api` router use different criteria, so they must be kept
-        // mutually exclusive here.
-        let is_api = path.starts_with("/api") || path.starts_with("api/");
-        if !is_api
-            && (path.len() <= 1
-                || path.ends_with(".js")
-                || path.ends_with(".css")
-                || path.ends_with(".png"))
-        {
+        // The login UI's own page and assets must load before the user
+        // authenticates; every other path — the `/configs` API included — is
+        // authenticated. The skip is keyed on the same lookup the static
+        // handler uses, not on a file extension: an extension-based rule let
+        // `GET //configs.js` skip auth while the router still treated it as the
+        // `/configs` API (2026-11-13 audit, P0).
+        if is_public_asset(path) {
             return true;
         }
         let value =
@@ -1172,16 +1195,75 @@ mod tests {
 
         // Genuine static assets of the login UI load without auth.
         assert_eq!(true, auth_skipped("/"));
-        assert_eq!(true, auth_skipped("/assets/index.js"));
-        assert_eq!(true, auth_skipped("/assets/index.css"));
-        assert_eq!(true, auth_skipped("/pingap.png"));
+        assert_eq!(true, auth_skipped("/index.html"));
+        assert_eq!(true, auth_skipped("/favicon.svg"));
+        let asset = AdminAsset::iter()
+            .find(|path| path.starts_with("assets/"))
+            .expect("the embedded bundle ships assets");
+        assert_eq!(true, auth_skipped(&format!("/{asset}")));
 
-        // Regression: API routes must never be auth-skipped, even when suffixed
-        // with a static-looking extension.
-        assert_eq!(false, auth_skipped("/api/configs/anything.js"));
-        assert_eq!(false, auth_skipped("/api/configs/upstream/evil.css"));
-        assert_eq!(false, auth_skipped("/api/certificates.png"));
-        assert_eq!(false, auth_skipped("/api/basic"));
+        // Regression (2026-11-13 audit, P0): the `/configs` API must require
+        // auth even when the path carries a static-looking extension. The old
+        // suffix-based skip let `GET /configs.js` through unauthenticated.
+        for path in [
+            "/configs.js",
+            "/configs/upstream/evil.js",
+            "/configs/import/.js",
+            "/config-history/upstream/x.js",
+            "/basic.js",
+            "/restart.png",
+            "/api/configs/anything.js",
+            "/api/configs/upstream/evil.css",
+            "/api/certificates.png",
+            "/api/basic",
+            "/missing.js",
+        ] {
+            assert_eq!(false, auth_skipped(path), "{path} must require auth");
+        }
+    }
+
+    /// Regression (2026-11-13 audit, P0): a double-slash prefix used to reach
+    /// the `/configs` API with the `.js` auth skip still applied.
+    #[tokio::test]
+    async fn test_configs_api_never_skips_auth() {
+        let file = tempfile::NamedTempFile::with_suffix(".toml").unwrap();
+        try_init_config_manager(&file.path().to_string_lossy()).unwrap();
+        let admin = AdminServe::try_from(
+            &toml::from_str::<PluginConf>(
+                r#"
+    category = "admin"
+    path = "/"
+    authorizations = ["YWRtaW46MTIzMTIz"]
+    "#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        // A leading `//` survives request-target parsing and, after the admin
+        // prefix is stripped, is re-parsed as the `/configs` route. These are
+        // the exact requests that used to skip auth via the `.js` suffix.
+        for request in [
+            "GET //configs.js HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            "GET //configs HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            "POST //configs/import/.js HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
+            "POST //configs/upstream/evil.js HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
+            "GET //config-history/upstream/x.js HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        ] {
+            let mock_io = Builder::new().read(request.as_bytes()).build();
+            let mut session = Session::new_h1(Box::new(mock_io));
+            session.read_request().await.unwrap();
+            let resp =
+                handle_request_admin(&admin, &mut session, &mut Ctx::default())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(
+                401,
+                resp.status.as_u16(),
+                "unauthenticated request must be refused: {request:?}"
+            );
+        }
     }
 
     /// Regression: `/config-history/{category}` without the trailing name used

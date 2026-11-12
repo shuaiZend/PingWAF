@@ -10,6 +10,34 @@ verbatim for reference and attribution, and is not maintained here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A multi-byte passkey label no longer aborts the control plane.** The
+  dashboard label is stored with the authenticator's AAGUID appended
+  (`-{uuid}`), and the code that strips that suffix sliced the string at a
+  fixed byte offset without checking the UTF-8 boundary. A label of 38 bytes
+  built from multi-byte characters (for example twelve CJK characters plus
+  `ab`) made `split_at` panic; because the release profile uses
+  `panic = "abort"`, one authenticated request — anonymous when
+  `allow_registration` is on, which is the code default — terminated the
+  whole control plane. The suffix is now only removed when the split point is
+  a character boundary, and the same function also protects
+  `update_passkey_name`. Regression tests cover CJK, 4-byte emoji, a valid
+  multi-byte label, and a real suffix on a multi-byte label.
+
+- **The pingap admin console no longer skips authentication for
+  `/configs`-style paths that carry a static-looking extension.** The login
+  page and its assets must load before authentication, but the skip was keyed
+  on the path suffix (`.js`/`.css`/`.png`) while the router keyed on the
+  `/configs` prefix. `GET //configs.js` therefore skipped auth and still
+  reached the config API, returning the whole `PingapConfig` — including any
+  inline TLS private key — unauthenticated; `POST //configs/import/.js` could
+  overwrite the entire config the same way. Auth is now skipped only for a
+  path the embedded bundle actually serves (the same `AdminAsset::get` lookup
+  the static handler uses), with the router-owned prefixes checked first.
+  Regression tests drive the real request pipeline for the double-slash
+  variants and assert `401`.
+
 ## [PingWAF 0.32.25] — 2026-11-12
 
 ### Fixed
