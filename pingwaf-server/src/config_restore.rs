@@ -12,6 +12,11 @@ use sea_orm::{
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+use crate::api::capabilities::{
+    attached_scope_requirements, path_exception_requirements,
+    site_agents_below, ScopeRequirement,
+};
+use crate::api::error::ApiError;
 use crate::api::validation::{
     check_path_exception_fields, check_rule_fields, RuleRowFix,
 };
@@ -19,6 +24,47 @@ use crate::config_catalog::{
     merge_shallow, normalise_tables, query_rows, rows_for, spec_for,
     tables_for, Filter, TableSpec, VersionScope, INSTANCE_SETTING_KEYS,
 };
+
+/// Errors [`prepare_restore`] can produce.
+///
+/// The distinction exists for DR-03: a capability rejection must reach the
+/// operator as a `400 BadRequest` (a validation outcome, exactly like the
+/// write-path gate in `api/capabilities.rs`), while everything else stays a
+/// storage error. Callers that only carry `DbErr` (the rollback path in
+/// `config_history.rs`) convert a rejection into `DbErr::Custom`, which still
+/// aborts the transaction before any row is written.
+#[derive(Debug)]
+pub enum RestoreError {
+    Db(DbErr),
+    /// The snapshot carries a scope the current agent fleet cannot execute.
+    /// The message names the site, the agent, its version and the missing
+    /// capability; no row has been written when this is returned.
+    AgentTooOld(String),
+}
+
+impl From<DbErr> for RestoreError {
+    fn from(err: DbErr) -> Self {
+        Self::Db(err)
+    }
+}
+
+impl From<RestoreError> for DbErr {
+    fn from(err: RestoreError) -> Self {
+        match err {
+            RestoreError::Db(db_err) => db_err,
+            RestoreError::AgentTooOld(message) => DbErr::Custom(message),
+        }
+    }
+}
+
+impl From<RestoreError> for ApiError {
+    fn from(err: RestoreError) -> Self {
+        match err {
+            RestoreError::Db(db_err) => db_err.into(),
+            RestoreError::AgentTooOld(message) => Self::BadRequest(message),
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct RestoreOptions {
@@ -605,7 +651,181 @@ fn compute_change(
     }
 }
 
+/// DR-03: scope requirements a restored row imposes on the agent fleet.
+///
+/// This is the row-to-requirement half of the same decision the write APIs
+/// make through `api/capabilities.rs` — a restore must not smuggle in a scope
+/// that write path would have rejected. Returns an empty list for rows that
+/// carry no gateable scope (including an empty/absent `path`, which is the
+/// historical whole-site scope and works on every agent).
+fn row_scope_requirements(table: &str, row: &Value) -> Vec<ScopeRequirement> {
+    match table {
+        "site_path_exceptions" => {
+            let match_type = json_key(row, "match_type").unwrap_or_default();
+            let skip_layers: Vec<String> = row
+                .get("skip_layers")
+                .and_then(Value::as_array)
+                .map(|layers| {
+                    layers
+                        .iter()
+                        .filter_map(|layer| layer.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            path_exception_requirements(&match_type, &skip_layers)
+        },
+        // Optional scopes attached to access/identity rules. `path` is read
+        // as `Option` on purpose: an absent column and an explicit empty
+        // string both mean "whole site" and impose no requirement.
+        "ip_access_rules" | "geo_rules" | "site_basic_auth" | "site_oidc" => {
+            let path = row.get("path").and_then(Value::as_str);
+            let match_type = json_key(row, "match_type").unwrap_or_default();
+            attached_scope_requirements(path, &match_type)
+        },
+        _ => Vec::new(),
+    }
+}
+
+/// The rejection message for a restore blocked by an under-capable agent.
+/// Site, agent name, agent version, capability and minimum are all named so
+/// the operator can act without opening the database.
+fn restore_rejection_message(
+    site: &str,
+    agent: &str,
+    version: &str,
+    requirement: &ScopeRequirement,
+) -> String {
+    format!(
+        "restore rejected: site {site} needs agent >= {} for {}, \
+         but agent {agent} reports {version}",
+        requirement.min, requirement.label
+    )
+}
+
+/// site_id → human-readable label for rejection messages: the domain when
+/// the snapshot carries one, the raw id otherwise (a restore without the
+/// `sites` table must still be able to name the site it rejects).
+fn site_domains_for(site_rows: &[Value]) -> BTreeMap<Uuid, String> {
+    site_rows
+        .iter()
+        .filter_map(|row| {
+            let id = uuid_field(row, "id")?;
+            let domain = json_key(row, "domain")
+                .filter(|domain| !domain.trim().is_empty())
+                .unwrap_or_else(|| id.to_string());
+            Some((id, domain))
+        })
+        .collect()
+}
+
+/// DR-03 gate: rejects the whole restore when any restored row needs a
+/// capability the current fleet cannot deliver.
+///
+/// Runs inside the caller's transaction, before [`apply_restore`] deletes or
+/// inserts anything, so a rejection leaves the live configuration untouched.
+/// Rows are grouped per site and requirement and one
+/// [`site_agents_below`] query per `(site, min)` decides; the message cites
+/// the first agent reported below the bar, the same wording contract as the
+/// write-path gate.
+async fn ensure_plan_scopes_supported<C: ConnectionTrait>(
+    db: &C,
+    tables: &[PreparedTable],
+) -> Result<(), RestoreError> {
+    // site_id -> (min, label) -> first offending row, for the message.
+    let mut needed: BTreeMap<
+        Uuid,
+        BTreeMap<(&'static str, &'static str), String>,
+    > = BTreeMap::new();
+    let mut site_rows: Vec<Value> = Vec::new();
+    for prepared in tables {
+        if prepared.spec.name == "sites" {
+            site_rows.extend(prepared.rows.iter().cloned());
+        }
+        for row in &prepared.rows {
+            let requirements = row_scope_requirements(prepared.spec.name, row);
+            if requirements.is_empty() {
+                continue;
+            }
+            let Some(site_id) = uuid_field(row, "site_id") else {
+                continue;
+            };
+            let row_id = json_key(row, "id").unwrap_or_default();
+            for requirement in requirements {
+                needed
+                    .entry(site_id)
+                    .or_default()
+                    .entry((requirement.min, requirement.label))
+                    .or_insert_with(|| {
+                        format!("{} row {row_id}", prepared.spec.name)
+                    });
+            }
+        }
+    }
+    // One lookup per (site, minimum); agents are few but visibility is a
+    // per-agent query, so the queries are deduplicated first — a large
+    // restore costs one query per distinct requirement, not per row.
+    let mut lookups: BTreeSet<(Uuid, &'static str)> = BTreeSet::new();
+    for (site_id, requirements) in &needed {
+        for key in requirements.keys() {
+            let (min, _) = *key;
+            lookups.insert((*site_id, min));
+        }
+    }
+    let mut below_cache: HashMap<(Uuid, &'static str), Vec<(String, String)>> =
+        HashMap::new();
+    for (site_id, min) in &lookups {
+        let below = site_agents_below(db, *site_id, min)
+            .await
+            .map_err(|err| RestoreError::Db(DbErr::Custom(err.to_string())))?;
+        below_cache.insert((*site_id, *min), below);
+    }
+    let site_domains = site_domains_for(&site_rows);
+    for (site_id, requirements) in &needed {
+        let site = site_domains
+            .get(site_id)
+            .cloned()
+            .unwrap_or_else(|| site_id.to_string());
+        for ((min, label), example) in requirements {
+            let (min, label) = (*min, *label);
+            let below = &below_cache[&(*site_id, min)];
+            if let Some((agent, version)) = below.first() {
+                tracing::warn!(
+                    site = %site,
+                    table_row = %example,
+                    requirement_min = min,
+                    requirement_label = label,
+                    agent = %agent,
+                    agent_version = %version,
+                    "restore rejected: restored configuration needs a capability the agent fleet cannot deliver"
+                );
+                return Err(RestoreError::AgentTooOld(
+                    restore_rejection_message(
+                        &site,
+                        agent,
+                        version,
+                        &ScopeRequirement { min, label },
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Plans a restore and gates it on agent capabilities before anything is
+/// written. See [`ensure_plan_scopes_supported`] for the DR-03 rejection.
 pub async fn prepare_restore<C: ConnectionTrait>(
+    db: &C,
+    scope: VersionScope,
+    snapshot: &Value,
+    options: RestoreOptions,
+) -> Result<RestorePlan, RestoreError> {
+    let plan = prepare_restore_inner(db, scope, snapshot, options).await?;
+    ensure_plan_scopes_supported(db, &plan.tables).await?;
+    Ok(plan)
+}
+
+async fn prepare_restore_inner<C: ConnectionTrait>(
     db: &C,
     scope: VersionScope,
     snapshot: &Value,
@@ -1250,6 +1470,113 @@ mod tests {
         assert_eq!(
             RowSanitisation::Keep,
             sanitise_restored_row("waf_settings", &mut row)
+        );
+    }
+
+    fn scope_row(table: &str, path: &str, match_type: &str) -> Value {
+        let mut row = json!({
+            "id": Uuid::new_v4(),
+            "site_id": Uuid::new_v4(),
+            "match_type": match_type,
+        });
+        if !path.is_empty() {
+            row["path"] = json!(path);
+        }
+        if table == "site_path_exceptions" {
+            row["skip_layers"] = json!([]);
+        }
+        row
+    }
+
+    /// DR-03: the row-to-requirement mapping must agree with the write-path
+    /// gate — a whole-site scope (empty or absent `path`) is ungated, any
+    /// non-empty scope needs the path-filter feature, and regex additionally
+    /// needs the matcher.
+    #[test]
+    fn restored_rows_map_to_the_same_requirements_as_the_write_path() {
+        for table in [
+            "ip_access_rules",
+            "geo_rules",
+            "site_basic_auth",
+            "site_oidc",
+        ] {
+            // Whole-site scope: no requirement, not even for a 0.32.16 agent.
+            assert!(
+                row_scope_requirements(table, &scope_row(table, "", "prefix"))
+                    .is_empty(),
+                "{table} with an empty path must not be gated"
+            );
+            // No `path` column at all (v1 snapshot shape): not gated either.
+            let mut row = scope_row(table, "", "prefix");
+            row.as_object_mut()
+                .expect("scope_row builds an object")
+                .remove("path");
+            assert!(
+                row_scope_requirements(table, &row).is_empty(),
+                "{table} with no path column must not be gated"
+            );
+            // Non-empty scope: needs the path-filter feature.
+            assert_eq!(
+                row_scope_requirements(
+                    table,
+                    &scope_row(table, "/admin", "prefix")
+                ),
+                vec![ScopeRequirement {
+                    min: crate::api::capabilities::MIN_AGENT_PATH_SCOPES,
+                    label: crate::api::capabilities::PATH_SCOPE_LABEL
+                }],
+                "{table} with a scope must require path scopes"
+            );
+        }
+
+        // A regex path exception needs the matcher.
+        let mut row = scope_row("site_path_exceptions", "/api/.*", "regex");
+        row["skip_layers"] = json!(["waf"]);
+        let requirements = row_scope_requirements("site_path_exceptions", &row);
+        assert_eq!(requirements.len(), 2);
+        assert_eq!(requirements[0].min, "0.32.21");
+        assert_eq!(requirements[1].min, "0.32.20");
+
+        // Plain prefix exception without skip_layers: ungated.
+        let row = scope_row("site_path_exceptions", "/health", "prefix");
+        assert!(row_scope_requirements("site_path_exceptions", &row).is_empty());
+
+        // Unrelated tables are never gated.
+        assert!(row_scope_requirements("rules", &json!({})).is_empty());
+    }
+
+    /// DR-03: the rejection names the site, the agent, its version, the
+    /// missing capability and the minimum — everything an operator needs to
+    /// fix the fleet.
+    #[test]
+    fn rejection_message_names_site_agent_version_and_minimum() {
+        let message = restore_rejection_message(
+            "pursearea.cn",
+            "edge-1",
+            "0.32.16",
+            &ScopeRequirement {
+                min: "0.32.21",
+                label: "canonical path matching",
+            },
+        );
+        assert_eq!(
+            message,
+            "restore rejected: site pursearea.cn needs agent >= 0.32.21 \
+             for canonical path matching, but agent edge-1 reports 0.32.16"
+        );
+    }
+
+    /// A restored row whose site cannot be resolved still gates on the id.
+    #[test]
+    fn unknown_sites_fall_back_to_their_id_in_the_rejection() {
+        let site_id = Uuid::new_v4();
+        let site = site_domains_for(&[json!({
+            "id": site_id,
+            // No `domain` column: restore rejection must still identify it.
+        })]);
+        assert_eq!(
+            site.get(&site_id).map(String::as_str),
+            Some(site_id.to_string().as_str())
         );
     }
 }

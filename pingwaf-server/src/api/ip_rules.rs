@@ -335,10 +335,10 @@ async fn create(
         resolve_create_mode(&state, &payload.group_id, &payload.ip_ranges)
             .await?;
 
-    // Capability gate: a regex path scope needs a data plane that
-    // implements regex matching at all (>= capabilities::MIN_AGENT_REGEX_
-    // SCOPES). Non-regex scopes are not gated here.
-    capabilities::ensure_ip_rule_supported(&state.db, id, &match_type).await?;
+    // Capability gate: any non-empty scope needs an agent that understands
+    // one, and a regex scope needs the matcher on top (see `capabilities`).
+    capabilities::ensure_ip_rule_supported(&state.db, id, &path, &match_type)
+        .await?;
 
     let timestamp = chrono::Utc::now();
     let model = ip_access_rules::ActiveModel {
@@ -446,12 +446,16 @@ async fn update(
                         .unwrap_or(stored_match_type.as_str()),
                 ),
             )?;
-        active.path = Set(path);
+        active.path = Set(path.clone());
         active.match_type = Set(match_type.clone());
-        // Partial-update semantics: only gate when the new value really
-        // writes a regex scope.
-        capabilities::ensure_ip_rule_supported(&state.db, id, &match_type)
-            .await?;
+        // Partial-update semantics: gate the effective scope of this write.
+        capabilities::ensure_ip_rule_supported(
+            &state.db,
+            id,
+            &path,
+            &match_type,
+        )
+        .await?;
     }
     if let Some(priority) = payload.priority {
         active.priority = Set(priority);

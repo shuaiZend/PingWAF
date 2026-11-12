@@ -8,6 +8,7 @@ use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::api::capabilities;
 use crate::api::common::{
     load_site_read, load_site_write, parse_uuid, query_all,
 };
@@ -268,6 +269,16 @@ async fn update_geo(
                         .unwrap_or(stored_match_type.as_str()),
                 ),
             )?;
+        // The gate sees the effective scope (after merging onto the stored
+        // row), not the raw payload — a partial update that only sends `path`
+        // inherits the stored `match_type`.
+        capabilities::ensure_attached_scope_supported(
+            &state.db,
+            id,
+            Some(&path),
+            &match_type,
+        )
+        .await?;
         active.path = Set(path);
         active.match_type = Set(match_type);
     }

@@ -256,6 +256,25 @@ pub(crate) fn validate_skip_layers(
     Ok(layers)
 }
 
+/// Whether this update makes the stored scope live again, even though the
+/// payload carries no scope field. Re-enabling an exception that needs a
+/// capability the fleet lacks must be rejected, not silently pushed.
+///
+/// Semantics:
+/// - `touches_scope` → always check (the payload rewrites the scope).
+/// - `enabling && !stored_enabled` → check (re-enabling makes the stored
+///   scope live on agents that may not support it).
+/// - otherwise → no check: `enabled: true` on an already-enabled row is an
+///   idempotent no-op, and a disabling or note-only edit never changes
+///   detection behaviour on the edge.
+fn update_requires_capability_check(
+    touches_scope: bool,
+    enabling: bool,
+    stored_enabled: bool,
+) -> bool {
+    touches_scope || (enabling && !stored_enabled)
+}
+
 fn validate_note(raw: Option<&str>) -> Result<Option<String>, ApiError> {
     let note = raw.map(str::trim).filter(|value| !value.is_empty());
     if let Some(note) = note {
@@ -402,6 +421,7 @@ async fn update_exception(
 
     let row = find_exception(&state, site_id, id).await?;
     let stored_skip_layers = row.skip_layers.clone();
+    let stored_enabled = row.enabled;
     let mut match_type = row.match_type.clone();
     if payload.match_type.is_some() {
         match_type = validate_match_type(payload.match_type.as_deref())?;
@@ -445,13 +465,18 @@ async fn update_exception(
     active.updated_at = Set(Utc::now());
 
     // Capability gate on the *effective* scope after this partial update:
-    // only runs when the payload actually touches the scope or the bypass
-    // behaviour (`path` / `match_type` / `skip_layers`), so a note-only edit
-    // is never blocked on an old agent.
-    if payload.path.is_some()
+    // the payload touching the scope, or re-enabling a disabled exception
+    // (which makes the stored scope live again), both run the gate, so a
+    // regex/skip_layers exception cannot be silently re-armed on an old
+    // agent. A note-only edit on an already-enabled row is never blocked.
+    let touches_scope = payload.path.is_some()
         || payload.match_type.is_some()
-        || payload.skip_layers.is_some()
-    {
+        || payload.skip_layers.is_some();
+    if update_requires_capability_check(
+        touches_scope,
+        payload.enabled == Some(true),
+        stored_enabled,
+    ) {
         let effective_layers =
             payload.skip_layers.clone().unwrap_or(stored_skip_layers);
         capabilities::ensure_path_exception_supported(
@@ -602,6 +627,35 @@ mod tests {
         assert_eq!(validate_match_type(None).unwrap(), "prefix");
         assert_eq!(validate_match_type(Some("regex")).unwrap(), "regex");
         assert!(validate_match_type(Some("glob")).is_err());
+    }
+
+    #[test]
+    fn note_only_edits_never_trigger_the_capability_check() {
+        // Note-only edit on an enabled row: not a scope change.
+        assert!(!update_requires_capability_check(false, false, true));
+        // Note-only edit on a disabled row: still does not arm the scope.
+        assert!(!update_requires_capability_check(false, false, false));
+    }
+
+    #[test]
+    fn re_enabling_a_disabled_exception_requires_the_check() {
+        // `{"enabled": true}` on a disabled row re-arms the stored scope.
+        assert!(update_requires_capability_check(false, true, false));
+    }
+
+    #[test]
+    fn enabling_an_already_enabled_row_is_an_idempotent_noop() {
+        // `enabled: true` on an already-enabled row changes nothing on the
+        // edge, so a historical legacy scope is not re-gated here.
+        assert!(!update_requires_capability_check(false, true, true));
+    }
+
+    #[test]
+    fn scope_touching_edits_always_require_the_check() {
+        assert!(update_requires_capability_check(true, false, true));
+        assert!(update_requires_capability_check(true, false, false));
+        assert!(update_requires_capability_check(true, true, false));
+        assert!(update_requires_capability_check(true, true, true));
     }
 
     #[test]

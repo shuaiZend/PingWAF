@@ -1838,15 +1838,17 @@ async fn clone_site(
         .filter(path_exceptions::Column::SiteId.eq(source_id))
         .all(&txn)
         .await?;
-    // Capability gate: a clone must not inherit a scope its own fleet cannot
-    // execute. The source write path already enforced this, but the clone is a
-    // new site whose agents can differ (another owner's fleet, a site created
-    // before an agent was downgraded), and a silently inert exception is the
-    // failure mode this gate exists to prevent.
+    // Capability gate: the clone copies the source's configuration, so it is
+    // the *source* site's fleet that has to be able to execute it. Judging the
+    // clone instead looked safer but was wrong twice over: a brand-new site has
+    // no agent bound to it yet (`agent_visible_site_ids` finds none until an
+    // unbound agent's owner match kicks in), so the gate either passes
+    // vacuously or — when the owner's fleet is old — blocks a clone whose rows
+    // would in fact land on the very same agents that run the source.
     for row in &source_exceptions {
         capabilities::ensure_path_exception_supported(
             &txn,
-            new_id,
+            source_id,
             &row.match_type,
             &row.skip_layers,
         )
@@ -1857,8 +1859,13 @@ async fn clone_site(
         .all(&txn)
         .await?;
     for row in &cloned_ip_rules {
-        capabilities::ensure_ip_rule_supported(&txn, new_id, &row.match_type)
-            .await?;
+        capabilities::ensure_ip_rule_supported(
+            &txn,
+            source_id,
+            &row.path,
+            &row.match_type,
+        )
+        .await?;
     }
     for row in source_exceptions {
         let row_id = row.id;

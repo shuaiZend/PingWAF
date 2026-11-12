@@ -35,6 +35,10 @@ use tokio_stream::{wrappers::ReceiverStream, Stream, StreamExt};
 use tonic::{Request, Response, Status, Streaming};
 use uuid::Uuid;
 
+use crate::api::capabilities::{
+    attached_scope_requirements, path_exception_requirements, version_supports,
+    ScopeRequirement, MIN_AGENT_CANONICAL_SCOPES,
+};
 use crate::api::keys::{authenticate_api_key, key_allows_agent};
 use crate::api::ssl::cert_status;
 use crate::auth::jwt::{create_agent_token, verify_agent_token};
@@ -51,8 +55,9 @@ use crate::grpc::registry::{
 };
 use crate::models::{
     access_log, action, agent, agent_blocked_ip, agent_metric, agent_status,
-    api_key, certificate_events, certificate_links, host_sample,
-    security_event, site, site_certificates,
+    api_key, certificate_events, certificate_links, geo_rules, host_sample,
+    ip_access_rules, path_exceptions, security_event, site, site_basic_auth,
+    site_certificates, site_oidc,
 };
 
 /// Stream type returned by the server-streaming RPCs.
@@ -249,6 +254,138 @@ impl ControlPlaneService {
             .map_err(db_status)
     }
 
+    /// DR-04 observability: compares the registering agent's reported version
+    /// against the scope requirements of the configuration it is about to
+    /// receive, and logs **one** aggregated WARN when there is a gap.
+    ///
+    /// The gate in `api/capabilities.rs` only guarantees the fleet at *save*
+    /// time; an older agent registering later still receives the full bundle.
+    /// The payload is deliberately unchanged (no silent config dropping, the
+    /// proto has no warning channel — see `control_plane.proto`), so the log
+    /// line is the only signal an operator gets; it tells them to upgrade.
+    async fn warn_scope_capability_gaps(&self, row: &agent::Model) {
+        let sites = match self.visible_sites(row).await {
+            Ok(sites) => sites,
+            Err(err) => {
+                tracing::debug!(
+                    agent_id = %row.id,
+                    error = %err,
+                    "could not list visible sites for a capability check"
+                );
+                return;
+            },
+        };
+        if sites.is_empty() {
+            return;
+        }
+        let ids: Vec<Uuid> = sites.iter().map(|site| site.id).collect();
+        let domains: HashMap<Uuid, String> = sites
+            .iter()
+            .map(|site| (site.id, site.domain.clone()))
+            .collect();
+        let version = row.version.as_deref().unwrap_or("unknown");
+        // An agent at or above the strictest requirement can execute every
+        // scope the control plane is able to emit, so skip the five queries
+        // below: this runs on every registration, including every reconnect.
+        if version_supports(version, MIN_AGENT_CANONICAL_SCOPES) {
+            return;
+        }
+
+        // (min, label) -> site domains that need it.
+        let mut gaps: HashMap<(&'static str, &'static str), Vec<String>> =
+            HashMap::new();
+        let mut note = |site_id: Uuid, requirements: Vec<ScopeRequirement>| {
+            for requirement in requirements {
+                gaps.entry((requirement.min, requirement.label))
+                    .or_default()
+                    .push(
+                        domains
+                            .get(&site_id)
+                            .cloned()
+                            .unwrap_or_else(|| site_id.to_string()),
+                    );
+            }
+        };
+
+        // Only live rows can bite: a disabled exception is neither compiled
+        // nor matched on the edge, so warning about it would be a false alarm
+        // and the log would stop being read.
+        let exceptions = path_exceptions::Entity::find()
+            .filter(path_exceptions::Column::SiteId.is_in(ids.clone()))
+            .filter(path_exceptions::Column::Enabled.eq(true))
+            .all(&self.db)
+            .await;
+        if let Ok(exceptions) = exceptions {
+            for exception in exceptions {
+                note(
+                    exception.site_id,
+                    path_exception_requirements(
+                        &exception.match_type,
+                        &exception.skip_layers,
+                    ),
+                );
+            }
+        }
+        // The four access/identity tables share the same optional-scope
+        // shape (`path` + `match_type`), so one macro keeps the gating
+        // identical across them. An empty `path` means whole-site and
+        // imposes no requirement — the pure function handles that.
+        macro_rules! gate_attached {
+            ($entity:ident, $ids:expr) => {
+                if let Ok(rows) = $entity::Entity::find()
+                    .filter($entity::Column::SiteId.is_in($ids))
+                    .filter($entity::Column::Enabled.eq(true))
+                    .all(&self.db)
+                    .await
+                {
+                    for scoped_row in rows {
+                        note(
+                            scoped_row.site_id,
+                            attached_scope_requirements(
+                                Some(&scoped_row.path),
+                                &scoped_row.match_type,
+                            ),
+                        );
+                    }
+                }
+            };
+        }
+        gate_attached!(ip_access_rules, ids.clone());
+        gate_attached!(geo_rules, ids.clone());
+        gate_attached!(site_basic_auth, ids.clone());
+        gate_attached!(site_oidc, ids);
+
+        // Keep only requirements this agent cannot satisfy.
+        gaps.retain(|(min, _), _| !version_supports(version, min));
+        if gaps.is_empty() {
+            return;
+        }
+        let mut summary: Vec<String> = Vec::new();
+        let mut gap_sites: Vec<&String> = Vec::new();
+        for ((min, label), site_domains) in &gaps {
+            gap_sites.extend(site_domains.iter());
+            let examples = if site_domains.len() > 3 {
+                format!(
+                    "{}, … ({} sites)",
+                    site_domains[..3].join(", "),
+                    site_domains.len()
+                )
+            } else {
+                site_domains.join(", ")
+            };
+            summary.push(format!("{label} needs agent >= {min} ({examples})"));
+        }
+        gap_sites.sort();
+        gap_sites.dedup();
+        tracing::warn!(
+            agent_id = %row.id,
+            agent_version = %version,
+            sites = gap_sites.len(),
+            gaps = %summary.join("; "),
+            "registered agent is below the version required by the configuration it is about to receive; upgrade this agent — the config is still pushed, but the listed scopes may be silently inert on the edge"
+        );
+    }
+
     /// Builds the configuration an agent should be running right now.
     async fn site_config_for(
         &self,
@@ -400,6 +537,9 @@ impl ControlPlaneTrait for ControlPlaneService {
         .map_err(|err| Status::internal(err.to_string()))?;
 
         let initial_config = self.site_config_for(&row).await?;
+        // DR-04: the config above is pushed regardless — this only makes a
+        // version/capability mismatch visible to the operator.
+        self.warn_scope_capability_gaps(&row).await;
 
         Ok(Response::new(RegisterAgentResponse {
             agent_id: row.id.to_string(),
