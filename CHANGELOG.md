@@ -10,6 +10,8 @@ verbatim for reference and attribution, and is not maintained here.
 
 ## [Unreleased]
 
+## [PingWAF 0.32.24] — 2026-11-12
+
 ### Changed
 
 - **Path scopes an old agent cannot execute are now rejected at save time
