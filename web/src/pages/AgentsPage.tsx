@@ -35,6 +35,7 @@ import { systemApi } from '@/api/system'
 import { analyticsApi } from '@/api/analytics'
 import { useCanWrite, useDebouncedValue, useNow, useSitesList } from '@/hooks'
 import { cn } from '@/lib/utils'
+import { peerAddressHint } from '@/lib/agentAddress'
 import { formatDateTime, formatLatency, formatNumber, formatRelative, formatSize } from '@/lib/format'
 import type { Agent, AgentCommand, AgentEnrollRequest, AgentEnrollResponse, AgentStatus } from '@/api/types'
 
@@ -262,7 +263,13 @@ export function AgentsPage() {
             {a.peer_ip && a.peer_ip !== a.ip_address && (
               <p
                 className="pw-mono truncate text-[11px] text-fg-subtle"
-                title={t('pages.agents.peerIpHint')}
+                // `title` carries the explanation; an `aria-label` here would
+                // repeat the visible text (and then some) for screen readers.
+                title={
+                  peerAddressHint(a) === 'private'
+                    ? t('pages.agents.peerPrivateHint')
+                    : t('pages.agents.peerIpHint')
+                }
               >
                 {t('pages.agents.peerVia', { ip: a.peer_ip })}
               </p>
@@ -702,6 +709,11 @@ export function AgentsPage() {
                       }`
                     : t('pages.agents.neverSeen')
                 }
+                title={
+                  peerAddressHint(detail) === 'private'
+                    ? t('pages.agents.peerPrivateHint')
+                    : undefined
+                }
                 mono
               />
               <DetailRow
@@ -968,16 +980,21 @@ function DetailRow({
   label,
   value,
   mono,
+  title,
 }: {
   label: string
   value: string | null | undefined
   mono?: boolean
+  title?: string
 }) {
   const text = value && value.length > 0 ? value : '—'
   return (
     <div className="flex min-w-0 items-baseline justify-between gap-3 border-b border-line/60 pb-1.5">
       <dt className="shrink-0 text-xs text-fg-subtle">{label}</dt>
-      <dd className={cn('min-w-0 truncate text-right text-[13px] text-fg', mono && 'pw-mono text-xs')}>
+      <dd
+        className={cn('min-w-0 truncate text-right text-[13px] text-fg', mono && 'pw-mono text-xs')}
+        title={title}
+      >
         {text}
       </dd>
     </div>

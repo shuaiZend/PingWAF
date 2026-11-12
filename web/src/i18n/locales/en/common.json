@@ -1676,7 +1676,8 @@
       "flushFailed": "Failed to flush logs",
       "peerIp": "Connection source",
       "peerIpHint": "Address the control plane accepted this agent's connection from — the closest thing to its public IP when the agent sits behind NAT.",
-      "peerVia": "via {{ip}}"
+      "peerVia": "via {{ip}}",
+      "peerPrivateHint": "The self-reported address is a private one (container / RFC1918) and is not reachable from outside — the Connection source is the address the control plane actually sees."
     },
     "notifications": {
       "title": "Notifications",

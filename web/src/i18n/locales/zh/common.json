@@ -1676,7 +1676,8 @@
       "flushFailed": "刷新日志失败",
       "peerIp": "连接来源地址",
       "peerIpHint": "控制面实际接受该代理连接时看到的对端地址；代理位于 NAT 之后时，这是最接近其公网地址的一项。",
-      "peerVia": "连接自 {{ip}}"
+      "peerVia": "连接自 {{ip}}",
+      "peerPrivateHint": "自报地址是私网地址（容器 / 内网），无法从外部访问；Connection source 才是控制面实际看到的地址。"
     },
     "notifications": {
       "title": "通知",
