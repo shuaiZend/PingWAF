@@ -2406,20 +2406,22 @@ cannot be parsed counts as *not* supporting the capability (fail-closed).
 | Capability | Minimum agent version | Evidence |
 |------------|----------------------|----------|
 | Path exceptions (`prefix` / `exact` / `wildcard`) | **≤ 0.32.16** (no gate) | `pingap-plugin/src/waf.rs` already matched `path_exceptions` in 0.32.16; the gate only covers what changed later |
-| Path scopes on IP / geo / basic-auth / OIDC rules (`prefix` / `exact` / `wildcard`) | **0.32.20** | `pingap-plugin/src/path_filter.rs` first shipped in 0.32.20 ("Path scopes for access restrictions") |
+| Path scopes on **any of the five scoped write surfaces** — path exceptions, IP access rules, geo rules, basic-auth and the OIDC configuration (`prefix` / `exact` / `wildcard`) | **0.32.20** | `pingap-plugin/src/path_filter.rs` first shipped in 0.32.20 ("Path scopes for access restrictions"). For IP / geo / basic-auth / OIDC **any non-empty `path` counts** — the pre-0.32.20 protocol has no path field at all, so an old agent decodes an empty scope and the rule degrades to the whole site |
 | `regex` scopes (`match_type: "regex"`) | **0.32.20** | `capabilities::MIN_AGENT_REGEX_SCOPES`; enforced by the save-time gate below |
 | Canonical path matching — scopes matched against the dot-segment-resolved path (any saved path exception, whose `skip_layers` is always non-empty) | **0.32.21** | `capabilities::MIN_AGENT_CANONICAL_SCOPES`; CHANGELOG 0.32.21 "Scope matching uses a canonical path" |
 | Built-in rule override contract — seeded rows linked to managed rules via `managed_rule_id` (override `enabled`/`mode` instead of duplicating the rule) | **0.32.21** | CHANGELOG 0.32.21 "Seeded built-in rules now control the managed rules instead of duplicating them" |
+| Re-enabling a saved path exception (`enabled` `false` → `true` re-arms its stored scope) | same gates as the stored scope | the update gate judges the *effective* scope, so re-enabling a row the fleet cannot execute is rejected too (see the [gating notes](#post-sitessite_idpath-exceptions)) |
 | `peer_ip` — connection source address in the agent inventory | **0.32.23** | PingWAF 0.32.23 (agent inventory shows the address the control plane accepted the heartbeat stream from) |
 | Agent self-upgrade (`agent.auto_upgrade` + `agent.upgrade_url`) | **0.32.23** | PingWAF 0.32.23 "Agents can upgrade themselves to the control plane's build" |
 
-The first three rows are not just informational: writes that would leave a
-regex scope or a path exception on an agent that cannot execute it are
-**rejected with `400` at save time** (see the capability-gating notes under
-[POST /sites/{site_id}/path-exceptions](#post-sitessite_idpath-exceptions) and
-[POST /sites/{site_id}/ip-rules](#post-sitessite_idip-rules)). The remaining
-rows mark the release a feature appeared in; upgrading every agent to the
-control plane's own version keeps the whole matrix satisfied.
+The first four rows are not just informational: all **five** scoped write
+surfaces — path exceptions, IP rules, geo rules, basic-auth and the OIDC
+configuration — plus configuration restore/rollback are **gated with `400`
+before anything is stored** (see the capability-gating notes under each
+endpoint, [POST /config-versions/{version_id}/rollback](#post-config-versionsversion_idrollback)
+and [POST /config-backups/{backup_id}/restore](#post-config-backupsbackup_idrestore)).
+The remaining rows mark the release a feature appeared in; upgrading every
+agent to the control plane's own version keeps the whole matrix satisfied.
 
 ### GET /sites/{site_id}/path-exceptions
 
@@ -2494,11 +2496,20 @@ exceeds what those agents can execute:
   — because scopes on an older agent are matched against the raw request path,
   so a dot-segment request could bypass the exception scope and its WAF checks
   entirely. Since `skip_layers` must always be non-empty (see the field table
-  above), this gate applies to every stored exception; a regex scope on an old
-  agent is reported with the regex wording, which is the narrower complaint.
+  above), this gate applies to every stored exception. When `match_type:
+  "regex"` and a non-empty `skip_layers` **both** apply, the two bars are
+  0.32.20 (regex) and 0.32.21 (canonical matching), and the **stricter** one is
+  reported: the `400` names `canonical path matching requires agent >= 0.32.21`,
+  because an agent upgraded only to 0.32.20 would still fail the write.
 
-The gate runs on `PUT` too, against the effective (`match_type`, `skip_layers`)
-pair the update would store.
+The gate runs on `PUT` too, judging the **effective** scope the update would
+store, not the raw payload: a payload that rewrites `path`, `match_type` or
+`skip_layers` is checked against the merged value, and flipping `enabled` from
+`false` to `true` on a row whose stored scope is gated re-runs the gate —
+re-enabling must not silently re-arm a scope the fleet cannot execute. Sending
+`{"enabled": true}` to an already-enabled row is an idempotent no-op and is
+never blocked, and a disabling or note-only edit does not change detection
+behaviour, so it is not gated either.
 
 **`match_type: "regex"`** — the `path` value is a regular expression evaluated
 with the Rust `regex` crate: unanchored `is_match` (write `^…$` yourself when
@@ -2524,7 +2535,8 @@ Partial update: omitted fields keep their value. The same validation applies;
 there is no observation-mode gate. Switching `match_type` re-validates the stored
 `path` against the new type (e.g. changing to `wildcard` without a trailing
 `*` on the path is rejected). Changing `path` to a value another exception
-already uses is a `409`.
+already uses is a `409`. The [agent capability gate](#post-sitessite_idpath-exceptions)
+applies to updates as well, including re-enabling a disabled exception.
 
 ### DELETE /sites/{site_id}/path-exceptions/{id}
 
@@ -3494,14 +3506,17 @@ and validation: `prefix` (default) / `exact` / `wildcard` / `regex`, a
 is a `400`), and an empty `path` is stored with `match_type: "prefix"`.
 Existing rules without a `path` behave exactly as before.
 
-**Agent capability gating (create and update):** a `regex` path scope
-requires every agent serving the site to be **≥ 0.32.20**; otherwise the
-write is rejected with a `400` whose message is verbatim
-`path scope is not supported by agent <name> (<version>); regex scope requires agent >= 0.32.20`.
-Non-regex scopes are not gated — an IP rule carries no `skip_layers`, and
-prefix matching against the raw path degrades an access rule far less
-critically than a detection bypass. `PUT` runs the gate only when the update
-really writes a regex scope.
+**Agent capability gating (create and update):** any **non-empty `path`** —
+regex or not — requires every agent serving the site to be **≥ 0.32.20**;
+otherwise the write is rejected with a `400` whose message is verbatim
+`path scope is not supported by agent <name> (<version>); path scope requires agent >= 0.32.20`.
+The reason is all-or-nothing: the pre-0.32.20 protocol has no path field at
+all, so an old agent would decode an empty scope and apply the rule to the
+entire site — a scoped `allow` would become allow-everywhere, and a scoped
+`basic_auth` rule would demand credentials everywhere. An empty `path`
+(whole-site scope) is never gated. `PUT` judges the effective scope after the
+payload merges onto the stored row, so an update that sends only `path` still
+checks the stored `match_type`.
 
 ### PUT /sites/{site_id}/ip-rules/{rule_id}
 
@@ -3823,6 +3838,15 @@ the IP-rule scope, including the server-side compile check for `regex`
 (invalid pattern → `400`). Agents that predate a `match_type` value degrade
 it to `prefix`, so a `regex` scope needs an upgraded agent.
 
+**Agent capability gating:** saving a geo policy whose effective `path` is
+non-empty requires every agent serving the site to be **≥ 0.32.20**; the write
+is otherwise rejected with a `400`:
+`path scope is not supported by agent <name> (<version>); path scope requires agent >= 0.32.20`.
+Old agents have no path field at all: they apply the block/allow policy to
+**every** request, whereas a scoped policy is only evaluated when the request
+path matches (outside the scope the policy does not run at all). An empty
+`path` (whole-site policy) is never gated.
+
 ### GET /sites/{site_id}/geo/stats
 
 Requests per country over the last 24 hours (up to 20 countries), for the bar chart next to the policy editor. Traffic whose country could not be resolved is skipped.
@@ -3879,6 +3903,14 @@ follow the
 (`regex` compile-checked within the 4 MiB budget, invalid pattern → `400`);
 old agents degrade unknown match types to `prefix`, so a `regex` scope needs
 an upgraded agent.
+
+**Agent capability gating:** saving a basic-auth configuration whose effective
+`path` is non-empty requires every agent serving the site to be **≥ 0.32.20**;
+the write is otherwise rejected with a `400`:
+`path scope is not supported by agent <name> (<version>); path scope requires agent >= 0.32.20`.
+Old agents have no path field at all, so a scoped gate would demand
+credentials for **every** request, whereas the intent is to require them only
+where the path matches. An empty `path` (whole-site gate) is never gated.
 
 Passwords are masked with `***` in responses; sending the mask back keeps the
 stored password instead of overwriting it. Site write permission is required.
@@ -4003,6 +4035,14 @@ The fields follow the [path-exception](#path-exceptions) `match_type`
 semantics and validation (`regex` compile-checked within the 4 MiB budget,
 invalid pattern → `400`); old agents degrade unknown match types to
 `prefix`, so a `regex` scope needs an upgraded agent.
+
+**Agent capability gating:** saving an OIDC configuration whose effective
+`path` is non-empty requires every agent serving the site to be **≥ 0.32.20**;
+the write is otherwise rejected with a `400`:
+`path scope is not supported by agent <name> (<version>); path scope requires agent >= 0.32.20`.
+Old agents have no path field at all, so the login gate would open or lock
+**every** path, whereas a scoped gate is only evaluated where the path matches.
+An empty `path` (whole-site gate) is never gated.
 
 **Request:**
 ```json
@@ -4910,6 +4950,22 @@ version through its own bundle, a global version through all of them. The
 rollback is itself recorded as a new version attributed to the operator, so
 rolling back a rollback works and the history stays linear.
 
+**Agent capability gating.** Before anything is rewritten, every path scope in
+a site-scoped snapshot is validated against the agents serving its site **as
+they are now**, not as they were when the version was recorded (a
+deployment-wide version carries no site rows, so it has nothing to validate). If any stored scope
+needs a capability the current fleet lacks — a `regex` scope before 0.32.20,
+a path exception before 0.32.21, or a scoped IP / geo / basic-auth / OIDC rule
+before 0.32.20 — the whole rollback is refused with a `400` naming the site,
+the offending agent and its version, and the missing capability; no rows are
+restored. This is fail-closed by design: a snapshot taken while the fleet was
+newer must not silently downgrade the edge (see
+[Agent capability requirements](#agent-capability-requirements) for why an
+old agent turns a scoped rule into a whole-site one). The way out is
+operational: upgrade the agents to the version named in the message and retry,
+or edit the offending scopes — clearing their `path` to the whole-site default
+— and record a new version to roll back to.
+
 **Response (200):**
 ```json
 {
@@ -5110,6 +5166,19 @@ or the `preview` endpoint) reports before/after counts, additions, removals,
 changes, owner mappings and warnings.
 
 A deployment restore requires a complete schema-2 snapshot. Missing tables are rejected, while an explicitly empty table means an empty configuration. Site ownership is restored when the original owner exists, otherwise the requesting administrator is used as the explicit default owner. Uploads claiming an unsupported algorithm, excessive KDF costs, an invalid scope, a wrong password or a mismatched checksum are refused.
+
+**Agent capability gating.** A restore is also validated against the current
+fleet before it is applied: every path scope in the snapshot is checked
+against the agents serving its site as they are now. If any scope needs a
+capability the current fleet lacks (see
+[Agent capability requirements](#agent-capability-requirements)), the entire
+restore is rejected with a `400` naming the site, the offending agent and its
+version, and the missing capability — no rows are restored and no partial
+configuration is left, exactly like the other restore failures above. The
+operational fix: upgrade the agents to the minimum named in the message and
+retry, or first restore into a state whose scopes use the whole-site default
+(empty `path`) until the fleet is upgraded. The same gate applies to
+[version rollback](#post-config-versionsversion_idrollback).
 
 ---
 

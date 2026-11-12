@@ -367,23 +367,40 @@ Other failures you may see when saving: a duplicate path on the same site
 64-exception limit, an unknown skip-layer token, or a wildcard path that does
 not end in exactly one `*`.
 
-**Why a save is rejected for agent capability:** a path exception is
-interpreted by the edge agent, so the control plane refuses — with a `400`
-naming the offending agent and version — when the agents serving the site
-cannot execute what you are saving. A `regex` match type requires every
+**Why a save is rejected for agent capability:** path scopes are interpreted
+by the edge agent, so the control plane refuses — with a `400` naming the
+offending agent and version — when the agents serving the site cannot execute
+what you are saving. This applies to **all five panels** that can carry a
+scope: path exceptions, IP rules, geo restrictions, basic auth and the OIDC
+configuration. For path exceptions, a `regex` match type requires every
 serving agent to be **≥ 0.32.20** (`path scope is not supported by agent
-<name> (<version>); regex scope requires agent >= 0.32.20`); saving any
+<name> (<version>); regex scope requires agent >= 0.32.20`), and saving any
 exception (its `skip_layers` is always non-empty) requires **≥ 0.32.21**
 (`path scope is not supported by agent <name> (<version>); canonical path
 matching requires agent >= 0.32.21`), because older agents match scopes
 against the raw request path and a dot-segment request could bypass the
-exception — and its WAF checks — entirely. Two ways out: upgrade the agents
-to the control plane's version, or (for IP rules) save with a non-regex
-scope, which the old agents handle. For path exceptions there is no scope
-that skips the 0.32.21 requirement — every exception names a non-empty
-`skip_layers` — so the fix is upgrading the agents. A site with no bound
-agent is never gated, and an agent whose version cannot be read is treated
-as unsupported (fail-closed).
+exception — and its WAF checks — entirely. When both apply, the stricter bar
+(0.32.21) is the one named in the message. For the other four panels, **any
+non-empty path scope** — regex or not — requires **≥ 0.32.20**
+(`path scope is not supported by agent <name> (<version>); path scope
+requires agent >= 0.32.20`): old agents have no path field at all, so a
+scoped `allow` rule would become allow-everywhere and a scoped basic-auth
+gate would ask for credentials on the whole site. An empty path (whole site)
+is never gated.
+
+Re-enabling counts too: turning a disabled path exception back on
+(`enabled` `false` → `true`) re-arms its stored scope, so the same gate runs
+and the save is rejected if the fleet cannot execute it. Sending
+`{"enabled": true}` to an already-enabled exception is a no-op and is never
+blocked.
+
+Restoring is gated the same way: rolling back a config version or restoring
+an encrypted backup whose snapshot contains a scope the current agents cannot
+execute is refused outright with a `400` naming the site, the agent, its
+version and the missing capability — nothing is partially applied. The fix is
+operational: upgrade the agents first (or clear the offending scope's `path`)
+and retry. A site with no bound agent is never gated, and an agent whose
+version cannot be read is treated as unsupported (fail-closed).
 
 ## Rate Limiting
 
@@ -1104,7 +1121,7 @@ Per setting, a non-matching path means:
 - **Basic auth**: for the site-wide switch, no credentials are asked for outside the gate's scope. An IP or geo rule with the `basic_auth` action is scoped by its own path: once it matches, the request must authenticate even when the gate's scope names another path, so a matched rule is never silently turned into a bypass.
 - **OIDC**: the path is fully public — no redirect to the identity provider, no session check. The OIDC callback, logout and `both`-mode provider entry stay reachable regardless of the scope.
 
-Validation matches path exceptions: a `regex` scope is compile-checked when saved (invalid patterns are rejected with `400`), and a `regex` scope additionally requires every agent serving the site to be **≥ 0.32.20** — otherwise the save is rejected with a `400` naming the agent and version (see [Path Exceptions](#path-exceptions)). Non-regex scopes are not gated.
+Validation matches path exceptions: a `regex` scope is compile-checked when saved (invalid patterns are rejected with `400`), and saving any of the four settings with a **non-empty `path`** — regex or not — requires every agent serving the site to be **≥ 0.32.20**; otherwise the save is rejected with a `400` naming the agent and version (see [Path Exceptions](#path-exceptions) for the message format and the reasoning). An empty `path` (whole site) is never gated. Re-enabling a disabled path exception runs the same gate.
 
 Examples:
 
@@ -1195,7 +1212,10 @@ redirected away from the page.
   table, so you can see exactly which rows a change touched before deciding.
 - **Rollback** archives the live state first, restores the selected snapshot
   and pushes it to the agents, behind a confirmation. It is recorded as a new
-  version and can be rolled back in turn.
+  version and can be rolled back in turn. A rollback whose snapshot contains a
+  path scope the current agents cannot execute is refused with a `400` before
+  anything changes — upgrade the agents (or clear the offending scope's
+  `path`) and retry (see [Path Exceptions](#path-exceptions)).
 
 ### Encrypted configuration backups
 
