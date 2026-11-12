@@ -10,6 +10,59 @@ verbatim for reference and attribution, and is not maintained here.
 
 ## [Unreleased]
 
+### Changed
+
+- **Path scopes an old agent cannot execute are now rejected at save time
+  instead of being left silently inert on the edge.** A regex path scope
+  (`match_type = "regex"` on path exceptions and IP rules) requires every
+  agent serving the site to be at least **0.32.20** — on an older agent the
+  unknown `PATH_MATCH_REGEX` degraded to `prefix` semantics, so an exception
+  the console reported as saved simply did not apply and the operator found
+  out only from traffic that should have been exempted or blocked. Saving any
+  path exception requires at least **0.32.21** (`skip_layers` is always
+  non-empty and any exception changes detection behaviour; scopes on 0.32.20
+  matched the raw request path, so a dot-segment request could bypass the
+  exception — and its WAF checks — entirely). The rejection is a `400`
+  naming the first offending agent and its version
+  (`path scope is not supported by agent <name> (<version>); regex scope
+  requires agent >= 0.32.20` / `…; canonical path matching requires agent >=
+  0.32.21`); a site with no bound agent is not gated, and an unparseable
+  agent version counts as unsupported (fail-closed).
+
+### Fixed
+
+- **Slow control-plane clients are no longer disconnected without a trace.** The
+  listener closes a socket that has not sent its first byte within 5 s (and one
+  whose TLS handshake exceeds 10 s) to bound slow-loris exposure — but it did so
+  silently, so a healthy client on a slow path saw a bare TLS EOF with no status,
+  no body and no server log (measured: 2–5% of an automation run, ~6.4 s per
+  failure while a successful handshake took ~1.4 s). Both timeouts now log at
+  `warn` (first occurrence, then every 1024th, so a flood cannot amplify) and can
+  be raised without a rebuild via
+  `PINGWAF_CONTROL_PLANE_PEEK_TIMEOUT_SECS` / `PINGWAF_CONTROL_PLANE_HANDSHAKE_TIMEOUT_SECS`
+  (clamped to 1–120 s; an unparseable value keeps the protective default). The
+  defaults are unchanged: the bound is a deliberate DoS control, and the pool
+  limits still cap what a stalled connection can pin.
+
+- **The agent command reference listed protocol enum names, not the command
+  names the endpoint accepts.** `docs/api.md` documented
+  `rule_update` / `config_reload` / `restart_agent` / `update_site` with a
+  nested `payload` object, but `POST /agents/{id}/commands` takes a flat body
+  and answers `400 unknown command 'config_reload'; expected restart, reload,
+  purge_cache, block_ip, unblock_ip or flush_logs` — anyone following the
+  table could not send a single command. The table now matches
+  `build_command` (`restart`, `reload`, `flush_logs`, `purge_cache`,
+  `block_ip`, `unblock_ip`) with each command's real parameters, and says
+  that an unknown command echoes the accepted list.
+- **The 400/422 boundary is now documented instead of guessable.** Request
+  bodies that do not match the endpoint's structure — unknown fields
+  (`deny_unknown_fields`), wrong field types — are rejected with `422`
+  `invalid_body` (axum 0.8 maps serde rejections to 422; the envelope
+  normalises the code), while semantic failures such as `mode: "enforce"`
+  answer `400` `bad_request`. Without the rule, a client treated the 422 of
+  an echoed `managed_rule_id` as an unknown transient error instead of
+  "stop sending fields this endpoint does not own".
+
 ## [PingWAF 0.32.23] — 2026-11-12
 
 ### Added

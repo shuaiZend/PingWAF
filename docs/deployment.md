@@ -383,6 +383,8 @@ are listed against it below; the dash in a table entry means the setting has no
 | `PINGWAF_TLS_ENABLED` | `server.tls_enabled` |
 | `PINGWAF_TLS_SANS` | `server.tls_sans` (comma-separated) |
 | `PINGWAF_CORS_ORIGINS` | — (comma-separated) |
+| `PINGWAF_CONTROL_PLANE_PEEK_TIMEOUT_SECS` | — (control-plane listener; default `5`, clamped `1`–`120`) |
+| `PINGWAF_CONTROL_PLANE_HANDSHAKE_TIMEOUT_SECS` | — (control-plane listener; default `10`, clamped `1`–`120`) |
 | `PINGWAF_PASSKEY_ENABLED` | — |
 | `PINGWAF_PASSKEY_RP_NAME` | — |
 | `PINGWAF_PASSKEY_RP_ID` | — |

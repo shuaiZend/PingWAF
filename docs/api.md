@@ -1985,30 +1985,40 @@ Deregister an agent.
 
 ### POST /agents/{agent_id}/commands
 
-Send a command to an agent.
+Send a command to an agent. The request is a flat object — the command name
+plus its parameters as top-level fields; there is no nested `payload` field.
 
 **Request:**
 ```json
 {
   "command": "block_ip",
-  "payload": {
-    "ip": "1.2.3.4",
-    "duration_secs": 3600
-  }
+  "ip_addresses": ["1.2.3.4"],
+  "duration_seconds": 3600,
+  "reason": "blocked from dashboard"
 }
 ```
 
-**Available commands:**
-| Command | Payload |
-|---------|---------|
-| `rule_update` | `{}` |
-| `config_reload` | `{}` |
-| `block_ip` | `{"ip": "single address or CIDR", "duration_secs": 3600}` |
-| `unblock_ip` | `{"ip": "single address or CIDR"}` |
-| `purge_cache` | `{"pattern": "..."}` |
-| `update_site` | `{"site_id": "..."}` |
-| `restart_agent` | `{}` |
-| `flush_logs` | `{}` — per-agent form of the broadcast below |
+All commands accept an optional `site_id` (UUID — the site the command is
+scoped to; a `404` when the caller cannot see it). Commands that carry a
+reason fall back to a default text when it is omitted.
+
+**Available commands** (`build_command` accepts exactly these; anything else
+is a `400` that echoes the full list — `unknown command '<x>'; expected
+restart, reload, purge_cache, block_ip, unblock_ip or flush_logs`):
+
+| Command | Parameters | Notes |
+|---------|------------|-------|
+| `restart` | `graceful` (default `true`), `reason` (default `requested from dashboard`) | Restarts the agent process. |
+| `reload` | — | Asks the agent to re-apply its current configuration; carries no payload. |
+| `flush_logs` | `reason` (default `requested from dashboard`) | Agent-by-agent form of the broadcast below. |
+| `purge_cache` | `urls` (array), `tags` (array) | Entries are trimmed and blanks dropped; at most 1000 urls and 100 tags, each at most 2048 characters. |
+| `block_ip` | `ip_addresses` (array, required non-empty), `duration_seconds` (optional), `reason` (optional) | Each entry accepts a single address or CIDR and is normalised; a CIDR wider than the manual-block guard is a `400`. `duration_seconds` must be `0`–`31536000`; absent and `0` both mean "until unblocked". |
+| `unblock_ip` | `ip_addresses` (array, required non-empty) | Each entry is normalised the same way so it matches the stored block key. |
+
+Note the command names: they are the REST-facing spellings (`reload`, not the
+protocol enum name `config_reload`; `restart`, not `restart_agent`). The
+protocol's internal `rule_update` / `update_site` commands are pushed by the
+control plane itself and are not accepted here.
 
 ### POST /agents/flush-logs
 
@@ -2384,6 +2394,33 @@ What an exception can **never** bypass, because those checks run before the
 exception is consulted: a paused site (maintenance page), a fail-closed edge
 (`fail_open = false` with no synced rules) and an active dynamic IP ban.
 
+### Agent capability requirements
+
+Path scopes are interpreted by the edge agent, so what the control plane may
+accept depends on the agent versions serving the site. An agent is bound to a
+site either explicitly (`agents.site_id`) or — when unbound — to every site
+owned by the user its API key belongs to. A site with **no serving agent is
+not gated** (there is nothing to push to), and an agent whose reported version
+cannot be parsed counts as *not* supporting the capability (fail-closed).
+
+| Capability | Minimum agent version | Evidence |
+|------------|----------------------|----------|
+| Path exceptions (`prefix` / `exact` / `wildcard`) | **≤ 0.32.16** (no gate) | `pingap-plugin/src/waf.rs` already matched `path_exceptions` in 0.32.16; the gate only covers what changed later |
+| Path scopes on IP / geo / basic-auth / OIDC rules (`prefix` / `exact` / `wildcard`) | **0.32.20** | `pingap-plugin/src/path_filter.rs` first shipped in 0.32.20 ("Path scopes for access restrictions") |
+| `regex` scopes (`match_type: "regex"`) | **0.32.20** | `capabilities::MIN_AGENT_REGEX_SCOPES`; enforced by the save-time gate below |
+| Canonical path matching — scopes matched against the dot-segment-resolved path (any saved path exception, whose `skip_layers` is always non-empty) | **0.32.21** | `capabilities::MIN_AGENT_CANONICAL_SCOPES`; CHANGELOG 0.32.21 "Scope matching uses a canonical path" |
+| Built-in rule override contract — seeded rows linked to managed rules via `managed_rule_id` (override `enabled`/`mode` instead of duplicating the rule) | **0.32.21** | CHANGELOG 0.32.21 "Seeded built-in rules now control the managed rules instead of duplicating them" |
+| `peer_ip` — connection source address in the agent inventory | **0.32.23** | PingWAF 0.32.23 (agent inventory shows the address the control plane accepted the heartbeat stream from) |
+| Agent self-upgrade (`agent.auto_upgrade` + `agent.upgrade_url`) | **0.32.23** | PingWAF 0.32.23 "Agents can upgrade themselves to the control plane's build" |
+
+The first three rows are not just informational: writes that would leave a
+regex scope or a path exception on an agent that cannot execute it are
+**rejected with `400` at save time** (see the capability-gating notes under
+[POST /sites/{site_id}/path-exceptions](#post-sitessite_idpath-exceptions) and
+[POST /sites/{site_id}/ip-rules](#post-sitessite_idip-rules)). The remaining
+rows mark the release a feature appeared in; upgrading every agent to the
+control plane's own version keeps the whole matrix satisfied.
+
 ### GET /sites/{site_id}/path-exceptions
 
 List the site's path exceptions, ordered by `path`.
@@ -2440,17 +2477,39 @@ Limits: a site accepts at most **64** exceptions
 (`a site accepts at most 64 path exceptions`); `(site_id, path)` is unique — a
 duplicate is a `409` (`a path exception for '<path>' already exists on this site`).
 
+**Agent capability gating (create and update).** Before the exception is
+stored, the control plane checks every agent that serves the site (see
+[Agent capability requirements](#agent-capability-requirements) for how
+"serves" is determined) and rejects the write with a `400` when the request
+exceeds what those agents can execute:
+
+- `match_type: "regex"` requires every serving agent to be **≥ 0.32.20** —
+  the failure message is verbatim
+  `path scope is not supported by agent <name> (<version>); regex scope requires agent >= 0.32.20`
+  (`<name>` is the first offending agent's display name or hostname, `<version>`
+  its reported version).
+- Any exception with a non-empty `skip_layers` requires every serving agent to
+  be **≥ 0.32.21** —
+  `path scope is not supported by agent <name> (<version>); canonical path matching requires agent >= 0.32.21`
+  — because scopes on an older agent are matched against the raw request path,
+  so a dot-segment request could bypass the exception scope and its WAF checks
+  entirely. Since `skip_layers` must always be non-empty (see the field table
+  above), this gate applies to every stored exception; a regex scope on an old
+  agent is reported with the regex wording, which is the narrower complaint.
+
+The gate runs on `PUT` too, against the effective (`match_type`, `skip_layers`)
+pair the update would store.
+
 **`match_type: "regex"`** — the `path` value is a regular expression evaluated
 with the Rust `regex` crate: unanchored `is_match` (write `^…$` yourself when
 the whole path must match), case-sensitive by default (`(?i)` opts out). The
 pattern must compile server-side; compilation uses 4 MiB `size_limit` /
 `dfa_size_limit` limits, the same budget as the WAF expression engine. An
 invalid pattern is a `400` carrying the compiler's reason
-(`invalid regex '<pattern>': <reason>`). Compatibility: agents that have not
-been upgraded receive the unknown `PATH_MATCH_REGEX = 3` and degrade to
-`prefix` semantics (fail-safe — the exception simply stops applying), so a
-regex exception does **not** take effect there; upgrade agents before relying
-on this type.
+(`invalid regex '<pattern>': <reason>`). Older agents have no regex matcher
+at all, so a regex exception is only accepted once every serving agent is at
+least 0.32.20 (see the capability gate above) — the save itself is rejected
+rather than left silently inert on the edge.
 
 **Response (200):** the created exception (same shape as the list items).
 
@@ -3433,10 +3492,16 @@ fields reuse the [path-exception](#path-exceptions) `match_type` semantics
 and validation: `prefix` (default) / `exact` / `wildcard` / `regex`, a
 `regex` scope is compile-checked on save (4 MiB budget; an invalid pattern
 is a `400`), and an empty `path` is stored with `match_type: "prefix"`.
-Existing rules without a `path` behave exactly as before. Agents that
-predate a `match_type` value degrade it to `prefix` — no visible change for
-an empty path — so a `regex` scope takes effect only after the agents are
-upgraded.
+Existing rules without a `path` behave exactly as before.
+
+**Agent capability gating (create and update):** a `regex` path scope
+requires every agent serving the site to be **≥ 0.32.20**; otherwise the
+write is rejected with a `400` whose message is verbatim
+`path scope is not supported by agent <name> (<version>); regex scope requires agent >= 0.32.20`.
+Non-regex scopes are not gated — an IP rule carries no `skip_layers`, and
+prefix matching against the raw path degrades an access rule far less
+critically than a detection bypass. `PUT` runs the gate only when the update
+really writes a regex scope.
 
 ### PUT /sites/{site_id}/ip-rules/{rule_id}
 
@@ -4126,8 +4191,9 @@ saved one.
 Update challenge settings. All fields are optional; omitted fields keep their
 value. Site write permission is required. Unknown fields are rejected with
 `422 Unprocessable Entity` (`deny_unknown_fields`) — note that axum 0.8 maps
-serde deserialization rejections to 422, and the response body is plain text,
-not the unified JSON error envelope.
+serde deserialization rejections to 422; the envelope middleware rewrites the
+plain-text rejection into the unified JSON error envelope with the
+`invalid_body` code (see [400 vs 422](#400-vs-422-structure-vs-semantics)).
 
 **Request:**
 ```json
@@ -5821,7 +5887,7 @@ prefix, so a wrong resource name can be grepped directly.
 |-------------|------|-------------|
 | 400 | `bad_request` | Invalid input |
 | 400 | `invalid_query` | Query string failed deserialization (e.g. `?page=abc`) |
-| 400 | `invalid_body` | Request body is not valid JSON for the endpoint's schema |
+| 400/422 | `invalid_body` | Request body is not valid JSON for the endpoint's schema (status follows axum's rejection: 400 for malformed JSON, 422 when serde rejects the value — including unknown fields on `deny_unknown_fields` endpoints) |
 | 400 | `unknown_file` | `ai-crawl/preview` `file` parameter is not `robots` or `llms` |
 | 400 | `invalid_range` | Analytics `range` parameter is not `24h`, `7d` or `30d` |
 | 401 | `unauthorized` | Missing or invalid token |
@@ -5843,6 +5909,43 @@ query strings, …) are rewritten into the same envelope: `invalid_query` and
 `invalid_body` where axum's rejection text identifies them, `rate_limited` for
 a bare `429`, and `request_failed` for any other status without a more
 specific code.
+
+### 400 vs 422: structure vs semantics
+
+Write endpoints split request-body failures into two layers, and the boundary
+is worth internalising before writing a client:
+
+- **422 `invalid_body`** — the request body does not match the endpoint's
+  **structure**: malformed JSON, a field of the wrong type, or a field the
+  schema does not know. Endpoints that accept read-modify-write payloads
+  declare `deny_unknown_fields`, so echoing back a server-owned field (for
+  example `managed_rule_id` on `POST/PUT /sites/{id}/rules`) or a typo'd key
+  is rejected instead of silently dropped — an edit that changed nothing never
+  looks successful.
+- **400 `bad_request`** — the body parsed fine but fails **semantic
+  validation**: expression syntax, enum values, constraint conflicts
+  (`allow` + `mode: "block"`), length and count limits, duplicate resources.
+
+Two concrete examples from `POST /sites/{site_id}/rules`:
+
+```json
+// Body carries an unknown field → 422 Unprocessable Entity
+{"name": "r", "expression": "http.request.uri.path contains \"/x\"",
+ "action": "block", "mode": "block", "severity": 3, "tag": "typo"}
+// → {"error": {"code": "invalid_body",
+//     "message": "Failed to deserialize the JSON body into the target type: unknown field `tag`, expected one of …"}}
+
+// Structurally valid but semantically rejected → 400 Bad Request
+{"name": "r", "expression": "http.request.uri.path contains \"/x\"",
+ "action": "block", "mode": "enforce", "severity": 3}
+// → {"error": {"code": "bad_request",
+//     "message": "unknown mode 'enforce'; allowed: off|monitor|block ('enforce' is not an API value: use 'block' to enforce)"}}
+```
+
+Note that axum 0.8 maps serde deserialization rejections to **422** (not
+400) — the failure message names the unknown field or type mismatch verbatim.
+Both statuses are normalised to the `invalid_body` code, so consumers branch
+on the code, never on the status alone.
 
 ---
 

@@ -31,6 +31,7 @@ centrally-controlled Web Application Firewall built on
 
 | Document | What you'll find |
 | --- | --- |
+| [e2e-test-plan.md](./e2e-test-plan.md) | Product-level E2E plan — scenarios, environments, case design, execution tiers, defect flow, regression set, gates (incl. UI/UE and accessibility), metrics |
 | [waf-test-plan.md](./waf-test-plan.md) | WAF test plan — layered model, blazehttp suite selection and organisation, matrix, calibres, acceptance gates |
 | [waf-test-report.md](./waf-test-report.md) | Results-only effectiveness report for users — interception, false positives, cross-vendor comparison |
 | [waf-test-report-internal.md](./waf-test-report-internal.md) | Maintainer companion — denominators, per-sample attribution, regression evidence, limits, open work |

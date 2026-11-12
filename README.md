@@ -284,6 +284,7 @@ PINGWAF_CONFIG=/etc/pingwaf/pingwaf.toml pingwaf all-in-one   # equivalent
 | [docs/cli.md](./docs/cli.md) | Administrator binary CLI — run modes, break-glass maintenance commands, incident runbooks |
 | [docs/user-guide.md](./docs/user-guide.md) | Dashboard walkthrough, sites, rules, policies |
 | [docs/http-lifecycle.md](./docs/http-lifecycle.md) | Where every feature acts in the request pipeline (WAF check order, caching, error pages) and how to debug with it |
+| [docs/e2e-test-plan.md](./docs/e2e-test-plan.md) | Product E2E test plan — scenarios, environments, execution tiers, defect and regression flow, release gates (incl. UI/UE, accessibility) |
 | [docs/waf-test-plan.md](./docs/waf-test-plan.md) | WAF test plan — layers, blazehttp suite selection, calibres and acceptance gates |
 | [docs/waf-test-report.md](./docs/waf-test-report.md) | Measured WAF effectiveness (0.32.4) — interception, false positives, attribution, limits |
 | [docs/waf-benchmark-report.md](./docs/waf-benchmark-report.md) | Per-round benchmark appendix (P0 → P14 iteration history) |

@@ -367,6 +367,24 @@ Other failures you may see when saving: a duplicate path on the same site
 64-exception limit, an unknown skip-layer token, or a wildcard path that does
 not end in exactly one `*`.
 
+**Why a save is rejected for agent capability:** a path exception is
+interpreted by the edge agent, so the control plane refuses — with a `400`
+naming the offending agent and version — when the agents serving the site
+cannot execute what you are saving. A `regex` match type requires every
+serving agent to be **≥ 0.32.20** (`path scope is not supported by agent
+<name> (<version>); regex scope requires agent >= 0.32.20`); saving any
+exception (its `skip_layers` is always non-empty) requires **≥ 0.32.21**
+(`path scope is not supported by agent <name> (<version>); canonical path
+matching requires agent >= 0.32.21`), because older agents match scopes
+against the raw request path and a dot-segment request could bypass the
+exception — and its WAF checks — entirely. Two ways out: upgrade the agents
+to the control plane's version, or (for IP rules) save with a non-regex
+scope, which the old agents handle. For path exceptions there is no scope
+that skips the 0.32.21 requirement — every exception names a non-empty
+`skip_layers` — so the fix is upgrading the agents. A site with no bound
+agent is never gated, and an agent whose version cannot be read is treated
+as unsupported (fail-closed).
+
 ## Rate Limiting
 
 Configure per-site rate limits:
@@ -1086,7 +1104,7 @@ Per setting, a non-matching path means:
 - **Basic auth**: for the site-wide switch, no credentials are asked for outside the gate's scope. An IP or geo rule with the `basic_auth` action is scoped by its own path: once it matches, the request must authenticate even when the gate's scope names another path, so a matched rule is never silently turned into a bypass.
 - **OIDC**: the path is fully public — no redirect to the identity provider, no session check. The OIDC callback, logout and `both`-mode provider entry stay reachable regardless of the scope.
 
-Validation matches path exceptions: a `regex` scope is compile-checked when saved (invalid patterns are rejected with `400`), and agents that predate a `match_type` value degrade it to `prefix` — no visible change for empty paths, but a `regex` scope takes effect only after the agents are upgraded.
+Validation matches path exceptions: a `regex` scope is compile-checked when saved (invalid patterns are rejected with `400`), and a `regex` scope additionally requires every agent serving the site to be **≥ 0.32.20** — otherwise the save is rejected with a `400` naming the agent and version (see [Path Exceptions](#path-exceptions)). Non-regex scopes are not gated.
 
 Examples:
 
