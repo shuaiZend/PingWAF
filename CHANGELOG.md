@@ -10,6 +10,56 @@ verbatim for reference and attribution, and is not maintained here.
 
 ## [Unreleased]
 
+## [PingWAF 0.32.25] — 2026-11-12
+
+### Fixed
+
+- **Agent capability gating now covers all five path-scope write surfaces, not
+  just two.** The save-time gate only guarded path exceptions and IP rules;
+  a `path` scope saved through geo restrictions, basic auth or the OIDC
+  configuration was still accepted on a fleet of pre-0.32.20 agents — and
+  because those messages have no path field at all under the old protocol,
+  the scope silently degraded to "whole site": a scoped `allow` became
+  allow-everywhere and a scoped basic-auth gate asked for credentials across
+  the entire site. All five surfaces (path exceptions, IP rules, geo, basic
+  auth, OIDC) now reject the save with the same `400`
+  (`path scope is not supported by agent <name> (<version>); path scope
+  requires agent >= 0.32.20`) whenever the effective path is non-empty. This
+  also fixes the last place where a partial update sending only `path`
+  inherited the stored `match_type` without a check, quietly keeping a
+  `regex` scope un-gated (OIDC).
+
+- **Re-enabling a saved path exception now runs the same capability gate.**
+  Flipping `enabled` from `false` to `true` re-arms the row's stored scope on
+  the edge, but the gate only looked at the payload's scope fields — so a
+  regex or skip_layers exception could be re-activated on agents that cannot
+  execute it by simply not touching them. The gate now judges the *effective*
+  scope: a payload that rewrites `path`/`match_type`/`skip_layers`, or a
+  re-enable of a row carrying a gated scope, is checked before anything is
+  stored; `{"enabled": true}` on an already-enabled row remains an idempotent
+  no-op and a disabling or note-only edit is never blocked.
+
+- **Configuration restore and rollback are validated against the current
+  fleet, and refused outright when the snapshot cannot be executed.** A
+  snapshot recorded while the agents were newer than they are today could
+  restore regex scopes, canonical path exceptions or scoped IP / geo /
+  basic-auth / OIDC rules onto a downgraded fleet — exactly the silently
+  inert configuration the save-time gate exists to prevent. Restores (backup
+  restore and version rollback alike) now check every path scope in the
+  snapshot against the agents serving its site as they are now and reject the
+  whole operation with a `400` naming the site, the offending agent and its
+  version, and the missing capability — no rows are restored. Operationally:
+  upgrade the agents to the minimum named in the message and retry, or first
+  restore into a state whose scopes use the whole-site default (empty
+  `path`) until the fleet is upgraded.
+
+- **Registering an old agent now warns about the scopes it cannot serve.**
+  The initial configuration push no longer drops anything, but the control
+  plane logs a WARN naming the agent and the sites whose stored scopes it
+  cannot execute, so a downgraded or lagging fleet is visible in the logs
+  instead of being discovered from traffic that should have been exempted or
+  blocked.
+
 ## [PingWAF 0.32.24] — 2026-11-12
 
 ### Changed
