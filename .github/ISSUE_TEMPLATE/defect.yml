@@ -1,0 +1,124 @@
+name: "🧪 Defect from patrol / 巡检缺陷"
+description: "Functional or design defect found by the E2E patrol or the design review / E2E 巡检或设计审查发现的缺陷"
+title: "[defect] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for findings produced by the quality patrol
+        ([docs/quality-patrol.md](https://github.com/shuaiZend/PingWAF/blob/main/docs/quality-patrol.md)).
+        Every field below maps to the record format in §5 of that document — a
+        record that cannot be reproduced from this form alone is not triaged.
+        Security vulnerabilities do **not** belong here: follow
+        [SECURITY.md](https://github.com/shuaiZend/PingWAF/blob/main/SECURITY.md).
+
+  - type: dropdown
+    id: defect_type
+    attributes:
+      label: Defect type / 缺陷类型
+      options:
+        - functional — wrong behaviour, wrong status, silent no-op, regression / 功能缺陷
+        - design — coupling, missing extension point, duplicated policy, unrepresentable state / 设计缺陷
+    validations:
+      required: true
+
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity / 严重等级
+      description: Rubric in §5.1 — functional and design severity are not the same question. / 判定标准见 §5.1。
+      options:
+        - Blocker — bypass, fail-open, data loss, crash loop, upgrade blocked / 阻断
+        - High — primary scenario fails, console and edge disagree, capability inert / 高
+        - Medium — degraded with a workaround, wrong status code, misleading message / 中
+        - Low — wording, ordering, cosmetic / 低
+    validations:
+      required: true
+
+  - type: input
+    id: location
+    attributes:
+      label: Location / 定位信息
+      description: Narrowest stable pointer — `file:line`, `METHOD /api/v1/path`, or a scenario ID from docs/e2e-test-plan.md. / 最精确且稳定的定位。
+      placeholder: "pingwaf-server/src/api/capabilities.rs:177 或 POST /sites/{id}/path-exceptions 或 E2E-05"
+    validations:
+      required: true
+
+  - type: textarea
+    id: trigger
+    attributes:
+      label: Trigger / reproduction / 复现或触发条件
+      description: |
+        Functional: the smallest steps, request, or config that fails, with the command used.
+        Design: the counter-example the current shape cannot absorb ("add a fifth matcher type and …").
+      placeholder: |
+        1. 控制面 0.32.24 + agent 0.32.16
+        2. POST /sites/{id}/path-exceptions {"path":"/a","match_type":"prefix","skip_layers":["waf"]}
+        3. 观察 200 而非 400
+    validations:
+      required: true
+
+  - type: textarea
+    id: observed_expected
+    attributes:
+      label: Observed vs expected / 现象与预期
+      placeholder: |
+        Observed: 200，规则保存成功但边缘不生效
+        Expected: 400，消息点名 agent 与最低版本
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence / 证据
+      description: Request/response, event id, log line, screenshot path, commit range. / 请求响应、事件 ID、日志行、截图路径、提交范围。
+    validations:
+      required: true
+
+  - type: textarea
+    id: fix
+    attributes:
+      label: Fix suggestion / 修复建议
+      description: The minimal change plus the test that would catch it. "Revert X" is a valid answer. / 最小改动与能捕获它的测试。
+    validations:
+      required: true
+
+  - type: input
+    id: blast_radius
+    attributes:
+      label: Blast radius / 影响面
+      description: Who is affected — all sites, mixed-version fleets, IPv6-only hosts, one endpoint. / 谁受影响。
+      placeholder: "混合版本舰队；纯 0.32.24 舰队不受影响"
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance / 验收断言
+      description: The observable assertion a reviewer runs to confirm the fix. / 复核者可执行的断言。
+      placeholder: "同一请求返回 400，消息包含 agent 名与 >= 0.32.21"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: found_by
+    attributes:
+      label: Found by / 发现来源
+      options:
+        - e2e-patrol (T0 pre-commit / T1 pre-merge / T2 weekly / T3 release)
+        - design-review (T0 / T1 / T2 / T3)
+        - human reviewer
+    validations:
+      required: true
+
+  - type: input
+    id: version_env
+    attributes:
+      label: Version and environment / 版本与环境
+      description: Build under test and where it ran. / 被测构建与运行环境。
+      placeholder: "0.32.24 (00071b0b)，demo 47.242.20.155 + agent 47.88.23.193"
+    validations:
+      required: true

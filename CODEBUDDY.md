@@ -25,7 +25,7 @@ cd web && npx tsc -b && npx vitest run   # 前端类型检查与测试
 
 ## 多 Agent 协作（Tech Lead 必读）
 
-本项目配置了 10 角色协作团队，角色定义在 `.codebuddy/agents/`（10 个文件），协作协议见项目规则 `pingwaf-multi-agent`。要点：
+本项目配置了 12 角色协作团队，角色定义在 `.codebuddy/agents/`（12 个文件），协作协议见项目规则 `pingwaf-multi-agent`。其中 `pingwaf-e2e-patrol` 与 `pingwaf-design-review` 是**节奏驱动**的巡检角色（不是任务驱动）：触发时机、检查维度、缺陷记录格式与人工复核流程见 [docs/quality-patrol.md](./docs/quality-patrol.md)。要点：
 
 1. 主会话（你）= Tech Lead：拆分任务 → 只读调查可并行（批量子代理调用）→ 跨模块改动先冻结接口 → 涉及用户可见变更时按文档同步工作流委派 `pingwaf-doc-prompt`（`make check-docs` 为文档/提示词门禁）→ 集成后强制独立审查（Code Reviewer + Security Reviewer）。
 2. 子代理通过 `task` 工具调度；用 `subagent_path` 指向 `.codebuddy/agents/<role>.md` 注入角色。
@@ -33,8 +33,8 @@ cd web && npx tsc -b && npx vitest run   # 前端类型检查与测试
 
 | 角色 | 目标模型 |
 |---|---|
-| Tech Lead / Architect / Bug Investigator / Security Reviewer / Code Reviewer | deepseek-v4.1-flash |
-| Frontend Engineer / Test Engineer / Documentation & Agent Prompt Engineer | glm-5.3-flash |
+| Tech Lead / Architect / Bug Investigator / Security Reviewer / Code Reviewer / Design Review | deepseek-v4.1-flash |
+| Frontend Engineer / Test Engineer / Documentation & Agent Prompt Engineer / E2E Patrol | glm-5.3-flash |
 | Rust Backend & WAF Engineer / CI/CD Engineer | glm-5.3-flashx |
 
 4. 安全红线：未经用户明确授权，禁止 commit/push/release、`git reset --hard`、删除分支/tag、触碰生产 Secrets；不伪造测试结果；安全修复须考虑绕过与回归。
