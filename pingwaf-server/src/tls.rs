@@ -48,11 +48,93 @@ const PROTOCOL_PEEK_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(test)]
 const PROTOCOL_PEEK_TIMEOUT: Duration = Duration::from_millis(300);
 
+/// Environment override for [`PROTOCOL_PEEK_TIMEOUT`].
+///
+/// The 5 s default is a deliberate slow-loris bound, but it also drops
+/// **healthy** clients when the path to the control plane is slow (a
+/// measured deployment spends ~1.4 s per handshake and >5 s for the first
+/// byte under load, and those connections were closed silently). An operator
+/// on such a path can raise the budget without a rebuild; the pool limits
+/// (pending / active / loopback) still bound the resources a stalled
+/// connection can pin.
+pub const PEEK_TIMEOUT_ENV: &str = "PINGWAF_CONTROL_PLANE_PEEK_TIMEOUT_SECS";
+
+/// Environment override for [`TLS_HANDSHAKE_TIMEOUT`].
+pub const HANDSHAKE_TIMEOUT_ENV: &str =
+    "PINGWAF_CONTROL_PLANE_HANDSHAKE_TIMEOUT_SECS";
+
+/// Upper bound for both overrides. Above this a stalled client occupies a
+/// pre-handshake slot for longer than the value of the protection.
+const TIMEOUT_ENV_MAX_SECS: u64 = 120;
+
 /// How long the TLS handshake may take after the first TLS record is seen.
 #[cfg(not(test))]
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(test)]
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Parses an override in whole seconds, clamped to `1..=TIMEOUT_ENV_MAX_SECS`.
+///
+/// Absent, empty or unparsable values keep `default`: a typo must not
+/// silently remove the slow-loris bound.
+fn timeout_from_env(raw: Option<&str>, default: Duration) -> Duration {
+    raw.and_then(|value| value.trim().parse::<u64>().ok())
+        .map(|secs| Duration::from_secs(secs.clamp(1, TIMEOUT_ENV_MAX_SECS)))
+        .unwrap_or(default)
+}
+
+/// The two admission budgets for one listener, resolved once when the
+/// listener is built and injected into the accept loop.
+///
+/// Resolving at construction (instead of per connection) keeps the hot path
+/// free of `getenv`, and — because the values are carried in a value rather
+/// than a process-wide `OnceLock` — a test that changes the environment
+/// cannot leak its override into every later test in the same binary.
+#[derive(Debug, Clone, Copy)]
+struct ListenerTimeouts {
+    peek: Duration,
+    handshake: Duration,
+}
+
+impl ListenerTimeouts {
+    /// Production: honour the environment overrides.
+    #[cfg(not(test))]
+    fn configured() -> Self {
+        Self {
+            peek: timeout_from_env(
+                std::env::var(PEEK_TIMEOUT_ENV).ok().as_deref(),
+                PROTOCOL_PEEK_TIMEOUT,
+            ),
+            handshake: timeout_from_env(
+                std::env::var(HANDSHAKE_TIMEOUT_ENV).ok().as_deref(),
+                TLS_HANDSHAKE_TIMEOUT,
+            ),
+        }
+    }
+
+    /// Tests: always the compiled-in budgets, so the suite is order-independent
+    /// even if another case writes the variables.
+    #[cfg(test)]
+    fn configured() -> Self {
+        Self {
+            peek: PROTOCOL_PEEK_TIMEOUT,
+            handshake: TLS_HANDSHAKE_TIMEOUT,
+        }
+    }
+}
+
+/// A timeout closes the socket, so it cannot carry an HTTP status. Logging it
+/// is the only way an operator learns about it — but a slow-loris flood would
+/// turn one line per connection into thousands, so log the first and then
+/// every 1024th, mirroring the pool-drop throttle.
+fn should_log_timeout(count: u64) -> bool {
+    count == 1 || count.is_multiple_of(1024)
+}
+
+/// Timeouts that were closed before the client sent a byte.
+static PEEK_TIMEOUTS: AtomicU64 = AtomicU64::new(0);
+/// Timeouts that expired during the TLS handshake.
+static HANDSHAKE_TIMEOUTS: AtomicU64 = AtomicU64::new(0);
 
 /// Maximum number of connections that may be in protocol detection or TLS
 /// handshake at once. Connections beyond this bound are closed immediately
@@ -432,8 +514,10 @@ impl MixedListener {
             active_loopback: Arc::new(Semaphore::new(MAX_ACTIVE_LOOPBACK)),
             dropped: dropped.clone(),
         };
-        let accept_task =
-            tokio::spawn(accept_loop(listener, acceptor, sender, limits));
+        let timeouts = ListenerTimeouts::configured();
+        let accept_task = tokio::spawn(accept_loop(
+            listener, acceptor, sender, limits, timeouts,
+        ));
         Ok(Self {
             receiver,
             local_addr,
@@ -514,6 +598,7 @@ async fn accept_loop(
     acceptor: TlsAcceptor,
     sender: mpsc::Sender<(MixedStream, SocketAddr)>,
     limits: ConnectionLimits,
+    timeouts: ListenerTimeouts,
 ) {
     loop {
         let (stream, addr) = match listener.accept().await {
@@ -579,7 +664,7 @@ async fn accept_loop(
         tokio::spawn(async move {
             let _permit = permit;
             let is_tls = match tokio::time::timeout(
-                PROTOCOL_PEEK_TIMEOUT,
+                timeouts.peek,
                 looks_like_tls(&stream),
             )
             .await
@@ -590,14 +675,25 @@ async fn accept_loop(
                     return;
                 },
                 Err(_) => {
-                    tracing::debug!(%addr, "control-plane protocol detection timed out");
+                    let count =
+                        PEEK_TIMEOUTS.fetch_add(1, Ordering::Relaxed) + 1;
+                    if should_log_timeout(count) {
+                        tracing::warn!(
+                            %addr,
+                            total = count,
+                            budget_secs = timeouts.peek.as_secs(),
+                            "control-plane closed a connection that sent no byte before the \
+                             protocol-detection budget expired; raise \
+                             PINGWAF_CONTROL_PLANE_PEEK_TIMEOUT_SECS on a slow path"
+                        );
+                    }
                     return;
                 },
             };
 
             let io = if is_tls {
                 match tokio::time::timeout(
-                    TLS_HANDSHAKE_TIMEOUT,
+                    timeouts.handshake,
                     acceptor.accept(stream),
                 )
                 .await
@@ -610,7 +706,18 @@ async fn accept_loop(
                         return;
                     },
                     Err(_) => {
-                        tracing::debug!(%addr, "control-plane TLS handshake timed out");
+                        let count = HANDSHAKE_TIMEOUTS
+                            .fetch_add(1, Ordering::Relaxed)
+                            + 1;
+                        if should_log_timeout(count) {
+                            tracing::warn!(
+                                %addr,
+                                total = count,
+                                budget_secs = timeouts.handshake.as_secs(),
+                                "control-plane TLS handshake exceeded its budget; raise \
+                                 PINGWAF_CONTROL_PLANE_HANDSHAKE_TIMEOUT_SECS on a slow path"
+                            );
+                        }
                         return;
                     },
                 }
@@ -958,5 +1065,43 @@ mod tests {
         let mut handshakes: Vec<bool> = server.await.unwrap();
         handshakes.sort_unstable();
         assert_eq!(handshakes, vec![false, true]);
+    }
+
+    /// A typo in the override must keep the protective default, and an
+    /// out-of-range value must be clamped rather than accepted verbatim.
+    #[test]
+    fn timeout_overrides_are_clamped_and_never_disable_the_bound() {
+        let default = Duration::from_secs(5);
+        assert_eq!(timeout_from_env(None, default), default);
+        assert_eq!(timeout_from_env(Some(""), default), default);
+        assert_eq!(timeout_from_env(Some("abc"), default), default);
+        assert_eq!(
+            timeout_from_env(Some("30"), default),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            timeout_from_env(Some(" 30 "), default),
+            Duration::from_secs(30)
+        );
+        // 0 means "no bound" in a naive reading; it must not be honoured.
+        assert_eq!(
+            timeout_from_env(Some("0"), default),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            timeout_from_env(Some("100000"), default),
+            Duration::from_secs(TIMEOUT_ENV_MAX_SECS)
+        );
+    }
+
+    /// The timeout log is throttled so a slow-loris flood cannot amplify into
+    /// one log line per connection.
+    #[test]
+    fn timeout_logging_is_throttled() {
+        assert!(should_log_timeout(1));
+        assert!(!should_log_timeout(2));
+        assert!(!should_log_timeout(1023));
+        assert!(should_log_timeout(1024));
+        assert!(should_log_timeout(2048));
     }
 }
