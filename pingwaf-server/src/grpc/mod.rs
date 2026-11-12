@@ -37,10 +37,13 @@ use crate::models::{agent, api_key, config_version, site};
 /// site owned by its API key's user. Mirrors the gRPC `visible_sites`, and is
 /// what an `UpdateSite` payload must carry — the agent applies the payload
 /// authoritatively, dropping any cached site the payload does not list.
-async fn agent_visible_site_ids(
-    db: &DatabaseConnection,
+pub(crate) async fn agent_visible_site_ids<C>(
+    db: &C,
     agent_row: &agent::Model,
-) -> Result<Vec<Uuid>, DbErr> {
+) -> Result<Vec<Uuid>, DbErr>
+where
+    C: sea_orm::ConnectionTrait,
+{
     if let Some(site_id) = agent_row.site_id {
         return Ok(vec![site_id]);
     }

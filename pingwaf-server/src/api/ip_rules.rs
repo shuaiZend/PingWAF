@@ -13,6 +13,7 @@ use sea_orm::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::api::capabilities;
 use crate::api::common::{
     load_site_read, load_site_write, non_empty, parse_uuid, Page, Pagination,
 };
@@ -334,6 +335,11 @@ async fn create(
         resolve_create_mode(&state, &payload.group_id, &payload.ip_ranges)
             .await?;
 
+    // Capability gate: a regex path scope needs a data plane that
+    // implements regex matching at all (>= capabilities::MIN_AGENT_REGEX_
+    // SCOPES). Non-regex scopes are not gated here.
+    capabilities::ensure_ip_rule_supported(&state.db, id, &match_type).await?;
+
     let timestamp = chrono::Utc::now();
     let model = ip_access_rules::ActiveModel {
         id: Set(Uuid::new_v4()),
@@ -428,12 +434,24 @@ async fn update(
         let (path, match_type) =
             crate::api::path_exceptions::validate_optional_path(
                 payload.path.as_deref().unwrap_or(&stored_path),
-                payload.match_type.as_deref().or_else(|| {
-                    payload.path.is_none().then_some(stored_match_type.as_str())
-                }),
+                // A partial update that only rewrites `path` must keep the
+                // stored scope type: falling back to `None` here let
+                // `validate_optional_path` default the pair to `prefix`, which
+                // silently downgraded a regex scope (and skipped the
+                // capability gate, which then saw `prefix`).
+                Some(
+                    payload
+                        .match_type
+                        .as_deref()
+                        .unwrap_or(stored_match_type.as_str()),
+                ),
             )?;
         active.path = Set(path);
-        active.match_type = Set(match_type);
+        active.match_type = Set(match_type.clone());
+        // Partial-update semantics: only gate when the new value really
+        // writes a regex scope.
+        capabilities::ensure_ip_rule_supported(&state.db, id, &match_type)
+            .await?;
     }
     if let Some(priority) = payload.priority {
         active.priority = Set(priority);

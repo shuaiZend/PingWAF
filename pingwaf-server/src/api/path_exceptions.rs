@@ -19,6 +19,7 @@ use sea_orm::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::api::capabilities;
 use crate::api::common::{load_site_read, load_site_write, parse_uuid};
 use crate::api::error::ApiError;
 use crate::api::sites::touch_site;
@@ -328,6 +329,18 @@ async fn create_exception(
     )?;
     let note = validate_note(payload.note.as_deref())?;
 
+    // Capability gate: `skip_layers` is validated non-empty above, so every
+    // created exception changes detection behaviour on the edge. A regex
+    // match type additionally needs a data plane that implements regex
+    // scopes at all (see `capabilities` for the evidence trail).
+    capabilities::ensure_path_exception_supported(
+        &state.db,
+        site_id,
+        &match_type,
+        &skip_layers,
+    )
+    .await?;
+
     let count = path_exceptions::Entity::find()
         .filter(path_exceptions::Column::SiteId.eq(site_id))
         .all(&state.db)
@@ -388,6 +401,7 @@ async fn update_exception(
     load_site_write(&state.db, site_id, &current).await?;
 
     let row = find_exception(&state, site_id, id).await?;
+    let stored_skip_layers = row.skip_layers.clone();
     let mut match_type = row.match_type.clone();
     if payload.match_type.is_some() {
         match_type = validate_match_type(payload.match_type.as_deref())?;
@@ -414,7 +428,7 @@ async fn update_exception(
         let stored_path = active.path.clone().unwrap();
         let checked = validate_path(&stored_path, &match_type)?;
         active.path = Set(checked);
-        active.match_type = Set(match_type);
+        active.match_type = Set(match_type.clone());
     }
     if let Some(layers) = payload.skip_layers.as_deref() {
         active.skip_layers = Set(validate_skip_layers(layers)?);
@@ -429,6 +443,25 @@ async fn update_exception(
         active.enabled = Set(enabled);
     }
     active.updated_at = Set(Utc::now());
+
+    // Capability gate on the *effective* scope after this partial update:
+    // only runs when the payload actually touches the scope or the bypass
+    // behaviour (`path` / `match_type` / `skip_layers`), so a note-only edit
+    // is never blocked on an old agent.
+    if payload.path.is_some()
+        || payload.match_type.is_some()
+        || payload.skip_layers.is_some()
+    {
+        let effective_layers =
+            payload.skip_layers.clone().unwrap_or(stored_skip_layers);
+        capabilities::ensure_path_exception_supported(
+            &state.db,
+            site_id,
+            &match_type,
+            &effective_layers,
+        )
+        .await?;
+    }
 
     let model = active.update(&state.db).await?;
     tracing::info!(

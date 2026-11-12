@@ -256,9 +256,17 @@ async fn update_geo(
         let (path, match_type) =
             crate::api::path_exceptions::validate_optional_path(
                 payload.path.as_deref().unwrap_or(&stored_path),
-                payload.match_type.as_deref().or_else(|| {
-                    payload.path.is_none().then_some(stored_match_type.as_str())
-                }),
+                // A partial update that only rewrites `path` must keep the
+                // stored scope type: falling back to `None` here let
+                // `validate_optional_path` default the pair to `prefix`, which
+                // silently downgraded a regex scope (and skipped the
+                // capability gate, which then saw `prefix`).
+                Some(
+                    payload
+                        .match_type
+                        .as_deref()
+                        .unwrap_or(stored_match_type.as_str()),
+                ),
             )?;
         active.path = Set(path);
         active.match_type = Set(match_type);

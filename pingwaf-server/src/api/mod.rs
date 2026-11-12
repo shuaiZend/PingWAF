@@ -15,6 +15,7 @@ pub mod blocked_ips;
 pub mod bot;
 pub mod cache;
 pub mod cache_settings;
+pub mod capabilities;
 pub mod challenge;
 pub mod common;
 pub mod config_backups;

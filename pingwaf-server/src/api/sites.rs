@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
+use crate::api::capabilities;
 use crate::api::common::{
     ensure_acme_wildcard_supported, ensure_domains_available, load_site_read,
     load_site_write, map_domain_conflict, non_empty, normalise_domain,
@@ -1837,6 +1838,28 @@ async fn clone_site(
         .filter(path_exceptions::Column::SiteId.eq(source_id))
         .all(&txn)
         .await?;
+    // Capability gate: a clone must not inherit a scope its own fleet cannot
+    // execute. The source write path already enforced this, but the clone is a
+    // new site whose agents can differ (another owner's fleet, a site created
+    // before an agent was downgraded), and a silently inert exception is the
+    // failure mode this gate exists to prevent.
+    for row in &source_exceptions {
+        capabilities::ensure_path_exception_supported(
+            &txn,
+            new_id,
+            &row.match_type,
+            &row.skip_layers,
+        )
+        .await?;
+    }
+    let cloned_ip_rules = ip_access_rules::Entity::find()
+        .filter(ip_access_rules::Column::SiteId.eq(new_id))
+        .all(&txn)
+        .await?;
+    for row in &cloned_ip_rules {
+        capabilities::ensure_ip_rule_supported(&txn, new_id, &row.match_type)
+            .await?;
+    }
     for row in source_exceptions {
         let row_id = row.id;
         match check_path_exception_fields(
