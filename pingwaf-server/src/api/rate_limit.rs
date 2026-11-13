@@ -119,6 +119,12 @@ fn bucket_for(
         ("POST", "/auth/register") => Some(("register", REGISTER)),
         ("POST", "/auth/refresh") => Some(("refresh", REFRESH)),
         ("PUT", "/auth/password") => Some(("password", PASSWORD)),
+        // A profile edit can carry `current_password` and costs one bcrypt
+        // verification, so it belongs in the same bucket as the other
+        // password-verifying endpoint. Without this it fell through to
+        // `None` and an authenticated account could drive bcrypt without any
+        // rate limit (2026-11-13 review, auth-02).
+        ("PUT", "/auth/me") => Some(("password", PASSWORD)),
         _ => None,
     }
 }
@@ -297,6 +303,14 @@ mod tests {
         );
         assert!(
             bucket_for(&axum::http::Method::PUT, "/auth/password").is_some()
+        );
+        // `PUT /auth/me` verifies the current password when the login name
+        // changes: it must share the password bucket instead of falling
+        // through to the unlimited branch.
+        assert_eq!(
+            bucket_for(&axum::http::Method::PUT, "/auth/me")
+                .map(|(bucket, _)| bucket),
+            Some("password")
         );
 
         // Read-only or already-authenticated surfaces stay unlimited.

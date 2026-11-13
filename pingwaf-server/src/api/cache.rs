@@ -27,6 +27,7 @@ use crate::api::common::{
 use crate::api::error::ApiError;
 use crate::api::sites::touch_site;
 use crate::api::state::AppState;
+use crate::api::validation::validate_expression;
 use crate::auth::AuthUser;
 use crate::grpc::cache_status::SiteCacheStatus;
 use crate::grpc::config::now_timestamp;
@@ -119,8 +120,18 @@ pub fn routes() -> Router<AppState> {
         )
 }
 
+/// Validates one cache rule's fields.
+///
+/// `match_expression` is compiled by the data plane before the rule can take
+/// effect: `pingap-plugin/src/cache.rs` calls `parse_expression(...).ok()?` and
+/// drops the whole rule when that fails. Accepting an unparsable expression
+/// here therefore returns `201`/`200` for a rule that silently never applies —
+/// including a cache *exclusion* rule, whose failure caches pages that should
+/// have been bypassed. The gate is the same one WAF rules and rate limits use
+/// (`api::validation`, 2026-10-19 audit D04/D05).
 fn validate(
     name: &str,
+    match_expression: &str,
     edge_ttl: i32,
     browser_ttl: i32,
 ) -> Result<(), ApiError> {
@@ -129,6 +140,7 @@ fn validate(
             "name must be 1-200 characters".to_string(),
         ));
     }
+    validate_expression(match_expression)?;
     if !(0..=MAX_TTL_SECONDS).contains(&edge_ttl) {
         return Err(ApiError::BadRequest(format!(
             "edge_ttl_seconds must be between 0 and {MAX_TTL_SECONDS}"
@@ -140,6 +152,17 @@ fn validate(
         )));
     }
     Ok(())
+}
+
+/// The expression a partial update leaves in place: the payload's value when
+/// present, otherwise the stored one.
+///
+/// The stored value is re-validated too, so an update that touches only the
+/// TTLs (or `enabled`) cannot leave behind an expression the data plane
+/// silently drops — the row may predate this validation or have been written
+/// by an older control plane.
+fn effective_match_expression(payload: Option<String>, stored: &str) -> String {
+    payload.unwrap_or_else(|| stored.to_string())
 }
 
 /// `GET /api/v1/sites/{site_id}/cache-rules`
@@ -175,6 +198,7 @@ async fn create(
 
     validate(
         &payload.name,
+        &payload.match_expression,
         payload.edge_ttl_seconds,
         payload.browser_ttl_seconds,
     )?;
@@ -216,6 +240,15 @@ async fn update(
     load_site_write(&state.db, id, &current).await?;
 
     let row = find(&state, id, target).await?;
+    // Effective expression for this partial update: the payload's value when
+    // present, otherwise the stored one. Both sides are validated so an update
+    // that only changes TTLs cannot leave an unparsable (silently inert) rule
+    // behind, and a payload expression cannot be stored unvalidated.
+    let effective_expression = effective_match_expression(
+        payload.match_expression.clone(),
+        &row.match_expression,
+    );
+    validate_expression(&effective_expression)?;
     let mut active: cache_rules::ActiveModel = row.into();
 
     if let Some(name) = non_empty(&payload.name) {
@@ -1071,12 +1104,72 @@ async fn seed_defaults(
 mod tests {
     use super::*;
 
+    /// A legal cache-rule expression, matching the shape the built-in rules
+    /// in `defaults.rs` use.
+    const OK_EXPR: &str = r#"http.request.uri.path starts_with "/api/""#;
+
     #[test]
     fn bounds_are_enforced() {
-        assert!(validate("static", 3600, 300).is_ok());
-        assert!(validate("static", -1, 300).is_err());
-        assert!(validate("static", 3600, MAX_TTL_SECONDS + 1).is_err());
-        assert!(validate("   ", 3600, 300).is_err());
+        assert!(validate("static", OK_EXPR, 3600, 300).is_ok());
+        assert!(validate("static", OK_EXPR, -1, 300).is_err());
+        assert!(validate("static", OK_EXPR, 3600, MAX_TTL_SECONDS + 1).is_err());
+        assert!(validate("   ", OK_EXPR, 3600, 300).is_err());
+    }
+
+    #[test]
+    fn cache_rule_expression_is_validated() {
+        // The data plane drops a cache rule whose expression fails to parse
+        // (`compile_cache_rule` -> `parse_expression(...).ok()?`), so accepting
+        // one here would return 201/200 for a rule that never applies — a
+        // silently inert cache exclusion.
+        let err = validate("static", "", 3600, 300)
+            .expect_err("an empty expression must be rejected");
+        assert!(matches!(err, ApiError::BadRequest(_)));
+        assert!(err.to_string().contains("must not be empty"), "{err}");
+
+        let err = validate(
+            "static",
+            r#"http.request.uri.path start_with "/api/""#,
+            3600,
+            300,
+        )
+        .expect_err("a mistyped operator must be rejected");
+        assert!(matches!(err, ApiError::BadRequest(_)));
+        assert!(err.to_string().contains("not valid"), "{err}");
+
+        // Every expression the default cache rules ship with must pass: those
+        // rows are seeded by the control plane itself.
+        for rule in crate::defaults::cache_rules_defaults() {
+            assert!(
+                validate(
+                    rule.name,
+                    rule.match_expression,
+                    rule.edge_ttl_seconds,
+                    rule.browser_ttl_seconds
+                )
+                .is_ok(),
+                "default cache rule '{}' must validate",
+                rule.name
+            );
+        }
+    }
+
+    #[test]
+    fn a_partial_update_validates_the_effective_expression() {
+        // No expression in the payload: the stored one is what the update
+        // leaves in place, so it is what must validate. A row written by an
+        // older control plane (empty expression) cannot be re-saved silently.
+        let effective = effective_match_expression(None, "");
+        assert!(validate("static", &effective, 3600, 300).is_err());
+
+        // A payload expression wins and is validated on its own.
+        let effective =
+            effective_match_expression(Some(OK_EXPR.to_string()), "");
+        assert!(validate("static", &effective, 3600, 300).is_ok());
+
+        // A valid stored expression survives a TTL-only update.
+        let effective = effective_match_expression(None, OK_EXPR);
+        assert!(validate("static", &effective, 3600, 300).is_ok());
     }
 
     #[test]

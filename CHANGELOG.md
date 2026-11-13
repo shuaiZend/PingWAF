@@ -10,6 +10,83 @@ verbatim for reference and attribution, and is not maintained here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A NUL byte in a logged request body or header no longer stalls the log
+  pipeline.** PostgreSQL TEXT/JSONB cannot store `U+0000`, but the access-log
+  `request_body`/`request_headers` fields were persisted verbatim. One binary
+  body (a gzip upload, a `\x00` in a form field) made the whole batch fail;
+  the agent's `flush_logs` then put the failed batch back and retried it
+  forever, so one entry blocked every site's `access_logs` and
+  `security_events` until the process was restarted (2026-11-13 incident,
+  ~1h49m of audit visibility lost on a real deployment). The control plane now
+  strips NUL from every log/certificate-event field (and from the JSON header
+  objects) before either sink, and the agent falls back to shipping entries
+  one at a time after three consecutive batch failures, dropping only the
+  entries the server still rejects and counting them. The same clamp already
+  used for host samples/metrics is now applied to log timestamps: a
+  future-dated row would never be pruned, and an ancient one would be deleted
+  on the next retention sweep.
+
+- **Revoking an agent API key now also revokes its heartbeat command channel
+  and upgrade download.** `Heartbeat` and `/api/v1/agent-upgrade/*` only
+  verified the JWT and that the agent row still existed; deleting the key set
+  `api_key_id` to NULL but left the edge connected for the token's 30-day
+  lifetime, still receiving `ServerCommand` and able to download the control
+  plane binary. Both paths now re-check the key through the same
+  `authorize()` used by the other RPCs.
+
+- **Heartbeat entries are checked against the sites the reporting agent
+  serves.** The heartbeat path writes certificate status/expiry, cache
+  counters and the blocked-IP mirror, and it trusted the `site_id` in the
+  message. A compromised edge could rewrite another tenant's certificate
+  state (suppressing expiry alerts) or inject blocked-IP rows. Entries stamped
+  with a site outside the agent's `visible_sites` are dropped and counted, on
+  the opening message and every later heartbeat.
+
+- **Agent enrolment keys no longer carry a control-plane `read` grant, and a
+  read key no longer inherits its owner's administrator role over MCP.**
+  `POST /agents/enroll` minted the key with `[agent, read]`, and the MCP
+  principal copied the owner's admin role, so an edge credential — which is
+  handed out in an install command and lives on the edge host — could read
+  every tenant's sites, access logs and audit log through `/mcp`. Enrolment
+  now mints `agent` only, and a key is fleet-wide over MCP only when it
+  carries `write` and its owner is an administrator.
+
+- **A cache rule whose `match_expression` is empty or malformed is rejected
+  at save time.** The create/update path never validated the expression, so a
+  typo (or simply omitting it, which defaulted to `""`) produced a rule the
+  data plane silently discarded — an exclusion meant to keep personalised
+  pages out of the shared cache simply did not run. Create and update now use
+  the same expression validator as WAF/rate-limit rules; an update that only
+  changes the TTL still validates the stored expression.
+
+- **`PUT /api/v1/auth/me` is rate-limited and no longer bypasses the bcrypt
+  concurrency semaphore.** A logged-in account could drive cost-12 bcrypt
+  through the profile-update endpoint without the 10/min password bucket and
+  without the process-wide `BCRYPT_CONCURRENCY` limit, saturating the blocking
+  pool. The bucket now covers `PUT /auth/me`, all five auth-path bcrypt calls
+  use the offloaded variants, and the email-uniqueness check runs before the
+  password check.
+
+### Security
+
+- **The agent's local rule cache is no longer readable by other local
+  users.** `sites.json` (and its roll-over backup) carries every synced site's
+  TLS private key, OIDC client secret and cookie secret, ACME DNS credentials
+  and HTTP basic-auth passwords, but the atomic-write helper created the temp
+  file with `File::create` — `0644` under the default umask — and the cache
+  directory with `create_dir_all` — `0755`. Any account on the same host could
+  therefore read the agent's key material. On Unix the cache directory is now
+  created `0700` (an existing directory is tightened), the temp file is opened
+  with `create_new` + `0600` and the destination is re-asserted `0600` after
+  the rename, and `sites.json` / `sites.json.bak` / `metadata.json` /
+  `metadata.json.bak` / `blocked_ips.json` are tightened to `0600` when the
+  cache is loaded — so a snapshot written by an older build is fixed in place
+  on the next start. Non-Unix platforms keep their previous behaviour, and a
+  failed `chmod` only warns instead of failing the write. Regression tests
+  cover the file and directory modes and the legacy-`0644` upgrade path.
+
 ## [PingWAF 0.32.26] — 2026-11-13
 
 ### Fixed

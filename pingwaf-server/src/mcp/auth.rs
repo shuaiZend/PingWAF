@@ -2,9 +2,13 @@
 //!
 //! Two credentials are accepted on the `Authorization: Bearer` header:
 //!
-//! - a console **API key** (`pwk_…`) — verified against `api_keys`, with the
-//!   key's `read` / `write` permissions deciding what the session may call.
-//!   `write` additionally requires the key's owner to be an administrator.
+//! - a console **API key** (`pwk_…`) — verified against `api_keys`. The key's
+//!   **own** `read` / `write` permissions decide what the session may call: a
+//!   key never inherits its owner's role. `write` additionally requires the
+//!   owner to be an administrator, and only such a key gets fleet-wide scope —
+//!   a `read` key (or a `write` key owned by a non-admin) is narrowed to the
+//!   sites the owner owns. Agent keys (permission `agent` only) are refused:
+//!   they are data-plane credentials and have no console surface.
 //! - a console **JWT** — the same tokens the dashboard uses; `admin` maps to
 //!   read+write, `viewer` to read-only. Beyond the signature, the account
 //!   row is re-checked on every request exactly like the REST API: disabled
@@ -41,10 +45,14 @@ pub struct McpPrincipal {
     pub key_id: Option<Uuid>,
     pub can_read: bool,
     pub can_write: bool,
-    /// Administrator accounts see every site; everyone else is restricted
-    /// to the sites they own (`site.user_id == subject`). MCP tools apply
-    /// the same narrowing as the REST handlers (2026-10-18 audit: read
-    /// tools returned every site's data to any authenticated caller).
+    /// Fleet-wide visibility: set for JWT administrators and, for API keys,
+    /// only for a key that itself carries `write` and whose owner is an
+    /// administrator. A `read` key — and any agent key, which is refused
+    /// outright — is never admin-scoped; it stays restricted to the sites it
+    /// owns (`site.user_id == subject`). MCP tools apply the same narrowing as
+    /// the REST handlers (2026-10-18 audit: read tools returned every site's
+    /// data to any authenticated caller; 2026-11-13: an enrolled agent key was
+    /// also accepted here and inherited its administrator owner's scope).
     pub is_admin: bool,
 }
 
@@ -131,6 +139,16 @@ fn map_auth_error(err: AuthError) -> McpAuthError {
 }
 
 /// Builds the principal for an API-key caller.
+///
+/// What the session may do comes from the key's **own** permission set, never
+/// from the owner's role: an API key is a delegated credential, and the fact
+/// that its owner happens to be an administrator does not make every key they
+/// minted an administrator. `is_admin` — the flag that lifts the site scope in
+/// [`crate::mcp::tools`] — is granted only to a key that carries `write` and
+/// whose owner is an administrator. This is the second line of defence behind
+/// [`crate::api::agents::enroll`] minting `agent`-only keys: a data-plane
+/// credential that leaks must not read every tenant's logs even if a future
+/// write path grants it `read`.
 fn key_principal(
     key: &api_key::Model,
     owner: &user::Model,
@@ -142,15 +160,21 @@ fn key_principal(
             "this API key has no MCP permissions; grant it read or write",
         ));
     }
+    // The only API key with fleet-wide scope: an explicit `write` grant whose
+    // owner is an administrator. Everything else is narrowed to the owner's
+    // own sites (`is_admin == false` → `visible_site_ids` returns the owned
+    // set instead of `None`).
+    let fleet_wide = has_write && owner.role == role::ADMIN;
     Ok(McpPrincipal {
         subject: owner.id,
         email: owner.email.clone(),
         label: format!("api key {} ({})", key.key_prefix, key.name),
         key_id: Some(key.id),
-        // A writer can always read; `write` keys are the broader grant.
+        // Admission above already requires `read` or `write`; a writer can
+        // always read, so every accepted key is readable.
         can_read: true,
-        can_write: has_write && owner.role == role::ADMIN,
-        is_admin: owner.role == role::ADMIN,
+        can_write: fleet_wide,
+        is_admin: fleet_wide,
     })
 }
 
@@ -260,30 +284,61 @@ mod tests {
         assert!(principal.can_read);
         assert!(!principal.can_write);
         assert!(principal.key_id.is_some());
+        // A read key is site-scoped even when its owner is an administrator:
+        // `is_admin == false` is what makes `visible_site_ids` return the
+        // owner's sites instead of `None` (all sites).
+        assert!(!principal.is_admin);
+    }
+
+    /// Regression for the enrollment key: it used to be minted with
+    /// `[agent, read]`, and `/mcp` accepted it as a console read key whose
+    /// principal inherited the (administrator) owner's fleet-wide scope. The
+    /// mint now writes `agent` only — covered by
+    /// `api::agents::tests::enroll_key_has_only_agent_permission` — and even a
+    /// legacy key with the old permission set must stay non-admin and scoped
+    /// to its owner's sites.
+    #[test]
+    fn enroll_shaped_key_is_not_admin_scoped() {
+        let owner_model = owner(role::ADMIN);
+        let principal = key_principal(
+            &key(&[permission::AGENT, permission::READ]),
+            &owner_model,
+        )
+        .unwrap();
+        assert!(principal.can_read);
+        assert!(!principal.can_write);
+        assert!(
+            !principal.is_admin,
+            "an API key must not inherit its owner's administrator scope"
+        );
+        // `visible_site_ids` branches on exactly this flag (tools.rs:62): a
+        // non-admin principal gets `Some(owned sites)`, never `None`.
+        assert_eq!(principal.subject, owner_model.id);
     }
 
     #[test]
     fn write_needs_both_the_permission_and_an_admin_owner() {
-        assert!(
+        let admin_writer =
             key_principal(&key(&[permission::WRITE]), &owner(role::ADMIN))
-                .unwrap()
-                .can_write
-        );
-        assert!(
-            !key_principal(&key(&[permission::WRITE]), &owner(role::VIEWER))
-                .unwrap()
-                .can_write
-        );
+                .unwrap();
+        assert!(admin_writer.can_write);
+        // Only an explicit `write` key owned by an administrator is fleet-wide.
+        assert!(admin_writer.is_admin);
+
+        let viewer_writer =
+            key_principal(&key(&[permission::WRITE]), &owner(role::VIEWER))
+                .unwrap();
+        assert!(!viewer_writer.can_write);
+        assert!(!viewer_writer.is_admin);
+
         // Write implies read.
-        assert!(
-            key_principal(&key(&[permission::WRITE]), &owner(role::ADMIN))
-                .unwrap()
-                .can_read
-        );
+        assert!(admin_writer.can_read);
     }
 
     #[test]
     fn agent_only_keys_are_refused() {
+        // The shape `POST /agents/enroll` mints: an agent key is a data-plane
+        // credential and has no `/mcp` surface at all.
         let err =
             key_principal(&key(&[permission::AGENT]), &owner(role::ADMIN))
                 .unwrap_err();
@@ -294,13 +349,18 @@ mod tests {
     fn roles_map_onto_capabilities() {
         let admin =
             AuthUser::new(Uuid::new_v4(), "admin@example.com", role::ADMIN);
-        assert!(jwt_principal(&admin).unwrap().can_write);
+        let admin = jwt_principal(&admin).unwrap();
+        assert!(admin.can_write);
+        // A JWT carries the account's role directly; only API keys are
+        // narrowed by their own permission set.
+        assert!(admin.is_admin);
 
         let viewer =
             AuthUser::new(Uuid::new_v4(), "v@example.com", role::VIEWER);
         let viewer = jwt_principal(&viewer).unwrap();
         assert!(viewer.can_read);
         assert!(!viewer.can_write);
+        assert!(!viewer.is_admin);
     }
 
     /// D06: the storage error used to be the 401 body, table names included.

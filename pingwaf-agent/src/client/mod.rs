@@ -78,6 +78,9 @@ pub struct LogEntry {
 type PurgeCacheFn = Box<dyn Fn(&str, &[String], &[String]) + Send + Sync>;
 
 /// How often expired dynamic IP blocks are swept from the rule cache.
+/// Consecutive batch failures before the log shipper falls back to sending
+/// entries one at a time (see `flush_or_isolate`).
+const LOG_SHIP_ISOLATION_THRESHOLD: u32 = 3;
 const BLOCK_SWEEP_INTERVAL_SECS: u64 = 60;
 
 /// How often the debounced blocked-IP disk flush runs (see
@@ -922,6 +925,7 @@ impl ControlPlaneClient {
         let mut receiver = self.log_receiver.lock().await;
         let mut batch: Vec<proto::LogEntry> =
             Vec::with_capacity(self.config.log_batch_size);
+        let mut consecutive_failures: u32 = 0;
 
         let flush_interval =
             Duration::from_secs(self.config.log_flush_interval_secs.max(1));
@@ -933,11 +937,12 @@ impl ControlPlaneClient {
             if self.shutdown_signal.load(Ordering::Relaxed) {
                 // Flush remaining logs before shutdown
                 if !batch.is_empty() {
-                    Self::flush_logs(
+                    Self::flush_or_isolate(
                         &mut client,
                         &mut batch,
                         &agent_token,
                         self.config.log_batch_size,
+                        &mut consecutive_failures,
                     )
                     .await;
                 }
@@ -954,11 +959,12 @@ impl ControlPlaneClient {
 
                             // Flush when batch is full
                             if batch.len() >= self.config.log_batch_size {
-                                Self::flush_logs(
+                                Self::flush_or_isolate(
                                     &mut client,
                                     &mut batch,
                                     &agent_token,
                                     self.config.log_batch_size,
+                                    &mut consecutive_failures,
                                 )
                                 .await;
                             }
@@ -973,11 +979,12 @@ impl ControlPlaneClient {
                 _ = interval.tick() => {
                     // Periodic flush
                     if !batch.is_empty() {
-                        Self::flush_logs(
+                        Self::flush_or_isolate(
                             &mut client,
                             &mut batch,
                             &agent_token,
                             self.config.log_batch_size,
+                            &mut consecutive_failures,
                         )
                         .await;
                     }
@@ -988,11 +995,12 @@ impl ControlPlaneClient {
                     // flight — up to one batch, so a flood cannot turn a
                     // single command into an unbounded send loop.
                     if !batch.is_empty() {
-                        Self::flush_logs(
+                        Self::flush_or_isolate(
                             &mut client,
                             &mut batch,
                             &agent_token,
                             self.config.log_batch_size,
+                            &mut consecutive_failures,
                         )
                         .await;
                     }
@@ -1014,11 +1022,12 @@ impl ControlPlaneClient {
                         }
                     }
                     if !batch.is_empty() {
-                        Self::flush_logs(
+                        Self::flush_or_isolate(
                             &mut client,
                             &mut batch,
                             &agent_token,
                             self.config.log_batch_size,
+                            &mut consecutive_failures,
                         )
                         .await;
                     }
@@ -1028,11 +1037,12 @@ impl ControlPlaneClient {
                 }
                 _ = self.wait_for_shutdown() => {
                     if !batch.is_empty() {
-                        Self::flush_logs(
+                        Self::flush_or_isolate(
                             &mut client,
                             &mut batch,
                             &agent_token,
                             self.config.log_batch_size,
+                            &mut consecutive_failures,
                         )
                         .await;
                     }
@@ -1044,15 +1054,16 @@ impl ControlPlaneClient {
         Ok(())
     }
 
-    /// Flush a batch of log entries to the server.
+    /// Flush a batch of log entries to the server. `true` when the batch was
+    /// accepted (or was empty); `false` when it must be retried.
     async fn flush_logs(
         client: &mut ProtoClient<Channel>,
         batch: &mut Vec<proto::LogEntry>,
         agent_token: &Option<Arc<String>>,
         batch_cap: usize,
-    ) {
+    ) -> bool {
         if batch.is_empty() {
-            return;
+            return true;
         }
 
         let entries = std::mem::take(batch);
@@ -1075,18 +1086,92 @@ impl ControlPlaneClient {
                         received = ack.received_count,
                         "Flushed logs to server"
                     );
+                    true
                 } else {
                     warn!(
                         error = %ack.error_message,
                         "Server rejected log batch"
                     );
+                    false
                 }
             },
             Err(e) => {
                 error!(error = %e, count, "Failed to ship logs");
                 restore_failed_batch(batch, entries, batch_cap);
+                false
             },
         }
+    }
+
+    /// Ship one entry per RPC.
+    ///
+    /// Used after a batch keeps failing: a single entry the server cannot
+    /// persist (before the server-side NUL sanitiser shipped, a binary body
+    /// did exactly this) must not block every log line behind it. Entries the
+    /// server still rejects are dropped and counted, never retried forever.
+    async fn flush_logs_individually(
+        client: &mut ProtoClient<Channel>,
+        entries: Vec<proto::LogEntry>,
+        agent_token: &Option<Arc<String>>,
+    ) -> usize {
+        let mut dropped = 0usize;
+        for entry in entries {
+            let mut request =
+                tonic::Request::new(tokio_stream::iter(vec![entry]));
+            attach_agent_token(&mut request, agent_token);
+            match client.ship_logs(request).await {
+                Ok(response) => {
+                    let ack = response.into_inner();
+                    if !ack.success {
+                        dropped += 1;
+                        warn!(
+                            error = %ack.error_message,
+                            "dropping a log entry the server rejected"
+                        );
+                    }
+                },
+                Err(e) => {
+                    dropped += 1;
+                    warn!(error = %e, "dropping an unshippable log entry");
+                },
+            }
+        }
+        dropped
+    }
+
+    /// Flush the batch; after a few consecutive failures, isolate entries.
+    ///
+    /// The batch-retry path is intentionally unbounded for transport errors
+    /// (a control plane restart must not lose logs), but one entry that can
+    /// never be persisted would otherwise head-of-line block the shipper
+    /// forever. After [`LOG_SHIP_ISOLATION_THRESHOLD`] failures the batch is
+    /// sent one entry at a time, so only the poison entry is dropped.
+    async fn flush_or_isolate(
+        client: &mut ProtoClient<Channel>,
+        batch: &mut Vec<proto::LogEntry>,
+        agent_token: &Option<Arc<String>>,
+        batch_cap: usize,
+        consecutive_failures: &mut u32,
+    ) {
+        if batch.is_empty() {
+            return;
+        }
+        if Self::flush_logs(client, batch, agent_token, batch_cap).await {
+            *consecutive_failures = 0;
+            return;
+        }
+        *consecutive_failures += 1;
+        if *consecutive_failures < LOG_SHIP_ISOLATION_THRESHOLD {
+            return;
+        }
+        let entries = std::mem::take(batch);
+        let dropped =
+            Self::flush_logs_individually(client, entries, agent_token).await;
+        error!(
+            dropped,
+            "log batch failed repeatedly; shipped entries individually"
+        );
+        *consecutive_failures = 0;
     }
 
     /// Run the certificate-event shipping loop.

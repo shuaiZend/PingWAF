@@ -22,6 +22,42 @@ use persist::{
     CacheHealth, LoadSource, CACHE_FORMAT_VERSION,
 };
 
+/// Creates the rule-cache directory owner-only (`0700`) on Unix.
+///
+/// The snapshot under it carries site TLS private keys, OIDC client secrets,
+/// ACME DNS credentials and basic-auth passwords, so the directory must not be
+/// listable or traversable by another local user. `DirBuilder::mode` only
+/// applies to directories it creates, so an existing cache directory (created
+/// by an older build with the process default, typically `0755`) is tightened
+/// explicitly. Permission failures only warn: an unusual filesystem must not
+/// stop the agent from running with a cache.
+fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)?;
+        if let Err(err) = std::fs::set_permissions(
+            dir,
+            std::fs::Permissions::from_mode(0o700),
+        ) {
+            warn!(
+                dir = %dir.display(),
+                error = %err,
+                "could not restrict cache directory permissions to 0700"
+            );
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(dir)
+    }
+}
+
 // ─────────────────────────────────────────────────────────────
 // Serializable cache types (local mirrors of proto types)
 // ─────────────────────────────────────────────────────────────
@@ -1383,8 +1419,9 @@ impl RuleCache {
             blocked_dirty: AtomicBool::new(false),
         });
 
-        // Ensure cache directory exists
-        if let Err(e) = std::fs::create_dir_all(&cache_dir) {
+        // Ensure the cache directory exists and is private to the agent's
+        // user: the snapshot it holds contains site TLS private keys.
+        if let Err(e) = create_private_dir(&cache_dir) {
             warn!(error = %e, "Failed to create cache directory, running without persistence");
         } else if let Err(e) = cache.load_from_disk() {
             // load_from_disk already logged the specific failure at the
@@ -2489,6 +2526,46 @@ impl RuleCache {
         Ok(())
     }
 
+    /// Best-effort tightening of the on-disk snapshot files to owner-only
+    /// (`0600` on Unix).
+    ///
+    /// `sites.json` (and its roll-over backup) carry site TLS private keys,
+    /// OIDC client secrets, ACME DNS credentials and basic-auth passwords;
+    /// `blocked_ips.json`/`metadata.json` are written next to them. Files
+    /// written by this build are already `0600`, but a cache written by an
+    /// older build is not, and the agent must not leave that exposure in place
+    /// across an upgrade. Failures only warn — a read-only or unusual
+    /// filesystem must not turn a usable cache into a startup failure.
+    fn harden_cache_file_permissions(&self) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            for name in [
+                "sites.json",
+                "sites.json.bak",
+                "metadata.json",
+                "metadata.json.bak",
+                "blocked_ips.json",
+            ] {
+                let path = self.cache_dir.join(name);
+                if !path.exists() {
+                    continue;
+                }
+                if let Err(err) = std::fs::set_permissions(
+                    &path,
+                    std::fs::Permissions::from_mode(0o600),
+                ) {
+                    warn!(
+                        file = %path.display(),
+                        error = %err,
+                        "could not restrict cache file permissions to 0600"
+                    );
+                }
+            }
+        }
+    }
+
     /// Load rules from disk, falling back to the `.bak` snapshot when the
     /// primary fails validation.
     ///
@@ -2497,6 +2574,11 @@ impl RuleCache {
     /// total failure warns loudly because the agent then runs on empty rules
     /// until the control plane re-pushes.
     pub fn load_from_disk(&self) -> anyhow::Result<()> {
+        // A cache written by an older build (or by hand) can be
+        // world-readable. Tighten every snapshot file before it is read so the
+        // secrets it carries are never exposed even if validation fails below.
+        self.harden_cache_file_permissions();
+
         let sites_path = self.cache_dir.join("sites.json");
         let metadata_path = self.cache_dir.join("metadata.json");
 
@@ -4502,5 +4584,118 @@ mod tests {
             meta.sites_len.unwrap()
         ));
         serde_json::from_slice::<CachedRules>(&bytes).unwrap();
+    }
+
+    /// The cache directory and every snapshot file are owner-only: the
+    /// snapshot carries site TLS private keys, OIDC client secrets, ACME DNS
+    /// credentials and basic-auth passwords.
+    #[cfg(unix)]
+    #[test]
+    fn cache_directory_and_files_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let cache_dir = dir.path().join("cache");
+        let cache =
+            RuleCache::new(cache_dir.clone(), "test".to_string()).unwrap();
+
+        let dir_mode =
+            std::fs::metadata(&cache_dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dir_mode, 0o700, "cache directory must be owner-only");
+
+        // Two persists: the second rolls the first snapshot to `sites.json.bak`.
+        cache.persist_to_disk().unwrap();
+        cache.persist_to_disk().unwrap();
+        assert!(
+            cache_dir.join("sites.json.bak").exists(),
+            "the roll-over backup must exist for the permission check"
+        );
+
+        for name in [
+            "sites.json",
+            "sites.json.bak",
+            "metadata.json",
+            "metadata.json.bak",
+            "blocked_ips.json",
+        ] {
+            let path = cache_dir.join(name);
+            if !path.exists() {
+                continue;
+            }
+            let mode =
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "{name} must be owner-only, got {mode:o}");
+        }
+    }
+
+    /// A cache written by an older build (directory `0755`, files `0644`) is
+    /// tightened the next time it is loaded.
+    #[cfg(unix)]
+    #[test]
+    fn legacy_world_readable_cache_is_hardened_on_load() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let cache_dir = dir.path().join("cache");
+        {
+            let cache =
+                RuleCache::new(cache_dir.clone(), "test".to_string()).unwrap();
+            cache.persist_to_disk().unwrap();
+            cache.persist_to_disk().unwrap();
+        }
+
+        // Simulate a snapshot produced by the previous build: the directory
+        // and every file were created with the process default (umask 022).
+        std::fs::set_permissions(
+            &cache_dir,
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        for name in [
+            "sites.json",
+            "sites.json.bak",
+            "metadata.json",
+            "metadata.json.bak",
+            "blocked_ips.json",
+        ] {
+            let path = cache_dir.join(name);
+            if path.exists() {
+                std::fs::set_permissions(
+                    &path,
+                    std::fs::Permissions::from_mode(0o644),
+                )
+                .unwrap();
+            }
+        }
+
+        let reloaded =
+            RuleCache::new(cache_dir.clone(), "test".to_string()).unwrap();
+        assert_eq!(
+            reloaded.health.status().source,
+            LoadSource::Disk,
+            "the hardened cache must still load"
+        );
+
+        let dir_mode =
+            std::fs::metadata(&cache_dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dir_mode, 0o700, "an existing cache dir must be tightened");
+        for name in [
+            "sites.json",
+            "sites.json.bak",
+            "metadata.json",
+            "metadata.json.bak",
+            "blocked_ips.json",
+        ] {
+            let path = cache_dir.join(name);
+            if !path.exists() {
+                continue;
+            }
+            let mode =
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode, 0o600,
+                "{name} must be tightened from 0644, got {mode:o}"
+            );
+        }
     }
 }

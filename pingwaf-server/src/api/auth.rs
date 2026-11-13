@@ -21,8 +21,8 @@ use crate::api::error::ApiError;
 use crate::api::state::AppState;
 use crate::auth::middleware::AuthUser;
 use crate::auth::password::{
-    hash_password, hash_password_with_cost, validate_password, verify_password,
-    DEFAULT_COST,
+    hash_password_offloaded, hash_password_with_cost, validate_password,
+    verify_password_offloaded, DEFAULT_COST,
 };
 use crate::auth::token_version_valid;
 use crate::auth::{create_refresh_token, create_token, verify_refresh_token};
@@ -232,25 +232,23 @@ async fn login(
     let Some(account) = found else {
         // Spend a bcrypt verification anyway so that the response time does not
         // reveal whether the e-mail exists. bcrypt is deliberately slow
-        // (~50-300ms): running it on the async worker pool lets a burst of
-        // logins starve every other control-plane request (2026-10-18 audit),
-        // so it runs on the blocking pool.
-        let password = payload.password.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            verify_password(&password, DUMMY_HASH.as_str())
-        })
+        // (~50-300ms), so it runs under the process-wide permit in
+        // `auth::password` rather than on an unbounded blocking task
+        // (2026-10-18/2026-11-13 audits).
+        let _ = verify_password_offloaded(
+            payload.password.clone(),
+            DUMMY_HASH.as_str().to_string(),
+        )
         .await;
         tracing::debug!(%email, "login failed: unknown account");
         return Err(ApiError::Unauthorized(INVALID_CREDENTIALS.to_string()));
     };
 
-    let password = payload.password.clone();
-    let stored_hash = account.password_hash.clone();
-    let valid = tokio::task::spawn_blocking(move || {
-        verify_password(&password, &stored_hash)
-    })
+    let valid = verify_password_offloaded(
+        payload.password.clone(),
+        account.password_hash.clone(),
+    )
     .await
-    .map_err(|err| ApiError::Internal(err.to_string()))?
     .map_err(|err| ApiError::Internal(err.to_string()))?;
     if !valid {
         tracing::debug!(%email, "login failed: wrong password");
@@ -460,6 +458,25 @@ async fn update_profile(
     if let Some(raw) = payload.email {
         let email = normalise_email(&raw)?;
         if email != old_email {
+            // Cheap check first: an address that is already taken is rejected
+            // without spending a bcrypt verification, so an authenticated
+            // caller cannot drive bcrypt work through this endpoint by racing
+            // known-taken addresses (2026-11-13 review, auth-02).
+            //
+            // Ordering note: this answers 409 before the password is checked,
+            // so an authenticated account can probe whether an address is
+            // registered. That is the same 409 the registration endpoint
+            // already returns when registration is open, and it is the price
+            // of not paying a bcrypt per probe.
+            let taken = user::Entity::find()
+                .filter(user::Column::Email.eq(email.clone()))
+                .one(&state.db)
+                .await?;
+            if taken.is_some() {
+                return Err(ApiError::Conflict(format!(
+                    "an account for {email} already exists"
+                )));
+            }
             // Changing the login name is a sensitive identity change: the
             // current password keeps a hijacked session from locking the
             // operator out, and the token bump invalidates every token whose
@@ -474,15 +491,6 @@ async fn update_profile(
                 &password_hash,
             )
             .await?;
-            let taken = user::Entity::find()
-                .filter(user::Column::Email.eq(email.clone()))
-                .one(&state.db)
-                .await?;
-            if taken.is_some() {
-                return Err(ApiError::Conflict(format!(
-                    "an account for {email} already exists"
-                )));
-            }
             active.email = Set(email.clone());
             active.token_version = Set(active.token_version.unwrap() + 1);
             tracing::info!(
@@ -508,14 +516,12 @@ async fn require_current_password(
     supplied: &str,
     stored_hash: &str,
 ) -> Result<(), ApiError> {
-    // bcrypt on the blocking pool — see the login handler for why.
-    let supplied = supplied.to_string();
-    let stored_hash = stored_hash.to_string();
-    let valid = tokio::task::spawn_blocking(move || {
-        verify_password(&supplied, &stored_hash)
-    })
+    // bcrypt under the process-wide permit (see the login handler for why).
+    let valid = verify_password_offloaded(
+        supplied.to_string(),
+        stored_hash.to_string(),
+    )
     .await
-    .map_err(|err| ApiError::Internal(err.to_string()))?
     .map_err(|err| ApiError::Internal(err.to_string()))?;
     if !valid {
         return Err(ApiError::BadRequest(
@@ -542,12 +548,9 @@ async fn change_password(
         .map_err(|err| ApiError::BadRequest(err.to_string()))?;
 
     let mut active: user::ActiveModel = account.into();
-    let new_password = payload.new_password.clone();
-    let new_hash =
-        tokio::task::spawn_blocking(move || hash_password(&new_password))
-            .await
-            .map_err(|err| ApiError::Internal(err.to_string()))?
-            .map_err(|err| ApiError::BadRequest(err.to_string()))?;
+    let new_hash = hash_password_offloaded(payload.new_password.clone())
+        .await
+        .map_err(|err| ApiError::BadRequest(err.to_string()))?;
     active.password_hash = Set(new_hash);
     // The first-login gate only demands one successful change.
     active.must_change_password = Set(false);
@@ -615,12 +618,9 @@ pub async fn create_user(
             "unknown role '{assigned_role}'"
         )));
     }
-    let password_owned = password.to_string();
-    let password_hash =
-        tokio::task::spawn_blocking(move || hash_password(&password_owned))
-            .await
-            .map_err(|err| ApiError::Internal(err.to_string()))?
-            .map_err(|err| ApiError::BadRequest(err.to_string()))?;
+    let password_hash = hash_password_offloaded(password.to_string())
+        .await
+        .map_err(|err| ApiError::BadRequest(err.to_string()))?;
     let timestamp = Utc::now();
     let active = user::ActiveModel {
         id: Set(Uuid::new_v4()),
@@ -680,6 +680,7 @@ pub(crate) fn issue_tokens(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::password::hash_password;
 
     #[test]
     fn emails_are_normalised() {

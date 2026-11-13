@@ -331,7 +331,7 @@ server-side log batch size (`500`) are compiled-in constants with no override.
 | `server_ca_cert` | string | — | PEM file with the CA that signed the control plane's TLS certificate (required for private CAs; bundled roots are used otherwise) |
 | `server_tls_name` | string | — | Name used for SNI and certificate verification when the control plane's certificate carries no SAN for the host in `server_url`. Requires 0.32.17 or newer; on older binaries, point the SAN name at the control plane via `/etc/hosts` instead |
 | `api_key` | string | `""` | Agent authentication key (empty = auto-register over loopback in all-in-one) |
-| `cache_dir` | string | `./data/cache` (`--cache-dir`); the compiled-in struct default is `/var/lib/pingwaf/cache` and applies when the key is absent from the file | Local rule cache directory |
+| `cache_dir` | string | `./data/cache` (`--cache-dir`); the compiled-in struct default is `/var/lib/pingwaf/cache` and applies when the key is absent from the file | Local rule cache directory. On Unix the directory is `0700` and the snapshot files are `0600` (an older world-readable cache is tightened on load): the snapshot carries site TLS private keys, OIDC secrets and ACME credentials |
 | `fail_open` | bool | `true` | Local fallback while disconnected: `true` keeps serving with the last synced rules; `false` answers 503 for hosts without synced rules. The per-site failover policy (console → site → basic) and the control-plane-wide default (settings → defense) take precedence once synced |
 | `heartbeat_interval_secs` | int | `30` | Fallback heartbeat frequency, used only when the control plane hands no interval down at registration |
 | `log_batch_size` | int | `100` | Log entries before flush |

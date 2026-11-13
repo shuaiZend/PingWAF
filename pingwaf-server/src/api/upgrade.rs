@@ -28,9 +28,10 @@ use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
 
 use crate::api::error::ApiError;
+use crate::api::keys::key_allows_agent;
 use crate::api::state::AppState;
 use crate::auth::jwt::verify_agent_token;
-use crate::models::agent;
+use crate::models::{agent, api_key};
 
 /// Routes contributed to `/api/v1`.
 ///
@@ -127,14 +128,31 @@ async fn authorize(
     let agent_id = claims.subject_id().map_err(|_| {
         ApiError::Unauthorized("invalid agent token".to_string())
     })?;
-    let exists = agent::Entity::find_by_id(agent_id)
+    // The upgrade artifact is a binary: re-check the key on every download,
+    // not just that the agent row exists. Deleting the key must revoke the
+    // upgrade channel immediately (2026-11-13 audit, server-grpc-control-02).
+    let row = agent::Entity::find_by_id(agent_id)
         .one(&state.db)
         .await
         .map_err(ApiError::from)?
-        .is_some();
-    if !exists {
+        .ok_or_else(|| {
+            ApiError::Unauthorized("agent is no longer registered".to_string())
+        })?;
+    let Some(key_id) = row.api_key_id else {
         return Err(ApiError::Unauthorized(
-            "agent is no longer registered".to_string(),
+            "the agent API key was revoked".to_string(),
+        ));
+    };
+    let key = api_key::Entity::find_by_id(key_id)
+        .one(&state.db)
+        .await
+        .map_err(ApiError::from)?
+        .ok_or_else(|| {
+            ApiError::Unauthorized("the agent API key was revoked".to_string())
+        })?;
+    if !key_allows_agent(&key) {
+        return Err(ApiError::Forbidden(
+            "this API key may no longer act as an agent".to_string(),
         ));
     }
     Ok(())

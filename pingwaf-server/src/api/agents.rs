@@ -252,6 +252,20 @@ pub fn routes() -> Router<AppState> {
         .route("/agents/flush-logs", post(flush_logs))
 }
 
+/// Permissions of the key an enrollment mints.
+///
+/// Only `agent`, deliberately: the token is pasted into the install command,
+/// copied to the edge host and kept in its config, so it is the credential most
+/// likely to leak. `agent` covers registration, heartbeats and log shipping;
+/// anything more would hand the edge a control-plane credential. In particular
+/// `read` must not be added: `/mcp` accepts a `read` key as a console read
+/// grant, and the enrollment owner is always an administrator (see
+/// [`crate::mcp::auth`] for the scope narrowing that is the second line of
+/// defence).
+fn enroll_key_permissions() -> Vec<String> {
+    vec![permission::AGENT.to_string()]
+}
+
 /// `POST /api/v1/agents/enroll` — mints an agent key and returns the command
 /// line that installs and starts a node with it.
 ///
@@ -274,14 +288,9 @@ async fn enroll(
         ));
     }
 
-    let (model, token) = mint_key(
-        &state,
-        current.id,
-        name,
-        vec![permission::AGENT.to_string(), permission::READ.to_string()],
-        None,
-    )
-    .await?;
+    let (model, token) =
+        mint_key(&state, current.id, name, enroll_key_permissions(), None)
+            .await?;
 
     let server_url = agent_server_url(&state, &headers);
     let install_command = format!(
@@ -976,6 +985,21 @@ mod tests {
             reason: None,
             graceful: true,
         }
+    }
+
+    /// The enrollment key is handed to the edge node (install command, agent
+    /// config, shell history, `ps`), so it must carry `agent` and nothing else.
+    /// A `read` bit here used to turn the data-plane credential into a console
+    /// read grant through `/mcp` (see `mcp::auth::key_principal`).
+    #[test]
+    fn enroll_key_has_only_agent_permission() {
+        assert_eq!(
+            vec![permission::AGENT.to_string()],
+            enroll_key_permissions()
+        );
+        // Not empty either: `key_allows_agent` treats an empty permission set
+        // as an agent key, but an explicit `agent` is what the mint writes.
+        assert!(!enroll_key_permissions().is_empty());
     }
 
     #[test]

@@ -570,28 +570,30 @@ impl ControlPlaneTrait for ControlPlaneService {
             Status::invalid_argument("heartbeat stream closed immediately")
         })?;
 
-        let claims =
-            verify_agent_token(&first.agent_token, &self.config.jwt_secret)
-                .map_err(|err| Status::unauthenticated(err.to_string()))?;
-        let agent_id = claims
-            .subject_id()
-            .map_err(|_| Status::unauthenticated(INVALID_CREDENTIALS))?;
+        // Reuse `authorize()`: it re-checks the API key on every connection,
+        // so deleting the key also revokes the heartbeat command channel
+        // (2026-11-13 audit, server-grpc-control-02). The previous shape only
+        // verified the JWT and that the agent row still existed, so a revoked
+        // edge kept its command channel for the token's 30-day lifetime.
+        let row = self.authorize(&first.agent_token).await?;
+        let agent_id = row.id;
         if !first.agent_id.is_empty() && first.agent_id != agent_id.to_string()
         {
             return Err(Status::permission_denied(
                 "agent_id does not match the presented token",
             ));
         }
-        if agent::Entity::find_by_id(agent_id)
-            .one(&self.db)
-            .await
-            .map_err(db_status)?
-            .is_none()
-        {
-            return Err(Status::unauthenticated(
-                "agent is no longer registered",
-            ));
-        }
+        // Heartbeat writes certificate state and cache/block counters: an
+        // entry stamped with a site this agent does not serve must be dropped
+        // (2026-11-13 audit, server-grpc-control-03).
+        let visible: Vec<Uuid> = self
+            .visible_sites(&row)
+            .await?
+            .iter()
+            .map(|site| site.id)
+            .collect();
+        let mut first = first;
+        filter_heartbeat_sites(&mut first, &visible);
 
         let (sender, receiver) =
             mpsc::channel::<ServerCommand>(COMMAND_CHANNEL_CAPACITY);
@@ -626,7 +628,7 @@ impl ControlPlaneTrait for ControlPlaneService {
             )
             .await;
             record_upstream_health(&db, agent_id, &first.upstream_health).await;
-            while let Some(message) = match inbound.message().await {
+            while let Some(mut message) = match inbound.message().await {
                 Ok(Some(message)) => Some(message),
                 Ok(None) => None,
                 Err(err) => {
@@ -634,6 +636,7 @@ impl ControlPlaneTrait for ControlPlaneService {
                     None
                 },
             } {
+                filter_heartbeat_sites(&mut message, &visible);
                 cache_status
                     .record_heartbeat(agent_id, &message.site_statuses)
                     .await;
@@ -790,7 +793,7 @@ impl ControlPlaneTrait for ControlPlaneService {
         let mut batch_bytes: usize = 0;
 
         loop {
-            let message = match inbound.message().await {
+            let mut message = match inbound.message().await {
                 Ok(Some(message)) => message,
                 Ok(None) => break,
                 Err(err) => {
@@ -802,6 +805,11 @@ impl ControlPlaneTrait for ControlPlaneService {
                     }));
                 },
             };
+            // NUL bytes in a body/header are legal on the wire but not in
+            // PostgreSQL/Elasticsearch: strip them before any field is used,
+            // or one bad entry fails the whole batch forever (2026-11-13).
+            sanitize_log_entry(&mut message);
+            let now = Utc::now();
             if !message.agent_id.is_empty()
                 && message.agent_id != authenticated_id.to_string()
             {
@@ -834,7 +842,10 @@ impl ControlPlaneTrait for ControlPlaneService {
 
             let site_id = parse_optional_uuid(&message.site_id);
             let agent_id = parse_optional_uuid(&message.agent_id);
-            let timestamp = from_timestamp(message.timestamp.as_ref());
+            let timestamp = clamp_log_timestamp(
+                from_timestamp(message.timestamp.as_ref()),
+                now,
+            );
             let waf_event = is_waf_event(&message);
 
             // WAF-decision entries are routed to `security_events` only: the
@@ -958,7 +969,7 @@ impl ControlPlaneTrait for ControlPlaneService {
             Vec::with_capacity(batch_size);
 
         loop {
-            let message = match inbound.message().await {
+            let mut message = match inbound.message().await {
                 Ok(Some(message)) => message,
                 Ok(None) => break,
                 Err(err) => {
@@ -974,6 +985,8 @@ impl ControlPlaneTrait for ControlPlaneService {
                     }));
                 },
             };
+            sanitize_cert_event(&mut message);
+            let now = Utc::now();
             if !message.agent_id.is_empty()
                 && message.agent_id != authenticated_id.to_string()
             {
@@ -1054,7 +1067,10 @@ impl ControlPlaneTrait for ControlPlaneService {
                     "target": message.target,
                     "agent_id": message.agent_id,
                 }))),
-                created_at: Set(from_timestamp(message.timestamp.as_ref())),
+                created_at: Set(clamp_log_timestamp(
+                    from_timestamp(message.timestamp.as_ref()),
+                    now,
+                )),
             });
             if batch.len() >= batch_size {
                 flush_cert_events(&self.db, &mut batch).await?;
@@ -2659,6 +2675,123 @@ fn access_log_row(
     }
 }
 
+/// Removes U+0000 from a string bound for PostgreSQL or Elasticsearch.
+///
+/// PostgreSQL TEXT/JSONB cannot store NUL, and Elasticsearch/Lucene cannot
+/// index it. A request body or header carrying a NUL byte (binary uploads,
+/// gzip payloads) used to make the whole log batch fail; the agent then
+/// retried that batch forever and stalled every site's log pipeline
+/// (2026-11-13 incident).
+fn strip_nul(value: &str) -> String {
+    if value.contains('\0') {
+        value.replace('\0', "")
+    } else {
+        value.to_string()
+    }
+}
+
+fn clean_string(value: &mut String) {
+    if value.as_bytes().contains(&0) {
+        value.retain(|ch| ch != '\0');
+    }
+}
+
+fn clean_map(map: &mut HashMap<String, String>) {
+    if !map
+        .iter()
+        .any(|(key, value)| key.contains('\0') || value.contains('\0'))
+    {
+        return;
+    }
+    *map = std::mem::take(map)
+        .into_iter()
+        .map(|(key, value)| (strip_nul(&key), strip_nul(&value)))
+        .collect();
+}
+
+fn clean_bytes(bytes: &mut Vec<u8>) {
+    if bytes.contains(&0) {
+        bytes.retain(|byte| *byte != 0);
+    }
+}
+
+/// Strips NUL bytes from every field the log sinks persist.
+fn sanitize_log_entry(entry: &mut LogEntry) {
+    for value in [
+        &mut entry.agent_id,
+        &mut entry.site_id,
+        &mut entry.request_id,
+        &mut entry.client_ip,
+        &mut entry.method,
+        &mut entry.scheme,
+        &mut entry.host,
+        &mut entry.path,
+        &mut entry.query_string,
+        &mut entry.protocol,
+        &mut entry.upstream_addr,
+        &mut entry.waf_action,
+        &mut entry.waf_rule_id,
+        &mut entry.waf_details,
+        &mut entry.waf_rule_name,
+        &mut entry.waf_event_type,
+        &mut entry.waf_enforced_rule_id,
+        &mut entry.user_identity,
+        &mut entry.cache_status,
+        &mut entry.tls_version,
+        &mut entry.ja3_hash,
+        &mut entry.country_code,
+        &mut entry.city,
+        &mut entry.user_agent,
+        &mut entry.referer,
+    ] {
+        clean_string(value);
+    }
+    for tag in &mut entry.waf_matched_tags {
+        clean_string(tag);
+    }
+    clean_map(&mut entry.request_headers);
+    clean_map(&mut entry.response_headers);
+    clean_bytes(&mut entry.request_body);
+    clean_bytes(&mut entry.response_body);
+}
+
+/// The same treatment for certificate-event text, which shares the TEXT
+/// columns and the same batch-retry path.
+fn sanitize_cert_event(entry: &mut CertEventEntry) {
+    for value in [
+        &mut entry.agent_id,
+        &mut entry.site_id,
+        &mut entry.certificate_id,
+        &mut entry.event_type,
+        &mut entry.level,
+        &mut entry.target,
+        &mut entry.message,
+    ] {
+        clean_string(value);
+    }
+}
+
+/// Clamps an agent-supplied log timestamp into the retention window.
+///
+/// Timestamps come from the agent's own clock: a row dated in the future is
+/// never pruned (`timestamp < cutoff` is always false) and pins the log list;
+/// one dated before the retention window is deleted on the next sweep, which
+/// destroys audit evidence. The same clamp already existed for host samples
+/// and metrics; the log path was the hole (2026-11-13 audit, db-models-01).
+fn clamp_log_timestamp(
+    timestamp: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> DateTime<Utc> {
+    const MAX_LOG_CLOCK_SKEW_DAYS: i64 = 180;
+    if timestamp <= now
+        && timestamp > now - chrono::Duration::days(MAX_LOG_CLOCK_SKEW_DAYS)
+    {
+        timestamp
+    } else {
+        now
+    }
+}
+
 /// Lossily decodes a body prefix kept for the PostgreSQL row. The agent
 /// already caps the payload at its configured limit; this is a defensive
 /// second cap for older or misconfigured agents.
@@ -2668,7 +2801,7 @@ fn body_text(body: &[u8]) -> Option<String> {
         return None;
     }
     let capped = &body[..body.len().min(MAX_STORED_BODY)];
-    Some(String::from_utf8_lossy(capped).into_owned())
+    Some(strip_nul(&String::from_utf8_lossy(capped)))
 }
 
 /// True when the entry carries a WAF decision and belongs in
@@ -2954,7 +3087,7 @@ fn headers_json(
     let map = headers
         .iter()
         .map(|(key, value)| {
-            (key.clone(), serde_json::Value::String(value.clone()))
+            (strip_nul(key), serde_json::Value::String(strip_nul(value)))
         })
         .collect::<serde_json::Map<String, serde_json::Value>>();
     Some(serde_json::Value::Object(map))
@@ -3023,6 +3156,31 @@ fn site_stamp_is_visible(stamped: &str, visible: &[Uuid]) -> bool {
     }
 }
 
+/// Drops heartbeat entries stamped with a site the reporting agent does not
+/// serve (D10).
+///
+/// The heartbeat path writes certificate status/expiry, cache counters and
+/// the blocked-IP mirror, so an unfiltered `site_id` let a compromised edge
+/// rewrite another tenant's view (2026-11-13 audit, server-grpc-control-03).
+fn filter_heartbeat_sites(heartbeat: &mut AgentHeartbeat, visible: &[Uuid]) {
+    let statuses_before = heartbeat.site_statuses.len();
+    heartbeat
+        .site_statuses
+        .retain(|status| site_stamp_is_visible(&status.site_id, visible));
+    let blocked_before = heartbeat.blocked_ips.len();
+    heartbeat
+        .blocked_ips
+        .retain(|blocked| site_stamp_is_visible(&blocked.site_id, visible));
+    let dropped = (statuses_before - heartbeat.site_statuses.len())
+        + (blocked_before - heartbeat.blocked_ips.len());
+    if dropped > 0 {
+        tracing::warn!(
+            dropped,
+            "heartbeat entries stamped with sites this agent does not serve"
+        );
+    }
+}
+
 fn parse_optional_uuid(raw: &str) -> Option<Uuid> {
     let raw = raw.trim();
     if raw.is_empty() {
@@ -3039,6 +3197,7 @@ fn parse_optional_uuid(raw: &str) -> Option<Uuid> {
 
 /// Blank protocol strings become SQL NULLs.
 fn optional(value: &str) -> Option<String> {
+    let value = strip_nul(value);
     let trimmed = value.trim();
     if trimmed.is_empty() {
         None
@@ -3049,6 +3208,7 @@ fn optional(value: &str) -> Option<String> {
 
 /// Same as [`optional`] but bounded by a column width.
 fn truncate(value: &str, max: usize) -> Option<String> {
+    let value = strip_nul(value);
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return None;
@@ -3402,6 +3562,54 @@ mod tests {
             .unwrap()
             .expect("a truncated value is still stored");
         assert_eq!(MAX_USER_IDENTITY, stored.chars().count());
+    }
+
+    /// Regression (2026-11-13 incident): a NUL byte in a logged body/header
+    /// used to fail the whole PostgreSQL batch, and the agent retried that
+    /// batch forever — stalling every site's log/security-event pipeline.
+    #[test]
+    fn nul_bytes_are_stripped_from_log_fields() {
+        let mut entry = LogEntry {
+            request_id: "req\0id".into(),
+            waf_details: "details\0here".into(),
+            request_body: b"body\0with\0nul".to_vec(),
+            response_body: b"resp\0onse".to_vec(),
+            request_headers: HashMap::from([(
+                "x\0key".to_string(),
+                "va\0lue".to_string(),
+            )]),
+            waf_matched_tags: vec!["tag\0one".into()],
+            ..Default::default()
+        };
+        sanitize_log_entry(&mut entry);
+        assert_eq!(entry.request_id, "reqid");
+        assert_eq!(entry.waf_details, "detailshere");
+        assert_eq!(entry.request_body, b"bodywithnul".to_vec());
+        assert_eq!(entry.response_body, b"response".to_vec());
+        assert_eq!(entry.request_headers.len(), 1);
+        assert!(entry.request_headers.contains_key("xkey"));
+        assert_eq!(entry.request_headers["xkey"], "value");
+        assert_eq!(entry.waf_matched_tags, vec!["tagone".to_string()]);
+
+        // The TEXT column conversion applies the same rule.
+        assert_eq!(body_text(b"a\0b"), Some("ab".to_string()));
+        assert_eq!(optional(" a\0b "), Some("ab".to_string()));
+        assert_eq!(truncate("a\0b", 10), Some("ab".to_string()));
+    }
+
+    /// Regression (2026-11-13 audit, db-models-01): a timestamp from the
+    /// agent's own clock must be clamped into the retention window, or a
+    /// future-dated row is never pruned and an ancient one is deleted on the
+    /// next sweep.
+    #[test]
+    fn log_timestamp_is_clamped_to_the_retention_window() {
+        let now = Utc::now();
+        let recent = now - chrono::Duration::hours(1);
+        assert_eq!(clamp_log_timestamp(recent, now), recent);
+        let future = now + chrono::Duration::days(1);
+        assert_eq!(clamp_log_timestamp(future, now), now);
+        let ancient = now - chrono::Duration::days(200);
+        assert_eq!(clamp_log_timestamp(ancient, now), now);
     }
 
     #[test]

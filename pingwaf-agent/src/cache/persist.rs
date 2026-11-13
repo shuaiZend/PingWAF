@@ -53,8 +53,12 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
         dir.join(format!(".{file_name}.tmp.{}.{seq}", std::process::id()));
 
     let result = (|| -> anyhow::Result<()> {
-        let mut file = std::fs::File::create(&tmp)
+        let mut file = create_temp_file(&tmp)
             .with_context(|| format!("creating temp file {:?}", tmp))?;
+        // `open(2)` applies the process umask to the mode bits; re-assert the
+        // private mode so a permissive umask can never widen it and a
+        // restrictive one can never leave the file unusable.
+        ensure_private_mode(&tmp);
         file.write_all(bytes)
             .with_context(|| format!("writing temp file {:?}", tmp))?;
         file.sync_all()
@@ -62,6 +66,10 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
         drop(file);
         std::fs::rename(&tmp, path)
             .with_context(|| format!("renaming {:?} to {:?}", tmp, path))?;
+        // The rename carries the temp file's mode over; assert it on the
+        // destination as well so a pre-existing world-readable cache file is
+        // replaced by a private one even if the temp mode was not honoured.
+        ensure_private_mode(path);
         Ok(())
     })();
 
@@ -89,6 +97,73 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
 
     Ok(())
 }
+
+/// Mode every cache file is created and kept with on Unix: owner read/write
+/// only.
+///
+/// The rule snapshot carries site TLS private keys, OIDC client secrets, ACME
+/// DNS credentials and basic-auth passwords, so no other local user may read
+/// it (nor list the directory, see [`super::RuleCache::new`]).
+#[cfg(unix)]
+const PRIVATE_FILE_MODE: u32 = 0o600;
+
+/// Creates the temp file owner-only (`0600`) on Unix.
+///
+/// `create_new` never follows a symlink planted at the temp path and never
+/// truncates an existing file in place. A stale temp file left by a crashed
+/// process (the name embeds the pid, which the OS may recycle after a reboot)
+/// is removed and the creation retried once; any other error is reported as
+/// usual.
+#[cfg(unix)]
+fn create_temp_file(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let open = || {
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(PRIVATE_FILE_MODE)
+            .open(path)
+    };
+    match open() {
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            let _ = std::fs::remove_file(path);
+            open()
+        },
+        other => other,
+    }
+}
+
+/// Non-Unix fallback: there are no POSIX mode bits to enforce, so keep the
+/// historical behaviour (the file inherits the agent account's ACLs).
+#[cfg(not(unix))]
+fn create_temp_file(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::create(path)
+}
+
+/// Best-effort `chmod 0600` on Unix; a failure only warns.
+///
+/// The temp file is already created with the private mode, so a filesystem
+/// that rejects `chmod` (or a read-only oddity) must not turn a successful
+/// cache write into a startup failure.
+#[cfg(unix)]
+fn ensure_private_mode(path: &Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+    if let Err(err) = std::fs::set_permissions(
+        path,
+        std::fs::Permissions::from_mode(PRIVATE_FILE_MODE),
+    ) {
+        tracing::warn!(
+            file = %path.display(),
+            error = %err,
+            "could not restrict cache file permissions to 0600"
+        );
+    }
+}
+
+#[cfg(not(unix))]
+fn ensure_private_mode(_path: &Path) {}
 
 /// Returns an error when the metadata stamps a format this build cannot read.
 pub fn check_format_version(stamped: u32) -> Result<(), String> {
@@ -236,6 +311,32 @@ mod tests {
         write_atomic(&path, b"second").unwrap();
 
         assert_eq!(std::fs::read(&path).unwrap(), b"second");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_creates_owner_only_file() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sites.json");
+
+        write_atomic(&path, b"{\"private\":true}").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "cache files carry secrets and must be owner-only"
+        );
+
+        // Rewriting over a world-readable file must restore the private mode,
+        // not inherit it: rename replaces the inode, and the destination mode
+        // is re-asserted afterwards.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+        write_atomic(&path, b"{\"private\":true}").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "a rewrite must stay owner-only");
     }
 
     #[test]

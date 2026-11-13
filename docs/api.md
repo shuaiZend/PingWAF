@@ -5479,13 +5479,16 @@ receive JSON responses; `GET` and `DELETE` answer `405` so probing clients
 fall back to POST. The endpoint is stateless — no `Mcp-Session-Id` is issued.
 
 Authentication reuses the console credentials: `Authorization: Bearer` with
-either a `pwk_…` API key or a user JWT. A key needs the `read` permission (and
-its owner must be an administrator) to be accepted at all; the write tools
-additionally require the `write` permission on the key. Revoked or disabled
-keys are rejected. JWT sessions run through the same account checks as the
-REST API — disabled accounts and stale tokens (superseded by a newer sign-in)
-are refused, and an account that must change its password at next sign-in is
-rejected outright since MCP offers no way to complete that flow.
+either a `pwk_…` API key or a user JWT. A key needs the `read` or `write`
+permission to be accepted at all; the write tools additionally require the
+`write` permission on the key. A key is fleet-wide (all sites, including the
+admin-only tools) only when it carries `write` **and** its owner is an
+administrator — a read-only key, including the read permission an agent
+enrolment key used to carry, only sees the sites its owner owns. Revoked or
+disabled keys are rejected. JWT sessions run through the same account checks
+as the REST API — disabled accounts and stale tokens (superseded by a newer
+sign-in) are refused, and an account that must change its password at next
+sign-in is rejected outright since MCP offers no way to complete that flow.
 
 The endpoint sits outside the REST credential rate limiter, so it is capped
 for abuse resistance instead: a JSON-RPC batch may contain at most 16 calls
