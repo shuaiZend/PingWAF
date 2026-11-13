@@ -1228,6 +1228,7 @@ mod tests {
     async fn test_configs_api_never_skips_auth() {
         let file = tempfile::NamedTempFile::with_suffix(".toml").unwrap();
         try_init_config_manager(&file.path().to_string_lossy()).unwrap();
+        // spellchecker:off
         let admin = AdminServe::try_from(
             &toml::from_str::<PluginConf>(
                 r#"
@@ -1239,6 +1240,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
+        // spellchecker:on
 
         // A leading `//` survives request-target parsing and, after the admin
         // prefix is stripped, is re-parsed as the `/configs` route. These are
