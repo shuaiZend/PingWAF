@@ -10,6 +10,8 @@ verbatim for reference and attribution, and is not maintained here.
 
 ## [Unreleased]
 
+## [PingWAF 0.32.27] — 2026-11-13
+
 ### Fixed
 
 - **A NUL byte in a logged request body or header no longer stalls the log
