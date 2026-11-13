@@ -10,6 +10,8 @@ verbatim for reference and attribution, and is not maintained here.
 
 ## [Unreleased]
 
+## [PingWAF 0.32.26] — 2026-11-13
+
 ### Fixed
 
 - **A multi-byte passkey label no longer aborts the control plane.** The
