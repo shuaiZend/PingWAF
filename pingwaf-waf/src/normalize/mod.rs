@@ -712,12 +712,17 @@ fn parse_query<'a>(
     }
     if let Some(tail) = pairs.next() {
         // The tail past the parameter cap is still request input: scan it as
-        // one blob instead of dropping it.
+        // one blob instead of dropping it. Decode it like any other value —
+        // the raw form would hide a percent-encoded payload from the
+        // detectors (2026-11-13 audit follow-up).
         truncation.query_params = true;
         decoded_values.push(DecodedValue {
             source: ValueSource::QueryParam,
             name: String::new(),
-            decoded: Cow::Owned(tail.to_string()),
+            decoded: Cow::Owned(
+                decode_value_form(tail, max_decode_layers, decode_escapes)
+                    .into_owned(),
+            ),
             field: false,
         });
     }
@@ -824,7 +829,10 @@ fn parse_form_body(
         decoded_values.push(DecodedValue {
             source: ValueSource::Body,
             name: String::new(),
-            decoded: Cow::Owned(tail.to_string()),
+            decoded: Cow::Owned(
+                decode_value_form(tail, max_decode_layers, decode_escapes)
+                    .into_owned(),
+            ),
             field: false,
         });
     }
@@ -1713,7 +1721,9 @@ mod tests {
             .map(|i| format!("k{i}=v"))
             .collect::<Vec<_>>()
             .join("&");
-        query.push_str("&q=1' OR 1=1--");
+        // Percent-encoded on purpose: the tail blob must be decoded, or an
+        // attacker who pads past the cap hides the payload from the engine.
+        query.push_str("&q=%27+OR+1%3D1--");
         let req = normalize_request("GET", "/", &query, &[], None, 3, false);
         assert!(req.truncation.query_params);
         assert!(req

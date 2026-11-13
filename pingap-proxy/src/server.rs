@@ -1092,14 +1092,8 @@ impl Server {
                 Some(original_uri);
         }
 
-        if self
-            .handle_request_plugin(PluginStep::Request, session, ctx)
-            .await?
-        {
-            return Ok(true);
-        }
-
-        Ok(false)
+        self.handle_request_plugin(PluginStep::Request, session, ctx)
+            .await
     }
 }
 
@@ -1981,10 +1975,7 @@ impl ProxyHttp for Server {
             .handle_request_plugin(PluginStep::ProxyUpstream, session, ctx)
             .await?;
 
-        if done {
-            return Ok(false);
-        }
-        Ok(true)
+        Ok(!done)
     }
 
     /// Selects and configures the upstream peer to proxy to.

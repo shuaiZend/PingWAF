@@ -236,13 +236,15 @@ pub struct WafEngineConfig {
     /// unlike managed rules, a custom rule's id never starts with
     /// `PINGWAF-`, so membership here is the only downgrade source.
     pub monitor_custom_rules: std::collections::HashSet<String>,
-    /// Soft wall-clock ceiling for one inspection.
+    /// Soft wall-clock ceiling for one inspection; **disabled by default**.
     ///
-    /// Deep detection stops when it is exceeded and the verdict carries
-    /// `request=deadline`; the data plane treats that like a truncation
-    /// (event, and a rejection under the truncation policy). This is a safety
-    /// valve on top of the per-request caps, not the primary bound: normal
-    /// requests finish far below it. Zero disables the check.
+    /// When enabled, deep detection stops if it is exceeded and the verdict
+    /// carries `request=deadline`; the data plane treats that like a
+    /// truncation (event, and a rejection under the truncation policy). It is
+    /// a safety valve on top of the per-request caps, not the primary bound,
+    /// and it is opt-in because a wall-clock limit makes verdicts depend on
+    /// scheduler load: on a busy host it can skip Stage-1 detection for a
+    /// request that would otherwise block. Zero (the default) disables it.
     pub inspection_deadline: Duration,
 }
 
@@ -263,7 +265,7 @@ impl Default for WafEngineConfig {
             monitor_managed_rules: std::collections::HashSet::new(),
             disabled_managed_rules: std::collections::HashSet::new(),
             monitor_custom_rules: std::collections::HashSet::new(),
-            inspection_deadline: Duration::from_millis(20),
+            inspection_deadline: Duration::ZERO,
         }
     }
 }
@@ -1619,12 +1621,6 @@ impl WafEngine {
         let mut enforced_block: Option<String> = None;
         let mut enforced_challenge: Option<String> = None;
         for rule in &self.rules {
-            if inspection_deadline
-                .is_some_and(|deadline| Instant::now() >= deadline)
-            {
-                deadline_hit = true;
-                break;
-            }
             if !rule.enabled || rule.action == RuleAction::Allow {
                 continue;
             }
@@ -1742,9 +1738,6 @@ impl WafEngine {
             Some(WafAction::Challenge) => enforced_challenge,
             _ => None,
         };
-        if deadline_hit {
-            append_inspection_note(&mut inspection_note, "request=deadline");
-        }
         let mut details = self.details_from(&recs, &rule_recs);
         if let Some(note) = inspection_note.as_deref() {
             details.push(note.to_string());

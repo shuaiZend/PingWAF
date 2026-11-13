@@ -1193,14 +1193,21 @@ mod tests {
             admin.auth_validate(&req)
         };
 
-        // Genuine static assets of the login UI load without auth.
-        assert_eq!(true, auth_skipped("/"));
-        assert_eq!(true, auth_skipped("/index.html"));
-        assert_eq!(true, auth_skipped("/favicon.svg"));
-        let asset = AdminAsset::iter()
-            .find(|path| path.starts_with("assets/"))
-            .expect("the embedded bundle ships assets");
-        assert_eq!(true, auth_skipped(&format!("/{asset}")));
+        // Genuine static assets of the login UI load without auth. The
+        // dashboard bundle is a build artifact: CI's Rust job does not build
+        // it, so only the tracked `dist/README.md` is embedded there. Assert
+        // the login page when it exists, and always exercise a real embedded
+        // file so the positive path is covered in both environments.
+        assert_eq!(true, auth_skipped("/README.md"));
+        if AdminAsset::get("index.html").is_some() {
+            assert_eq!(true, auth_skipped("/"));
+            assert_eq!(true, auth_skipped("/index.html"));
+        }
+        if let Some(asset) =
+            AdminAsset::iter().find(|path| path.starts_with("assets/"))
+        {
+            assert_eq!(true, auth_skipped(&format!("/{asset}")));
+        }
 
         // Regression (2026-11-13 audit, P0): the `/configs` API must require
         // auth even when the path carries a static-looking extension. The old

@@ -74,9 +74,9 @@ verbatim for reference and attribution, and is not maintained here.
   zero-cost bypass. Typed body fields now keep full severity; only
   unstructured body blobs and reflected meta headers stay weak. The new
   `truncated_body_policy` (`monitor` default, `reject` optional) turns a
-  truncated scan surface into a `413`, and deep detection now has a 20 ms soft
-  deadline that reports `request=deadline` (`body_scan_deadline`) instead of
-  silently passing a request it did not finish.
+  truncated scan surface into a `413`. An optional soft inspection deadline
+  (off by default) reports `request=deadline` (`body_scan_deadline`) instead
+  of silently passing a request it did not finish.
 
 ## [PingWAF 0.32.25] — 2026-11-12
 
