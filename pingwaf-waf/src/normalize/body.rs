@@ -39,6 +39,26 @@ use crate::normalize::url::bytes_to_scannable;
 /// *ours* and not the attacker's.
 pub const MAX_DECOMPRESSED_BODY: usize = 1024 * 1024;
 
+/// Largest expansion accepted for a compressed body: 100:1.
+///
+/// A form post compresses far below this; a 1.5 KiB body expanding to 1 MiB
+/// is an amplification attack, not a request. Stopping at the ratio keeps
+/// the per-request scan work proportional to what the client sent — the
+/// 2026-11-13 audit used exactly that shape to allocate ~80 MB from a 1.5 KiB
+/// gzip body.
+const MAX_EXPANSION_RATIO: usize = 100;
+/// Bodies smaller than this are never ratio-limited: a tiny input's "ratio"
+/// says nothing about intent, and 64 KiB is the default staging cap anyway.
+const MIN_EXPANSION_FLOOR: usize = 64 * 1024;
+
+/// Decompression ceiling for one body, bounded by both the ratio and the
+/// absolute cap.
+fn decompression_cap(input_len: usize) -> usize {
+    input_len
+        .saturating_mul(MAX_EXPANSION_RATIO)
+        .clamp(MIN_EXPANSION_FLOOR, MAX_DECOMPRESSED_BODY)
+}
+
 /// What fraction of the request body actually reached the detectors.
 ///
 /// A body that was not inspected must never look like a clean pass: the
@@ -63,6 +83,9 @@ pub enum PrefixReason {
     /// [`MAX_DECOMPRESSED_BODY`] was reached while undoing
     /// `Content-Encoding`.
     DecompressedCap,
+    /// The decompressed body exceeded [`MAX_EXPANSION_RATIO`] times the wire
+    /// size. The prefix is still scanned; the rest is an amplification bomb.
+    ExpansionRatio,
 }
 
 impl BodyInspection {
@@ -115,11 +138,15 @@ pub fn decode_body<'a>(
         });
     }
     if let Some(decoded) = decompress(headers, body) {
-        let truncated = decoded.len() >= MAX_DECOMPRESSED_BODY;
+        let cap = decompression_cap(body.len());
         // Charset applies to the decoded octets, not the wire bytes, so the
         // `Content-Encoding` layer is undone first (RFC 9110).
         let decoded =
             transcode_to_utf8(content_type, &decoded).unwrap_or(decoded);
+        // Judge the cap on the bytes actually handed to the detectors: a
+        // UTF-16-to-UTF-8 transcode can grow the buffer past the decoder cap.
+        let decoded_len = decoded.len();
+        let truncated = decoded_len >= cap;
         // `String::from_utf8` consumes the Vec without copying when the bytes
         // are valid UTF-8, which is the normal JSON/form case.
         let text = match String::from_utf8(decoded) {
@@ -128,8 +155,12 @@ pub fn decode_body<'a>(
         };
         let inspection = if truncated {
             BodyInspection::Prefix {
-                checked: MAX_DECOMPRESSED_BODY,
-                reason: PrefixReason::DecompressedCap,
+                checked: decoded_len,
+                reason: if cap < MAX_DECOMPRESSED_BODY {
+                    PrefixReason::ExpansionRatio
+                } else {
+                    PrefixReason::DecompressedCap
+                },
             }
         } else {
             BodyInspection::Inspected
@@ -213,6 +244,17 @@ fn transcode_to_utf8(
     content_type: Option<&str>,
     body: &[u8],
 ) -> Option<Vec<u8>> {
+    // Byte-oriented form bodies are parsed by the origin from the raw octets:
+    // a leading UTF-16 BOM is just two bytes there, not a charset
+    // declaration. Honouring it here rewrote the whole body as UTF-16 and
+    // hid the payload from the form parser while the origin still decoded it
+    // (2026-11-13 audit, P1). Only text-shaped bodies are transcoded.
+    let ctype = content_type.unwrap_or_default().to_ascii_lowercase();
+    if ctype.contains("application/x-www-form-urlencoded")
+        || ctype.contains("multipart/form-data")
+    {
+        return None;
+    }
     let (big_endian, skip) = if body.starts_with(&[0xFE, 0xFF]) {
         (true, 2)
     } else if body.starts_with(&[0xFF, 0xFE]) {
@@ -273,15 +315,13 @@ fn decode_one(encoding: &str, bytes: &[u8]) -> Option<Vec<u8>> {
 /// cap can cut a gzip body mid-stream, and discarding the decoded prefix
 /// would send the compressed bytes to the detectors instead of the payload.
 fn read_bounded<R: Read>(reader: R, input_len: usize) -> Option<Vec<u8>> {
+    let cap = decompression_cap(input_len);
     let initial = input_len
         .saturating_mul(4)
         .clamp(4 * 1024, 64 * 1024)
-        .min(MAX_DECOMPRESSED_BODY);
+        .min(cap);
     let mut out = Vec::with_capacity(initial);
-    match reader
-        .take(MAX_DECOMPRESSED_BODY as u64)
-        .read_to_end(&mut out)
-    {
+    match reader.take(cap as u64).read_to_end(&mut out) {
         Ok(_) => Some(out),
         Err(_) if !out.is_empty() => Some(out),
         Err(_) => None,
@@ -363,6 +403,29 @@ mod tests {
         // remapped. Before the fix this whole body was skipped.
         assert!(decoded.text.starts_with("q=1' OR 1=1--"));
         assert!(decoded.text.chars().any(|c| c == '\u{ff}'));
+    }
+
+    /// Regression (2026-11-13 audit, P1): a `FF FE` prefix on a byte-oriented
+    /// form body must not be read as a UTF-16 BOM. The origin parses the raw
+    /// octets and still sees the payload; transcoding here rewrote the body
+    /// and hid it from the form parser.
+    #[test]
+    fn bom_does_not_rewrite_form_bodies() {
+        assert!(transcode_to_utf8(
+            Some("application/x-www-form-urlencoded"),
+            b"\xFF\xFE&q=%27+OR+1%3D1--"
+        )
+        .is_none());
+        assert!(transcode_to_utf8(
+            Some("multipart/form-data; boundary=----B"),
+            b"\xFF\xFE&q=1"
+        )
+        .is_none());
+        // Text-shaped bodies keep the BOM behaviour that closes the
+        // UTF-16-as-UTF-8 evasion.
+        assert!(
+            transcode_to_utf8(Some("application/json"), b"\xFF\xFEa").is_some()
+        );
     }
 
     #[test]
@@ -453,20 +516,26 @@ mod tests {
 
     #[test]
     fn decompression_stops_at_the_cap() {
-        // 2 MiB of zeros compresses to a few KiB; the reader must stop at
-        // the cap instead of expanding a bomb.
+        // The ratio cap binds without depending on a compressor backend: a
+        // 1 KiB input cannot expand past 100 KiB even from an infinite
+        // reader.
+        assert_eq!(decompression_cap(1024), 100 * 1024);
+        let out = read_bounded(std::io::repeat(b'A'), 1024)
+            .expect("an infinite reader still yields bytes");
+        assert_eq!(out.len(), 100 * 1024);
+
+        // A tiny input is floored, not ratio-limited: the ratio says nothing
+        // about intent below the default staging size.
+        assert_eq!(decompression_cap(16), MIN_EXPANSION_FLOOR);
+
+        // A real gzip bomb is bounded by one of the two caps and reported.
         let bomb = gzip(&vec![b'A'; 2 * MAX_DECOMPRESSED_BODY]);
         assert!(bomb.len() < 64 * 1024);
         let decoded = decode_body(&header("content-encoding", "gzip"), &bomb)
             .expect("body is present");
-        assert_eq!(decoded.text.len(), MAX_DECOMPRESSED_BODY);
-        assert!(matches!(
-            decoded.inspection,
-            BodyInspection::Prefix {
-                reason: PrefixReason::DecompressedCap,
-                ..
-            }
-        ));
+        assert_eq!(decoded.text.len(), decompression_cap(bomb.len()));
+        assert!(decoded.text.len() <= MAX_DECOMPRESSED_BODY);
+        assert!(matches!(decoded.inspection, BodyInspection::Prefix { .. }));
     }
 
     #[test]

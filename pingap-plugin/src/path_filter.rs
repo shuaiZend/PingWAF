@@ -110,26 +110,7 @@ impl PathFilter {
 /// the raw path could hide a different path (`%`, `..`, `//`, `/.`), so the
 /// common case stays an allocation-free borrow.
 fn canonical_path(path: &str) -> Option<Cow<'_, str>> {
-    // `normalize` treats `#` as a fragment and truncates there; a request
-    // target should never carry one, and truncating it could turn a
-    // non-matching path into a matching one. Refuse to scope it instead.
-    if path.contains('#') || path.contains("..;") {
-        return None;
-    }
-    if !(path.contains('%')
-        || path.contains("..")
-        || path.contains("//")
-        || path.contains("/."))
-    {
-        return Some(Cow::Borrowed(path));
-    }
-    // Keep this in lock-step with the engine's default decode depth. A site
-    // configured for more layers may see a more-decoded path in the engine;
-    // the conservative safe reading is to scope what three layers expose.
-    let decoded = pingwaf_waf::normalize::url::multi_decode(path, 3);
-    Some(Cow::Owned(pingwaf_waf::normalize::path::normalize(
-        &decoded,
-    )))
+    pingwaf_waf::normalize::canonical_scope_path(path)
 }
 
 /// The same automaton budget the WAF expression engine uses: one pathological

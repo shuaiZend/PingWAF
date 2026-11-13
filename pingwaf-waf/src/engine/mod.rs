@@ -78,13 +78,31 @@ fn estimated_scan_bytes(request: &RequestData) -> usize {
         .iter()
         .map(|(name, value)| name.len() + value.len())
         .sum();
+    // A compressed body is estimated at what it will decompress to, not at
+    // its wire size: the old `wire * 8` estimate under-counted a gzip form by
+    // three orders of magnitude, so a burst of tiny bodies could reserve far
+    // less than the memory their decompression actually used.
+    let compressed = request.headers.iter().any(|(name, value)| {
+        name.eq_ignore_ascii_case("content-encoding")
+            && value.split(',').any(|token| {
+                matches!(
+                    token.trim().to_ascii_lowercase().as_str(),
+                    "gzip" | "x-gzip" | "deflate"
+                )
+            })
+    });
     let body_bytes = request.body.as_ref().map_or(0, |body| {
         if body.is_empty() {
             return 0;
         }
-        body.len()
-            .saturating_mul(8)
-            .clamp(4 * 1024, 4 * 1024 * 1024)
+        let decoded = if compressed {
+            body.len()
+                .saturating_mul(100)
+                .min(crate::normalize::body::MAX_DECOMPRESSED_BODY)
+        } else {
+            body.len()
+        };
+        decoded.saturating_mul(8).clamp(4 * 1024, 4 * 1024 * 1024)
     });
     request
         .path
@@ -463,6 +481,16 @@ pub struct WafEngine {
     monitor_stacks: StackSet,
     monitor_managed_rules: std::collections::HashSet<String>,
     monitor_custom_rules: std::collections::HashSet<String>,
+    /// Categories covered by a managed rule on the per-rule monitor switch.
+    ///
+    /// The stage-1 critical fast path cannot tell which managed rule a
+    /// signature hit will feed, so it uses this set: a monitored rule may
+    /// suppress the fast path for the category it belongs to, and only that
+    /// category. The previous shape disabled the fast path for every family
+    /// as soon as any managed rule was monitored, which silently downgraded
+    /// command injection / path traversal / SSRF / deserialization to
+    /// monitor-only (2026-11-13 audit, P1).
+    fast_path_monitored: CategorySet,
 }
 
 impl std::fmt::Debug for WafEngine {
@@ -530,6 +558,17 @@ impl WafEngine {
         // `PINGWAF-` guard and are left untouched.
         rules.extend(config.rules.iter().cloned().map(Arc::new));
 
+        let mut fast_path_monitored = CategorySet::EMPTY;
+        for rule in &rules {
+            if !config.monitor_managed_rules.contains(rule.id.as_str()) {
+                continue;
+            }
+            if let Some(category) = managed_rule_category(rule) {
+                fast_path_monitored = fast_path_monitored
+                    .union(CategorySet::from_category(category));
+            }
+        }
+
         Self {
             signatures: Arc::clone(&base.signatures),
             rules,
@@ -543,6 +582,7 @@ impl WafEngine {
             monitor_stacks: config.monitor_stacks,
             monitor_managed_rules: config.monitor_managed_rules.clone(),
             monitor_custom_rules: config.monitor_custom_rules.clone(),
+            fast_path_monitored,
         }
     }
 
@@ -556,6 +596,24 @@ impl WafEngine {
         }
         let scoped = stack.except_generic();
         !scoped.is_empty() && self.monitor_stacks.intersects(scoped)
+    }
+
+    /// Records a Stage-1 critical hit unless its category is suppressed by
+    /// the per-rule monitor switch.
+    ///
+    /// `critical_hit` gates the critical fast path. A monitored managed rule
+    /// may only suppress the category it belongs to: monitoring one noisy
+    /// SQLi rule must not disable the fast path for command injection.
+    fn note_critical_hit(
+        &self,
+        category: AttackCategory,
+        monitored: bool,
+        critical_hit: &mut bool,
+    ) {
+        if monitored || self.fast_path_monitored.contains_category(category) {
+            return;
+        }
+        *critical_hit = true;
     }
 
     /// `true` when a Stage-2 rule is downgraded to monitor-only. Managed
@@ -712,8 +770,19 @@ impl WafEngine {
             normalize_started.elapsed().as_nanos() as u64,
         );
         // Kept for the verdict: a body that was only partly inspected must
-        // not read as a clean pass in the event stream.
-        let body_inspection = normalized.body_inspection.clone();
+        // not read as a clean pass in the event stream. Normalization
+        // truncations (query/form/value/body caps) are folded into the same
+        // note so the data plane can reject a padded request in strict mode.
+        let mut inspection_note = normalized.body_inspection.detail();
+        if let Some(note) = normalized.truncation.detail() {
+            match inspection_note.as_mut() {
+                Some(existing) => {
+                    existing.push_str("; ");
+                    existing.push_str(&note);
+                },
+                None => inspection_note = Some(note),
+            }
+        }
         // The decoded values are the biggest structure the inspection builds;
         // report what they hold for as long as this inspection owns them.
         let decoded_bytes: usize = normalized
@@ -871,7 +940,11 @@ impl WafEngine {
                     critical = true;
                 }
                 if critical && !search_phrase && !monitored {
-                    critical_hit = true;
+                    self.note_critical_hit(
+                        hit.category,
+                        monitored,
+                        &mut critical_hit,
+                    );
                 }
                 if !search_phrase {
                     if value.source == ValueSource::Path
@@ -930,7 +1003,11 @@ impl WafEngine {
                     StackSet::GENERIC,
                 );
                 if !monitored {
-                    critical_hit = true;
+                    self.note_critical_hit(
+                        AttackCategory::SqlInjection,
+                        monitored,
+                        &mut critical_hit,
+                    );
                 }
                 self.scorer.add_category_hit_ex(
                     &mut breakdown,
@@ -958,7 +1035,11 @@ impl WafEngine {
                     StackSet::GENERIC,
                 );
                 if !monitored {
-                    critical_hit = true;
+                    self.note_critical_hit(
+                        AttackCategory::CommandInjection,
+                        monitored,
+                        &mut critical_hit,
+                    );
                 }
                 self.scorer.add_category_hit_ex(
                     &mut breakdown,
@@ -986,7 +1067,11 @@ impl WafEngine {
                     StackSet::GENERIC,
                 );
                 if !monitored {
-                    critical_hit = true;
+                    self.note_critical_hit(
+                        AttackCategory::PathTraversal,
+                        monitored,
+                        &mut critical_hit,
+                    );
                 }
                 self.scorer.add_category_hit_ex(
                     &mut breakdown,
@@ -1048,7 +1133,11 @@ impl WafEngine {
                     StackSet::GENERIC,
                 );
                 if critical && !search_phrase && !monitored {
-                    critical_hit = true;
+                    self.note_critical_hit(
+                        AttackCategory::SqlInjection,
+                        monitored,
+                        &mut critical_hit,
+                    );
                 }
                 if !search_phrase {
                     self.scorer.add_category_hit_ex(
@@ -1092,7 +1181,11 @@ impl WafEngine {
                 let monitored =
                     self.hit_monitored(AttackCategory::Xss, StackSet::GENERIC);
                 if critical && !collected_js_uri && !monitored {
-                    critical_hit = true;
+                    self.note_critical_hit(
+                        AttackCategory::Xss,
+                        monitored,
+                        &mut critical_hit,
+                    );
                 }
                 if !collected_js_uri {
                     self.scorer.add_category_hit_ex(
@@ -1136,7 +1229,11 @@ impl WafEngine {
                     StackSet::GENERIC,
                 );
                 if critical && !monitored {
-                    critical_hit = true;
+                    self.note_critical_hit(
+                        AttackCategory::Deserialization,
+                        monitored,
+                        &mut critical_hit,
+                    );
                 }
                 self.scorer.add_category_hit_ex(
                     &mut breakdown,
@@ -1165,7 +1262,11 @@ impl WafEngine {
                     StackSet::GENERIC,
                 );
                 if !monitored {
-                    critical_hit = true;
+                    self.note_critical_hit(
+                        AttackCategory::CommandInjection,
+                        monitored,
+                        &mut critical_hit,
+                    );
                 }
                 self.scorer.add_category_hit_ex(
                     &mut breakdown,
@@ -1188,7 +1289,11 @@ impl WafEngine {
                     StackSet::GENERIC,
                 );
                 if !monitored {
-                    critical_hit = true;
+                    self.note_critical_hit(
+                        AttackCategory::CommandInjection,
+                        monitored,
+                        &mut critical_hit,
+                    );
                 }
                 self.scorer.add_category_hit_ex(
                     &mut breakdown,
@@ -1209,7 +1314,11 @@ impl WafEngine {
                 let monitored =
                     self.hit_monitored(AttackCategory::Ssrf, StackSet::GENERIC);
                 if !monitored {
-                    critical_hit = true;
+                    self.note_critical_hit(
+                        AttackCategory::Ssrf,
+                        monitored,
+                        &mut critical_hit,
+                    );
                 }
                 self.scorer.add_category_hit_ex(
                     &mut breakdown,
@@ -1232,7 +1341,11 @@ impl WafEngine {
                     StackSet::GENERIC,
                 );
                 if !monitored {
-                    critical_hit = true;
+                    self.note_critical_hit(
+                        AttackCategory::PathTraversal,
+                        monitored,
+                        &mut critical_hit,
+                    );
                 }
                 self.scorer.add_category_hit_ex(
                     &mut breakdown,
@@ -1261,7 +1374,11 @@ impl WafEngine {
                 if let Some(container) = detect_expr_injection(needle) {
                     self.scorer.add_expr_hit_ex(&mut breakdown, expr_monitored);
                     if !expr_monitored {
-                        critical_hit = true;
+                        self.note_critical_hit(
+                            AttackCategory::TemplateInjection,
+                            expr_monitored,
+                            &mut critical_hit,
+                        );
                     }
                     recs.push(HitRec::Expr {
                         container,
@@ -1282,7 +1399,11 @@ impl WafEngine {
                     // re-block what the critical gate let through.
                     self.scorer.add_expr_hit_ex(&mut breakdown, expr_monitored);
                     if !expr_monitored {
-                        critical_hit = true;
+                        self.note_critical_hit(
+                            AttackCategory::TemplateInjection,
+                            expr_monitored,
+                            &mut critical_hit,
+                        );
                     }
                     recs.push(HitRec::Expr {
                         container: "js-call",
@@ -1321,7 +1442,11 @@ impl WafEngine {
                 self.signatures.pattern(hit.pattern).stack,
             );
             if critical && !monitored {
-                critical_hit = true;
+                self.note_critical_hit(
+                    hit.category,
+                    monitored,
+                    &mut critical_hit,
+                );
             }
             // Mirror of the decoded-value gate: CI/Deser shapes found on the
             // resolved path keep their aggregate score but stay out of the
@@ -1430,21 +1555,15 @@ impl WafEngine {
         );
 
         // ----- Fast-path Block on critical Stage-1 hit -----
-        // A managed rule downgraded to monitor must be able to suppress this
-        // shortcut: the fast path runs before stage 2, where the per-rule
-        // monitor switch lives. Let stage 2 decide when any loaded managed
-        // rule is monitored (the branch is an optimisation, not enforcement).
-        let stage2_must_decide = self.rules.iter().any(|rule| {
-            rule.id.starts_with("PINGWAF-")
-                && self.monitor_managed_rules.contains(rule.id.as_str())
-        });
-        if self.fast_path_block_on_critical
-            && critical_hit
-            && !stage2_must_decide
-        {
+        // `critical_hit` is only set for a hit that is neither
+        // category/stack-monitored nor covered by a managed rule on the
+        // per-rule monitor switch (see `note_critical_hit`), so a monitored
+        // rule suppresses its own category without disabling the shortcut
+        // for every other family.
+        if self.fast_path_block_on_critical && critical_hit {
             let mut details = self.details_from(&recs, &[]);
-            if let Some(note) = body_inspection.detail() {
-                details.push(note);
+            if let Some(note) = inspection_note.as_deref() {
+                details.push(note.to_string());
             }
             return self.finalize_verdict(
                 &mut breakdown,
@@ -1570,8 +1689,8 @@ impl WafEngine {
             // A clean verdict must still carry the fact that the body was
             // only partly inspected; otherwise a blind spot is indistinguish-
             // able from a genuinely clean request.
-            if let Some(note) = body_inspection.detail() {
-                verdict.details = note;
+            if let Some(note) = inspection_note.as_deref() {
+                verdict.details = note.to_string();
             }
             return verdict;
         }
@@ -1588,8 +1707,8 @@ impl WafEngine {
             _ => None,
         };
         let mut details = self.details_from(&recs, &rule_recs);
-        if let Some(note) = body_inspection.detail() {
-            details.push(note);
+        if let Some(note) = inspection_note.as_deref() {
+            details.push(note.to_string());
         }
         self.finalize_verdict(
             &mut breakdown,
@@ -2072,6 +2191,90 @@ mod tests {
         assert_eq!(v.action, WafAction::Monitor);
         assert!(v.matched_rules.contains(&"PINGWAF-1002".to_string()));
         assert!(v.details.contains("[monitored]"));
+    }
+
+    /// A per-rule monitor switch may only suppress the fast path for the
+    /// category that rule belongs to (2026-11-13 audit, P1). The previous
+    /// implementation disabled the critical fast path for every family as
+    /// soon as any managed rule was monitored, so monitoring one noisy SQLi
+    /// rule silently downgraded command injection / traversal / SSRF /
+    /// deserialization to monitor-only.
+    #[test]
+    fn monitoring_one_family_keeps_the_critical_fast_path_for_others() {
+        let cfg = WafEngineConfig {
+            monitor_managed_rules: ["PINGWAF-1002".to_string()]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let v = WafEngine::new(&cfg).inspect(&req(
+            "GET",
+            "/api/users",
+            "q=$(whoami)",
+        ));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+
+        // The monitored category itself still loses the fast path and is
+        // decided by Stage 2 (PINGWAF-1002 is on monitor in this config).
+        let v = WafEngine::new(&cfg).inspect(&req(
+            "GET",
+            "/api/users",
+            "id=1' OR 1=1 --",
+        ));
+        assert_eq!(v.action, WafAction::Monitor, "details: {}", v.details);
+    }
+
+    /// Regression (2026-11-13 audit, P1): a request whose scan surface was
+    /// truncated must carry that fact in the verdict. The old behaviour
+    /// dropped the bytes and returned a clean pass, so "pad the payload past
+    /// an internal cap" was a stable bypass.
+    #[test]
+    fn truncated_scan_surface_is_visible_in_the_verdict() {
+        let e = engine();
+
+        let query = (0..300)
+            .map(|i| format!("k{i}=v"))
+            .collect::<Vec<_>>()
+            .join("&");
+        let v = e.inspect(&req("GET", "/", &query));
+        assert!(
+            v.details.contains("request=truncated(query-params)"),
+            "{}",
+            v.details
+        );
+
+        let body = (0..600)
+            .map(|i| format!("k{i}=v"))
+            .collect::<Vec<_>>()
+            .join("&");
+        let mut form = req("POST", "/login", "");
+        form.headers.push((
+            "content-type".into(),
+            "application/x-www-form-urlencoded".into(),
+        ));
+        form.body = Some(bytes::Bytes::from(body));
+        let v = e.inspect(&form);
+        assert!(
+            v.details.contains("request=truncated(form-params)"),
+            "{}",
+            v.details
+        );
+
+        // A body past the parse/scan cap is reported, not silently cut.
+        let mut big = req("POST", "/upload", "");
+        big.headers.push((
+            "content-type".into(),
+            "application/x-www-form-urlencoded".into(),
+        ));
+        big.body =
+            Some(bytes::Bytes::from(format!("q={}", "A".repeat(300 * 1024))));
+        let v = e.inspect(&big);
+        assert!(
+            v.details.contains("request=truncated(")
+                && v.details.contains("body-scan-cap"),
+            "{}",
+            v.details
+        );
     }
 
     /// D17: the verdict names the request surface a hit came from instead of

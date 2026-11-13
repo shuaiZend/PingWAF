@@ -5437,6 +5437,7 @@ dependencies = [
  "chrono",
  "hex",
  "hmac 0.13.0",
+ "pingwaf-waf",
  "rand 0.10.3",
  "serde",
  "serde_json",

@@ -118,11 +118,24 @@ stacks = ["php"]
   `request_body_truncated` whenever the limit cut a body short.
 - **Encoded and non-text bodies are decoded before scanning.** With
   `inspect_body` on, a `Content-Encoding: gzip` / `x-gzip` / `deflate` body is
-  decompressed first (layers peeled in reverse, decompressed size capped at
-  1 MiB so a decompression bomb cannot exhaust memory), and a body that is not
-  valid UTF-8 is decoded leniently rather than skipped. An encoding the engine
-  does not recognise is scanned as-is. The scan therefore covers the bytes a
-  payload actually carries, not just the ones that happened to be readable.
+  decompressed first (layers peeled in reverse; the expansion is capped at
+  **100:1** with a 64 KiB floor and a 1 MiB ceiling, so a decompression bomb
+  cannot exhaust memory), and a body that is not valid UTF-8 is decoded
+  leniently rather than skipped. An encoding the engine does not recognise is
+  scanned as-is. The scan therefore covers the bytes a payload actually
+  carries, not just the ones that happened to be readable. A body that hits
+  the ratio cap is still scanned up to the cap and reported as
+  `reason=ExpansionRatio`.
+- **Internal scan caps are reported, never silently dropped.** Query
+  parameters (256), form parameters (512), decoded values (2048), single
+  values (8 KiB) and the decompressed parse surface (256 KiB) are bounded so
+  one request cannot multiply into an unbounded scan. The tail past a cap is
+  still scanned as one blob, and the verdict carries
+  `request=truncated(...)`; the data plane emits a `body_scan_truncated`
+  security event. With `body_stage_policy = "strict"` a truncated-but-clean
+  request is rejected with `413` instead of being forwarded, because "pad the
+  payload past the inspection surface" is exactly the shape that used to
+  bypass detection.
 - The engine is held behind `Arc<RwLock<..>>` and per-domain engines are cached,
   so control-plane rule updates hot-reload without restarting pingap. Cached
   engines idle for more than 600 seconds are evicted, least-recently-used

@@ -196,6 +196,22 @@ impl CategorySet {
         Self(self.0 | other.0)
     }
 
+    /// The set holding exactly `category`.
+    pub const fn from_category(category: AttackCategory) -> Self {
+        let bit = match category {
+            AttackCategory::SqlInjection => Self::SQLI.0,
+            AttackCategory::Xss => Self::XSS.0,
+            AttackCategory::CommandInjection => Self::RCE.0,
+            AttackCategory::PathTraversal => Self::LFI.0,
+            AttackCategory::Ssrf => Self::SSRF.0,
+            AttackCategory::Deserialization => Self::DESER.0,
+            AttackCategory::CrlfInjection => Self::CRLF.0,
+            AttackCategory::Xxe => Self::XXE.0,
+            AttackCategory::TemplateInjection => Self::SSTI.0,
+        };
+        Self(bit)
+    }
+
     /// `true` when `category` is in this monitor set.
     pub const fn contains_category(self, category: AttackCategory) -> bool {
         let bit = match category {

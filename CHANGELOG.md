@@ -38,6 +38,36 @@ verbatim for reference and attribution, and is not maintained here.
   Regression tests drive the real request pipeline for the double-slash
   variants and assert `401`.
 
+- **WAF body inspection no longer has silent scan-surface truncation.** The
+  normalizer used to drop bytes past its internal caps — the 257th query
+  parameter, the payload after 8 KiB in one form field, the 1025th form
+  parameter, the 65th multipart part — and return a clean pass, so padding a
+  payload past a cap was a stable bypass. Those caps are now enforced while
+  parsing (the unparsed tail is scanned as a blob), the verdict carries
+  `request=truncated(...)`, and the data plane emits a `body_scan_truncated`
+  event. With `body_stage_policy = "strict"` a truncated-but-clean request is
+  rejected with `413` instead of being forwarded. Decompression is also
+  ratio-limited (100:1, 64 KiB floor, 1 MiB ceiling), which turns the
+  "1.5 KiB gzip body expands to ~80 MB" amplification into a bounded scan, and
+  the concurrent scan-budget estimate now uses the decompressed size instead
+  of the wire size.
+- **A UTF-16 BOM on a form body is no longer honoured.** `application/x-www-form-urlencoded`
+  and `multipart/form-data` bodies are parsed by the origin from the raw
+  octets; treating a leading `FF FE` as a BOM rewrote the body and hid the
+  payload from the form parser while the origin still decoded it. Text-shaped
+  bodies keep the BOM handling that closes the UTF-16-as-UTF-8 evasion.
+- **Monitoring one managed rule no longer disables the critical fast path for
+  every family.** The per-rule monitor switch suppressed the Stage-1 critical
+  shortcut globally, so putting one noisy SQLi rule on monitor silently
+  downgraded command injection, path traversal, SSRF and deserialization to
+  monitor-only. The switch now suppresses only the category the rule belongs
+  to.
+- **Challenge exemption paths are matched on the canonical path.** A raw
+  prefix test let `/api/../admin` match an `/api/*` exemption while the origin
+  resolved it to `/admin`, skipping the challenge on a protected path. Path
+  exceptions and the WAF scope filter already used the shared
+  `canonical_scope_path`; the challenge engine now does too.
+
 ## [PingWAF 0.32.25] — 2026-11-12
 
 ### Fixed

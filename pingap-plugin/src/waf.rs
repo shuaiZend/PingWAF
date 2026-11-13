@@ -3455,6 +3455,10 @@ impl WafPlugin {
     fn body_inspection_event(verdict: &WafVerdict) -> Option<&'static str> {
         if verdict.details.contains("body=uninspected") {
             Some("body_encoded_uninspected")
+        } else if verdict.details.contains("request=truncated") {
+            // Query/form/value/body caps: the request fell out of the scan
+            // surface. Never let that read as a clean pass.
+            Some("body_scan_truncated")
         } else if verdict.details.contains("body=prefix") {
             Some("body_expanded_cap")
         } else {
@@ -3859,6 +3863,41 @@ impl WafPlugin {
             }
             return VerdictOutcome::Respond(
                 HttpResponse::builder(http::StatusCode::UNSUPPORTED_MEDIA_TYPE)
+                    .no_store()
+                    .finish(),
+            );
+        }
+
+        // `body_stage_policy = strict` promises an uninspected tail is
+        // rejected instead of forwarded. The normalization caps are the same
+        // shape: a request whose query/form/value was cut short is exactly
+        // "padded past the inspection surface", which the 2026-11-13 audit
+        // turned into a stable bypass. Strict sites reject it instead of
+        // passing it silently.
+        if verdict.action == WafAction::Pass
+            && self.body_stage_policy == BodyStagePolicy::Strict
+            && verdict.details.contains("request=truncated")
+        {
+            // A truncated-but-clean request is the bypass shape: reject it
+            // and keep the reason visible in the event stream. Block/Monitor
+            // verdicts keep their own path below (the block page and its
+            // event matter more than the 413).
+            if !defer_events {
+                Self::log_event(
+                    site_id,
+                    request_id,
+                    host,
+                    request_data,
+                    &verdict,
+                    "body_inspection",
+                    "body_scan_truncated",
+                );
+            }
+            if let Some(agent) = agent {
+                agent.record_request(false);
+            }
+            return VerdictOutcome::Respond(
+                HttpResponse::builder(http::StatusCode::PAYLOAD_TOO_LARGE)
                     .no_store()
                     .finish(),
             );
@@ -6088,6 +6127,12 @@ ml_threshold = 0.75
                 "body=prefix(checked=1048576, reason=DecompressedCap)"
             )),
             Some("body_expanded_cap")
+        );
+        assert_eq!(
+            WafPlugin::body_inspection_event(&pass(
+                "request=truncated(query-params,value-len)"
+            )),
+            Some("body_scan_truncated")
         );
     }
 

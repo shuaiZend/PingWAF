@@ -401,15 +401,28 @@ impl ChallengeEngine {
 
     // --- Internal helpers ---
 
-    /// Check if a path is exempt from challenges
+    /// Check if a path is exempt from challenges.
+    ///
+    /// Matching runs on the canonical path, not the raw one: a raw prefix
+    /// test let `/api/../admin` match `/api/*` while the origin resolves it
+    /// to `/admin`, skipping the challenge on a protected path (2026-11-13
+    /// audit, P1). `None` from the canonicalizer means the path cannot be
+    /// scoped safely, so it is not exempt.
     fn is_exempt_path(&self, path: &str) -> bool {
+        if self.config.exempt_paths.is_empty() {
+            return false;
+        }
+        let Some(path) = pingwaf_waf::normalize::canonical_scope_path(path)
+        else {
+            return false;
+        };
         self.config.exempt_paths.iter().any(|exempt| {
             if exempt.ends_with('*') {
                 // Wildcard match: /api/* matches /api/foo
                 let prefix = &exempt[..exempt.len() - 1];
                 path.starts_with(prefix)
             } else {
-                path == exempt
+                path.as_ref() == exempt
             }
         })
     }
@@ -954,6 +967,27 @@ mod tests {
 
         request.path = "/dashboard".to_string();
         assert_ne!(engine.should_challenge(&request), ChallengeDecision::Pass);
+    }
+
+    /// Regression (2026-11-13 audit, P1): the exemption list must not match
+    /// dot-segment escapes; the origin resolves `/api/../admin` to `/admin`.
+    #[test]
+    fn test_exempt_paths_do_not_match_dot_segment_escapes() {
+        let config = ChallengeConfig {
+            exempt_paths: vec!["/api/*".to_string()],
+            ..test_config()
+        };
+        let engine = ChallengeEngine::new(config);
+        let mut request = test_request();
+        request.request_rate = 1000;
+        for path in ["/api/../admin", "/api/%2e%2e/admin", "//api/../admin"] {
+            request.path = path.to_string();
+            assert_ne!(
+                engine.should_challenge(&request),
+                ChallengeDecision::Pass,
+                "{path} must not be exempt"
+            );
+        }
     }
 
     // Helper for tests to issue a clearance cookie directly
