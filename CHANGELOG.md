@@ -68,6 +68,16 @@ verbatim for reference and attribution, and is not maintained here.
   exceptions and the WAF scope filter already used the shared
   `canonical_scope_path`; the challenge engine now does too.
 
+- **WAF body fields are no longer demoted by length.** A typed body field
+  longer than 256 bytes used to turn SQLi/XSS/command-injection hits into a
+  2-point weak signal, so padding a payload with 257 bytes of filler was a
+  zero-cost bypass. Typed body fields now keep full severity; only
+  unstructured body blobs and reflected meta headers stay weak. The new
+  `truncated_body_policy` (`monitor` default, `reject` optional) turns a
+  truncated scan surface into a `413`, and deep detection now has a 20 ms soft
+  deadline that reports `request=deadline` (`body_scan_deadline`) instead of
+  silently passing a request it did not finish.
+
 ## [PingWAF 0.32.25] — 2026-11-12
 
 ### Fixed

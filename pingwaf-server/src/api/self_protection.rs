@@ -423,6 +423,7 @@ fn control_plane_waf(blocking: bool) -> Arc<WafEngine> {
         rules: Vec::new(),
         enable_managed_rules: true,
         fast_path_block_on_critical: true,
+        inspection_deadline: WafEngineConfig::default().inspection_deadline,
     }));
     cache.insert(blocking, Arc::clone(&engine));
     engine

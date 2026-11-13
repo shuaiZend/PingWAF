@@ -20,7 +20,7 @@ use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use pingwaf_profiler::{record_method, track_memory, Method, Module};
 use serde::{Deserialize, Serialize};
@@ -110,6 +110,19 @@ fn estimated_scan_bytes(request: &RequestData) -> usize {
         .saturating_add(request.query.len())
         .saturating_add(header_bytes)
         .saturating_add(body_bytes)
+}
+
+/// Appends an inspection-gap marker to the verdict note, without repeating
+/// one that is already present.
+fn append_inspection_note(note: &mut Option<String>, marker: &str) {
+    match note {
+        Some(existing) if existing.contains(marker) => {},
+        Some(existing) => {
+            existing.push_str("; ");
+            existing.push_str(marker);
+        },
+        None => *note = Some(marker.to_string()),
+    }
 }
 
 /// Strips control characters from attacker-influenced fragments before they
@@ -223,6 +236,14 @@ pub struct WafEngineConfig {
     /// unlike managed rules, a custom rule's id never starts with
     /// `PINGWAF-`, so membership here is the only downgrade source.
     pub monitor_custom_rules: std::collections::HashSet<String>,
+    /// Soft wall-clock ceiling for one inspection.
+    ///
+    /// Deep detection stops when it is exceeded and the verdict carries
+    /// `request=deadline`; the data plane treats that like a truncation
+    /// (event, and a rejection under the truncation policy). This is a safety
+    /// valve on top of the per-request caps, not the primary bound: normal
+    /// requests finish far below it. Zero disables the check.
+    pub inspection_deadline: Duration,
 }
 
 impl Default for WafEngineConfig {
@@ -242,6 +263,7 @@ impl Default for WafEngineConfig {
             monitor_managed_rules: std::collections::HashSet::new(),
             disabled_managed_rules: std::collections::HashSet::new(),
             monitor_custom_rules: std::collections::HashSet::new(),
+            inspection_deadline: Duration::from_millis(20),
         }
     }
 }
@@ -398,13 +420,6 @@ struct RuleRec<'a> {
 
 /// Multi-stage WAF detection engine. Clone is intentionally not derived —
 /// share an `Arc<WafEngine>` instead so the Aho-Corasick automaton stays put.
-/// A typed body field (form member / JSON member) above this decoded length
-/// is treated as pasted bulk content — code, documents, uploaded HTML — and
-/// weighted like a blob. Real injection payloads are short; pasted content
-/// routinely carries the same markers (`<script>`, quote+keyword runs,
-/// CRLF) as attacks.
-const FIELD_STRONG_MAX_LEN: usize = 256;
-
 /// Immutable per-profile WAF material shared by every site with the same
 /// detection level and stack set. The Aho-Corasick automaton and the compiled
 /// managed rules are identical across those sites; only custom rules and
@@ -481,6 +496,7 @@ pub struct WafEngine {
     monitor_stacks: StackSet,
     monitor_managed_rules: std::collections::HashSet<String>,
     monitor_custom_rules: std::collections::HashSet<String>,
+    inspection_deadline: Duration,
     /// Categories covered by a managed rule on the per-rule monitor switch.
     ///
     /// The stage-1 critical fast path cannot tell which managed rule a
@@ -582,6 +598,7 @@ impl WafEngine {
             monitor_stacks: config.monitor_stacks,
             monitor_managed_rules: config.monitor_managed_rules.clone(),
             monitor_custom_rules: config.monitor_custom_rules.clone(),
+            inspection_deadline: config.inspection_deadline,
             fast_path_monitored,
         }
     }
@@ -800,6 +817,12 @@ impl WafEngine {
         // verdict details name the first one and aggregate the rest (D17).
         let mut surfaces: Vec<Surface> = Vec::new();
         let mut critical_hit = false;
+        // Soft per-request deadline: a safety valve for pathological inputs
+        // that still fit the per-request caps. Exceeding it stops deep
+        // detection and marks the verdict, never silently passes.
+        let inspection_deadline = (!self.inspection_deadline.is_zero())
+            .then(|| Instant::now() + self.inspection_deadline);
+        let mut deadline_hit = false;
 
         // Reused scan buffers: a full request costs one allocation here
         // instead of one per inspected value.
@@ -808,7 +831,16 @@ impl WafEngine {
 
         // ----- Stage 1: signatures + libinjection over every decoded value -----
         let stage1_started = Instant::now();
-        for value in &normalized.decoded_values {
+        for (index, value) in normalized.decoded_values.iter().enumerate() {
+            // Checking every 16 values keeps the clock read off the hot path
+            // while still bounding the overrun to a few values.
+            if index % 16 == 0
+                && inspection_deadline
+                    .is_some_and(|deadline| Instant::now() >= deadline)
+            {
+                deadline_hit = true;
+                break;
+            }
             let needle = value.decoded.as_ref();
             if needle.is_empty() {
                 continue;
@@ -886,11 +918,12 @@ impl WafEngine {
                             needle,
                             value.source != ValueSource::Body,
                         ));
+                // A typed body field is never demoted by length: filler is
+                // free, so "long enough" was a zero-cost bypass (2026-11-13
+                // audit, P1). Only unstructured body blobs are weak.
                 let weak = (is_meta_header && reflected_family)
                     || (value.source == ValueSource::Body
-                        && (!value.field
-                            || (value.decoded.len() > FIELD_STRONG_MAX_LEN
-                                && !self.level.is_strict()))
+                        && !value.field
                         && reflected_family);
                 // A bare "union select" without statement structure is a
                 // search phrase: the needle and its libinjection twin
@@ -1100,10 +1133,7 @@ impl WafEngine {
             let (is_sqli, sqli_fp) = detect_sqli(needle);
             if is_sqli {
                 let weak = is_meta_header
-                    || (value.source == ValueSource::Body
-                        && (!value.field
-                            || (value.decoded.len() > FIELD_STRONG_MAX_LEN
-                                && !self.level.is_strict())));
+                    || (value.source == ValueSource::Body && !value.field);
                 // Same zero-score rule as the needle gate: a union-select
                 // or into-file fingerprint without statement structure is
                 // a search phrase, and the needle hit for it is skipped
@@ -1172,10 +1202,7 @@ impl WafEngine {
                             value.source != ValueSource::Body,
                         ));
                 let weak = is_meta_header
-                    || (value.source == ValueSource::Body
-                        && (!value.field
-                            || (value.decoded.len() > FIELD_STRONG_MAX_LEN
-                                && !self.level.is_strict())));
+                    || (value.source == ValueSource::Body && !value.field);
                 let (severity, critical) =
                     if weak { (2, false) } else { (5, true) };
                 let monitored =
@@ -1214,8 +1241,7 @@ impl WafEngine {
             if let Some(shape) = detect_deser_shape(needle) {
                 let weak = is_meta_header
                     || (value.source == ValueSource::Body
-                        && (!value.field
-                            || value.decoded.len() > FIELD_STRONG_MAX_LEN)
+                        && !value.field
                         && !self.level.is_strict());
                 let (severity, critical) = if weak {
                     (2, false)
@@ -1554,6 +1580,10 @@ impl WafEngine {
             stage1_started.elapsed().as_nanos() as u64,
         );
 
+        if deadline_hit {
+            append_inspection_note(&mut inspection_note, "request=deadline");
+        }
+
         // ----- Fast-path Block on critical Stage-1 hit -----
         // `critical_hit` is only set for a hit that is neither
         // category/stack-monitored nor covered by a managed rule on the
@@ -1589,6 +1619,12 @@ impl WafEngine {
         let mut enforced_block: Option<String> = None;
         let mut enforced_challenge: Option<String> = None;
         for rule in &self.rules {
+            if inspection_deadline
+                .is_some_and(|deadline| Instant::now() >= deadline)
+            {
+                deadline_hit = true;
+                break;
+            }
             if !rule.enabled || rule.action == RuleAction::Allow {
                 continue;
             }
@@ -1706,6 +1742,9 @@ impl WafEngine {
             Some(WafAction::Challenge) => enforced_challenge,
             _ => None,
         };
+        if deadline_hit {
+            append_inspection_note(&mut inspection_note, "request=deadline");
+        }
         let mut details = self.details_from(&recs, &rule_recs);
         if let Some(note) = inspection_note.as_deref() {
             details.push(note.to_string());
@@ -2222,6 +2261,41 @@ mod tests {
             "id=1' OR 1=1 --",
         ));
         assert_eq!(v.action, WafAction::Monitor, "details: {}", v.details);
+    }
+
+    /// Regression (2026-11-13 audit, P1): padding a form field past the old
+    /// 256-byte "bulk content" threshold used to demote the hit to a 2-point
+    /// weak signal. Filler is free, so that was a zero-cost bypass; typed body
+    /// fields are now never demoted by length.
+    #[test]
+    fn padded_body_field_probe_blocks() {
+        for e in [engine(), strict_engine()] {
+            let mut r = req("POST", "/login", "");
+            r.headers.push((
+                "Content-Type".into(),
+                "application/x-www-form-urlencoded".into(),
+            ));
+            r.body = Some(bytes::Bytes::from(format!(
+                "password={}' OR 1=1 --",
+                "A".repeat(300)
+            )));
+            let v = e.inspect(&r);
+            assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+        }
+    }
+
+    /// The soft deadline is a safety valve, not the primary bound: when it
+    /// trips, deep detection stops and the verdict says so instead of reading
+    /// as a clean pass.
+    #[test]
+    fn inspection_deadline_is_reported() {
+        let cfg = WafEngineConfig {
+            inspection_deadline: Duration::from_nanos(1),
+            ..Default::default()
+        };
+        let v =
+            WafEngine::new(&cfg).inspect(&req("GET", "/", "id=1' OR 1=1--"));
+        assert!(v.details.contains("request=deadline"), "{}", v.details);
     }
 
     /// Regression (2026-11-13 audit, P1): a request whose scan surface was

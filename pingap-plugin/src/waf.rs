@@ -3045,6 +3045,11 @@ pub struct WafPlugin {
     /// (default) scans the encoded bytes and marks the body uninspected;
     /// `reject` answers 415.
     encoded_body_policy: EncodedBodyPolicy,
+    /// What to do when the scan surface was truncated (query/form/value/body
+    /// cap or the inspection deadline). `monitor` (default) forwards and
+    /// emits an event; `reject` answers 413. `body_stage_policy = strict`
+    /// keeps its old "reject a truncated body" behaviour either way.
+    truncated_body_policy: TruncatedBodyPolicy,
     hash_value: String,
     /// Per-domain engines built from agent rules, keyed by host.
     site_contexts: DashMap<String, CachedSite>,
@@ -3097,6 +3102,29 @@ impl EncodedBodyPolicy {
         match value.trim().to_ascii_lowercase().as_str() {
             "reject" | "fail_closed" | "fail-closed" => Self::Reject,
             _ => Self::InspectWire,
+        }
+    }
+}
+
+/// How a request whose scan surface was truncated is handled.
+///
+/// Truncation happens when a query/form/value/body cap (or the inspection
+/// deadline) stopped the scan early. The bytes past the cap were not
+/// inspected, so forwarding the request is exactly the "pad the payload past
+/// the inspection surface" bypass; `reject` closes it with a `413`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TruncatedBodyPolicy {
+    /// Forward it and emit `body_scan_truncated` / `body_scan_deadline`.
+    Monitor,
+    /// Reject with `413` instead of forwarding a partly-scanned request.
+    Reject,
+}
+
+impl TruncatedBodyPolicy {
+    fn parse(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "reject" | "fail_closed" | "fail-closed" => Self::Reject,
+            _ => Self::Monitor,
         }
     }
 }
@@ -3292,6 +3320,7 @@ fn build_site_engine(cfg: &CacheWafConfig) -> WafEngine {
         rules,
         enable_managed_rules: true,
         fast_path_block_on_critical: true,
+        inspection_deadline: WafEngineConfig::default().inspection_deadline,
     };
     WafEngine::new(&engine_config)
 }
@@ -3459,6 +3488,9 @@ impl WafPlugin {
             // Query/form/value/body caps: the request fell out of the scan
             // surface. Never let that read as a clean pass.
             Some("body_scan_truncated")
+        } else if verdict.details.contains("request=deadline") {
+            // The soft inspection deadline stopped deep detection early.
+            Some("body_scan_deadline")
         } else if verdict.details.contains("body=prefix") {
             Some("body_expanded_cap")
         } else {
@@ -3874,9 +3906,12 @@ impl WafPlugin {
         // "padded past the inspection surface", which the 2026-11-13 audit
         // turned into a stable bypass. Strict sites reject it instead of
         // passing it silently.
+        let scan_incomplete = verdict.details.contains("request=truncated")
+            || verdict.details.contains("request=deadline");
         if verdict.action == WafAction::Pass
-            && self.body_stage_policy == BodyStagePolicy::Strict
-            && verdict.details.contains("request=truncated")
+            && scan_incomplete
+            && (self.truncated_body_policy == TruncatedBodyPolicy::Reject
+                || self.body_stage_policy == BodyStagePolicy::Strict)
         {
             // A truncated-but-clean request is the bypass shape: reject it
             // and keep the reason visible in the event stream. Block/Monitor
@@ -4134,6 +4169,10 @@ impl TryFrom<&PluginConf> for WafPlugin {
             value,
             "encoded_body_policy",
         ));
+        let truncated_body_policy = TruncatedBodyPolicy::parse(&get_str_conf(
+            value,
+            "truncated_body_policy",
+        ));
         let body_stage_timeout =
             stage_deadline_timeout(Some(Duration::from_secs(
                 get_int_conf_or_default(
@@ -4176,6 +4215,7 @@ impl TryFrom<&PluginConf> for WafPlugin {
             rules: Vec::new(),
             enable_managed_rules: true,
             fast_path_block_on_critical: true,
+            inspection_deadline: WafEngineConfig::default().inspection_deadline,
         };
 
         Ok(Self {
@@ -4193,6 +4233,7 @@ impl TryFrom<&PluginConf> for WafPlugin {
             body_stage_timeout,
             body_stage_policy,
             encoded_body_policy,
+            truncated_body_policy,
             hash_value,
             site_contexts: DashMap::new(),
             site_contexts_by_id: DashMap::new(),
@@ -6133,6 +6174,30 @@ ml_threshold = 0.75
                 "request=truncated(query-params,value-len)"
             )),
             Some("body_scan_truncated")
+        );
+        assert_eq!(
+            WafPlugin::body_inspection_event(&pass("request=deadline")),
+            Some("body_scan_deadline")
+        );
+    }
+
+    #[test]
+    fn truncated_body_policy_parses() {
+        assert_eq!(
+            TruncatedBodyPolicy::parse(""),
+            TruncatedBodyPolicy::Monitor
+        );
+        assert_eq!(
+            TruncatedBodyPolicy::parse("monitor"),
+            TruncatedBodyPolicy::Monitor
+        );
+        assert_eq!(
+            TruncatedBodyPolicy::parse("reject"),
+            TruncatedBodyPolicy::Reject
+        );
+        assert_eq!(
+            TruncatedBodyPolicy::parse("FAIL-CLOSED"),
+            TruncatedBodyPolicy::Reject
         );
     }
 

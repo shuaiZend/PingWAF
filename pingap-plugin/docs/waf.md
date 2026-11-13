@@ -26,6 +26,9 @@ rules), and the resulting verdict is mapped onto the proxy pipeline.
 | `ml_threshold` | float | `0.5` | Reserved: ML confidence threshold (`0.0`–`1.0`). **Not wired up yet** — ignored at runtime. |
 | `inspect_body` | bool | `false` | Read and inspect the request body. Off by default — reading the body on every request is expensive and interferes with streaming uploads. |
 | `max_body_size` | int | `65536` | Upper bound (bytes) of the body read when `inspect_body` is on. |
+| `body_stage_policy` | string | `balanced` | What to do when the body staging budget runs out: `balanced` forwards the checked prefix and emits `body_prefix_only`; `strict` rejects instead of forwarding an uninspected tail; `throughput` withholds nothing. |
+| `encoded_body_policy` | string | `inspect_wire` | What to do with a `Content-Encoding` the engine cannot undo: `inspect_wire` scans the encoded bytes and emits `body_encoded_uninspected`; `reject` answers `415`. |
+| `truncated_body_policy` | string | `monitor` | What to do when the scan surface was truncated (query/form/value/body cap, or the 20 ms inspection deadline): `monitor` forwards and emits `body_scan_truncated` / `body_scan_deadline`; `reject` answers `413`. `body_stage_policy = "strict"` keeps its own rejection behaviour regardless. |
 | `pow_difficulty` | int | `20` | Proof-of-work difficulty used when a `Challenge` verdict delegates to the challenge subsystem. |
 | `step` | string | `early_request` | `early_request` or `request`. Any other value is a configuration error. |
 
@@ -132,10 +135,16 @@ stacks = ["php"]
   one request cannot multiply into an unbounded scan. The tail past a cap is
   still scanned as one blob, and the verdict carries
   `request=truncated(...)`; the data plane emits a `body_scan_truncated`
-  security event. With `body_stage_policy = "strict"` a truncated-but-clean
-  request is rejected with `413` instead of being forwarded, because "pad the
-  payload past the inspection surface" is exactly the shape that used to
-  bypass detection.
+  security event. With `truncated_body_policy = "reject"` (or
+  `body_stage_policy = "strict"`) a truncated-but-clean request is rejected
+  with `413` instead of being forwarded, because "pad the payload past the
+  inspection surface" is exactly the shape that used to bypass detection.
+- **Deep detection has a soft per-request deadline (20 ms).** When it trips,
+  the remaining rules are skipped and the verdict carries `request=deadline`
+  (`body_scan_deadline` event); the truncation policy decides whether such a
+  request is forwarded or rejected. The deadline is a safety valve on top of
+  the per-request caps, not the primary bound — normal requests finish far
+  below it.
 - The engine is held behind `Arc<RwLock<..>>` and per-domain engines are cached,
   so control-plane rule updates hot-reload without restarting pingap. Cached
   engines idle for more than 600 seconds are evicted, least-recently-used
