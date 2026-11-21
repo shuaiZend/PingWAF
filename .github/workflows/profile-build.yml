@@ -12,6 +12,7 @@ permissions:
 jobs:
   dhat-amd64:
     name: Build amd64 dhat binary
+    if: github.event.repository.fork == false
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:

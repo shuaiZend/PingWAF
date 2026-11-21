@@ -12,6 +12,7 @@ permissions:
 jobs:
   image:
     name: Build and push dev image
+    if: github.event.repository.fork == false
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
