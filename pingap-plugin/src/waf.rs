@@ -2212,14 +2212,10 @@ impl ExpressionState {
 fn parse_cookies(
     headers: &[(String, String)],
 ) -> Vec<(Cow<'static, str>, Cow<'static, str>)> {
-    let Some(raw) = headers
+    headers
         .iter()
-        .find(|(k, _)| k == "cookie")
-        .map(|(_, v)| v.as_str())
-    else {
-        return Vec::new();
-    };
-    raw.split(';')
+        .filter(|(name, _)| name.eq_ignore_ascii_case("cookie"))
+        .flat_map(|(_, value)| value.split(';'))
         .filter_map(|pair| {
             let (name, value) = pair.trim().split_once('=')?;
             Some((
@@ -2244,14 +2240,13 @@ fn request_user_agent(headers: &[(String, String)]) -> &str {
 fn clearance_cookie(headers: &[(String, String)]) -> Option<String> {
     headers
         .iter()
-        .find(|(k, _)| k == "cookie")
-        .and_then(|(_, v)| {
-            v.split(';').find_map(|pair| {
-                let (name, value) = pair.trim().split_once('=')?;
-                name.trim()
-                    .eq_ignore_ascii_case(CLEARANCE_COOKIE_NAME)
-                    .then(|| value.trim().to_string())
-            })
+        .filter(|(name, _)| name.eq_ignore_ascii_case("cookie"))
+        .flat_map(|(_, value)| value.split(';'))
+        .find_map(|pair| {
+            let (name, value) = pair.trim().split_once('=')?;
+            name.trim()
+                .eq_ignore_ascii_case(CLEARANCE_COOKIE_NAME)
+                .then(|| value.trim().to_string())
         })
 }
 
@@ -11998,5 +11993,57 @@ inspect_body = true"###,
         )])
         .unwrap();
         assert_eq!(compiled.match_path("/anon").unwrap().name, "/anon");
+    }
+}
+
+#[cfg(test)]
+mod http2_cookie_regression_tests {
+    use super::*;
+
+    #[test]
+    fn clearance_in_later_cookie_header() {
+        let headers = vec![
+            ("cookie".into(), "app_id=12345".into()),
+            ("cookie".into(), "preferences=A=1|B=1|C=1".into()),
+            (
+                "cookie".into(),
+                format!("{}=signed-clearance", CLEARANCE_COOKIE_NAME),
+            ),
+        ];
+
+        assert_eq!(clearance_cookie(&headers), Some("signed-clearance".into()));
+
+        let parsed = parse_cookies(&headers);
+        assert_eq!(parsed.len(), 3);
+        assert_eq!(parsed[1].1.as_ref(), "A=1|B=1|C=1");
+    }
+
+    #[test]
+    fn clearance_first_or_last() {
+        for cookie in [
+            format!("{}=token; app_id=123", CLEARANCE_COOKIE_NAME),
+            format!("app_id=123; {}=token", CLEARANCE_COOKIE_NAME),
+        ] {
+            let headers = vec![("cookie".into(), cookie)];
+            assert_eq!(clearance_cookie(&headers), Some("token".into()));
+        }
+    }
+
+    #[test]
+    fn cookie_header_case_insensitive() {
+        let headers = vec![
+            ("Cookie".into(), "app_id=123".into()),
+            ("COOKIE".into(), format!("{}=token", CLEARANCE_COOKIE_NAME)),
+        ];
+        assert_eq!(clearance_cookie(&headers), Some("token".into()));
+    }
+
+    #[test]
+    fn no_clearance_does_not_bypass() {
+        let headers = vec![
+            ("cookie".into(), "app_id=123".into()),
+            ("cookie".into(), "preferences=A=1|B=1".into()),
+        ];
+        assert_eq!(clearance_cookie(&headers), None);
     }
 }

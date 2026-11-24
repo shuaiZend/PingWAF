@@ -751,26 +751,15 @@ pub fn get_cookie_value<'a>(
     req_header: &'a RequestHeader,
     cookie_name: &str,
 ) -> Option<&'a str> {
-    // First, get the entire "Cookie" header string. The '?' operator will short-circuit if it's not present.
-    get_req_header_value(req_header, "cookie")?
-        // Split the string into individual cookies.
-        .split(';')
-        // `find_map` is an efficient way to find the first cookie that matches our criteria.
-        .find_map(|item| {
-            // This chained logic attempts to quickly find a match.
-            // It's more complex to handle cases like "key=value" vs "key=" correctly.
-            item.trim()
-                .strip_prefix(cookie_name)?
-                .strip_prefix('=')
-                .or_else(|| {
-                    // Fallback logic to ensure the cookie name is an exact match.
-                    let (k, v) = item.split_once('=')?;
-                    if k.trim() == cookie_name {
-                        Some(v.trim())
-                    } else {
-                        None
-                    }
-                })
+    req_header
+        .headers
+        .get_all("cookie")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|raw| raw.split(';'))
+        .find_map(|pair| {
+            let (name, value) = pair.trim().split_once('=')?;
+            (name.trim() == cookie_name).then(|| value.trim())
         })
 }
 
