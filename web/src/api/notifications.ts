@@ -5,7 +5,7 @@ import type { Page } from './types'
 export interface NotificationChannel {
   id: string
   name: string
-  kind: 'email' | 'wecom' | 'dingtalk' | 'webhook'
+  kind: 'email' | 'wecom' | 'dingtalk' | 'webhook' | 'telegram'
   config: Record<string, unknown>
   /** Event types the channel subscribed to; empty receives everything. */
   events: string[]
@@ -155,7 +155,7 @@ export function unmaskSecrets(
   config: Record<string, unknown>,
 ): Record<string, unknown> {
   const output: Record<string, unknown> = { ...config }
-  for (const key of ['smtp_pass', 'secret', 'secret_token']) {
+  for (const key of ['smtp_pass', 'secret', 'secret_token', 'bot_token']) {
     if (output[key] === NOTIFICATION_SECRET_MASK) {
       output[key] = '__REDACTED__'
     }

@@ -20,6 +20,7 @@ pub mod email;
 pub mod login_anomaly;
 pub mod secretbox;
 pub mod self_monitor;
+pub mod telegram;
 pub mod upstream_monitor;
 pub mod webhook;
 
@@ -407,7 +408,7 @@ impl NotificationManager {
 
     /// Sends a test alert through one channel and reports the outcome.
     pub async fn test_channel(&self, channel_id: Uuid) -> Result<(), String> {
-        let Some(channel) =
+        let Some(mut channel) =
             notification_channel::Entity::find_by_id(channel_id)
                 .one(&self.db)
                 .await
@@ -427,6 +428,7 @@ impl NotificationManager {
             details: None,
             dedup_key: None,
         };
+        secretbox::open_config(&mut channel.config);
         self.deliver(&channel, &event).await
     }
 
@@ -535,6 +537,9 @@ async fn deliver_to(
         },
         crate::models::channel_kind::DINGTALK => {
             webhook::send_dingtalk(http, &channel.config, event).await
+        },
+        crate::models::channel_kind::TELEGRAM => {
+            telegram::send(http, &channel.config, event).await
         },
         crate::models::channel_kind::WEBHOOK => {
             webhook::send_generic(http, &channel.config, event).await
