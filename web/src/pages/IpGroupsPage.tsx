@@ -40,6 +40,10 @@ const ACTION_TONE: Record<string, 'danger' | 'success'> = {
 /** Refresh intervals offered for subscriptions, in minutes (0 = manual). */
 const SYNC_INTERVAL_OPTIONS = [
   { value: '0', labelKey: 'syncManual' },
+  { value: '1', labelKey: 'sync1m' },
+  { value: '5', labelKey: 'sync5m' },
+  { value: '15', labelKey: 'sync15m' },
+  { value: '30', labelKey: 'sync30m' },
   { value: '60', labelKey: 'syncHourly' },
   { value: '360', labelKey: 'sync6h' },
   { value: '1440', labelKey: 'syncDaily' },
