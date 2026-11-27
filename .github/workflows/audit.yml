@@ -17,6 +17,7 @@ permissions:
 
 jobs:
   security-audit:
+    if: github.event.repository.fork == false
     permissions:
       contents: read # for actions/checkout to fetch code
     runs-on: ubuntu-latest

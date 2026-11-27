@@ -52,6 +52,7 @@ jobs:
   # static checks stay enforced on every run.
   changes:
     name: Detect changed paths
+    if: github.event.repository.fork == false
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -75,7 +76,7 @@ jobs:
   rust:
     name: Rust ${{ matrix.toolchain }} (test)
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: github.event.repository.fork == false && needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -167,7 +168,7 @@ jobs:
   rustls:
     name: Rust rustls backend (clippy / test)
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: github.event.repository.fork == false && needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     env:
       PROTOC: /usr/bin/protoc
@@ -226,7 +227,7 @@ jobs:
   web:
     name: Web (lint / build)
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: github.event.repository.fork == false && needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -272,7 +273,7 @@ jobs:
   site:
     name: Site (content / build / links)
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: github.event.repository.fork == false && needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -310,7 +311,7 @@ jobs:
   dockerfile:
     name: Dockerfile (source build, frontend stage)
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: github.event.repository.fork == false && needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -359,7 +360,7 @@ jobs:
   release-binary:
     name: Release binary (pingwaf, full)
     needs: [changes, web]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.changes.outputs.code == 'true'
+    if: github.event.repository.fork == false && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     env:
       # Same reason as in the rust job: pingwaf-proto/build.rs honours PROTOC.
@@ -416,6 +417,7 @@ jobs:
   # paths filter: it stays green/loud on docs-only PRs too.
   docs:
     name: Docs & agent prompts (static checks)
+    if: github.event.repository.fork == false
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -450,6 +452,7 @@ jobs:
     # so a future change to the dependency list cannot make it run without an
     # artifact.
     if: >-
+      github.event.repository.fork == false &&
       github.event_name == 'push' && github.ref == 'refs/heads/main' &&
       needs.release-binary.result == 'success'
     runs-on: ubuntu-latest

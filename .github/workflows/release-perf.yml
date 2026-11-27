@@ -35,6 +35,7 @@ env:
 jobs:
   perf-image:
     name: Docker perf image (amd64)
+    if: github.event.repository.fork == false
     runs-on: ubuntu-latest
     timeout-minutes: 120
     permissions:
