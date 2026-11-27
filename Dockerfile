@@ -33,7 +33,7 @@
 # image resolve step before any layer cache can help.
 # Node version is pinned in lockstep with ci.yml / release.yml; bump this
 # patch version when a Node security release ships.
-FROM mirror.gcr.io/library/node:26.12.1-alpine AS frontend-builder
+FROM mirror.gcr.io/library/node:26.13.1-alpine AS frontend-builder
 
 WORKDIR /app/web
 
