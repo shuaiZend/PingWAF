@@ -1,5 +1,3 @@
-## [Unreleased]
-
 # Changelog
 
 This file is the change log of **PingWAF** — the distributed, centrally managed
@@ -9,6 +7,23 @@ and Cloudflare's [Pingora](https://github.com/cloudflare/pingora).
 PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
+
+## [Unreleased]
+
+### Fixed
+
+- **Re-running the installer on an existing agent silently ignored
+  `--server-url`.** The agent's config file (`[agent]` in
+  `/etc/pingwaf/pingwaf.toml`) is authoritative and wins over `PINGWAF_*`, but
+  the installer only wrote the flag's value into the systemd unit as an inert
+  environment line — so `systemctl cat` showed a URL the agent never dialed
+  (in the field, an `http://` default against the file's `https://`), and a
+  changed `--server-url` looked accepted while nothing changed. The installer
+  now reads the file, writes an explicitly passed `--server-url`, `--api-key`,
+  `--server-ca-cert` or `--server-tls-name` into `[agent]` (backing the file up
+  first), keeps the unit free of duplicate settings, warns when a key is
+  missing and none was supplied, and the plan summary prints the URL the agent
+  will actually dial.
 
 ## [PingWAF 0.33.5] — 2026-11-28
 

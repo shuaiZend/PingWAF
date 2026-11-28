@@ -273,7 +273,10 @@ the script resolved from your options.
 > for the agent-only build (no PostgreSQL, REST API or embedded dashboard),
 > each with a `.sha256` sidecar. `install.sh --mode agent` prefers the
 > `pingwaf-agent` asset and installs it as `/usr/local/bin/pingwaf-agent`
-> (`pingwaf-agent.service`); a release
+> (`pingwaf-agent.service`). On an existing agent install, re-running the
+> installer updates only the `[agent]` keys you pass explicitly in
+> `/etc/pingwaf/pingwaf.toml` (that file wins over `PINGWAF_*`, and the unit
+> carries no duplicate), keeping a timestamped backup; a release
 > that predates it falls back to the full binary with a warning. The installer
 > prefers the `.tar.xz` asset, skips straight to `.tar.gz` when `xz(1)` is not
 > installed locally, and falls back on a failed download.

@@ -102,6 +102,16 @@ and `pingwaf.service`. Re-run `install.sh --mode agent` once: it installs
 (stopped, disabled and removed) so the two cannot fight over the ports and the
 config file.
 
+**In agent mode the config file is authoritative** (`[agent]` in
+`/etc/pingwaf/pingwaf.toml` wins over `PINGWAF_*`), so the systemd unit carries
+no second copy of the connection settings — a duplicate was inert at best and,
+when it disagreed with the file, `systemctl cat` reported a URL the agent never
+dialed. Re-running the installer updates only the keys you pass explicitly
+(`--server-url`, `--api-key`, `--server-ca-cert`, `--server-tls-name`): each is
+written into `[agent]` (a `pingwaf.toml.bak-<timestamp>` copy is kept first) and
+the plan summary shows the effective URL, marking it "from the existing config
+file" when the file wins.
+
 > An agent-only node is currently **unbound**: it receives every site owned by
 > the API key's owner, not one site. The control plane must be **0.32.40 or
 > newer** when it is the ACME issuer, so issued PEMs are synced and pushed;

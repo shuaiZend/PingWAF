@@ -505,6 +505,58 @@ toml_string() { # $1 raw value -> escaped TOML basic-string body
     printf '%s' "$value"
 }
 
+# Value of `key` in the [agent] section of a TOML file (empty when absent).
+#
+# In agent mode the config file is authoritative, so the installer has to read
+# it before it can decide whether a flag changes anything — writing a second
+# copy into the unit only produced a line that never took effect.
+agent_config_value() { # $1 file, $2 key
+    [[ -f "$1" ]] || return 0
+    awk -v key="$2" '
+        /^[[:space:]]*\[/ { in_agent = ($0 ~ /^[[:space:]]*\[agent\][[:space:]]*$/); next }
+        in_agent && $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+            line = $0
+            sub(/^[^=]*=[[:space:]]*/, "", line)
+            sub(/[[:space:]]*#.*$/, "", line)
+            gsub(/^"|"$/, "", line)
+            print line
+            exit
+        }
+    ' "$1"
+}
+
+# Sets `key` inside [agent], replacing the line or appending it to the section.
+# Returns 0 only when the file actually changed.
+agent_config_set() { # $1 file, $2 key, $3 value
+    local file="$1" key="$2" value="$3"
+    [[ -f "$file" && -n "$value" ]] || return 1
+    [[ "$(agent_config_value "$file" "$key")" == "$value" ]] && return 1
+    local tmp
+    tmp="$(mktemp "${file}.XXXXXX")" || return 1
+    if ! awk -v key="$key" -v value="$(toml_string "$value")" '
+        /^[[:space:]]*\[/ {
+            if (in_agent && !done) { printf "%s = \"%s\"\n", key, value; done = 1 }
+            in_agent = ($0 ~ /^[[:space:]]*\[agent\][[:space:]]*$/)
+            print
+            next
+        }
+        in_agent && !done && $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+            printf "%s = \"%s\"\n", key, value
+            done = 1
+            next
+        }
+        { print }
+        END { if (in_agent && !done) printf "%s = \"%s\"\n", key, value }
+    ' "$file" > "$tmp"; then
+        rm -f "$tmp"
+        return 1
+    fi
+    mv "$tmp" "$file"
+    # Confirm the write landed inside [agent]: a file without that section is
+    # left alone rather than reported as updated.
+    [[ "$(agent_config_value "$file" "$key")" == "$value" ]]
+}
+
 systemd_env() { # $1 variable name, $2 value -> Environment="NAME=value"
     local value="${2//\\/\\\\}"
     value="${value//\"/\\\"}"
@@ -716,7 +768,23 @@ print_plan_summary() {
         echo "  service:     ${SERVICE_NAME}"
     elif [[ "${MODE:-all-in-one}" == "agent" ]]; then
         echo "  service:     ${SERVICE_NAME}"
-        echo "  control:     ${SERVER_URL}"
+        # In agent mode the config file wins, so show what the agent will
+        # actually dial — the flag's value only when it is about to replace it.
+        local effective_url="${SERVER_URL}"
+        local url_source=""
+        if [[ "$CONFIG_PRESENT" == "true" ]]; then
+            local file_url
+            file_url="$(agent_config_value "${CONFIG_DIR}/pingwaf.toml" server_url)"
+            if [[ -n "$file_url" ]]; then
+                if [[ "$AGENT_SERVER_URL_GIVEN" == "true" && "$file_url" != "$SERVER_URL" ]]; then
+                    url_source=" (updates [agent].server_url in the existing config)"
+                else
+                    effective_url="$file_url"
+                    url_source=" (from the existing config file)"
+                fi
+            fi
+        fi
+        echo "  control:     ${effective_url}${url_source}"
         if [[ -n "$SERVER_CA_CERT" ]]; then
             echo "  control CA:  ${SERVER_CA_CERT} -> ${CONFIG_DIR}/grpc-ca.pem"
         else
@@ -843,6 +911,15 @@ ASSET_PREFIX="$(asset_prefix "$MODE")"
 ARCHIVE_BINARY="$ASSET_PREFIX"
 
 validate_install_values
+
+# Which agent values the operator supplied (flag or environment) before the
+# defaults fill them in: only an explicit value may update an existing config
+# file, or a bare `install.sh --mode agent` would rewrite the operator's URL
+# with the 127.0.0.1 default.
+AGENT_SERVER_URL_GIVEN=false; [[ -n "$SERVER_URL" ]] && AGENT_SERVER_URL_GIVEN=true
+AGENT_API_KEY_GIVEN=false; [[ -n "$API_KEY" ]] && AGENT_API_KEY_GIVEN=true
+AGENT_SERVER_CA_GIVEN=false; [[ -n "$SERVER_CA_CERT" ]] && AGENT_SERVER_CA_GIVEN=true
+AGENT_TLS_NAME_GIVEN=false; [[ -n "$SERVER_TLS_NAME" ]] && AGENT_TLS_NAME_GIVEN=true
 
 # Agents and tunnel connectors talk to the control plane, never to PostgreSQL.
 if [[ "$MODE" == "agent" || "$MODE" == "tunnel" ]]; then
@@ -1637,26 +1714,60 @@ install_systemd() {
     if [[ "$MODE" == "agent" ]]; then
         unit_after="After=network-online.target"
         unit_wants="Wants=network-online.target"
-        # A fresh install keeps the agent settings in the file only: two
-        # copies meant the environment silently beat the file, so editing
-        # /etc/pingwaf/pingwaf.toml did nothing. An existing file was written
-        # by an older installer and may have no api_key, so keep the
-        # environment as a fallback for it.
+        # In agent mode the config file is the source of truth: it wins over
+        # PINGWAF_* variables. The unit therefore carries no second copy — a
+        # duplicate was inert at best, and when it disagreed with the file
+        # `systemctl cat` lied about the URL the agent dials. An explicit
+        # --server-url/--api-key/--server-ca-cert/--server-tls-name updates
+        # the file instead (backed up first), and the unit keeps only
+        # PINGWAF_CONFIG.
         if [[ "$CONFIG_PRESENT" == "true" ]]; then
-            agent_env="${agent_env}
-$(systemd_env PINGWAF_SERVER_URL "$SERVER_URL")
-$(systemd_env PINGWAF_API_KEY "$API_KEY")
-$(systemd_env PINGWAF_CACHE_DIR "${DATA_DIR}/cache")"
-            # The keys this installer newly understands may not exist in a file
-            # written by an older version; the environment carries them until
-            # the operator moves them into [agent].
-            if [[ -n "$SERVER_CA_CERT" ]]; then
-                agent_env="${agent_env}
-$(systemd_env PINGWAF_SERVER_CA_CERT "$SERVER_CA_CERT")"
+            local cfg="${CONFIG_DIR}/pingwaf.toml"
+            local cfg_cmd=""
+            [[ -w "$cfg" ]] || cfg_cmd="sudo"
+            local updates=0
+            [[ "$AGENT_SERVER_URL_GIVEN" == "true" ]] && updates=$((updates + 1))
+            [[ "$AGENT_API_KEY_GIVEN" == "true" ]] && updates=$((updates + 1))
+            [[ "$AGENT_SERVER_CA_GIVEN" == "true" ]] && updates=$((updates + 1))
+            [[ "$AGENT_TLS_NAME_GIVEN" == "true" ]] && updates=$((updates + 1))
+            local backup=""
+            if [[ "$updates" -gt 0 ]]; then
+                backup="${cfg}.bak-$(date -u +%Y%m%dT%H%M%SZ)"
+                $cfg_cmd cp -p "$cfg" "$backup" 2>/dev/null || backup=""
             fi
-            if [[ -n "$SERVER_TLS_NAME" ]]; then
-                agent_env="${agent_env}
-$(systemd_env PINGWAF_SERVER_TLS_NAME "$SERVER_TLS_NAME")"
+            local cfg_changed=false
+            if [[ "$AGENT_SERVER_URL_GIVEN" == "true" ]] \
+                && agent_config_set "$cfg" server_url "$SERVER_URL"; then
+                cfg_changed=true
+                info "Updated [agent].server_url in ${cfg} to ${SERVER_URL}."
+            fi
+            if [[ "$AGENT_API_KEY_GIVEN" == "true" ]] \
+                && agent_config_set "$cfg" api_key "$API_KEY"; then
+                cfg_changed=true
+                info "Updated [agent].api_key in ${cfg}."
+            fi
+            if [[ "$AGENT_SERVER_CA_GIVEN" == "true" ]] \
+                && agent_config_set "$cfg" server_ca_cert "$SERVER_CA_CERT"; then
+                cfg_changed=true
+                info "Updated [agent].server_ca_cert in ${cfg} to ${SERVER_CA_CERT}."
+            fi
+            if [[ "$AGENT_TLS_NAME_GIVEN" == "true" ]] \
+                && agent_config_set "$cfg" server_tls_name "$SERVER_TLS_NAME"; then
+                cfg_changed=true
+                info "Updated [agent].server_tls_name in ${cfg} to ${SERVER_TLS_NAME}."
+            fi
+            # The cache directory is the installer's, not the operator's: keep
+            # it defined so an old file without it still works.
+            agent_config_set "$cfg" cache_dir "${DATA_DIR}/cache" && cfg_changed=true
+            if [[ "$cfg_changed" == "true" ]]; then
+                $cfg_cmd chown root:pingwaf "$cfg" 2>/dev/null || true
+                $cfg_cmd chmod 0640 "$cfg" 2>/dev/null || true
+                [[ -n "$backup" ]] && info "Previous ${cfg} saved as ${backup}."
+            fi
+            # A file written before this installer may predate a key and no
+            # flag supplied it: say so instead of leaving a silent gap.
+            if [[ -z "$(agent_config_value "$cfg" api_key)" ]]; then
+                warn "${cfg} has no [agent].api_key and none was given: the agent cannot register until one is added."
             fi
         fi
     else
