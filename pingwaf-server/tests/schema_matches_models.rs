@@ -53,6 +53,9 @@ async fn every_model_matches_the_migrated_schema() {
     // One test, not two: a second test would run the migrator concurrently
     // against the same empty database and collide on `seaql_migrations`.
     let db = connected().await;
+
+    verify_response_rate_migration(&db).await;
+
     probe!(
         &db,
         pingwaf_server::models::agent_blocked_ip::Entity,
@@ -123,4 +126,155 @@ async fn every_model_matches_the_migrated_schema() {
         "agents.tunnel_listener_error is missing: the 0.33.0 regression \
          (a model column no migration creates) has come back"
     );
+}
+
+/// Execute migration 111 against an isolated temporary table,
+/// using the actual migration implementation.
+async fn verify_response_rate_migration(db: &sea_orm::DatabaseConnection) {
+    use sea_orm::{
+        ConnectionTrait, DatabaseBackend, Statement, TransactionTrait,
+    };
+    use sea_orm_migration::{MigrationTrait, SchemaManager};
+
+    let migrations = Migrator::migrations();
+
+    let migration = migrations
+        .iter()
+        .find(|m| m.name().contains("000111_rate_limit_response_counting"))
+        .expect("response counting migration is registered");
+
+    let txn = db.begin().await.unwrap();
+
+    txn.execute_unprepared(
+        "CREATE TEMP TABLE rate_limit_rules (
+            id integer PRIMARY KEY,
+            name text NOT NULL,
+            enabled boolean NOT NULL DEFAULT TRUE
+        ) ON COMMIT DROP",
+    )
+    .await
+    .unwrap();
+
+    txn.execute_unprepared(
+        "INSERT INTO rate_limit_rules (id, name, enabled)
+         VALUES
+            (1, 'existing-enabled-request', TRUE),
+            (2, 'existing-disabled-request', FALSE)",
+    )
+    .await
+    .unwrap();
+
+    let manager = SchemaManager::new(&txn);
+
+    // Apply the real migration.
+    migration.up(&manager).await.unwrap();
+
+    let rows = txn
+        .query_all(Statement::from_string(
+            DatabaseBackend::Postgres,
+            "SELECT id, counting_mode,
+                response_status_codes::text AS statuses,
+                enabled
+         FROM rate_limit_rules
+         ORDER BY id"
+                .to_string(),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(rows.len(), 2);
+
+    for row in &rows {
+        let mode: String = row.try_get("", "counting_mode").unwrap();
+
+        let statuses: String = row.try_get("", "statuses").unwrap();
+
+        assert_eq!(mode, "request");
+        assert_eq!(statuses, "[]");
+    }
+
+    assert!(rows[0].try_get::<bool>("", "enabled").unwrap());
+    assert!(!rows[1].try_get::<bool>("", "enabled").unwrap());
+
+    println!("Migration 111 preserves existing request rules");
+
+    // Insert response rules and an unknown counting mode.
+    txn.execute_unprepared(
+        "INSERT INTO rate_limit_rules
+            (id, name, enabled,
+             counting_mode, response_status_codes)
+         VALUES
+            (3, 'enabled-response', TRUE,
+                'response', '[404]'),
+            (4, 'disabled-response', FALSE,
+                'response', '[403,404]'),
+            (5, 'unknown-mode', TRUE,
+                'unknown', '[]')",
+    )
+    .await
+    .unwrap();
+
+    // Execute the actual rollback migration.
+    migration.down(&manager).await.unwrap();
+
+    let rows = txn
+        .query_all(Statement::from_string(
+            DatabaseBackend::Postgres,
+            "SELECT id, enabled
+         FROM rate_limit_rules
+         ORDER BY id"
+                .to_string(),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(rows.len(), 5);
+
+    let expected = [(1, true), (2, false), (3, false), (4, false), (5, false)];
+
+    for (row, (expected_id, expected_enabled)) in rows.iter().zip(expected) {
+        let id: i32 = row.try_get("", "id").unwrap();
+
+        let enabled: bool = row.try_get("", "enabled").unwrap();
+
+        assert_eq!(id, expected_id);
+        assert_eq!(
+            enabled, expected_enabled,
+            "unexpected enabled state after rollback for rule {id}"
+        );
+    }
+
+    println!("Migration 111 rollback safely disables response rules");
+
+    // Verify that the migration can be reapplied.
+    migration.up(&manager).await.unwrap();
+
+    let rows = txn
+        .query_all(Statement::from_string(
+            DatabaseBackend::Postgres,
+            "SELECT id, enabled, counting_mode
+         FROM rate_limit_rules
+         ORDER BY id"
+                .to_string(),
+        ))
+        .await
+        .unwrap();
+
+    for row in &rows {
+        assert_eq!(
+            row.try_get::<String>("", "counting_mode").unwrap(),
+            "request"
+        );
+    }
+
+    for (row, (_, expected_enabled)) in rows.iter().zip(expected) {
+        assert_eq!(
+            row.try_get::<bool>("", "enabled").unwrap(),
+            expected_enabled
+        );
+    }
+
+    println!("Migration 111 reapplies without reactivating response rules");
+
+    txn.rollback().await.unwrap();
 }

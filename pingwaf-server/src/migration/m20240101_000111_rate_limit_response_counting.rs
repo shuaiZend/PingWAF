@@ -3,6 +3,7 @@
 //! Existing rules retain request counting by default.
 
 use sea_orm_migration::prelude::*;
+use sea_orm_migration::sea_orm::ConnectionTrait;
 
 #[derive(DeriveMigrationName)]
 pub struct Migration;
@@ -32,6 +33,15 @@ impl MigrationTrait for Migration {
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        // Response rules must not become enabled request rules when
+        // their counting configuration is removed during rollback.
+        manager
+            .get_connection()
+            .execute_unprepared(
+                "UPDATE rate_limit_rules                  SET enabled = FALSE                  WHERE counting_mode <> 'request'",
+            )
+            .await?;
+
         manager
             .alter_table(
                 Table::alter()

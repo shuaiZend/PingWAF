@@ -563,7 +563,13 @@ fn rate_limit_to_proto(row: &rate_limit_rules::Model) -> RateLimitRule {
         && response_status_codes
             .iter()
             .all(|code| (200..=599).contains(code))
-        && row.action != "allow";
+        && matches!(
+            row.action.as_str(),
+            "log" | "challenge" | "js_challenge" | "block"
+        )
+        && row.period_seconds > 0
+        && row.threshold > 0
+        && row.mitigation_timeout_seconds >= 0;
 
     if counting_mode == 0 {
         response_status_codes.clear();
@@ -3502,5 +3508,152 @@ mod tests {
 
         assert!(ssl.cert_pem.is_empty());
         assert!(ssl.self_signed);
+    }
+}
+
+#[cfg(test)]
+mod response_rate_proto_tests {
+    use super::*;
+
+    fn fixture() -> rate_limit_rules::Model {
+        serde_json::from_value(serde_json::json!({
+            "id": "11111111-1111-4111-8111-111111111111",
+            "site_id": "22222222-2222-4222-8222-222222222222",
+            "name": "Response compatibility test",
+            "expression": "",
+            "exception_expression": "",
+            "characteristics": ["ip"],
+            "counting_mode": "response",
+            "response_status_codes": [404, 403, 404],
+            "period_seconds": 60,
+            "threshold": 30,
+            "action": "block",
+            "mitigation_timeout_seconds": 300,
+            "enabled": true,
+            "priority": 100,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn response_rule_is_disabled_for_legacy_agents() {
+        let row = fixture();
+        let rule = rate_limit_to_proto(&row);
+
+        assert_eq!(rule.counting_mode, 1);
+        assert!(!rule.enabled);
+        assert!(rule.response_enabled);
+
+        assert_eq!(rule.response_status_codes, vec![403, 404]);
+    }
+
+    #[test]
+    fn disabled_response_rule_stays_disabled() {
+        let mut row = fixture();
+        row.enabled = false;
+
+        let rule = rate_limit_to_proto(&row);
+
+        assert!(!rule.enabled);
+        assert!(!rule.response_enabled);
+    }
+
+    #[test]
+    fn request_rule_remains_legacy_compatible() {
+        let mut row = fixture();
+        row.counting_mode = "request".to_string();
+
+        let rule = rate_limit_to_proto(&row);
+
+        assert_eq!(rule.counting_mode, 0);
+        assert!(rule.enabled);
+        assert!(!rule.response_enabled);
+        assert!(rule.response_status_codes.is_empty());
+    }
+
+    #[test]
+    fn disabled_request_rule_stays_disabled() {
+        let mut row = fixture();
+        row.counting_mode = "request".to_string();
+        row.enabled = false;
+
+        let rule = rate_limit_to_proto(&row);
+
+        assert!(!rule.enabled);
+        assert!(!rule.response_enabled);
+    }
+
+    #[test]
+    fn unknown_counting_mode_is_disabled() {
+        let mut row = fixture();
+        row.counting_mode = "unknown".to_string();
+
+        let rule = rate_limit_to_proto(&row);
+
+        assert!(!rule.enabled);
+        assert!(!rule.response_enabled);
+    }
+
+    #[test]
+    fn invalid_status_configuration_is_disabled() {
+        for statuses in [
+            serde_json::json!([]),
+            serde_json::json!([199]),
+            serde_json::json!([600]),
+            serde_json::json!([404, 999]),
+            serde_json::json!("404"),
+            serde_json::json!(null),
+        ] {
+            let mut row = fixture();
+            row.response_status_codes = statuses;
+
+            let rule = rate_limit_to_proto(&row);
+
+            assert!(!rule.enabled);
+            assert!(!rule.response_enabled);
+        }
+    }
+
+    #[test]
+    fn unsupported_response_actions_are_disabled() {
+        for action in ["allow", "basic_auth", "unknown", ""] {
+            let mut row = fixture();
+            row.action = action.to_string();
+
+            let rule = rate_limit_to_proto(&row);
+
+            assert!(!rule.enabled);
+            assert!(!rule.response_enabled);
+        }
+    }
+
+    #[test]
+    fn valid_response_actions_are_enabled() {
+        for action in ["log", "challenge", "js_challenge", "block"] {
+            let mut row = fixture();
+            row.action = action.to_string();
+
+            let rule = rate_limit_to_proto(&row);
+
+            assert!(!rule.enabled);
+            assert!(rule.response_enabled);
+        }
+    }
+
+    #[test]
+    fn invalid_counter_parameters_are_disabled() {
+        let mut row = fixture();
+        row.period_seconds = 0;
+        assert!(!rate_limit_to_proto(&row).response_enabled);
+
+        let mut row = fixture();
+        row.threshold = 0;
+        assert!(!rate_limit_to_proto(&row).response_enabled);
+
+        let mut row = fixture();
+        row.mitigation_timeout_seconds = -1;
+        assert!(!rate_limit_to_proto(&row).response_enabled);
     }
 }
