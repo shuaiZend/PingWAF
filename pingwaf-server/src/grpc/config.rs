@@ -546,6 +546,8 @@ pub fn rule_to_proto(row: &rule::Model) -> WafRule {
 
 fn rate_limit_to_proto(row: &rate_limit_rules::Model) -> RateLimitRule {
     RateLimitRule {
+        counting_mode: 0,
+        response_status_codes: Vec::new(),
         id: row.id.to_string(),
         name: row.name.clone(),
         expression: row.expression.clone(),

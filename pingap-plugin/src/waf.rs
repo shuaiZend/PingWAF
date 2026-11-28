@@ -10303,6 +10303,8 @@ inspect_body = true"###,
         mitigation: u32,
     ) -> proto::RateLimitRule {
         proto::RateLimitRule {
+            counting_mode: 0,
+            response_status_codes: Vec::new(),
             id: id.to_string(),
             name: format!("rule-{id}"),
             expression: expression.to_string(),
@@ -10599,6 +10601,8 @@ inspect_body = true"###,
     fn rate_rule_build_filters_unenforceable_rules() {
         let build = |rule: proto::RateLimitRule| {
             CompiledRateRule::build(&CacheRateLimitRule {
+                counting_mode: 0,
+                response_status_codes: Vec::new(),
                 id: rule.id,
                 name: rule.name,
                 expression: rule.expression,
@@ -10741,6 +10745,8 @@ inspect_body = true"###,
     fn rate_rule_build_accepts_parameterized_characteristics() {
         let build = |characteristics: &[&str], params: &[&str]| {
             CompiledRateRule::build(&CacheRateLimitRule {
+                counting_mode: 0,
+                response_status_codes: Vec::new(),
                 id: "p".to_string(),
                 name: "rule-p".to_string(),
                 expression: String::new(),

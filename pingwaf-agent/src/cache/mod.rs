@@ -705,6 +705,12 @@ pub struct RuleOverride {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RateLimitRule {
+    /// Zero = request counting; one = response counting.
+    #[serde(default)]
+    pub counting_mode: i32,
+    /// Upstream HTTP status codes counted in response mode.
+    #[serde(default)]
+    pub response_status_codes: Vec<u32>,
     pub id: String,
     pub name: String,
     pub expression: String,
@@ -3391,6 +3397,8 @@ impl RuleCache {
 
     fn convert_rate_limit_rule(r: &proto::RateLimitRule) -> RateLimitRule {
         RateLimitRule {
+            counting_mode: r.counting_mode,
+            response_status_codes: r.response_status_codes.clone(),
             id: r.id.clone(),
             name: r.name.clone(),
             expression: r.expression.clone(),
