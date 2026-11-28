@@ -7,8 +7,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use chrono::{DateTime, TimeZone, Utc};
 use pingwaf_proto::control_plane::{
     AiBotPolicy, AiCrawlConfig, BasicAuthConfig, BasicAuthCredential,
@@ -35,8 +35,8 @@ use crate::api::site_basic_auth as site_basic_auth_api;
 use crate::api::site_oidc as site_oidc_api;
 use crate::api::ssl::uncovered_site_hostnames;
 use crate::api::waf_settings::{
-    clamp_body_stage_timeout_secs, DEFAULT_BODY_STAGE_TIMEOUT_SECS,
-    MAX_BODY_STAGE_TIMEOUT_SECS,
+    DEFAULT_BODY_STAGE_TIMEOUT_SECS, MAX_BODY_STAGE_TIMEOUT_SECS,
+    clamp_body_stage_timeout_secs,
 };
 use crate::models::{
     acme_challenge, action, bot_protection, cache_rules, certificate_links,
@@ -548,6 +548,7 @@ fn rate_limit_to_proto(row: &rate_limit_rules::Model) -> RateLimitRule {
     RateLimitRule {
         counting_mode: 0,
         response_status_codes: Vec::new(),
+        response_enabled: false,
         id: row.id.to_string(),
         name: row.name.clone(),
         expression: row.expression.clone(),

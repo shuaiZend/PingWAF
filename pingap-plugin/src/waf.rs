@@ -10588,6 +10588,7 @@ inspect_body = true"###,
         mitigation: u32,
     ) -> proto::RateLimitRule {
         proto::RateLimitRule {
+            response_enabled: false,
             counting_mode: 0,
             response_status_codes: Vec::new(),
             id: id.to_string(),

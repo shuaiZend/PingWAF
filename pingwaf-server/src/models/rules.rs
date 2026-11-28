@@ -157,6 +157,12 @@ pub mod rate_limit_rules {
         pub expression: String,
         /// Requests matching this filter are excluded from the rule entirely.
         pub exception_expression: String,
+        /// Request or upstream response counting.
+        #[serde(default = "default_counting_mode")]
+        pub counting_mode: String,
+        /// HTTP status codes counted in response mode.
+        #[serde(default = "default_response_status_codes")]
+        pub response_status_codes: serde_json::Value,
         /// Counter keys to group requests by, e.g. `ip`, `path`, or the
         /// parameterized `header:<name>` / `cookie:<name>` / `query:<name>`.
         pub characteristics: Vec<String>,
@@ -172,6 +178,14 @@ pub mod rate_limit_rules {
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
     pub enum Relation {}
+
+    fn default_counting_mode() -> String {
+        "request".to_string()
+    }
+
+    fn default_response_status_codes() -> serde_json::Value {
+        serde_json::json!([])
+    }
 
     impl ActiveModelBehavior for ActiveModel {}
 }

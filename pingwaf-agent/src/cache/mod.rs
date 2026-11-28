@@ -18,8 +18,8 @@ use pingwaf_proto::control_plane as proto;
 mod persist;
 
 use persist::{
-    check_format_version, content_crc32, content_matches, write_atomic,
-    CacheHealth, LoadSource, CACHE_FORMAT_VERSION,
+    CACHE_FORMAT_VERSION, CacheHealth, LoadSource, check_format_version,
+    content_crc32, content_matches, write_atomic,
 };
 
 /// Caps a status detail shipped in the heartbeat, so one long error cannot
@@ -971,11 +971,7 @@ pub struct ChallengeConfig {
 
 /// A proto3 scalar of `0` means "unset"; fall back to the documented default.
 fn or_default(value: u32, default: u32) -> u32 {
-    if value == 0 {
-        default
-    } else {
-        value
-    }
+    if value == 0 { default } else { value }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -3421,7 +3417,11 @@ impl RuleCache {
             threshold: r.threshold,
             action: WafAction::from(r.action),
             mitigation_timeout_seconds: r.mitigation_timeout_seconds,
-            enabled: r.enabled,
+            enabled: match r.counting_mode {
+                0 => r.enabled,
+                1 => r.response_enabled,
+                _ => false,
+            },
             priority: r.priority,
         }
     }

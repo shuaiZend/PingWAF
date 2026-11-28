@@ -1,11 +1,11 @@
 //! Rate limiting rule management.
 
+use axum::Json;
+use axum::Router;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, put};
-use axum::Json;
-use axum::Router;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter,
     QueryOrder, Set,
@@ -14,7 +14,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::api::common::{
-    load_site_read, load_site_write, non_empty, parse_uuid, Page, Pagination,
+    Page, Pagination, load_site_read, load_site_write, non_empty, parse_uuid,
 };
 use crate::api::error::ApiError;
 use crate::api::sites::touch_site;
@@ -254,6 +254,8 @@ async fn create(
         name: Set(payload.name.trim().to_string()),
         expression: Set(payload.expression),
         exception_expression: Set(payload.exception_expression),
+        counting_mode: Set("request".to_string()),
+        response_status_codes: Set(serde_json::json!([])),
         characteristics: Set(characteristics),
         period_seconds: Set(payload.period_seconds),
         threshold: Set(payload.threshold),
@@ -424,7 +426,9 @@ mod tests {
         // Bare kinds carry no key to count on and are rejected.
         assert!(normalise_characteristics(&["header".into()]).is_err());
         assert!(normalise_characteristics(&["cookie:".into()]).is_err());
-        assert!(normalise_characteristics(&["query:has space".into()]).is_err());
+        assert!(
+            normalise_characteristics(&["query:has space".into()]).is_err()
+        );
         assert!(normalise_characteristics(&["host:nope".into()]).is_err());
     }
 

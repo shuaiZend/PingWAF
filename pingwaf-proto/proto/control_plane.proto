@@ -836,6 +836,11 @@ message RateLimitRule {
 
   // HTTP status codes counted in response mode.
   repeated uint32 response_status_codes = 14;
+
+  // Response-mode rules deliberately carry enabled=false so
+  // legacy agents cannot interpret them as request-mode rules.
+  // Agents supporting response counting use this flag instead.
+  bool response_enabled = 15;
 }
 
 enum RateLimitCharacteristics {
