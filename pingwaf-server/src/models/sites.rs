@@ -68,6 +68,10 @@ pub mod sites {
         /// Extension-based cache type policy (five content families with
         /// toggle, TTLs and extension lists). `None` when unconfigured.
         pub cache_type_policy: Option<Json>,
+        /// Per-site image optimization policy (`image_optim` plugin): the
+        /// switch, output formats and encoder qualities. `None` = never
+        /// configured; an object with `enabled = false` is a deliberate off.
+        pub image_optimization: Option<Json>,
         /// The site sits behind a CDN / reverse proxy: security features key
         /// on the forwarded-header client IP, not the direct TCP peer.
         pub trust_proxy_headers: bool,

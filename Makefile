@@ -171,7 +171,10 @@ release-full:
 # embedded dashboard. This is the artifact install.sh --mode agent downloads;
 # `edge` only gates code, so it shares the cargo cache with the full build.
 release-agent:
-	cargo build --release --bin pingwaf-agent --features=tracing,edge
+	# `imageoptim` matches the published agent archive (release.yml builds
+	# `tracing,imageoptim,edge`); without it the local artifact would accept a
+	# site's image-optimization policy and silently not apply it.
+	cargo build --release --bin pingwaf-agent --features=tracing,imageoptim,edge
 	ls -lh target/release/pingwaf-agent
 
 # The full feature set on the rustls TLS backend (no OpenSSL in the binary)

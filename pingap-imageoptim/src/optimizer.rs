@@ -15,7 +15,7 @@
 use image::ImageEncoder;
 use image::codecs::avif;
 use image::codecs::webp;
-use image::{ImageFormat, RgbaImage, load};
+use image::{ImageFormat, RgbaImage};
 use lodepng::Bitmap;
 use rgb::{ComponentBytes, RGBA8};
 use snafu::{ResultExt, Snafu};
@@ -87,12 +87,28 @@ impl From<RgbaImage> for ImageInfo {
     }
 }
 
+/// Largest decoded image accepted, in pixels.
+///
+/// The byte cap on the request side bounds the *compressed* input; a
+/// decompression bomb still expands to a huge RGBA buffer (4 bytes per pixel).
+/// 40 megapixels covers any real photograph and caps the decode at ~160 MiB
+/// before the re-encode copies it again.
+const MAX_DECODE_PIXELS: u64 = 40_000_000;
+
 pub(crate) fn load_image(data: &[u8], ext: &str) -> Result<ImageInfo> {
     let format = image::guess_format(data).or_else(|_| {
         ImageFormat::from_extension(OsStr::new(ext))
             .ok_or(ImageError::NotSupported)
     })?;
-    let di = load(Cursor::new(&data), format).context(ImageSnafu {
+    let mut reader =
+        image::ImageReader::with_format(Cursor::new(&data), format);
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(20_000);
+    limits.max_image_height = Some(20_000);
+    // `max_alloc` covers the whole decode including the intermediate buffers.
+    limits.max_alloc = Some(MAX_DECODE_PIXELS * 4 * 2);
+    reader.limits(limits);
+    let di = reader.decode().context(ImageSnafu {
         category: "load_image",
     })?;
     Ok(di.to_rgba8().into())

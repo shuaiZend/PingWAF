@@ -908,6 +908,74 @@ fn site_has_cache_policy(site: &pingwaf_agent::cache::SiteRules) -> bool {
         })
 }
 
+/// The `image_optim` plugin for one site, when the site enabled it.
+///
+/// The plugin is part of `pingap-imageoptim`, which is compiled in only with
+/// the `imageoptim` feature. A binary without it must not pretend to optimize:
+/// the site policy is still accepted by the control plane (one binary can be
+/// newer than another), and this build says so once per site instead of
+/// silently doing nothing.
+#[cfg(feature = "imageoptim")]
+fn site_image_optim_plugin(
+    site_id: &str,
+    policy: Option<&pingwaf_agent::cache::ImageOptimization>,
+    plugins: &mut HashMap<String, PluginConf>,
+) -> Option<String> {
+    let policy = policy.filter(|policy| policy.enabled)?;
+    if policy.formats.is_empty() {
+        warn!(target: LOG_TARGET,
+            site = %site_id,
+            "image optimization is enabled without an output format; responses are left untouched"
+        );
+        return None;
+    }
+    let name = format!("{site_id}_image_optim");
+    let mut conf = PluginConf::new();
+    conf.insert(
+        "category".to_string(),
+        toml::Value::String("image_optim".to_string()),
+    );
+    // The plugin only converts to a format the request's Accept header lists;
+    // the order here is the preference order it walks.
+    conf.insert(
+        "output_types".to_string(),
+        toml::Value::String(policy.formats.join(",")),
+    );
+    conf.insert(
+        "png_quality".to_string(),
+        toml::Value::Integer(policy.png_quality as i64),
+    );
+    conf.insert(
+        "jpeg_quality".to_string(),
+        toml::Value::Integer(policy.jpeg_quality as i64),
+    );
+    conf.insert(
+        "avif_quality".to_string(),
+        toml::Value::Integer(policy.avif_quality as i64),
+    );
+    conf.insert(
+        "avif_speed".to_string(),
+        toml::Value::Integer(policy.avif_speed as i64),
+    );
+    plugins.insert(name.clone(), conf);
+    Some(name)
+}
+
+#[cfg(not(feature = "imageoptim"))]
+fn site_image_optim_plugin(
+    site_id: &str,
+    policy: Option<&pingwaf_agent::cache::ImageOptimization>,
+    _plugins: &mut HashMap<String, PluginConf>,
+) -> Option<String> {
+    if policy.is_some_and(|policy| policy.enabled) {
+        warn!(target: LOG_TARGET,
+            site = %site_id,
+            "image optimization is enabled for this site, but this binary was built without the `imageoptim` feature; responses are left untouched"
+        );
+    }
+    None
+}
+
 /// Startup view of the cache: `None` while there is nothing to serve, so the
 /// proxy is not started on an empty or unusable configuration.
 /// The loopback address a tunnel target is reached at, when a session is live.
@@ -1384,6 +1452,17 @@ fn convert_cached_rules(
         if let Some(cache_plugin) = &cache_plugin {
             site_plugins.push(cache_plugin.clone());
         }
+        // Image optimization runs after the cache. The plugin works at the
+        // upstream stage, so what the cache stores is the variant the client
+        // received; the plugin extends the cache key with the accepted image
+        // formats in `handle_request`, so each variant has its own entry.
+        site_plugins.extend(site_image_optim_plugin(
+            site_id,
+            site.cache_settings
+                .as_ref()
+                .and_then(|settings| settings.image_optimization.as_ref()),
+            &mut plugins,
+        ));
         site_plugins.extend(site_posture_plugins(
             site_id,
             site.ssl_config.as_ref(),
@@ -4705,6 +4784,109 @@ mod tests {
                     .as_slice()
                 ),
                 "location {name} must reference the cache plugin"
+            );
+        }
+    }
+
+    /// The image optimizer is a per-site plugin: present only when the site
+    /// enabled it, registered under a site-scoped name, and wired into the
+    /// site's own locations behind the cache.
+    #[cfg(feature = "imageoptim")]
+    #[test]
+    fn image_optimization_plugin_follows_the_site_policy() {
+        let mut site = site_rules("site1", "a.example.com");
+        let mut default_pool = pool("pool1", vec![peer("10.0.0.1:8080")]);
+        default_pool.is_default = true;
+        site.upstreams = vec![default_pool];
+        site.cache_rules = vec![cache_rule(true)];
+
+        // Unconfigured: no plugin, and no location references one.
+        let plain = cached_rules_to_pingap_config(
+            &one_site_cache(site.clone()),
+            Path::new("/var/lib/pingwaf/cache"),
+        )
+        .expect("config should build");
+        assert!(!plain.plugins.contains_key("site1_image_optim"));
+
+        // Disabled policy: still nothing.
+        let mut disabled = site.clone();
+        disabled.cache_settings =
+            Some(pingwaf_agent::cache::SiteCacheSettings {
+                image_optimization: Some(
+                    pingwaf_agent::cache::ImageOptimization {
+                        enabled: false,
+                        formats: vec!["webp".to_string()],
+                        png_quality: 90,
+                        jpeg_quality: 80,
+                        avif_quality: 75,
+                        avif_speed: 3,
+                    },
+                ),
+                ..Default::default()
+            });
+        let off = cached_rules_to_pingap_config(
+            &one_site_cache(disabled),
+            Path::new("/var/lib/pingwaf/cache"),
+        )
+        .expect("config should build");
+        assert!(!off.plugins.contains_key("site1_image_optim"));
+
+        // Enabled: the plugin carries the site's formats and qualities, and
+        // every site location references it after the cache.
+        let mut enabled = site;
+        enabled.cache_settings =
+            Some(pingwaf_agent::cache::SiteCacheSettings {
+                image_optimization: Some(
+                    pingwaf_agent::cache::ImageOptimization {
+                        enabled: true,
+                        formats: vec!["avif".to_string(), "webp".to_string()],
+                        png_quality: 91,
+                        jpeg_quality: 82,
+                        avif_quality: 73,
+                        avif_speed: 5,
+                    },
+                ),
+                ..Default::default()
+            });
+        let config = cached_rules_to_pingap_config(
+            &one_site_cache(enabled),
+            Path::new("/var/lib/pingwaf/cache"),
+        )
+        .expect("config should build");
+        let conf = config
+            .plugins
+            .get("site1_image_optim")
+            .expect("image optimization plugin must be present");
+        assert_eq!(
+            conf.get("category").and_then(|value| value.as_str()),
+            Some("image_optim")
+        );
+        assert_eq!(
+            conf.get("output_types").and_then(|value| value.as_str()),
+            Some("avif,webp")
+        );
+        assert_eq!(
+            conf.get("png_quality").and_then(|value| value.as_integer()),
+            Some(91)
+        );
+        assert_eq!(
+            conf.get("avif_speed").and_then(|value| value.as_integer()),
+            Some(5)
+        );
+        for (name, loc) in &config.locations {
+            let plugins = loc.plugins.clone().unwrap_or_default();
+            assert!(
+                plugins.contains(&"site1_image_optim".to_string()),
+                "location {name} must reference the image optimizer"
+            );
+            let cache =
+                plugins.iter().position(|plugin| plugin == "pingwaf:cache");
+            let optim = plugins
+                .iter()
+                .position(|plugin| plugin == "site1_image_optim");
+            assert!(
+                cache < optim,
+                "the optimizer must run after the cache on {name}"
             );
         }
     }

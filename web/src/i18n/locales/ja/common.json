@@ -1212,7 +1212,22 @@
         "media": "メディア",
         "other": "その他",
         "html": "HTML ページ"
-      }
+      },
+      "imageOptimTitle": "画像最適化",
+      "imageOptimHint": "JPEG / PNG のレスポンスを、ブラウザが既に受け取れるより小さい形式に再エンコードします。キャッシュの後に実行され、ヒットは保存済みのまま、ミスは返す前に最適化されます。",
+      "imageOptimSwitch": "返却時に画像を最適化",
+      "imageOptimSwitchHint": "Accept ヘッダーに選択した形式が含まれる画像レスポンスだけを変換し、それ以外はそのまま通します。",
+      "imageOptimFormatsLabel": "出力形式",
+      "imageOptimPng": "PNG 品質",
+      "imageOptimJpeg": "JPEG 品質",
+      "imageOptimAvif": "AVIF 品質",
+      "imageOptimSpeed": "AVIF 速度",
+      "imageOptimSpeedHint": "1 = 最も遅く最小、10 = 最速",
+      "imageOptimNote": "サイト自身のオリジンのレスポンスにのみ適用され、キャッシュは受け入れ形式ごとに変種を保存します。",
+      "imageOptimSaved": "画像最適化を保存しました",
+      "imageOptimNeedsFormat": "出力形式を 1 つ以上選ぶか、スイッチを切ってください。",
+      "imageOptimQualityInvalid": "{{label}} は 1〜100 の範囲で指定してください。",
+      "imageOptimSpeedInvalid": "AVIF 速度は 1〜10 の範囲で指定してください。"
     },
     "ssl": {
       "title": "SSL/TLS",

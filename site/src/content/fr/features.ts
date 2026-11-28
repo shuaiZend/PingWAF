@@ -44,6 +44,7 @@ const features = {
         "Heuristiques libinjection pour SQLi et XSS, plus correspondance multi-motifs Aho-Corasick.",
         "Expressions façon Cloudflare comme http.request.uri.path contains \"/admin\".",
         "Le score d'anomalie agrège toutes les correspondances en un seul verdict.",
+        "Les actifs statiques sont mis en cache par famille de contenu, et les réponses JPEG/PNG peuvent être réencodées en WebP ou AVIF par site (`image_optim`), via un interrupteur sur la page de cache.",
       ],
       note: "normaliser → signatures → expressions → score",
       scene: {

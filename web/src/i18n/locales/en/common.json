@@ -1212,7 +1212,22 @@
         "media": "Media",
         "other": "Other types",
         "html": "HTML pages"
-      }
+      },
+      "imageOptimTitle": "Image optimization",
+      "imageOptimHint": "Re-encode JPEG and PNG responses into a smaller format the browser already accepts. Runs after the cache: a hit is served as stored, a miss is optimized on the way out.",
+      "imageOptimSwitch": "Optimize images on the way out",
+      "imageOptimSwitchHint": "Only image responses whose Accept header lists the chosen format are converted; everything else passes through untouched.",
+      "imageOptimFormatsLabel": "Output formats",
+      "imageOptimPng": "PNG quality",
+      "imageOptimJpeg": "JPEG quality",
+      "imageOptimAvif": "AVIF quality",
+      "imageOptimSpeed": "AVIF speed",
+      "imageOptimSpeedHint": "1 = slowest and smallest, 10 = fastest",
+      "imageOptimNote": "Applies to the site's own origin responses; the cache keeps one variant per accepted format.",
+      "imageOptimSaved": "Image optimization saved",
+      "imageOptimNeedsFormat": "Pick at least one output format, or turn the switch off.",
+      "imageOptimQualityInvalid": "{{label}} must be between 1 and 100.",
+      "imageOptimSpeedInvalid": "AVIF speed must be between 1 and 10."
     },
     "ssl": {
       "title": "SSL/TLS",

@@ -10,6 +10,23 @@ verbatim for reference and attribution, and is not maintained here.
 
 ## [Unreleased]
 
+### Added
+
+- **Per-site image optimization in the caching page.** A site can now re-encode
+  its JPEG/PNG responses into WebP or AVIF through the data plane's
+  `image_optim` plugin: the policy (switch, output formats, PNG/JPEG/AVIF
+  qualities, AVIF speed) is stored on the site row, rides the cache-settings
+  API and the rule bundle, and is edited under **Site → Cache → Image
+  optimization**. The plugin acts on a `200` JPEG/PNG with a declared
+  `Content-Length` of at most 16 MiB whose request `Accept` header explicitly
+  lists the chosen format; everything else (a chunked image, `HEAD`, a `206`
+  range, a `304`, an image over the cap, or `Accept: */*`) passes through with
+  the origin's bytes and type. The response gains `Vary: Accept`, the cache
+  keeps one variant per accepted format, and a corrupt image that fails to
+  decode is served as the origin sent it rather than as an empty body. Release
+  builds and the Docker image now compile the `imageoptim` feature, and a
+  binary without it logs a warning per site instead of pretending to optimize.
+
 ### Fixed
 
 - **Re-running the installer on an existing agent silently ignored

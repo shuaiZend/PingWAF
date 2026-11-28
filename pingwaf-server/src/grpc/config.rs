@@ -615,9 +615,14 @@ fn site_cache_settings_to_proto(
         .as_ref()
         .and_then(|value| serde_json::from_value(value.clone()).ok())
         .map(cache_type_policy_to_proto);
+    // The image policy rides on the same bundle message: it is a per-site
+    // cache-adjacent setting, and an old agent ignores the new field.
+    let image_optimization =
+        image_optimization_to_proto(site.image_optimization.as_ref());
     if site.cache_max_file_size_mb.is_none()
         && type_limits.is_none()
         && type_policy.is_none()
+        && image_optimization.is_none()
     {
         return None;
     }
@@ -627,6 +632,27 @@ fn site_cache_settings_to_proto(
             .map(|value| value.max(0) as u32),
         type_max_file_size_mb: type_limits.unwrap_or_default(),
         type_policy,
+        image_optimization,
+    })
+}
+
+/// Maps the stored image-optimization JSON onto its proto message.
+///
+/// An unparsable document (hand-edited row, an old writer) is dropped rather
+/// than failing the whole bundle: the site then keeps its originals.
+fn image_optimization_to_proto(
+    value: Option<&serde_json::Value>,
+) -> Option<pingwaf_proto::control_plane::ImageOptimization> {
+    let value = value?;
+    let policy: crate::api::cache::ImageOptimization =
+        serde_json::from_value(value.clone()).ok()?;
+    Some(pingwaf_proto::control_plane::ImageOptimization {
+        enabled: policy.enabled,
+        formats: policy.formats,
+        png_quality: policy.png_quality,
+        jpeg_quality: policy.jpeg_quality,
+        avif_quality: policy.avif_quality,
+        avif_speed: policy.avif_speed,
     })
 }
 
@@ -2177,6 +2203,41 @@ pub async fn build_site_config(
 mod tests {
     use super::*;
     use crate::models::route_match_type;
+
+    #[test]
+    fn the_image_policy_reaches_the_bundle() {
+        // Never configured: the field is absent, an old agent is unaffected.
+        assert!(image_optimization_to_proto(None).is_none());
+        // Unparsable (a hand-edited row): dropped, not fatal.
+        assert!(image_optimization_to_proto(Some(
+            &serde_json::json!({"enabled": "yes"})
+        ))
+        .is_none());
+        // Configured: every knob travels.
+        let value = serde_json::json!({
+            "enabled": true,
+            "formats": ["avif", "webp"],
+            "png_quality": 91,
+            "jpeg_quality": 82,
+            "avif_quality": 73,
+            "avif_speed": 5
+        });
+        let proto = image_optimization_to_proto(Some(&value)).expect("policy");
+        assert!(proto.enabled);
+        assert_eq!(proto.formats, vec!["avif".to_string(), "webp".to_string()]);
+        assert_eq!(proto.png_quality, 91);
+        assert_eq!(proto.jpeg_quality, 82);
+        assert_eq!(proto.avif_quality, 73);
+        assert_eq!(proto.avif_speed, 5);
+        // A disabled policy is still sent: "configured off" differs from
+        // "never configured" only in the console, and the data plane ignores
+        // it either way.
+        let off = image_optimization_to_proto(Some(&serde_json::json!({
+            "enabled": false
+        })))
+        .expect("disabled policy");
+        assert!(!off.enabled);
+    }
 
     #[test]
     fn timestamps_roundtrip() {

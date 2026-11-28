@@ -9,6 +9,7 @@ import {
   CaretDown,
   CaretUp,
   CheckCircle,
+  ImageSquare,
   Lightning,
   PencilSimple,
   Plus,
@@ -40,11 +41,29 @@ import type {
   CacheTypeCategory,
   CacheTypePolicy,
   CreateCacheRuleRequest,
+  ImageOptimFormat,
+  ImageOptimization,
   UpdateCacheSettingsRequest,
 } from '@/api/types'
 
 /** `MAX_DISK_QUOTA_MB` on the server — reject out-of-range values up front. */
 const MAX_QUOTA_MB = 1024 * 1024
+
+/** Server defaults for a policy the site never saved (`ImageOptimization::default`). */
+const DEFAULT_IMAGE_OPTIMIZATION: ImageOptimization = {
+  enabled: false,
+  formats: ['webp', 'avif'],
+  png_quality: 90,
+  jpeg_quality: 80,
+  avif_quality: 75,
+  avif_speed: 3,
+}
+
+/** Formats the data plane's plugin can produce. */
+const IMAGE_OPTIM_FORMATS: { key: ImageOptimFormat; label: string }[] = [
+  { key: 'webp', label: 'WebP' },
+  { key: 'avif', label: 'AVIF' },
+]
 
 /** `CACHE_TYPE_KEYS` on the server — the per-type single-file cap families. */
 const CACHE_TYPE_KEYS = [
@@ -453,6 +472,68 @@ export function CachingPage() {
     },
     onError: (e) => setPolicyError(errorText(e)),
   })
+
+  /* ── Image optimization ────────────────────────────────────────────── */
+  const imageOptimSeed = settings
+    ? JSON.stringify(settings.image_optimization ?? DEFAULT_IMAGE_OPTIMIZATION)
+    : ''
+  const [lastImageOptimSeed, setLastImageOptimSeed] = useState<string | null>(
+    null,
+  )
+  const [imageOptim, setImageOptim] = useState<ImageOptimization>(
+    DEFAULT_IMAGE_OPTIMIZATION,
+  )
+  const [imageOptimError, setImageOptimError] = useState<string | null>(null)
+  if (settings && imageOptimSeed !== lastImageOptimSeed) {
+    setLastImageOptimSeed(imageOptimSeed)
+    setImageOptim(settings.image_optimization ?? DEFAULT_IMAGE_OPTIMIZATION)
+  }
+
+  const saveImageOptim = useMutation({
+    mutationFn: (policy: ImageOptimization) =>
+      cachingApi.updateSettings(siteId, { image_optimization: policy }),
+    onSuccess: (next) => {
+      queryClient.setQueryData<CacheSettings>(cacheKeys.settings(siteId), next)
+      setImageOptimError(null)
+      toast.success(t('pages.caching.imageOptimSaved'))
+      invalidate()
+    },
+    onError: (e) => setImageOptimError(errorText(e)),
+  })
+
+  const imageOptimDirty =
+    settings != null &&
+    JSON.stringify(imageOptim) !==
+      JSON.stringify(settings.image_optimization ?? DEFAULT_IMAGE_OPTIMIZATION)
+
+  const submitImageOptim = () => {
+    setImageOptimError(null)
+    if (imageOptim.enabled && imageOptim.formats.length === 0) {
+      setImageOptimError(t('pages.caching.imageOptimNeedsFormat'))
+      return
+    }
+    for (const [label, value] of [
+      [t('pages.caching.imageOptimPng'), imageOptim.png_quality],
+      [t('pages.caching.imageOptimJpeg'), imageOptim.jpeg_quality],
+      [t('pages.caching.imageOptimAvif'), imageOptim.avif_quality],
+    ] as const) {
+      if (!Number.isInteger(value) || value < 1 || value > 100) {
+        setImageOptimError(
+          t('pages.caching.imageOptimQualityInvalid', { label }),
+        )
+        return
+      }
+    }
+    if (
+      !Number.isInteger(imageOptim.avif_speed) ||
+      imageOptim.avif_speed < 1 ||
+      imageOptim.avif_speed > 10
+    ) {
+      setImageOptimError(t('pages.caching.imageOptimSpeedInvalid'))
+      return
+    }
+    saveImageOptim.mutate(imageOptim)
+  }
 
   /* ── Rules ────────────────────────────────────────────────────────── */
 
@@ -1279,6 +1360,166 @@ export function CachingPage() {
                       }
                       loading={saveLimits.isPending}
                       onClick={submitLimits}
+                    >
+                      {t('common.save')}
+                    </Button>
+                  </div>
+                </>
+              )}
+            </CardBody>
+          </Card>
+
+
+          {/* ── Image optimization (image_optim plugin) ─────────────── */}
+          <Card className="mb-4">
+            <CardHeader
+              title={t('pages.caching.imageOptimTitle')}
+              description={t('pages.caching.imageOptimHint')}
+            />
+            <CardBody className="flex flex-col gap-4">
+              {settingsQuery.isPending && !settings ? (
+                <Skeleton className="h-20 w-full" />
+              ) : (
+                <>
+                  <div className="flex flex-wrap items-center gap-4">
+                    <span
+                      className={cn(
+                        'flex h-10 w-10 shrink-0 items-center justify-center rounded-lg',
+                        imageOptim.enabled
+                          ? 'bg-brand-soft text-fg-brand-strong'
+                          : 'bg-recessed text-fg-subtle',
+                      )}
+                    >
+                      <ImageSquare weight="duotone" className="h-5 w-5" />
+                    </span>
+                    <Switch
+                      className="min-w-[220px] flex-1"
+                      checked={imageOptim.enabled}
+                      disabled={!canWrite || saveImageOptim.isPending}
+                      onCheckedChange={(next) =>
+                        setImageOptim((prev) => ({ ...prev, enabled: next }))
+                      }
+                      label={t('pages.caching.imageOptimSwitch')}
+                      description={t('pages.caching.imageOptimSwitchHint')}
+                    />
+                    <Badge tone={imageOptim.enabled ? 'success' : 'neutral'} dot>
+                      {imageOptim.enabled
+                        ? t('pages.caching.stateActive')
+                        : t('pages.caching.stateInactive')}
+                    </Badge>
+                  </div>
+
+                  <div>
+                    <p className="mb-2 text-xs font-medium uppercase tracking-wide text-fg-subtle">
+                      {t('pages.caching.imageOptimFormatsLabel')}
+                    </p>
+                    <div className="flex flex-wrap gap-4">
+                      {IMAGE_OPTIM_FORMATS.map((format) => (
+                        <Switch
+                          key={format.key}
+                          className="min-w-[140px]"
+                          checked={imageOptim.formats.includes(format.key)}
+                          disabled={
+                            !canWrite ||
+                            !imageOptim.enabled ||
+                            saveImageOptim.isPending
+                          }
+                          onCheckedChange={(next) =>
+                            setImageOptim((prev) => ({
+                              ...prev,
+                              formats: next
+                                ? [...prev.formats, format.key]
+                                : prev.formats.filter(
+                                    (value) => value !== format.key,
+                                  ),
+                            }))
+                          }
+                          label={format.label}
+                        />
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                    <Input
+                      type="number"
+                      min={1}
+                      max={100}
+                      className="tabular-nums"
+                      label={t('pages.caching.imageOptimPng')}
+                      value={String(imageOptim.png_quality)}
+                      disabled={!canWrite || !imageOptim.enabled}
+                      onChange={(e) =>
+                        setImageOptim((prev) => ({
+                          ...prev,
+                          png_quality: Number(e.target.value),
+                        }))
+                      }
+                    />
+                    <Input
+                      type="number"
+                      min={1}
+                      max={100}
+                      className="tabular-nums"
+                      label={t('pages.caching.imageOptimJpeg')}
+                      value={String(imageOptim.jpeg_quality)}
+                      disabled={!canWrite || !imageOptim.enabled}
+                      onChange={(e) =>
+                        setImageOptim((prev) => ({
+                          ...prev,
+                          jpeg_quality: Number(e.target.value),
+                        }))
+                      }
+                    />
+                    <Input
+                      type="number"
+                      min={1}
+                      max={100}
+                      className="tabular-nums"
+                      label={t('pages.caching.imageOptimAvif')}
+                      value={String(imageOptim.avif_quality)}
+                      disabled={!canWrite || !imageOptim.enabled}
+                      onChange={(e) =>
+                        setImageOptim((prev) => ({
+                          ...prev,
+                          avif_quality: Number(e.target.value),
+                        }))
+                      }
+                    />
+                    <Input
+                      type="number"
+                      min={1}
+                      max={10}
+                      className="tabular-nums"
+                      label={t('pages.caching.imageOptimSpeed')}
+                      hint={t('pages.caching.imageOptimSpeedHint')}
+                      value={String(imageOptim.avif_speed)}
+                      disabled={!canWrite || !imageOptim.enabled}
+                      onChange={(e) =>
+                        setImageOptim((prev) => ({
+                          ...prev,
+                          avif_speed: Number(e.target.value),
+                        }))
+                      }
+                    />
+                  </div>
+
+                  {imageOptimError && (
+                    <p className="text-xs text-fg-danger">{imageOptimError}</p>
+                  )}
+
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <span className="text-xs text-fg-subtle">
+                      {t('pages.caching.imageOptimNote')}
+                    </span>
+                    <Button
+                      size="sm"
+                      variant="primary"
+                      disabled={
+                        !canWrite || !imageOptimDirty || saveImageOptim.isPending
+                      }
+                      loading={saveImageOptim.isPending}
+                      onClick={submitImageOptim}
                     >
                       {t('common.save')}
                     </Button>

@@ -609,6 +609,20 @@ message CacheTypePolicy {
   optional CacheTypeCategory html = 5;
 }
 
+// Per-site image optimization, applied by the data plane's `image_optim`
+// plugin. Absent = never configured (responses are left untouched).
+message ImageOptimization {
+  bool enabled = 1;
+  // Output formats the plugin may convert to (`webp`, `avif`). Empty with
+  // `enabled = true` is rejected by the control plane.
+  repeated string formats = 2;
+  uint32 png_quality = 3;
+  uint32 jpeg_quality = 4;
+  uint32 avif_quality = 5;
+  // AVIF encoder speed, 1 (slowest, smallest) to 10 (fastest).
+  uint32 avif_speed = 6;
+}
+
 // One site's cache limits. Values the site did not set are absent and the
 // consumer falls back: type limit → site cap → global cap.
 message SiteCacheSettings {
@@ -620,6 +634,8 @@ message SiteCacheSettings {
   map<string, uint32> type_max_file_size_mb = 2;
   // Extension-based cache policy; absent when unconfigured.
   optional CacheTypePolicy type_policy = 3;
+  // Image optimization policy; absent when unconfigured.
+  optional ImageOptimization image_optimization = 4;
 }
 
 // How one site behaves while the control plane is unreachable and the host

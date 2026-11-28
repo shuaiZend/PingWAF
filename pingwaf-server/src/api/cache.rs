@@ -443,6 +443,23 @@ async fn remove_by_id(
 
 // ─── Site-wide cache settings ──────────────────────────────────────────────
 
+/// Deserializer for the tri-state update fields: absent = unchanged,
+/// `null` = clear, a value = set.
+///
+/// Plain `Option<Option<T>>` cannot tell the first two apart — serde maps both
+/// to `None` — so the handler silently treated `{"field": null}` as "leave it
+/// alone". With `#[serde(default)]` above it, an absent field still yields
+/// `None` and a present one is always `Some(..)`.
+fn deserialize_explicit_null<'de, D, T>(
+    deserializer: D,
+) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    Ok(Some(Option::<T>::deserialize(deserializer)?))
+}
+
 /// Site-wide cache settings.
 ///
 /// The disk budget belongs to the site, not to an individual rule: the agent
@@ -464,6 +481,9 @@ pub struct CacheSettingsResponse {
     /// TTLs and extension lists). `None` when unconfigured — the site then
     /// relies solely on its cache rules.
     pub cache_type_policy: Option<CacheTypePolicy>,
+    /// Image optimization policy (`image_optim` plugin). `None` = never
+    /// configured; a policy with `enabled = false` is a deliberate off.
+    pub image_optimization: Option<ImageOptimization>,
     /// The global single-file ceiling every site-level value is clamped
     /// against — shown so the UI can state the effective limit.
     pub global_max_file_size_mb: i32,
@@ -482,16 +502,134 @@ pub struct UpdateCacheSettingsRequest {
     pub quota_mb: Option<i32>,
     /// Site-level single-file cap. Absent = unchanged; explicit `null` =
     /// follow the global ceiling again.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_explicit_null")]
     pub max_file_size_mb: Option<Option<i32>>,
     /// Per-content-type single-file caps. Absent = unchanged; an empty map
     /// clears every override.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_explicit_null")]
     pub type_limits: Option<Option<HashMap<String, i32>>>,
     /// Extension-based cache policy. Absent = unchanged; explicit `null`
     /// removes the policy.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_explicit_null")]
     pub cache_type_policy: Option<Option<CacheTypePolicy>>,
+    /// Image optimization policy. Absent = unchanged; explicit `null` removes
+    /// it (the data plane stops optimizing).
+    #[serde(default, deserialize_with = "deserialize_explicit_null")]
+    pub image_optimization: Option<Option<ImageOptimization>>,
+}
+
+/// Per-site image optimization policy, applied by the data plane's
+/// `image_optim` plugin.
+///
+/// `formats` are the output types offered when the client accepts them (the
+/// plugin only converts to a format the request's `Accept` header lists);
+/// `png_quality` / `jpeg_quality` / `avif_quality` are the encoder qualities
+/// and `avif_speed` trades encode time for size (1 = slowest/smallest).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ImageOptimization {
+    pub enabled: bool,
+    /// Output formats, a subset of `webp` / `avif`.
+    #[serde(default)]
+    pub formats: Vec<String>,
+    #[serde(default = "default_png_quality")]
+    pub png_quality: u32,
+    #[serde(default = "default_jpeg_quality")]
+    pub jpeg_quality: u32,
+    #[serde(default = "default_avif_quality")]
+    pub avif_quality: u32,
+    #[serde(default = "default_avif_speed")]
+    pub avif_speed: u32,
+}
+
+fn default_png_quality() -> u32 {
+    90
+}
+
+fn default_jpeg_quality() -> u32 {
+    80
+}
+
+fn default_avif_quality() -> u32 {
+    75
+}
+
+fn default_avif_speed() -> u32 {
+    3
+}
+
+/// Output formats the plugin can produce.
+pub const IMAGE_OPTIM_FORMATS: [&str; 2] = ["webp", "avif"];
+
+impl Default for ImageOptimization {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            formats: IMAGE_OPTIM_FORMATS
+                .iter()
+                .map(|f| f.to_string())
+                .collect(),
+            png_quality: default_png_quality(),
+            jpeg_quality: default_jpeg_quality(),
+            avif_quality: default_avif_quality(),
+            avif_speed: default_avif_speed(),
+        }
+    }
+}
+
+/// Rejects a policy the plugin would silently ignore or clamp.
+///
+/// Returns the normalized policy: formats are lowercased and de-duplicated,
+/// and an enabled policy must name at least one format — otherwise the plugin
+/// would rewrite the content type to nothing and the response would be
+/// unusable.
+fn validate_image_optimization(
+    policy: &ImageOptimization,
+) -> Result<ImageOptimization, ApiError> {
+    let mut formats: Vec<String> = Vec::new();
+    for raw in &policy.formats {
+        let format = raw.trim().to_ascii_lowercase();
+        if format.is_empty() {
+            continue;
+        }
+        if !IMAGE_OPTIM_FORMATS.contains(&format.as_str()) {
+            return Err(ApiError::BadRequest(format!(
+                "image optimization format '{format}' is not supported \
+                 (allowed: {})",
+                IMAGE_OPTIM_FORMATS.join(", ")
+            )));
+        }
+        if !formats.contains(&format) {
+            formats.push(format);
+        }
+    }
+    if policy.enabled && formats.is_empty() {
+        return Err(ApiError::BadRequest(
+            "image optimization needs at least one output format (webp, avif)"
+                .to_string(),
+        ));
+    }
+    for (name, value) in [
+        ("png_quality", policy.png_quality),
+        ("jpeg_quality", policy.jpeg_quality),
+        ("avif_quality", policy.avif_quality),
+    ] {
+        if !(1..=100).contains(&value) {
+            return Err(ApiError::BadRequest(format!(
+                "image optimization {name} must be between 1 and 100"
+            )));
+        }
+    }
+    if !(1..=10).contains(&policy.avif_speed) {
+        return Err(ApiError::BadRequest(
+            "image optimization avif_speed must be between 1 and 10"
+                .to_string(),
+        ));
+    }
+    Ok(ImageOptimization {
+        enabled: policy.enabled,
+        formats,
+        ..*policy
+    })
 }
 
 /// The content families of the extension-based cache type policy, in
@@ -647,6 +785,10 @@ async fn settings_view(
         .cache_type_policy
         .as_ref()
         .and_then(|value| serde_json::from_value(value.clone()).ok());
+    let image_optimization: Option<ImageOptimization> = model
+        .image_optimization
+        .as_ref()
+        .and_then(|value| serde_json::from_value(value.clone()).ok());
     Ok(CacheSettingsResponse {
         site_id: model.id,
         quota_mb: model.cache_quota_mb,
@@ -656,6 +798,7 @@ async fn settings_view(
             .unwrap_or(global.max_file_size_mb),
         type_limits,
         cache_type_policy,
+        image_optimization,
         global_max_file_size_mb: global.max_file_size_mb,
         cache_enabled: rules.iter().any(|rule| rule.enabled),
         rule_count: rules.len(),
@@ -716,6 +859,11 @@ async fn update_settings(
     {
         validate_cache_type_policy(policy)?;
     }
+    let validated_image_optim =
+        match payload.image_optimization.as_ref().and_then(Option::as_ref) {
+            Some(policy) => Some(validate_image_optimization(policy)?),
+            None => None,
+        };
 
     let mut changed = false;
     if let Some(quota) = payload.quota_mb {
@@ -761,6 +909,20 @@ async fn update_settings(
             site_id = %id,
             policy = ?policy,
             "site cache type policy updated"
+        );
+        changed = true;
+    }
+    if let Some(policy) = payload.image_optimization {
+        let stored = validated_image_optim.as_ref().map(|policy| {
+            serde_json::to_value(policy).unwrap_or(serde_json::Value::Null)
+        });
+        let mut active: site::ActiveModel = model.clone().into();
+        active.image_optimization = Set(stored);
+        active.update(&state.db).await?;
+        tracing::info!(
+            site_id = %id,
+            enabled = policy.as_ref().is_some_and(|p| p.enabled),
+            "site image optimization updated"
         );
         changed = true;
     }
@@ -1107,6 +1269,109 @@ mod tests {
     /// A legal cache-rule expression, matching the shape the built-in rules
     /// in `defaults.rs` use.
     const OK_EXPR: &str = r#"http.request.uri.path starts_with "/api/""#;
+
+    #[test]
+    fn the_update_request_distinguishes_absent_from_null() {
+        // Absent: leave the stored policy alone.
+        let absent: UpdateCacheSettingsRequest =
+            serde_json::from_str("{}").expect("empty request");
+        assert!(absent.image_optimization.is_none());
+        assert!(absent.cache_type_policy.is_none());
+        assert!(absent.max_file_size_mb.is_none());
+
+        // Explicit null: clear the policy (this used to deserialize as absent,
+        // so `PUT {"image_optimization": null}` silently kept the old policy).
+        let cleared: UpdateCacheSettingsRequest =
+            serde_json::from_str(r#"{"image_optimization": null}"#)
+                .expect("null request");
+        assert_eq!(cleared.image_optimization, Some(None));
+        assert!(cleared.cache_type_policy.is_none());
+
+        // A value: set it.
+        let set: UpdateCacheSettingsRequest = serde_json::from_str(
+            r#"{"image_optimization": {"enabled": true, "formats": ["webp"]}}"#,
+        )
+        .expect("value request");
+        let policy = set
+            .image_optimization
+            .flatten()
+            .expect("the policy must be present");
+        assert!(policy.enabled);
+        assert_eq!(policy.formats, vec!["webp".to_string()]);
+        // Omitted encoder knobs fall back to the plugin defaults.
+        assert_eq!(policy.png_quality, 90);
+        assert_eq!(policy.avif_speed, 3);
+    }
+
+    #[test]
+    fn image_optimization_is_validated_and_normalised() {
+        let mut policy = ImageOptimization {
+            enabled: true,
+            formats: vec![
+                "WEBP".to_string(),
+                " webp ".to_string(),
+                "avif".to_string(),
+            ],
+            ..Default::default()
+        };
+        let normalized = validate_image_optimization(&policy).expect("valid");
+        assert_eq!(
+            normalized.formats,
+            vec!["webp".to_string(), "avif".to_string()]
+        );
+
+        // An unsupported output format is rejected, not silently dropped: the
+        // plugin would otherwise convert to a type no browser asked for.
+        policy.formats = vec!["jxl".to_string()];
+        assert!(validate_image_optimization(&policy).is_err());
+
+        // Enabled with no format leaves the plugin unable to rewrite the
+        // content type; the policy is refused instead of producing a broken
+        // response.
+        policy.formats = vec!["  ".to_string()];
+        assert!(validate_image_optimization(&policy).is_err());
+
+        // A disabled policy may carry no format — that is the console's
+        // "configured off" state.
+        policy.enabled = false;
+        assert!(validate_image_optimization(&policy).is_ok());
+
+        // Quality and speed bounds.
+        for png_quality in [0, 101] {
+            let bounds = ImageOptimization {
+                png_quality,
+                ..Default::default()
+            };
+            assert!(validate_image_optimization(&bounds).is_err());
+        }
+        for avif_speed in [0, 11] {
+            let bounds = ImageOptimization {
+                avif_speed,
+                ..Default::default()
+            };
+            assert!(validate_image_optimization(&bounds).is_err());
+        }
+        assert!(
+            validate_image_optimization(&ImageOptimization::default()).is_ok()
+        );
+    }
+
+    #[test]
+    fn the_image_optimization_defaults_match_the_plugin() {
+        // The plugin's own fallbacks are png 90 / jpeg 80 / avif 75 / speed 3;
+        // the console shows these for a site that never saved a policy, so a
+        // drift would make the form lie about what the edge does.
+        let policy = ImageOptimization::default();
+        assert!(!policy.enabled);
+        assert_eq!(
+            policy.formats,
+            vec!["webp".to_string(), "avif".to_string()]
+        );
+        assert_eq!(policy.png_quality, 90);
+        assert_eq!(policy.jpeg_quality, 80);
+        assert_eq!(policy.avif_quality, 75);
+        assert_eq!(policy.avif_speed, 3);
+    }
 
     #[test]
     fn bounds_are_enforced() {

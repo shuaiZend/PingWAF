@@ -3003,6 +3003,7 @@ permission.
   "max_file_size_mb": 16,
   "type_limits": {"html": 8, "image": 16},
   "cache_type_policy": null,
+  "image_optimization": null,
   "global_max_file_size_mb": 16,
   "effective_max_file_size_mb": 16,
   "cache_enabled": true,
@@ -3017,6 +3018,7 @@ permission.
 | `max_file_size_mb` | Site-level single-file cap in MiB; `null` follows the global ceiling. |
 | `type_limits` | Per-content-type single-file caps in MiB, keyed by `html/css/js/image/font/media/other`; a missing key follows `max_file_size_mb`. |
 | `cache_type_policy` | The extension-based category presets (see the chapter intro); `null` when unconfigured — the site then relies solely on its cache rules. |
+| `image_optimization` | Per-site image optimization policy: `enabled`, `formats` (`webp`/`avif`), `png_quality`, `jpeg_quality`, `avif_quality`, `avif_speed`. `null` = never configured; `enabled: false` is a deliberate off. |
 | `global_max_file_size_mb` | The global single-file ceiling every site-level value is clamped against. |
 | `effective_max_file_size_mb` | The resolved cap this site actually enforces: `min(global, max_file_size_mb?)`. |
 | `cache_enabled` / `rule_count` / `enabled_rule_count` | Whether any cache rule of the site is enabled, and how many rules exist / are enabled. |
@@ -3035,6 +3037,7 @@ override.
 | `max_file_size_mb` | 1 MiB up to `global_max_file_size_mb`. |
 | `type_limits` | Every key must be one of `html`, `css`, `js`, `image`, `font`, `media`, `other`; every value between 1 MiB and the site cap (the new value when both change in one request). |
 | `cache_type_policy` | The five fixed families `web_assets`, `image`, `media`, `other`, `html`. |
+| `image_optimization` | `enabled` plus `formats` (a subset of `webp`/`avif`; at least one when enabled), `png_quality`/`jpeg_quality`/`avif_quality` in 1-100 and `avif_speed` in 1-10. An unsupported format is a `400`, not a silent drop. |
 
 Validation failures return `400`: a TTL above 2592000 seconds, an enabled
 family with a zero edge TTL, an extension outside 1-16 lowercase

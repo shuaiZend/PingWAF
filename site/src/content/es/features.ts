@@ -44,6 +44,7 @@ const features = {
         "Heurísticas libinjection para SQLi y XSS más coincidencia multipatrón con Aho-Corasick.",
         "Expresiones estilo Cloudflare como http.request.uri.path contains \"/admin\".",
         "La puntuación de anomalía agrega todas las coincidencias en un veredicto por petición.",
+        "Los activos estáticos se cachean por familia de contenido, y las respuestas JPEG/PNG pueden recodificarse a WebP o AVIF por sitio (`image_optim`), con un interruptor en la página de caché.",
       ],
       note: "normalizar → firmas → expresiones → puntuación",
       scene: {

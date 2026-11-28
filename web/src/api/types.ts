@@ -2099,6 +2099,11 @@ export interface CacheSettings {
   type_limits: Record<string, number> | null
   /** Extension-based cache policy (five families); null when unconfigured. */
   cache_type_policy: CacheTypePolicy | null
+  /**
+   * Per-site image optimization (`image_optim` plugin). `null` = never
+   * configured; `enabled: false` inside the object is a deliberate off.
+   */
+  image_optimization: ImageOptimization | null
   /** The global single-file ceiling every site value is clamped against. */
   global_max_file_size_mb: number
   /** Resolved cap: min(global, max_file_size_mb?). */
@@ -2123,6 +2128,24 @@ export type CacheTypePolicy = Record<
   CacheTypeCategory
 >
 
+/** Output formats the image optimizer can produce. */
+export type ImageOptimFormat = 'webp' | 'avif'
+
+/**
+ * Per-site image optimization, applied by the data plane's `image_optim`
+ * plugin: it converts JPEG/PNG responses to a format the client accepts, and
+ * only for responses that actually carry an image body.
+ */
+export interface ImageOptimization {
+  enabled: boolean
+  formats: ImageOptimFormat[]
+  png_quality: number
+  jpeg_quality: number
+  avif_quality: number
+  /** AVIF encoder speed: 1 = slowest/smallest, 10 = fastest. */
+  avif_speed: number
+}
+
 export interface UpdateCacheSettingsRequest {
   quota_mb?: number
   /** Absent = unchanged; null = follow the global ceiling again. */
@@ -2131,6 +2154,8 @@ export interface UpdateCacheSettingsRequest {
   type_limits?: Record<string, number> | null
   /** Absent = unchanged; null removes the policy. */
   cache_type_policy?: CacheTypePolicy | null
+  /** Absent = unchanged; null stops optimizing for this site. */
+  image_optimization?: ImageOptimization | null
 }
 
 /**

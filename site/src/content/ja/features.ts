@@ -44,6 +44,7 @@ const features = {
         "SQLi と XSS は libinjection、その他は Aho-Corasick の多パターン一致で検知します。",
         "http.request.uri.path contains \"/admin\" のような Cloudflare 風の式を利用できます。",
         "異常スコアがすべての一致を集約し、リクエストごとに 1 つの判定を出します。",
+        "静的アセットはコンテンツ種別ごとにキャッシュされ、JPEG/PNG レスポンスはサイト単位で WebP や AVIF に再エンコードできます（`image_optim`、キャッシュ画面で切り替え）。",
       ],
       note: "正規化 → シグネチャ → 式 → 異常スコア",
       scene: {

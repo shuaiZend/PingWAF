@@ -876,6 +876,21 @@ pub struct SiteCacheSettings {
     pub type_max_file_size_mb: HashMap<String, u32>,
     #[serde(default)]
     pub type_policy: Option<CacheTypePolicy>,
+    /// Image optimization policy; `None` = never configured.
+    #[serde(default)]
+    pub image_optimization: Option<ImageOptimization>,
+}
+
+/// Per-site image optimization, mirrored from `SiteCacheSettings`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ImageOptimization {
+    pub enabled: bool,
+    /// Output formats (`webp`, `avif`).
+    pub formats: Vec<String>,
+    pub png_quality: u32,
+    pub jpeg_quality: u32,
+    pub avif_quality: u32,
+    pub avif_speed: u32,
 }
 
 /// One content family of a site's extension-based cache policy.
@@ -3316,6 +3331,23 @@ impl RuleCache {
             max_file_size_mb: s.max_file_size_mb,
             type_max_file_size_mb: s.type_max_file_size_mb.clone(),
             type_policy: s.type_policy.as_ref().map(Self::convert_type_policy),
+            image_optimization: s
+                .image_optimization
+                .as_ref()
+                .map(Self::convert_image_optimization),
+        }
+    }
+
+    fn convert_image_optimization(
+        p: &proto::ImageOptimization,
+    ) -> ImageOptimization {
+        ImageOptimization {
+            enabled: p.enabled,
+            formats: p.formats.clone(),
+            png_quality: p.png_quality,
+            jpeg_quality: p.jpeg_quality,
+            avif_quality: p.avif_quality,
+            avif_speed: p.avif_speed,
         }
     }
 

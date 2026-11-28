@@ -1736,6 +1736,7 @@ purge_ip_list = ["192.168.1.1"]
             .into_iter()
             .collect(),
             type_policy: None,
+            image_optimization: None,
         });
         let compiled = build_site_cache_rules(&site);
         assert_eq!(Some(8 * 1024 * 1024), compiled.max_file_size);
@@ -1777,6 +1778,7 @@ purge_ip_list = ["192.168.1.1"]
             max_file_size_mb: None,
             type_max_file_size_mb: HashMap::new(),
             type_policy: Some(policy),
+            image_optimization: None,
         });
         let compiled = build_site_cache_rules(&site);
 

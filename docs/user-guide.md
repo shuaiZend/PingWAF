@@ -550,6 +550,42 @@ looks like `http.request.uri.path matches "(?i)\.(?:png|jpg)$"` — and
 disables the preset so the same requests are not matched twice. Use it when
 a preset is almost right but needs conditions the preset cannot express.
 
+### Image Optimization
+
+**Site → Cache → Image optimization** switches on the data plane's
+`image_optim` plugin for this site. When enabled, a JPEG or PNG response is
+re-encoded into the first of the site's **output formats** (`WebP`, `AVIF`)
+that the request's `Accept` header lists — and only then; a client that accepts
+neither gets the original bytes. The qualities (`PNG`, `JPEG`, `AVIF`, 1-100)
+and the AVIF encoder speed (1 = slowest and smallest, 10 = fastest) tune the
+trade-off per site.
+
+Three properties are worth knowing before turning it on:
+
+- **The cache keeps one variant per accepted format.** The plugin extends the
+  cache key with the image types the request's `Accept` header lists, so a
+  client that accepts WebP/AVIF and one that accepts neither are different
+  entries: the first is stored optimized, the second keeps the origin bytes.
+  The plugin runs at the upstream stage, so what is stored is the response the
+  client received — a later hit with the same accepted formats is served as
+  stored, and a client with a different `Accept` set is a different key.
+- **Only plain, sized image responses are touched.** The plugin acts on a
+  `200` with `Content-Type: image/jpeg` or `image/png`, a `Content-Length` of at
+  most 16 MiB, and a request whose `Accept` header explicitly lists the chosen
+  format. Everything else — a chunked image (no declared length), a `HEAD`, a
+  `206` range, a `304`, an image over 16 MiB, or a client that only sent
+  `Accept: */*` — passes through with the origin's bytes and content type. The
+  response gains `Vary: Accept`, so a CDN in front of the edge caches the
+  variants apart. If a corrupt image fails to decode, the origin's bytes are
+  sent rather than an empty body.
+- **The binary must be built with the `imageoptim` feature** (the release
+  artifacts and the Docker image are). A build without it accepts the policy but
+  logs one warning per site and leaves responses untouched.
+
+Turning the switch on does not rewrite entries cached before it: those were
+stored under a key without the accepted-format suffix, so the next request
+simply misses and fills the new variant.
+
 ### Cache Purging
 
 Purge cached content immediately:

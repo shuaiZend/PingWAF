@@ -1212,7 +1212,22 @@
         "media": "音视频",
         "other": "其他类型",
         "html": "HTML 页面"
-      }
+      },
+      "imageOptimTitle": "图片优化",
+      "imageOptimHint": "把 JPEG / PNG 响应重新编码为浏览器已支持且更小的格式。在缓存之后执行：命中缓存直接返回已存内容，未命中则在返回前优化。",
+      "imageOptimSwitch": "返回时优化图片",
+      "imageOptimSwitchHint": "只转换 Accept 头里列出所选格式的图片响应，其余响应原样透传。",
+      "imageOptimFormatsLabel": "输出格式",
+      "imageOptimPng": "PNG 质量",
+      "imageOptimJpeg": "JPEG 质量",
+      "imageOptimAvif": "AVIF 质量",
+      "imageOptimSpeed": "AVIF 速度",
+      "imageOptimSpeedHint": "1 最慢且体积最小，10 最快",
+      "imageOptimNote": "只作用于本站点自有源站的响应；缓存按 Accept 的格式分别保存变体。",
+      "imageOptimSaved": "图片优化已保存",
+      "imageOptimNeedsFormat": "至少选择一个输出格式，或关闭开关。",
+      "imageOptimQualityInvalid": "{{label}} 必须在 1 到 100 之间。",
+      "imageOptimSpeedInvalid": "AVIF 速度必须在 1 到 10 之间。"
     },
     "ssl": {
       "title": "SSL/TLS",

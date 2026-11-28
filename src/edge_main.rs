@@ -43,6 +43,13 @@ compile_error!(
 
 #[cfg(not(feature = "dhat"))]
 mod allocator_tune;
+// The image optimizer registers itself through a `#[ctor]` in
+// `pingap-imageoptim`; without a reference the linker drops the crate and the
+// agent would accept a site policy it cannot honour.
+#[cfg(feature = "imageoptim")]
+#[allow(unused_imports)]
+use pingap_imageoptim::ImageOptim;
+
 mod certificates;
 mod cli;
 mod config_file;

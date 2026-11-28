@@ -44,6 +44,7 @@ const features = {
         "libinjection 负责 SQLi 与 XSS 启发式，其余交给 Aho-Corasick 多模式匹配。",
         "支持 Cloudflare 风格表达式，例如 http.request.uri.path contains \"/admin\" 与 ip.src in {10.0.0.0/8}。",
         "异常评分汇总所有命中，为每个请求给出唯一判决。",
+        "静态资源按内容族缓存，JPEG/PNG 响应可按站点重编码为 WebP 或 AVIF（`image_optim`），在缓存页开关。",
       ],
       note: "归一化 → 签名 → 表达式 → 异常评分",
       scene: {

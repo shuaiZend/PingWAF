@@ -44,6 +44,7 @@ const features = {
         "libinjection heuristics for SQLi and XSS plus Aho-Corasick multi-pattern matching for the rest.",
         "Cloudflare-style expressions such as http.request.uri.path contains \"/admin\" and ip.src in {10.0.0.0/8}.",
         "Anomaly scoring aggregates every match into one verdict per request.",
+        "Static assets are cached by content family, and JPEG/PNG responses can be re-encoded to WebP or AVIF per site (`image_optim`), toggled on the caching page.",
       ],
       note: "normalize → signatures → expression → anomaly score",
       scene: {
