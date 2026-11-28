@@ -1520,6 +1520,8 @@ enum RateAction {
 /// the control plane sent them in (priority ascending) and the first
 /// enforcing rule to trip stops the request.
 struct CompiledRateRule {
+    /// None counts requests; Some counts matching upstream statuses.
+    response_status_codes: Option<Vec<u16>>,
     id: String,
     name: String,
     /// Optional inclusion filter; `None` applies to every request.
@@ -1648,7 +1650,45 @@ impl CompiledRateRule {
             // Basic auth is not a rate limit outcome.
             CacheWafAction::BasicAuth => return None,
         };
+        let response_status_codes = match rule.counting_mode {
+            0 => None,
+            1 => {
+                if rule.response_status_codes.is_empty()
+                    || rule
+                        .response_status_codes
+                        .iter()
+                        .any(|code| !(200..=599).contains(code))
+                    || action == RateAction::Allow
+                {
+                    warn!(
+                        rule = %rule.id,
+                        "invalid response rate limit configuration; rule ignored"
+                    );
+                    return None;
+                }
+
+                let mut codes: Vec<u16> = rule
+                    .response_status_codes
+                    .iter()
+                    .map(|code| *code as u16)
+                    .collect();
+
+                codes.sort_unstable();
+                codes.dedup();
+                Some(codes)
+            },
+            unknown => {
+                warn!(
+                    rule = %rule.id,
+                    counting_mode = unknown,
+                    "unknown rate limit counting mode; rule ignored"
+                );
+                return None;
+            },
+        };
+
         Some(Self {
+            response_status_codes,
             id: rule.id.clone(),
             name: rule.name.clone(),
             expression,
@@ -1676,6 +1716,18 @@ impl CompiledRateRule {
     ) -> RateKey {
         let mut digest = RateKeyDigest::new();
         digest.push(&self.id);
+
+        // Request and response counters must not share the same key.
+        // Changing response counting parameters also starts a fresh counter.
+        if let Some(codes) = &self.response_status_codes {
+            digest.push("response");
+            digest.push(&format!("{codes:?}"));
+            digest.push(&self.period_secs.to_string());
+            digest.push(&self.threshold.to_string());
+            digest.push(&self.mitigation_secs.to_string());
+            digest.push(&format!("{:?}", self.action));
+        }
+
         self.key_parts(request_data, host, asn, |part| digest.push(part));
         digest.finish()
     }
@@ -1870,7 +1922,106 @@ struct RateCounters {
     uncounted: AtomicU64,
 }
 
+/// Response accounting prepared during request evaluation.
+struct PendingResponseRate {
+    key: RateKey,
+    rule_id: String,
+    status_codes: Vec<u16>,
+    period_secs: u64,
+    threshold: u32,
+    mitigation_secs: u64,
+}
+
 impl RateCounters {
+    /// Check response-based mitigation without counting the request.
+    fn response_mitigation(
+        &self,
+        key: RateKey,
+        rule: &CompiledRateRule,
+        now: u64,
+    ) -> Option<u64> {
+        let entry = self.map.get(&key)?;
+
+        if now < entry.blocked_until {
+            return Some(entry.blocked_until - now);
+        }
+
+        // With no explicit mitigation timeout, enforce until the
+        // counting window expires.
+        if rule.mitigation_secs == 0
+            && entry.window == now / rule.period_secs
+            && entry.count > rule.threshold
+        {
+            return Some((entry.window + 1) * rule.period_secs - now);
+        }
+
+        None
+    }
+
+    /// Count one eligible upstream response.
+    /// Returns true when this response activates mitigation.
+    fn count_response(
+        &self,
+        pending: &PendingResponseRate,
+        status: u16,
+        now: u64,
+    ) -> bool {
+        if !pending.status_codes.contains(&status) {
+            return false;
+        }
+
+        let window = now / pending.period_secs;
+
+        let mut entry = match self.map.get_mut(&pending.key) {
+            Some(entry) => entry,
+            None => {
+                if !self.admit(now) {
+                    return false;
+                }
+
+                self.map.entry(pending.key).or_insert(RateCounter {
+                    window,
+                    count: 0,
+                    blocked_until: 0,
+                    expires_at: 0,
+                })
+            },
+        };
+
+        // In-flight responses arriving during mitigation must not
+        // continually extend the mitigation timeout.
+        if now < entry.blocked_until {
+            return false;
+        }
+
+        if entry.window != window {
+            entry.window = window;
+            entry.count = 0;
+            entry.blocked_until = 0;
+        } else if entry.blocked_until != 0 {
+            // A timed mitigation has expired within the same window.
+            // Start a fresh counting cycle.
+            entry.count = 0;
+            entry.blocked_until = 0;
+        }
+
+        let previous = entry.count;
+
+        entry.count = entry.count.saturating_add(1);
+        entry.expires_at = (window + 1) * pending.period_secs;
+
+        if entry.count <= pending.threshold {
+            return false;
+        }
+
+        if pending.mitigation_secs > 0 {
+            entry.blocked_until = now + pending.mitigation_secs;
+            entry.expires_at = entry.expires_at.max(entry.blocked_until);
+        }
+
+        previous <= pending.threshold
+    }
+
     fn len(&self) -> usize {
         self.map.len()
     }
