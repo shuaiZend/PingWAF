@@ -12346,3 +12346,211 @@ inspect_body = true"###,
         assert_eq!(compiled.match_path("/anon").unwrap().name, "/anon");
     }
 }
+
+#[cfg(test)]
+mod response_rate_tests {
+    use super::*;
+
+    fn pending(
+        key: u128,
+        threshold: u32,
+        mitigation_secs: u64,
+    ) -> PendingResponseRate {
+        PendingResponseRate {
+            key: RateKey(key),
+            rule_id: "response-test".to_string(),
+            status_codes: vec![400, 403, 404, 405],
+            period_secs: 60,
+            threshold,
+            mitigation_secs,
+        }
+    }
+
+    fn compiled(threshold: u32, mitigation_secs: u64) -> CompiledRateRule {
+        CompiledRateRule {
+            response_status_codes: Some(vec![400, 403, 404, 405]),
+            id: "response-test".to_string(),
+            name: "Response test".to_string(),
+            expression: None,
+            exception: None,
+            chars: vec![RateChar::Ip],
+            period_secs: 60,
+            threshold,
+            mitigation_secs,
+            action: RateAction::Block,
+        }
+    }
+
+    #[test]
+    fn response_rate_ignores_non_matching_statuses() {
+        let counters = RateCounters::default();
+        let rule = pending(1, 3, 300);
+
+        for status in [200, 201, 301, 302, 429, 500, 502, 503, 504] {
+            assert!(!counters.count_response(&rule, status, 1000));
+        }
+
+        assert_eq!(counters.len(), 0);
+    }
+
+    #[test]
+    fn response_rate_combines_matching_statuses() {
+        let counters = RateCounters::default();
+        let rule = pending(1, 3, 300);
+
+        assert!(!counters.count_response(&rule, 400, 1000));
+        assert!(!counters.count_response(&rule, 403, 1000));
+        assert!(!counters.count_response(&rule, 404, 1000));
+
+        assert_eq!(counters.map.get(&rule.key).unwrap().count, 3);
+
+        assert!(counters.count_response(&rule, 405, 1000));
+
+        assert_eq!(counters.map.get(&rule.key).unwrap().count, 4);
+    }
+
+    #[test]
+    fn response_rate_triggers_only_above_threshold() {
+        let counters = RateCounters::default();
+        let rule = pending(1, 3, 300);
+        let policy = compiled(3, 300);
+
+        for _ in 0..3 {
+            assert!(!counters.count_response(&rule, 404, 1000));
+        }
+
+        assert_eq!(counters.response_mitigation(rule.key, &policy, 1000), None);
+
+        assert!(counters.count_response(&rule, 404, 1000));
+
+        assert_eq!(
+            counters.response_mitigation(rule.key, &policy, 1000),
+            Some(300)
+        );
+    }
+
+    #[test]
+    fn response_rate_inflight_responses_do_not_extend_ban() {
+        let counters = RateCounters::default();
+        let rule = pending(1, 1, 300);
+        let policy = compiled(1, 300);
+
+        assert!(!counters.count_response(&rule, 404, 1000));
+        assert!(counters.count_response(&rule, 404, 1000));
+
+        for _ in 0..100 {
+            assert!(!counters.count_response(&rule, 404, 1100));
+        }
+
+        assert_eq!(
+            counters.response_mitigation(rule.key, &policy, 1100),
+            Some(200)
+        );
+
+        let entry = counters.map.get(&rule.key).unwrap();
+        assert_eq!(entry.count, 2);
+        assert_eq!(entry.blocked_until, 1300);
+    }
+
+    #[test]
+    fn response_rate_expired_mitigation_resets_count() {
+        let counters = RateCounters::default();
+        let rule = pending(1, 1, 10);
+        let policy = compiled(1, 10);
+
+        assert!(!counters.count_response(&rule, 404, 1000));
+        assert!(counters.count_response(&rule, 404, 1000));
+
+        assert_eq!(
+            counters.response_mitigation(rule.key, &policy, 1009),
+            Some(1)
+        );
+
+        assert_eq!(counters.response_mitigation(rule.key, &policy, 1010), None);
+
+        assert!(!counters.count_response(&rule, 404, 1010));
+
+        assert_eq!(counters.map.get(&rule.key).unwrap().count, 1);
+    }
+
+    #[test]
+    fn response_rate_zero_timeout_expires_at_window_boundary() {
+        let counters = RateCounters::default();
+        let rule = pending(1, 1, 0);
+        let policy = compiled(1, 0);
+
+        assert!(!counters.count_response(&rule, 404, 1000));
+        assert!(counters.count_response(&rule, 404, 1000));
+
+        assert_eq!(
+            counters.response_mitigation(rule.key, &policy, 1000),
+            Some(20)
+        );
+
+        assert_eq!(counters.map.get(&rule.key).unwrap().blocked_until, 1020);
+
+        assert_eq!(counters.response_mitigation(rule.key, &policy, 1020), None);
+
+        assert!(!counters.count_response(&rule, 404, 1020));
+
+        assert_eq!(counters.map.get(&rule.key).unwrap().count, 1);
+    }
+
+    #[test]
+    fn response_rate_window_rollover_resets_count() {
+        let counters = RateCounters::default();
+        let rule = pending(1, 3, 300);
+
+        for _ in 0..3 {
+            assert!(!counters.count_response(&rule, 404, 1019));
+        }
+
+        assert!(!counters.count_response(&rule, 404, 1020));
+
+        assert_eq!(counters.map.get(&rule.key).unwrap().count, 1);
+    }
+
+    #[test]
+    fn response_rate_keys_are_independent() {
+        let counters = RateCounters::default();
+        let first = pending(1, 1, 300);
+        let second = pending(2, 1, 300);
+        let policy = compiled(1, 300);
+
+        assert!(!counters.count_response(&first, 404, 1000));
+        assert!(counters.count_response(&first, 404, 1000));
+
+        assert!(!counters.count_response(&second, 404, 1000));
+
+        assert_eq!(
+            counters.response_mitigation(first.key, &policy, 1000),
+            Some(300)
+        );
+
+        assert_eq!(
+            counters.response_mitigation(second.key, &policy, 1000),
+            None
+        );
+    }
+
+    #[test]
+    fn response_rate_concurrent_increments_are_preserved() {
+        let counters = RateCounters::default();
+        let rule = pending(1, 10000, 300);
+
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let counters = &counters;
+                let rule = &rule;
+
+                scope.spawn(move || {
+                    for _ in 0..100 {
+                        assert!(!counters.count_response(rule, 404, 1000));
+                    }
+                });
+            }
+        });
+
+        assert_eq!(counters.map.get(&rule.key).unwrap().count, 800);
+    }
+}
