@@ -545,10 +545,34 @@ pub fn rule_to_proto(row: &rule::Model) -> WafRule {
 }
 
 fn rate_limit_to_proto(row: &rate_limit_rules::Model) -> RateLimitRule {
+    let counting_mode = match row.counting_mode.as_str() {
+        "request" => 0,
+        "response" => 1,
+        _ => -1,
+    };
+
+    let mut response_status_codes: Vec<u32> =
+        serde_json::from_value(row.response_status_codes.clone())
+            .unwrap_or_default();
+
+    response_status_codes.sort_unstable();
+    response_status_codes.dedup();
+
+    let valid_response_rule = counting_mode == 1
+        && !response_status_codes.is_empty()
+        && response_status_codes
+            .iter()
+            .all(|code| (200..=599).contains(code))
+        && row.action != "allow";
+
+    if counting_mode == 0 {
+        response_status_codes.clear();
+    }
+
     RateLimitRule {
-        counting_mode: 0,
-        response_status_codes: Vec::new(),
-        response_enabled: false,
+        counting_mode,
+        response_status_codes,
+        response_enabled: row.enabled && valid_response_rule,
         id: row.id.to_string(),
         name: row.name.clone(),
         expression: row.expression.clone(),
@@ -568,7 +592,9 @@ fn rate_limit_to_proto(row: &rate_limit_rules::Model) -> RateLimitRule {
         action: action::to_proto(&row.action),
         mitigation_timeout_seconds: row.mitigation_timeout_seconds.max(0)
             as u32,
-        enabled: row.enabled,
+        // Legacy agents must never enforce response-mode
+        // rules as ordinary request-based rate limits.
+        enabled: row.enabled && counting_mode == 0,
         priority: row.priority.max(0) as u32,
     }
 }
