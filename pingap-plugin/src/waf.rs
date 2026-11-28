@@ -1540,7 +1540,8 @@ impl CompiledRateRule {
     /// (zero threshold or period, unsupported characteristic, allow action)
     /// or carrying an expression that fails to parse.
     fn build(rule: &CacheRateLimitRule) -> Option<Self> {
-        if !rule.enabled || rule.threshold == 0 || rule.period_seconds == 0 {
+        if !rule.is_enabled() || rule.threshold == 0 || rule.period_seconds == 0
+        {
             return None;
         }
         let mut chars = Vec::with_capacity(rule.characteristics.len());
@@ -1933,10 +1934,29 @@ struct RateCounters {
 /// Per-request plugin-state key for response rate limiting.
 const RESPONSE_RATE_STATE_KEY: &str = "pingwaf.response_rate";
 
+/// Request metadata retained only for response rate accounting.
+/// Do not retain request bodies or unrelated headers.
+struct PendingResponseRates {
+    site_id: String,
+    request_id: String,
+    host: String,
+    client_ip: String,
+    method: String,
+    scheme: String,
+    protocol: String,
+    path: String,
+    query: String,
+    user_agent: String,
+    country_code: String,
+    rules: Vec<PendingResponseRate>,
+}
+
 /// Response accounting prepared during request evaluation.
 struct PendingResponseRate {
     key: RateKey,
     rule_id: String,
+    rule_name: String,
+    action: RateAction,
     status_codes: Vec<u16>,
     period_secs: u64,
     threshold: u32,
@@ -2277,6 +2297,8 @@ impl RateLimitPolicy {
                 pending_response.push(PendingResponseRate {
                     key,
                     rule_id: rule.id.clone(),
+                    rule_name: rule.name.clone(),
+                    action: rule.action,
                     status_codes: codes.clone(),
                     period_secs: rule.period_secs,
                     threshold: rule.threshold,
@@ -4232,6 +4254,53 @@ impl WafPlugin {
         }
     }
 
+    /// Record threshold detection without counting the request twice
+    /// or claiming that the triggering response was mitigated.
+    fn log_response_rate_event(
+        pending: &PendingResponseRates,
+        rule: &PendingResponseRate,
+        status: u16,
+        user_identity: &str,
+    ) {
+        let Some(agent) = PingWafAgent::instance() else {
+            return;
+        };
+
+        mark_waf_triggered(&pending.request_id);
+
+        agent.log_security_event(SecurityEvent {
+            site_id: pending.site_id.clone(),
+            request_id: pending.request_id.clone(),
+            client_ip: pending.client_ip.clone(),
+            method: pending.method.clone(),
+            scheme: pending.scheme.clone(),
+            protocol: pending.protocol.clone(),
+            host: pending.host.clone(),
+            path: pending.path.clone(),
+            query_string: pending.query.clone(),
+            rule_id: rule.rule_id.clone(),
+            enforced_rule_id: String::new(),
+            rule_name: rule.rule_name.clone(),
+            event_type: "rate_limit".to_string(),
+            action: action_str(&WafAction::Monitor).to_string(),
+            score: 0,
+            details: format!(
+                "response rate limit threshold exceeded;                  HTTP status={}; count={}; threshold={};                  period={}s; configured_action={:?};                  mitigation_timeout={}s",
+                status,
+                rule.threshold.saturating_add(1),
+                rule.threshold,
+                rule.period_secs,
+                rule.action,
+                rule.mitigation_secs,
+            ),
+            response_status: status.into(),
+            user_agent: pending.user_agent.clone(),
+            country_code: pending.country_code.clone(),
+            matched_tags: vec![rule.rule_id.clone()],
+            user_identity: user_identity.to_string(),
+        });
+    }
+
     /// Ship a security event to the control plane (best effort, non-blocking).
     fn log_event(
         site_id: &str,
@@ -5733,7 +5802,28 @@ impl Plugin for WafPlugin {
 
                 states.insert(
                     RESPONSE_RATE_STATE_KEY,
-                    Box::new(outcome.pending_response),
+                    Box::new(PendingResponseRates {
+                        site_id: site_id.to_string(),
+                        request_id: request_id.to_string(),
+                        host: host.to_string(),
+                        client_ip: request_data.client_ip.clone(),
+                        method: request_data.method.clone(),
+                        scheme: request_data.scheme.clone(),
+                        protocol: request_data.protocol.clone(),
+                        path: request_data.path.clone(),
+                        query: request_data.query.clone(),
+                        user_agent: request_data
+                            .headers
+                            .iter()
+                            .find(|(k, _)| k.eq_ignore_ascii_case("user-agent"))
+                            .map(|(_, v)| v.clone())
+                            .unwrap_or_default(),
+                        country_code: request_data
+                            .country_code
+                            .clone()
+                            .unwrap_or_default(),
+                        rules: outcome.pending_response,
+                    }),
                 );
             }
 
@@ -6520,9 +6610,7 @@ impl Plugin for WafPlugin {
             .as_mut()
             .and_then(|features| features.plugin_state.as_mut())
             .and_then(|states| states.remove(RESPONSE_RATE_STATE_KEY))
-            .and_then(|state| {
-                state.downcast::<Vec<PendingResponseRate>>().ok()
-            });
+            .and_then(|state| state.downcast::<PendingResponseRates>().ok());
 
         let Some(pending) = pending else {
             return Ok(ResponsePluginResult::Unchanged);
@@ -6530,7 +6618,7 @@ impl Plugin for WafPlugin {
 
         let now = unix_now();
 
-        for rule in pending.iter() {
+        for rule in &pending.rules {
             if self.rate_counters.count_response(rule, status, now) {
                 debug!(
                     rule_id = %rule.rule_id,
@@ -6539,6 +6627,13 @@ impl Plugin for WafPlugin {
                     period_secs = rule.period_secs,
                     mitigation_secs = rule.mitigation_secs,
                     "response rate limit threshold exceeded"
+                );
+
+                Self::log_response_rate_event(
+                    &pending,
+                    rule,
+                    status,
+                    ctx.state.user_identity.as_deref().unwrap_or_default(),
                 );
             }
         }
@@ -10673,6 +10768,371 @@ inspect_body = true"###,
             .unwrap()
     }
 
+    /// Constructs a response-counting rule using the legacy-safe flags.
+    fn response_rate_rule(
+        id: &str,
+        action: proto::WafAction,
+    ) -> proto::RateLimitRule {
+        let mut rule = rate_rule(
+            id,
+            vec![proto::RateLimitCharacteristics::RateLimitCharIp],
+            "",
+            1,
+            action,
+            300,
+        );
+
+        rule.counting_mode = 1;
+        rule.response_status_codes = vec![404];
+        rule.enabled = false;
+        rule.response_enabled = true;
+        rule.period_seconds = 86400;
+
+        rule
+    }
+
+    /// Runs the request phase and optionally delivers upstream responses
+    /// using the same session and request context.
+    async fn run_response_rate_request(
+        plugin: &WafPlugin,
+        client_ip: &str,
+        path: &str,
+        statuses: &[u16],
+    ) -> RequestPluginResult {
+        let input_header =
+            format!("GET {path} HTTP/1.1\r\nHost: example.com\r\n\r\n");
+
+        let mock_io = Builder::new().read(input_header.as_bytes()).build();
+
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+
+        let mut ctx = Ctx::default();
+        ctx.conn.client_ip = Some(client_ip.to_string());
+
+        let result = plugin
+            .handle_request(PluginStep::EarlyRequest, &mut session, &mut ctx)
+            .await
+            .unwrap();
+
+        if result == RequestPluginResult::Continue {
+            for status in statuses {
+                let mut response =
+                    ResponseHeader::build(*status, None).unwrap();
+
+                plugin
+                    .handle_upstream_response(
+                        &mut session,
+                        &mut ctx,
+                        &mut response,
+                    )
+                    .unwrap();
+
+                // Response counting must never change the triggering
+                // upstream response.
+                assert_eq!(response.status.as_u16(), *status);
+            }
+        }
+
+        result
+    }
+
+    #[tokio::test]
+    async fn response_rate_lifecycle_request_without_response() {
+        let (_guard, _agent, _dir) =
+            install_rate_agent(vec![response_rate_rule(
+                "rl-response-no-origin",
+                proto::WafAction::Block,
+            )])
+            .await;
+
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        for _ in 0..5 {
+            assert!(
+                run_response_rate_request(&plugin, "203.0.113.20", "/", &[],)
+                    .await
+                    == RequestPluginResult::Continue
+            );
+        }
+
+        assert_eq!(plugin.rate_counters.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn response_rate_lifecycle_nonmatching_status() {
+        let (_guard, _agent, _dir) =
+            install_rate_agent(vec![response_rate_rule(
+                "rl-response-status",
+                proto::WafAction::Block,
+            )])
+            .await;
+
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        for status in [200, 301, 403, 500, 503] {
+            assert!(
+                run_response_rate_request(
+                    &plugin,
+                    "203.0.113.21",
+                    "/",
+                    &[status],
+                )
+                .await
+                    == RequestPluginResult::Continue
+            );
+        }
+
+        assert_eq!(plugin.rate_counters.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn response_rate_lifecycle_threshold_and_block() {
+        let (_guard, agent, _dir) =
+            install_rate_agent(vec![response_rate_rule(
+                "rl-response-block",
+                proto::WafAction::Block,
+            )])
+            .await;
+
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        // First response reaches the threshold.
+        assert!(
+            run_response_rate_request(&plugin, "203.0.113.22", "/", &[404],)
+                .await
+                == RequestPluginResult::Continue
+        );
+
+        // Second response exceeds the threshold but is not blocked.
+        assert!(
+            run_response_rate_request(&plugin, "203.0.113.22", "/", &[404],)
+                .await
+                == RequestPluginResult::Continue
+        );
+
+        // Detection is reported immediately, without another request.
+        let event = agent.client.pop_log().await.unwrap();
+
+        assert_eq!("rl-response-block", event.waf_rule_id);
+        assert_eq!("monitor", event.waf_action);
+
+        // The next matching request is mitigated.
+        let result =
+            run_response_rate_request(&plugin, "203.0.113.22", "/", &[]).await;
+
+        let RequestPluginResult::Respond(response) = result else {
+            panic!("expected response rate mitigation");
+        };
+
+        assert_eq!(429, response.status.as_u16());
+
+        // A different client remains unaffected.
+        assert!(
+            run_response_rate_request(&plugin, "203.0.113.23", "/", &[200],)
+                .await
+                == RequestPluginResult::Continue
+        );
+    }
+
+    #[tokio::test]
+    async fn response_rate_lifecycle_duplicate_callback() {
+        let (_guard, _agent, _dir) =
+            install_rate_agent(vec![response_rate_rule(
+                "rl-response-duplicate",
+                proto::WafAction::Block,
+            )])
+            .await;
+
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        assert!(
+            run_response_rate_request(
+                &plugin,
+                "203.0.113.24",
+                "/",
+                &[404, 404, 404],
+            )
+            .await
+                == RequestPluginResult::Continue
+        );
+
+        assert_eq!(plugin.rate_counters.len(), 1);
+
+        let count = plugin
+            .rate_counters
+            .map
+            .iter()
+            .next()
+            .unwrap()
+            .value()
+            .count;
+
+        assert_eq!(count, 1);
+
+        // Duplicate callbacks must not activate mitigation.
+        assert!(
+            run_response_rate_request(&plugin, "203.0.113.24", "/", &[],).await
+                == RequestPluginResult::Continue
+        );
+    }
+
+    #[tokio::test]
+    async fn response_rate_lifecycle_informational_response() {
+        let (_guard, _agent, _dir) =
+            install_rate_agent(vec![response_rate_rule(
+                "rl-response-informational",
+                proto::WafAction::Block,
+            )])
+            .await;
+
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        assert!(
+            run_response_rate_request(
+                &plugin,
+                "203.0.113.25",
+                "/",
+                &[100, 103, 404],
+            )
+            .await
+                == RequestPluginResult::Continue
+        );
+
+        assert_eq!(plugin.rate_counters.len(), 1);
+
+        let count = plugin
+            .rate_counters
+            .map
+            .iter()
+            .next()
+            .unwrap()
+            .value()
+            .count;
+
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn response_rate_lifecycle_log_only() {
+        let (_guard, agent, _dir) =
+            install_rate_agent(vec![response_rate_rule(
+                "rl-response-log",
+                proto::WafAction::Log,
+            )])
+            .await;
+
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        for _ in 0..2 {
+            assert!(
+                run_response_rate_request(&plugin, "203.0.113.26", "/", &[404],)
+                    .await == RequestPluginResult::Continue
+            );
+        }
+
+        let event = agent.client.pop_log().await.unwrap();
+
+        assert_eq!("rl-response-log", event.waf_rule_id);
+        assert_eq!("monitor", event.waf_action);
+
+        // Log action must never prevent requests reaching the origin.
+        for _ in 0..3 {
+            assert!(
+                run_response_rate_request(&plugin, "203.0.113.26", "/", &[200],)
+                    .await == RequestPluginResult::Continue
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn response_rate_lifecycle_exception_expression() {
+        let mut rule = response_rate_rule(
+            "rl-response-exception",
+            proto::WafAction::Block,
+        );
+
+        rule.exception_expression =
+            r#"http.request.uri.path eq "/excluded""#.to_string();
+
+        let (_guard, _agent, _dir) = install_rate_agent(vec![rule]).await;
+
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        for _ in 0..5 {
+            assert!(
+                run_response_rate_request(
+                    &plugin,
+                    "203.0.113.27",
+                    "/excluded",
+                    &[404],
+                )
+                .await
+                    == RequestPluginResult::Continue
+            );
+        }
+
+        assert_eq!(plugin.rate_counters.len(), 0);
+
+        assert!(
+            run_response_rate_request(
+                &plugin,
+                "203.0.113.27",
+                "/other",
+                &[404],
+            )
+            .await
+                == RequestPluginResult::Continue
+        );
+
+        assert_eq!(plugin.rate_counters.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn response_rate_lifecycle_disabled_rule() {
+        let mut rule =
+            response_rate_rule("rl-response-disabled", proto::WafAction::Block);
+
+        rule.response_enabled = false;
+
+        let (_guard, _agent, _dir) = install_rate_agent(vec![rule]).await;
+
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        for _ in 0..5 {
+            assert!(
+                run_response_rate_request(&plugin, "203.0.113.28", "/", &[404],)
+                    .await == RequestPluginResult::Continue
+            );
+        }
+
+        assert_eq!(plugin.rate_counters.len(), 0);
+    }
+
     /// Above the GC threshold the expired-counter sweep runs at most once per
     /// interval instead of on every request: an attacker rotating unique keys
     /// must not turn each request into an O(N) walk over the whole map.
@@ -10889,6 +11349,7 @@ inspect_body = true"###,
     fn rate_rule_build_filters_unenforceable_rules() {
         let build = |rule: proto::RateLimitRule| {
             CompiledRateRule::build(&CacheRateLimitRule {
+                response_enabled: false,
                 counting_mode: 0,
                 response_status_codes: Vec::new(),
                 id: rule.id,
@@ -11034,6 +11495,7 @@ inspect_body = true"###,
     fn rate_rule_build_accepts_parameterized_characteristics() {
         let build = |characteristics: &[&str], params: &[&str]| {
             CompiledRateRule::build(&CacheRateLimitRule {
+                response_enabled: false,
                 counting_mode: 0,
                 response_status_codes: Vec::new(),
                 id: "p".to_string(),
@@ -12360,6 +12822,8 @@ mod response_rate_tests {
         PendingResponseRate {
             key: RateKey(key),
             rule_id: "response-test".to_string(),
+            rule_name: "Response test".to_string(),
+            action: RateAction::Block,
             status_codes: vec![400, 403, 404, 405],
             period_secs: 60,
             threshold,
