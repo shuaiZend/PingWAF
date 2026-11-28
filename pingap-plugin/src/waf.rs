@@ -1839,10 +1839,16 @@ fn rate_tripped(rule: &CompiledRateRule, retry_after: u64) -> RateTripped {
     RateTripped {
         rule_id: rule.id.clone(),
         rule_name: rule.name.clone(),
-        detail: format!(
-            "rate limit rule '{}' exceeded {} requests per {}s",
-            rule.name, rule.threshold, rule.period_secs
-        ),
+        detail: match &rule.response_status_codes {
+            Some(codes) => format!(
+                "rate limit rule '{}' exceeded {} responses with HTTP statuses {:?} per {}s",
+                rule.name, rule.threshold, codes, rule.period_secs
+            ),
+            None => format!(
+                "rate limit rule '{}' exceeded {} requests per {}s",
+                rule.name, rule.threshold, rule.period_secs
+            ),
+        },
         challenge: rule.action == RateAction::Challenge,
         retry_after,
     }
@@ -1861,6 +1867,8 @@ struct RateTripped {
 
 /// What rate limiting decided for one request.
 struct RateOutcome {
+    /// Rules whose counters depend on the upstream response.
+    pending_response: Vec<PendingResponseRate>,
     /// First enforcing rule that tripped: the request must be stopped.
     deny: Option<RateTripped>,
     /// Log-only rules that tripped: recorded as events only.
@@ -1921,6 +1929,9 @@ struct RateCounters {
     /// Requests a rule did not count because the table was full.
     uncounted: AtomicU64,
 }
+
+/// Per-request plugin-state key for response rate limiting.
+const RESPONSE_RATE_STATE_KEY: &str = "pingwaf.response_rate";
 
 /// Response accounting prepared during request evaluation.
 struct PendingResponseRate {
@@ -2017,6 +2028,10 @@ impl RateCounters {
         if pending.mitigation_secs > 0 {
             entry.blocked_until = now + pending.mitigation_secs;
             entry.expires_at = entry.expires_at.max(entry.blocked_until);
+        }
+
+        if pending.mitigation_secs == 0 {
+            entry.blocked_until = (window + 1) * pending.period_secs;
         }
 
         previous <= pending.threshold
@@ -2145,6 +2160,7 @@ impl RateLimitPolicy {
         client_addr: Option<IpAddr>,
     ) -> RateOutcome {
         let mut logged = Vec::new();
+        let mut pending_response = Vec::new();
         if self.rules.is_empty() {
             // A site whose rate-limit rules were removed (or that was
             // deleted) leaves its counters behind, and this early return is
@@ -2155,7 +2171,11 @@ impl RateLimitPolicy {
             if counters.len() > 1024 {
                 counters.sweep_expired(unix_now());
             }
-            return RateOutcome { deny: None, logged };
+            return RateOutcome {
+                pending_response,
+                deny: None,
+                logged,
+            };
         }
         let now = unix_now();
         let asn = if self.rules.iter().any(|r| r.chars.contains(&RateChar::Asn))
@@ -2192,7 +2212,11 @@ impl RateLimitPolicy {
             if rule.action == RateAction::Allow {
                 // This rule is an explicit exception; stop evaluating the
                 // remaining rate-limit rules and do not create a counter.
-                return RateOutcome { deny: None, logged };
+                return RateOutcome {
+                    pending_response,
+                    deny: None,
+                    logged,
+                };
             }
             // A client holding a valid clearance already solved a challenge;
             // challenge rules neither count nor stop it.
@@ -2227,6 +2251,41 @@ impl RateLimitPolicy {
             {
                 counters.sweep_expired(now);
             }
+            // Response-based rules check existing mitigation now,
+            // but defer counting until an upstream status is received.
+            if let Some(codes) = &rule.response_status_codes {
+                if let Some(retry_after) =
+                    counters.response_mitigation(key, rule, now)
+                {
+                    let tripped = rate_tripped(rule, retry_after);
+
+                    match rule.action {
+                        RateAction::Log => logged.push(tripped),
+                        RateAction::Allow => {},
+                        _ => {
+                            return RateOutcome {
+                                pending_response,
+                                deny: Some(tripped),
+                                logged,
+                            };
+                        },
+                    }
+
+                    continue;
+                }
+
+                pending_response.push(PendingResponseRate {
+                    key,
+                    rule_id: rule.id.clone(),
+                    status_codes: codes.clone(),
+                    period_secs: rule.period_secs,
+                    threshold: rule.threshold,
+                    mitigation_secs: rule.mitigation_secs,
+                });
+
+                continue;
+            }
+
             let window = now / rule.period_secs;
             // A key already in the table is always counted; only a new one
             // has to be admitted, and that happens with no shard lock held
@@ -2269,6 +2328,7 @@ impl RateLimitPolicy {
                     RateAction::Allow => {},
                     _ => {
                         return RateOutcome {
+                            pending_response,
                             deny: Some(tripped),
                             logged,
                         };
@@ -2290,6 +2350,7 @@ impl RateLimitPolicy {
                     RateAction::Allow => {},
                     _ => {
                         return RateOutcome {
+                            pending_response,
                             deny: Some(tripped),
                             logged,
                         };
@@ -2297,7 +2358,11 @@ impl RateLimitPolicy {
                 }
             }
         }
-        RateOutcome { deny: None, logged }
+        RateOutcome {
+            pending_response,
+            deny: None,
+            logged,
+        }
     }
 }
 
@@ -5657,6 +5722,21 @@ impl Plugin for WafPlugin {
                 cleared,
                 client_addr,
             );
+            // Carry response-based rules into the upstream response
+            // phase independently of the access logging pipeline.
+            if !outcome.pending_response.is_empty() {
+                let features =
+                    ctx.features.get_or_insert_with(Default::default);
+
+                let states =
+                    features.plugin_state.get_or_insert_with(Default::default);
+
+                states.insert(
+                    RESPONSE_RATE_STATE_KEY,
+                    Box::new(outcome.pending_response),
+                );
+            }
+
             for tripped in &outcome.logged {
                 let verdict = WafVerdict {
                     action: WafAction::Monitor,
@@ -5732,7 +5812,13 @@ impl Plugin for WafPlugin {
                     // Defense in depth: refuse the client at the edge for the
                     // mitigation window so a repeat offender never reaches
                     // the counters (or the origin) again in that time.
+                    let response_based = rate.rules.iter().any(|rule| {
+                        rule.id == tripped.rule_id
+                            && rule.response_status_codes.is_some()
+                    });
+
                     if !tripped.challenge
+                        && !response_based
                         && let Some(agent) = &agent
                     {
                         agent.block_ip(
@@ -6412,6 +6498,54 @@ impl Plugin for WafPlugin {
         // Log-only or already-passthrough entries left the chunk (if any)
         // untouched.
         Ok(None)
+    }
+
+    fn handle_upstream_response(
+        &self,
+        _session: &mut Session,
+        ctx: &mut Ctx,
+        upstream_response: &mut ResponseHeader,
+    ) -> pingora::Result<ResponsePluginResult> {
+        let status = upstream_response.status.as_u16();
+
+        // Informational responses are not final responses.
+        if status < 200 {
+            return Ok(ResponsePluginResult::Unchanged);
+        }
+
+        // Consume the pending state exactly once. Requests served
+        // locally or from cache do not require response accounting.
+        let pending = ctx
+            .features
+            .as_mut()
+            .and_then(|features| features.plugin_state.as_mut())
+            .and_then(|states| states.remove(RESPONSE_RATE_STATE_KEY))
+            .and_then(|state| {
+                state.downcast::<Vec<PendingResponseRate>>().ok()
+            });
+
+        let Some(pending) = pending else {
+            return Ok(ResponsePluginResult::Unchanged);
+        };
+
+        let now = unix_now();
+
+        for rule in pending.iter() {
+            if self.rate_counters.count_response(rule, status, now) {
+                debug!(
+                    rule_id = %rule.rule_id,
+                    status = status,
+                    threshold = rule.threshold,
+                    period_secs = rule.period_secs,
+                    mitigation_secs = rule.mitigation_secs,
+                    "response rate limit threshold exceeded"
+                );
+            }
+        }
+
+        // Return the original upstream response unchanged.
+        // Mitigation is evaluated on subsequent requests.
+        Ok(ResponsePluginResult::Unchanged)
     }
 
     async fn handle_response(
@@ -10545,6 +10679,7 @@ inspect_body = true"###,
     fn rate_counter_gc_is_throttled_above_the_threshold() {
         let policy = RateLimitPolicy {
             rules: vec![CompiledRateRule {
+                response_status_codes: None,
                 id: "rl-gc".to_string(),
                 name: "gc".to_string(),
                 expression: None,
@@ -10621,6 +10756,7 @@ inspect_body = true"###,
     fn rate_counters_expire_below_the_threshold() {
         let policy = RateLimitPolicy {
             rules: vec![CompiledRateRule {
+                response_status_codes: None,
                 id: "rl-idle".to_string(),
                 name: "idle".to_string(),
                 expression: None,
@@ -10859,6 +10995,7 @@ inspect_body = true"###,
     #[test]
     fn rate_limit_exception_skips_counting() {
         let rule = CompiledRateRule {
+            response_status_codes: None,
             id: "except".to_string(),
             name: "except".to_string(),
             expression: None,
@@ -10946,6 +11083,7 @@ inspect_body = true"###,
     #[test]
     fn rate_limit_keys_parameterized_characteristics() {
         let rule = CompiledRateRule {
+            response_status_codes: None,
             id: "rl-h".to_string(),
             name: "per-key".to_string(),
             expression: None,
@@ -11060,6 +11198,7 @@ inspect_body = true"###,
     #[test]
     fn rate_key_keeps_parts_and_rules_apart() {
         let rule = |id: &str| CompiledRateRule {
+            response_status_codes: None,
             id: id.to_string(),
             name: "k".to_string(),
             expression: None,
@@ -11135,6 +11274,7 @@ inspect_body = true"###,
     fn rate_counters_full_of_bans_refuse_new_keys() {
         let policy = RateLimitPolicy {
             rules: vec![CompiledRateRule {
+                response_status_codes: None,
                 id: "rl-cap".to_string(),
                 name: "cap".to_string(),
                 expression: None,
@@ -11193,6 +11333,7 @@ inspect_body = true"###,
     fn rate_policy_counts_per_key_and_expires() {
         let policy = RateLimitPolicy {
             rules: vec![CompiledRateRule {
+                response_status_codes: None,
                 id: "rl".to_string(),
                 name: "per-ip".to_string(),
                 expression: None,
