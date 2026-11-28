@@ -1522,6 +1522,8 @@ enum RateAction {
 struct CompiledRateRule {
     /// None counts requests; Some counts matching upstream statuses.
     response_status_codes: Option<Vec<u16>>,
+    /// Precomputed identity of the response counting configuration.
+    response_config_fingerprint: Option<String>,
     id: String,
     name: String,
     /// Optional inclusion filter; `None` applies to every request.
@@ -1688,8 +1690,27 @@ impl CompiledRateRule {
             },
         };
 
+        let response_config_fingerprint =
+            response_status_codes.as_ref().map(|codes| {
+                let mut digest = RateKeyDigest::new();
+
+                digest.push("response");
+                digest.push(&format!("{codes:?}"));
+                digest.push(&rule.period_seconds.to_string());
+                digest.push(&rule.threshold.to_string());
+                digest.push(&rule.mitigation_timeout_seconds.to_string());
+                digest.push(&format!("{action:?}"));
+                digest.push(&rule.expression);
+                digest.push(&rule.exception_expression);
+                digest.push(&format!("{:?}", rule.characteristics));
+                digest.push(&format!("{:?}", rule.characteristic_params));
+
+                format!("{:032x}", digest.finish().0)
+            });
+
         Some(Self {
             response_status_codes,
+            response_config_fingerprint,
             id: rule.id.clone(),
             name: rule.name.clone(),
             expression,
@@ -1720,13 +1741,9 @@ impl CompiledRateRule {
 
         // Request and response counters must not share the same key.
         // Changing response counting parameters also starts a fresh counter.
-        if let Some(codes) = &self.response_status_codes {
+        if let Some(fingerprint) = &self.response_config_fingerprint {
             digest.push("response");
-            digest.push(&format!("{codes:?}"));
-            digest.push(&self.period_secs.to_string());
-            digest.push(&self.threshold.to_string());
-            digest.push(&self.mitigation_secs.to_string());
-            digest.push(&format!("{:?}", self.action));
+            digest.push(fingerprint);
         }
 
         self.key_parts(request_data, host, asn, |part| digest.push(part));
@@ -11133,6 +11150,110 @@ inspect_body = true"###,
         assert_eq!(plugin.rate_counters.len(), 0);
     }
 
+    fn fingerprint_fixture() -> CacheRateLimitRule {
+        serde_json::from_value(serde_json::json!({
+            "id": "rl-fingerprint",
+            "name": "Fingerprint test",
+            "expression": "",
+            "exception_expression": "",
+            "characteristics": ["ip"],
+            "characteristic_params": [],
+            "period_seconds": 60,
+            "threshold": 30,
+            "action": "block",
+            "mitigation_timeout_seconds": 300,
+            "enabled": false,
+            "priority": 100,
+            "counting_mode": 1,
+            "response_enabled": true,
+            "response_status_codes": [403, 404]
+        }))
+        .unwrap()
+    }
+
+    fn response_fingerprint(rule: &CacheRateLimitRule) -> String {
+        CompiledRateRule::build(rule)
+            .unwrap()
+            .response_config_fingerprint
+            .unwrap()
+    }
+
+    #[test]
+    fn response_rate_fingerprint_configuration_changes() {
+        let base = fingerprint_fixture();
+        let original = response_fingerprint(&base);
+
+        let mut changed = base.clone();
+        changed.threshold += 1;
+        assert_ne!(original, response_fingerprint(&changed));
+
+        let mut changed = base.clone();
+        changed.period_seconds += 1;
+        assert_ne!(original, response_fingerprint(&changed));
+
+        let mut changed = base.clone();
+        changed.mitigation_timeout_seconds += 1;
+        assert_ne!(original, response_fingerprint(&changed));
+
+        let mut changed = base.clone();
+        changed.response_status_codes.push(405);
+        assert_ne!(original, response_fingerprint(&changed));
+
+        let mut changed = base.clone();
+        changed.action = CacheWafAction::Log;
+        assert_ne!(original, response_fingerprint(&changed));
+
+        let mut changed = base.clone();
+        changed.expression = r#"http.request.uri.path eq "/test""#.to_string();
+        assert_ne!(original, response_fingerprint(&changed));
+
+        let mut changed = base.clone();
+        changed.exception_expression =
+            r#"http.request.uri.path eq "/excluded""#.to_string();
+        assert_ne!(original, response_fingerprint(&changed));
+
+        let mut changed = base.clone();
+        changed.characteristics.push("path".to_string());
+        assert_ne!(original, response_fingerprint(&changed));
+    }
+
+    #[test]
+    fn response_rate_fingerprint_ignores_cosmetic_changes() {
+        let base = fingerprint_fixture();
+        let original = response_fingerprint(&base);
+
+        let mut changed = base.clone();
+        changed.name = "Renamed rule".to_string();
+        changed.priority += 1;
+
+        assert_eq!(original, response_fingerprint(&changed));
+    }
+
+    #[test]
+    fn response_rate_fingerprint_normalises_statuses() {
+        let base = fingerprint_fixture();
+        let original = response_fingerprint(&base);
+
+        let mut changed = base.clone();
+        changed.response_status_codes = vec![404, 403, 404];
+
+        assert_eq!(original, response_fingerprint(&changed));
+    }
+
+    #[test]
+    fn response_rate_fingerprint_request_mode_is_unchanged() {
+        let mut rule = fingerprint_fixture();
+
+        rule.counting_mode = 0;
+        rule.enabled = true;
+        rule.response_enabled = false;
+        rule.response_status_codes.clear();
+
+        let compiled = CompiledRateRule::build(&rule).unwrap();
+
+        assert!(compiled.response_config_fingerprint.is_none());
+    }
+
     /// Above the GC threshold the expired-counter sweep runs at most once per
     /// interval instead of on every request: an attacker rotating unique keys
     /// must not turn each request into an O(N) walk over the whole map.
@@ -11141,6 +11262,7 @@ inspect_body = true"###,
         let policy = RateLimitPolicy {
             rules: vec![CompiledRateRule {
                 response_status_codes: None,
+                response_config_fingerprint: None,
                 id: "rl-gc".to_string(),
                 name: "gc".to_string(),
                 expression: None,
@@ -11218,6 +11340,7 @@ inspect_body = true"###,
         let policy = RateLimitPolicy {
             rules: vec![CompiledRateRule {
                 response_status_codes: None,
+                response_config_fingerprint: None,
                 id: "rl-idle".to_string(),
                 name: "idle".to_string(),
                 expression: None,
@@ -11458,6 +11581,7 @@ inspect_body = true"###,
     fn rate_limit_exception_skips_counting() {
         let rule = CompiledRateRule {
             response_status_codes: None,
+            response_config_fingerprint: None,
             id: "except".to_string(),
             name: "except".to_string(),
             expression: None,
@@ -11547,6 +11671,7 @@ inspect_body = true"###,
     fn rate_limit_keys_parameterized_characteristics() {
         let rule = CompiledRateRule {
             response_status_codes: None,
+            response_config_fingerprint: None,
             id: "rl-h".to_string(),
             name: "per-key".to_string(),
             expression: None,
@@ -11662,6 +11787,7 @@ inspect_body = true"###,
     fn rate_key_keeps_parts_and_rules_apart() {
         let rule = |id: &str| CompiledRateRule {
             response_status_codes: None,
+            response_config_fingerprint: None,
             id: id.to_string(),
             name: "k".to_string(),
             expression: None,
@@ -11738,6 +11864,7 @@ inspect_body = true"###,
         let policy = RateLimitPolicy {
             rules: vec![CompiledRateRule {
                 response_status_codes: None,
+                response_config_fingerprint: None,
                 id: "rl-cap".to_string(),
                 name: "cap".to_string(),
                 expression: None,
@@ -11797,6 +11924,7 @@ inspect_body = true"###,
         let policy = RateLimitPolicy {
             rules: vec![CompiledRateRule {
                 response_status_codes: None,
+                response_config_fingerprint: None,
                 id: "rl".to_string(),
                 name: "per-ip".to_string(),
                 expression: None,
@@ -12834,6 +12962,9 @@ mod response_rate_tests {
     fn compiled(threshold: u32, mitigation_secs: u64) -> CompiledRateRule {
         CompiledRateRule {
             response_status_codes: Some(vec![400, 403, 404, 405]),
+            response_config_fingerprint: Some(
+                "response-test-fingerprint".to_string(),
+            ),
             id: "response-test".to_string(),
             name: "Response test".to_string(),
             expression: None,
