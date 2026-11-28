@@ -1520,6 +1520,10 @@ enum RateAction {
 /// the control plane sent them in (priority ascending) and the first
 /// enforcing rule to trip stops the request.
 struct CompiledRateRule {
+    /// None counts requests; Some counts matching upstream statuses.
+    response_status_codes: Option<Vec<u16>>,
+    /// Precomputed identity of the response counting configuration.
+    response_config_fingerprint: Option<String>,
     id: String,
     name: String,
     /// Optional inclusion filter; `None` applies to every request.
@@ -1538,7 +1542,8 @@ impl CompiledRateRule {
     /// (zero threshold or period, unsupported characteristic, allow action)
     /// or carrying an expression that fails to parse.
     fn build(rule: &CacheRateLimitRule) -> Option<Self> {
-        if !rule.enabled || rule.threshold == 0 || rule.period_seconds == 0 {
+        if !rule.is_enabled() || rule.threshold == 0 || rule.period_seconds == 0
+        {
             return None;
         }
         let mut chars = Vec::with_capacity(rule.characteristics.len());
@@ -1648,7 +1653,64 @@ impl CompiledRateRule {
             // Basic auth is not a rate limit outcome.
             CacheWafAction::BasicAuth => return None,
         };
+        let response_status_codes = match rule.counting_mode {
+            0 => None,
+            1 => {
+                if rule.response_status_codes.is_empty()
+                    || rule
+                        .response_status_codes
+                        .iter()
+                        .any(|code| !(200..=599).contains(code))
+                    || action == RateAction::Allow
+                {
+                    warn!(
+                        rule = %rule.id,
+                        "invalid response rate limit configuration; rule ignored"
+                    );
+                    return None;
+                }
+
+                let mut codes: Vec<u16> = rule
+                    .response_status_codes
+                    .iter()
+                    .map(|code| *code as u16)
+                    .collect();
+
+                codes.sort_unstable();
+                codes.dedup();
+                Some(codes)
+            },
+            unknown => {
+                warn!(
+                    rule = %rule.id,
+                    counting_mode = unknown,
+                    "unknown rate limit counting mode; rule ignored"
+                );
+                return None;
+            },
+        };
+
+        let response_config_fingerprint =
+            response_status_codes.as_ref().map(|codes| {
+                let mut digest = RateKeyDigest::new();
+
+                digest.push("response");
+                digest.push(&format!("{codes:?}"));
+                digest.push(&rule.period_seconds.to_string());
+                digest.push(&rule.threshold.to_string());
+                digest.push(&rule.mitigation_timeout_seconds.to_string());
+                digest.push(&format!("{action:?}"));
+                digest.push(&rule.expression);
+                digest.push(&rule.exception_expression);
+                digest.push(&format!("{:?}", rule.characteristics));
+                digest.push(&format!("{:?}", rule.characteristic_params));
+
+                format!("{:032x}", digest.finish().0)
+            });
+
         Some(Self {
+            response_status_codes,
+            response_config_fingerprint,
             id: rule.id.clone(),
             name: rule.name.clone(),
             expression,
@@ -1676,6 +1738,14 @@ impl CompiledRateRule {
     ) -> RateKey {
         let mut digest = RateKeyDigest::new();
         digest.push(&self.id);
+
+        // Request and response counters must not share the same key.
+        // Changing response counting parameters also starts a fresh counter.
+        if let Some(fingerprint) = &self.response_config_fingerprint {
+            digest.push("response");
+            digest.push(fingerprint);
+        }
+
         self.key_parts(request_data, host, asn, |part| digest.push(part));
         digest.finish()
     }
@@ -1787,10 +1857,16 @@ fn rate_tripped(rule: &CompiledRateRule, retry_after: u64) -> RateTripped {
     RateTripped {
         rule_id: rule.id.clone(),
         rule_name: rule.name.clone(),
-        detail: format!(
-            "rate limit rule '{}' exceeded {} requests per {}s",
-            rule.name, rule.threshold, rule.period_secs
-        ),
+        detail: match &rule.response_status_codes {
+            Some(codes) => format!(
+                "rate limit rule '{}' exceeded {} responses with HTTP statuses {:?} per {}s",
+                rule.name, rule.threshold, codes, rule.period_secs
+            ),
+            None => format!(
+                "rate limit rule '{}' exceeded {} requests per {}s",
+                rule.name, rule.threshold, rule.period_secs
+            ),
+        },
         challenge: rule.action == RateAction::Challenge,
         retry_after,
     }
@@ -1809,6 +1885,8 @@ struct RateTripped {
 
 /// What rate limiting decided for one request.
 struct RateOutcome {
+    /// Rules whose counters depend on the upstream response.
+    pending_response: Vec<PendingResponseRate>,
     /// First enforcing rule that tripped: the request must be stopped.
     deny: Option<RateTripped>,
     /// Log-only rules that tripped: recorded as events only.
@@ -1870,7 +1948,132 @@ struct RateCounters {
     uncounted: AtomicU64,
 }
 
+/// Per-request plugin-state key for response rate limiting.
+const RESPONSE_RATE_STATE_KEY: &str = "pingwaf.response_rate";
+
+/// Request metadata retained only for response rate accounting.
+/// Do not retain request bodies or unrelated headers.
+struct PendingResponseRates {
+    site_id: String,
+    request_id: String,
+    host: String,
+    client_ip: String,
+    method: String,
+    scheme: String,
+    protocol: String,
+    path: String,
+    query: String,
+    user_agent: String,
+    country_code: String,
+    rules: Vec<PendingResponseRate>,
+}
+
+/// Response accounting prepared during request evaluation.
+struct PendingResponseRate {
+    key: RateKey,
+    rule_id: String,
+    rule_name: String,
+    action: RateAction,
+    status_codes: Vec<u16>,
+    period_secs: u64,
+    threshold: u32,
+    mitigation_secs: u64,
+}
+
 impl RateCounters {
+    /// Check response-based mitigation without counting the request.
+    fn response_mitigation(
+        &self,
+        key: RateKey,
+        rule: &CompiledRateRule,
+        now: u64,
+    ) -> Option<u64> {
+        let entry = self.map.get(&key)?;
+
+        if now < entry.blocked_until {
+            return Some(entry.blocked_until - now);
+        }
+
+        // With no explicit mitigation timeout, enforce until the
+        // counting window expires.
+        if rule.mitigation_secs == 0
+            && entry.window == now / rule.period_secs
+            && entry.count > rule.threshold
+        {
+            return Some((entry.window + 1) * rule.period_secs - now);
+        }
+
+        None
+    }
+
+    /// Count one eligible upstream response.
+    /// Returns true when this response activates mitigation.
+    fn count_response(
+        &self,
+        pending: &PendingResponseRate,
+        status: u16,
+        now: u64,
+    ) -> bool {
+        if !pending.status_codes.contains(&status) {
+            return false;
+        }
+
+        let window = now / pending.period_secs;
+
+        let mut entry = match self.map.get_mut(&pending.key) {
+            Some(entry) => entry,
+            None => {
+                if !self.admit(now) {
+                    return false;
+                }
+
+                self.map.entry(pending.key).or_insert(RateCounter {
+                    window,
+                    count: 0,
+                    blocked_until: 0,
+                    expires_at: 0,
+                })
+            },
+        };
+
+        // In-flight responses arriving during mitigation must not
+        // continually extend the mitigation timeout.
+        if now < entry.blocked_until {
+            return false;
+        }
+
+        if entry.window != window {
+            entry.window = window;
+            entry.count = 0;
+            entry.blocked_until = 0;
+        } else if entry.blocked_until != 0 {
+            // A timed mitigation has expired within the same window.
+            // Start a fresh counting cycle.
+            entry.count = 0;
+            entry.blocked_until = 0;
+        }
+
+        let previous = entry.count;
+
+        entry.count = entry.count.saturating_add(1);
+        entry.expires_at = (window + 1) * pending.period_secs;
+
+        if entry.count <= pending.threshold {
+            return false;
+        }
+
+        if pending.mitigation_secs > 0 {
+            entry.blocked_until = now + pending.mitigation_secs;
+            entry.expires_at = entry.expires_at.max(entry.blocked_until);
+        }
+
+        if pending.mitigation_secs == 0 {
+            entry.blocked_until = (window + 1) * pending.period_secs;
+        }
+
+        previous <= pending.threshold
+    }
+
     fn len(&self) -> usize {
         self.map.len()
     }
@@ -1994,6 +2197,7 @@ impl RateLimitPolicy {
         client_addr: Option<IpAddr>,
     ) -> RateOutcome {
         let mut logged = Vec::new();
+        let mut pending_response = Vec::new();
         if self.rules.is_empty() {
             // A site whose rate-limit rules were removed (or that was
             // deleted) leaves its counters behind, and this early return is
@@ -2004,7 +2208,11 @@ impl RateLimitPolicy {
             if counters.len() > 1024 {
                 counters.sweep_expired(unix_now());
             }
-            return RateOutcome { deny: None, logged };
+            return RateOutcome {
+                pending_response,
+                deny: None,
+                logged,
+            };
         }
         let now = unix_now();
         let asn = if self.rules.iter().any(|r| r.chars.contains(&RateChar::Asn))
@@ -2041,7 +2249,11 @@ impl RateLimitPolicy {
             if rule.action == RateAction::Allow {
                 // This rule is an explicit exception; stop evaluating the
                 // remaining rate-limit rules and do not create a counter.
-                return RateOutcome { deny: None, logged };
+                return RateOutcome {
+                    pending_response,
+                    deny: None,
+                    logged,
+                };
             }
             // A client holding a valid clearance already solved a challenge;
             // challenge rules neither count nor stop it.
@@ -2076,6 +2288,43 @@ impl RateLimitPolicy {
             {
                 counters.sweep_expired(now);
             }
+            // Response-based rules check existing mitigation now,
+            // but defer counting until an upstream status is received.
+            if let Some(codes) = &rule.response_status_codes {
+                if let Some(retry_after) =
+                    counters.response_mitigation(key, rule, now)
+                {
+                    let tripped = rate_tripped(rule, retry_after);
+
+                    match rule.action {
+                        RateAction::Log => logged.push(tripped),
+                        RateAction::Allow => {},
+                        _ => {
+                            return RateOutcome {
+                                pending_response,
+                                deny: Some(tripped),
+                                logged,
+                            };
+                        },
+                    }
+
+                    continue;
+                }
+
+                pending_response.push(PendingResponseRate {
+                    key,
+                    rule_id: rule.id.clone(),
+                    rule_name: rule.name.clone(),
+                    action: rule.action,
+                    status_codes: codes.clone(),
+                    period_secs: rule.period_secs,
+                    threshold: rule.threshold,
+                    mitigation_secs: rule.mitigation_secs,
+                });
+
+                continue;
+            }
+
             let window = now / rule.period_secs;
             // A key already in the table is always counted; only a new one
             // has to be admitted, and that happens with no shard lock held
@@ -2118,6 +2367,7 @@ impl RateLimitPolicy {
                     RateAction::Allow => {},
                     _ => {
                         return RateOutcome {
+                            pending_response,
                             deny: Some(tripped),
                             logged,
                         };
@@ -2139,6 +2389,7 @@ impl RateLimitPolicy {
                     RateAction::Allow => {},
                     _ => {
                         return RateOutcome {
+                            pending_response,
                             deny: Some(tripped),
                             logged,
                         };
@@ -2146,7 +2397,11 @@ impl RateLimitPolicy {
                 }
             }
         }
-        RateOutcome { deny: None, logged }
+        RateOutcome {
+            pending_response,
+            deny: None,
+            logged,
+        }
     }
 }
 
@@ -4016,6 +4271,53 @@ impl WafPlugin {
         }
     }
 
+    /// Record threshold detection without counting the request twice
+    /// or claiming that the triggering response was mitigated.
+    fn log_response_rate_event(
+        pending: &PendingResponseRates,
+        rule: &PendingResponseRate,
+        status: u16,
+        user_identity: &str,
+    ) {
+        let Some(agent) = PingWafAgent::instance() else {
+            return;
+        };
+
+        mark_waf_triggered(&pending.request_id);
+
+        agent.log_security_event(SecurityEvent {
+            site_id: pending.site_id.clone(),
+            request_id: pending.request_id.clone(),
+            client_ip: pending.client_ip.clone(),
+            method: pending.method.clone(),
+            scheme: pending.scheme.clone(),
+            protocol: pending.protocol.clone(),
+            host: pending.host.clone(),
+            path: pending.path.clone(),
+            query_string: pending.query.clone(),
+            rule_id: rule.rule_id.clone(),
+            enforced_rule_id: String::new(),
+            rule_name: rule.rule_name.clone(),
+            event_type: "rate_limit".to_string(),
+            action: action_str(&WafAction::Monitor).to_string(),
+            score: 0,
+            details: format!(
+                "response rate limit threshold exceeded;                  HTTP status={}; count={}; threshold={};                  period={}s; configured_action={:?};                  mitigation_timeout={}s",
+                status,
+                rule.threshold.saturating_add(1),
+                rule.threshold,
+                rule.period_secs,
+                rule.action,
+                rule.mitigation_secs,
+            ),
+            response_status: status.into(),
+            user_agent: pending.user_agent.clone(),
+            country_code: pending.country_code.clone(),
+            matched_tags: vec![rule.rule_id.clone()],
+            user_identity: user_identity.to_string(),
+        });
+    }
+
     /// Ship a security event to the control plane (best effort, non-blocking).
     fn log_event(
         site_id: &str,
@@ -5506,6 +5808,42 @@ impl Plugin for WafPlugin {
                 cleared,
                 client_addr,
             );
+            // Carry response-based rules into the upstream response
+            // phase independently of the access logging pipeline.
+            if !outcome.pending_response.is_empty() {
+                let features =
+                    ctx.features.get_or_insert_with(Default::default);
+
+                let states =
+                    features.plugin_state.get_or_insert_with(Default::default);
+
+                states.insert(
+                    RESPONSE_RATE_STATE_KEY,
+                    Box::new(PendingResponseRates {
+                        site_id: site_id.to_string(),
+                        request_id: request_id.to_string(),
+                        host: host.to_string(),
+                        client_ip: request_data.client_ip.clone(),
+                        method: request_data.method.clone(),
+                        scheme: request_data.scheme.clone(),
+                        protocol: request_data.protocol.clone(),
+                        path: request_data.path.clone(),
+                        query: request_data.query.clone(),
+                        user_agent: request_data
+                            .headers
+                            .iter()
+                            .find(|(k, _)| k.eq_ignore_ascii_case("user-agent"))
+                            .map(|(_, v)| v.clone())
+                            .unwrap_or_default(),
+                        country_code: request_data
+                            .country_code
+                            .clone()
+                            .unwrap_or_default(),
+                        rules: outcome.pending_response,
+                    }),
+                );
+            }
+
             for tripped in &outcome.logged {
                 let verdict = WafVerdict {
                     action: WafAction::Monitor,
@@ -5581,7 +5919,13 @@ impl Plugin for WafPlugin {
                     // Defense in depth: refuse the client at the edge for the
                     // mitigation window so a repeat offender never reaches
                     // the counters (or the origin) again in that time.
+                    let response_based = rate.rules.iter().any(|rule| {
+                        rule.id == tripped.rule_id
+                            && rule.response_status_codes.is_some()
+                    });
+
                     if !tripped.challenge
+                        && !response_based
                         && let Some(agent) = &agent
                     {
                         agent.block_ip(
@@ -6261,6 +6605,59 @@ impl Plugin for WafPlugin {
         // Log-only or already-passthrough entries left the chunk (if any)
         // untouched.
         Ok(None)
+    }
+
+    fn handle_upstream_response(
+        &self,
+        _session: &mut Session,
+        ctx: &mut Ctx,
+        upstream_response: &mut ResponseHeader,
+    ) -> pingora::Result<ResponsePluginResult> {
+        let status = upstream_response.status.as_u16();
+
+        // Informational responses are not final responses.
+        if status < 200 {
+            return Ok(ResponsePluginResult::Unchanged);
+        }
+
+        // Consume the pending state exactly once. Requests served
+        // locally or from cache do not require response accounting.
+        let pending = ctx
+            .features
+            .as_mut()
+            .and_then(|features| features.plugin_state.as_mut())
+            .and_then(|states| states.remove(RESPONSE_RATE_STATE_KEY))
+            .and_then(|state| state.downcast::<PendingResponseRates>().ok());
+
+        let Some(pending) = pending else {
+            return Ok(ResponsePluginResult::Unchanged);
+        };
+
+        let now = unix_now();
+
+        for rule in &pending.rules {
+            if self.rate_counters.count_response(rule, status, now) {
+                debug!(
+                    rule_id = %rule.rule_id,
+                    status = status,
+                    threshold = rule.threshold,
+                    period_secs = rule.period_secs,
+                    mitigation_secs = rule.mitigation_secs,
+                    "response rate limit threshold exceeded"
+                );
+
+                Self::log_response_rate_event(
+                    &pending,
+                    rule,
+                    status,
+                    ctx.state.user_identity.as_deref().unwrap_or_default(),
+                );
+            }
+        }
+
+        // Return the original upstream response unchanged.
+        // Mitigation is evaluated on subsequent requests.
+        Ok(ResponsePluginResult::Unchanged)
     }
 
     async fn handle_response(
@@ -10303,6 +10700,9 @@ inspect_body = true"###,
         mitigation: u32,
     ) -> proto::RateLimitRule {
         proto::RateLimitRule {
+            response_enabled: false,
+            counting_mode: 0,
+            response_status_codes: Vec::new(),
             id: id.to_string(),
             name: format!("rule-{id}"),
             expression: expression.to_string(),
@@ -10385,6 +10785,475 @@ inspect_body = true"###,
             .unwrap()
     }
 
+    /// Constructs a response-counting rule using the legacy-safe flags.
+    fn response_rate_rule(
+        id: &str,
+        action: proto::WafAction,
+    ) -> proto::RateLimitRule {
+        let mut rule = rate_rule(
+            id,
+            vec![proto::RateLimitCharacteristics::RateLimitCharIp],
+            "",
+            1,
+            action,
+            300,
+        );
+
+        rule.counting_mode = 1;
+        rule.response_status_codes = vec![404];
+        rule.enabled = false;
+        rule.response_enabled = true;
+        rule.period_seconds = 86400;
+
+        rule
+    }
+
+    /// Runs the request phase and optionally delivers upstream responses
+    /// using the same session and request context.
+    async fn run_response_rate_request(
+        plugin: &WafPlugin,
+        client_ip: &str,
+        path: &str,
+        statuses: &[u16],
+    ) -> RequestPluginResult {
+        let input_header =
+            format!("GET {path} HTTP/1.1\r\nHost: example.com\r\n\r\n");
+
+        let mock_io = Builder::new().read(input_header.as_bytes()).build();
+
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+
+        let mut ctx = Ctx::default();
+        ctx.conn.client_ip = Some(client_ip.to_string());
+
+        let result = plugin
+            .handle_request(PluginStep::EarlyRequest, &mut session, &mut ctx)
+            .await
+            .unwrap();
+
+        if result == RequestPluginResult::Continue {
+            for status in statuses {
+                let mut response =
+                    ResponseHeader::build(*status, None).unwrap();
+
+                plugin
+                    .handle_upstream_response(
+                        &mut session,
+                        &mut ctx,
+                        &mut response,
+                    )
+                    .unwrap();
+
+                // Response counting must never change the triggering
+                // upstream response.
+                assert_eq!(response.status.as_u16(), *status);
+            }
+        }
+
+        result
+    }
+
+    #[tokio::test]
+    async fn response_rate_lifecycle_request_without_response() {
+        let (_guard, _agent, _dir) =
+            install_rate_agent(vec![response_rate_rule(
+                "rl-response-no-origin",
+                proto::WafAction::Block,
+            )])
+            .await;
+
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        for _ in 0..5 {
+            assert!(
+                run_response_rate_request(&plugin, "203.0.113.20", "/", &[],)
+                    .await
+                    == RequestPluginResult::Continue
+            );
+        }
+
+        assert_eq!(plugin.rate_counters.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn response_rate_lifecycle_nonmatching_status() {
+        let (_guard, _agent, _dir) =
+            install_rate_agent(vec![response_rate_rule(
+                "rl-response-status",
+                proto::WafAction::Block,
+            )])
+            .await;
+
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        for status in [200, 301, 403, 500, 503] {
+            assert!(
+                run_response_rate_request(
+                    &plugin,
+                    "203.0.113.21",
+                    "/",
+                    &[status],
+                )
+                .await
+                    == RequestPluginResult::Continue
+            );
+        }
+
+        assert_eq!(plugin.rate_counters.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn response_rate_lifecycle_threshold_and_block() {
+        let (_guard, agent, _dir) =
+            install_rate_agent(vec![response_rate_rule(
+                "rl-response-block",
+                proto::WafAction::Block,
+            )])
+            .await;
+
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        // First response reaches the threshold.
+        assert!(
+            run_response_rate_request(&plugin, "203.0.113.22", "/", &[404],)
+                .await
+                == RequestPluginResult::Continue
+        );
+
+        // Second response exceeds the threshold but is not blocked.
+        assert!(
+            run_response_rate_request(&plugin, "203.0.113.22", "/", &[404],)
+                .await
+                == RequestPluginResult::Continue
+        );
+
+        // Detection is reported immediately, without another request.
+        let event = agent.client.pop_log().await.unwrap();
+
+        assert_eq!("rl-response-block", event.waf_rule_id);
+        assert_eq!("monitor", event.waf_action);
+
+        // The next matching request is mitigated.
+        let result =
+            run_response_rate_request(&plugin, "203.0.113.22", "/", &[]).await;
+
+        let RequestPluginResult::Respond(response) = result else {
+            panic!("expected response rate mitigation");
+        };
+
+        assert_eq!(429, response.status.as_u16());
+
+        // A different client remains unaffected.
+        assert!(
+            run_response_rate_request(&plugin, "203.0.113.23", "/", &[200],)
+                .await
+                == RequestPluginResult::Continue
+        );
+    }
+
+    #[tokio::test]
+    async fn response_rate_lifecycle_duplicate_callback() {
+        let (_guard, _agent, _dir) =
+            install_rate_agent(vec![response_rate_rule(
+                "rl-response-duplicate",
+                proto::WafAction::Block,
+            )])
+            .await;
+
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        assert!(
+            run_response_rate_request(
+                &plugin,
+                "203.0.113.24",
+                "/",
+                &[404, 404, 404],
+            )
+            .await
+                == RequestPluginResult::Continue
+        );
+
+        assert_eq!(plugin.rate_counters.len(), 1);
+
+        let count = plugin
+            .rate_counters
+            .map
+            .iter()
+            .next()
+            .unwrap()
+            .value()
+            .count;
+
+        assert_eq!(count, 1);
+
+        // Duplicate callbacks must not activate mitigation.
+        assert!(
+            run_response_rate_request(&plugin, "203.0.113.24", "/", &[],).await
+                == RequestPluginResult::Continue
+        );
+    }
+
+    #[tokio::test]
+    async fn response_rate_lifecycle_informational_response() {
+        let (_guard, _agent, _dir) =
+            install_rate_agent(vec![response_rate_rule(
+                "rl-response-informational",
+                proto::WafAction::Block,
+            )])
+            .await;
+
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        assert!(
+            run_response_rate_request(
+                &plugin,
+                "203.0.113.25",
+                "/",
+                &[100, 103, 404],
+            )
+            .await
+                == RequestPluginResult::Continue
+        );
+
+        assert_eq!(plugin.rate_counters.len(), 1);
+
+        let count = plugin
+            .rate_counters
+            .map
+            .iter()
+            .next()
+            .unwrap()
+            .value()
+            .count;
+
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn response_rate_lifecycle_log_only() {
+        let (_guard, agent, _dir) =
+            install_rate_agent(vec![response_rate_rule(
+                "rl-response-log",
+                proto::WafAction::Log,
+            )])
+            .await;
+
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        for _ in 0..2 {
+            assert!(
+                run_response_rate_request(&plugin, "203.0.113.26", "/", &[404],)
+                    .await == RequestPluginResult::Continue
+            );
+        }
+
+        let event = agent.client.pop_log().await.unwrap();
+
+        assert_eq!("rl-response-log", event.waf_rule_id);
+        assert_eq!("monitor", event.waf_action);
+
+        // Log action must never prevent requests reaching the origin.
+        for _ in 0..3 {
+            assert!(
+                run_response_rate_request(&plugin, "203.0.113.26", "/", &[200],)
+                    .await == RequestPluginResult::Continue
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn response_rate_lifecycle_exception_expression() {
+        let mut rule = response_rate_rule(
+            "rl-response-exception",
+            proto::WafAction::Block,
+        );
+
+        rule.exception_expression =
+            r#"http.request.uri.path eq "/excluded""#.to_string();
+
+        let (_guard, _agent, _dir) = install_rate_agent(vec![rule]).await;
+
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        for _ in 0..5 {
+            assert!(
+                run_response_rate_request(
+                    &plugin,
+                    "203.0.113.27",
+                    "/excluded",
+                    &[404],
+                )
+                .await
+                    == RequestPluginResult::Continue
+            );
+        }
+
+        assert_eq!(plugin.rate_counters.len(), 0);
+
+        assert!(
+            run_response_rate_request(
+                &plugin,
+                "203.0.113.27",
+                "/other",
+                &[404],
+            )
+            .await
+                == RequestPluginResult::Continue
+        );
+
+        assert_eq!(plugin.rate_counters.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn response_rate_lifecycle_disabled_rule() {
+        let mut rule =
+            response_rate_rule("rl-response-disabled", proto::WafAction::Block);
+
+        rule.response_enabled = false;
+
+        let (_guard, _agent, _dir) = install_rate_agent(vec![rule]).await;
+
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        for _ in 0..5 {
+            assert!(
+                run_response_rate_request(&plugin, "203.0.113.28", "/", &[404],)
+                    .await == RequestPluginResult::Continue
+            );
+        }
+
+        assert_eq!(plugin.rate_counters.len(), 0);
+    }
+
+    fn fingerprint_fixture() -> CacheRateLimitRule {
+        serde_json::from_value(serde_json::json!({
+            "id": "rl-fingerprint",
+            "name": "Fingerprint test",
+            "expression": "",
+            "exception_expression": "",
+            "characteristics": ["ip"],
+            "characteristic_params": [],
+            "period_seconds": 60,
+            "threshold": 30,
+            "action": "block",
+            "mitigation_timeout_seconds": 300,
+            "enabled": false,
+            "priority": 100,
+            "counting_mode": 1,
+            "response_enabled": true,
+            "response_status_codes": [403, 404]
+        }))
+        .unwrap()
+    }
+
+    fn response_fingerprint(rule: &CacheRateLimitRule) -> String {
+        CompiledRateRule::build(rule)
+            .unwrap()
+            .response_config_fingerprint
+            .unwrap()
+    }
+
+    #[test]
+    fn response_rate_fingerprint_configuration_changes() {
+        let base = fingerprint_fixture();
+        let original = response_fingerprint(&base);
+
+        let mut changed = base.clone();
+        changed.threshold += 1;
+        assert_ne!(original, response_fingerprint(&changed));
+
+        let mut changed = base.clone();
+        changed.period_seconds += 1;
+        assert_ne!(original, response_fingerprint(&changed));
+
+        let mut changed = base.clone();
+        changed.mitigation_timeout_seconds += 1;
+        assert_ne!(original, response_fingerprint(&changed));
+
+        let mut changed = base.clone();
+        changed.response_status_codes.push(405);
+        assert_ne!(original, response_fingerprint(&changed));
+
+        let mut changed = base.clone();
+        changed.action = CacheWafAction::Log;
+        assert_ne!(original, response_fingerprint(&changed));
+
+        let mut changed = base.clone();
+        changed.expression = r#"http.request.uri.path eq "/test""#.to_string();
+        assert_ne!(original, response_fingerprint(&changed));
+
+        let mut changed = base.clone();
+        changed.exception_expression =
+            r#"http.request.uri.path eq "/excluded""#.to_string();
+        assert_ne!(original, response_fingerprint(&changed));
+
+        let mut changed = base.clone();
+        changed.characteristics.push("path".to_string());
+        assert_ne!(original, response_fingerprint(&changed));
+    }
+
+    #[test]
+    fn response_rate_fingerprint_ignores_cosmetic_changes() {
+        let base = fingerprint_fixture();
+        let original = response_fingerprint(&base);
+
+        let mut changed = base.clone();
+        changed.name = "Renamed rule".to_string();
+        changed.priority += 1;
+
+        assert_eq!(original, response_fingerprint(&changed));
+    }
+
+    #[test]
+    fn response_rate_fingerprint_normalises_statuses() {
+        let base = fingerprint_fixture();
+        let original = response_fingerprint(&base);
+
+        let mut changed = base.clone();
+        changed.response_status_codes = vec![404, 403, 404];
+
+        assert_eq!(original, response_fingerprint(&changed));
+    }
+
+    #[test]
+    fn response_rate_fingerprint_request_mode_is_unchanged() {
+        let mut rule = fingerprint_fixture();
+
+        rule.counting_mode = 0;
+        rule.enabled = true;
+        rule.response_enabled = false;
+        rule.response_status_codes.clear();
+
+        let compiled = CompiledRateRule::build(&rule).unwrap();
+
+        assert!(compiled.response_config_fingerprint.is_none());
+    }
+
     /// Above the GC threshold the expired-counter sweep runs at most once per
     /// interval instead of on every request: an attacker rotating unique keys
     /// must not turn each request into an O(N) walk over the whole map.
@@ -10392,6 +11261,8 @@ inspect_body = true"###,
     fn rate_counter_gc_is_throttled_above_the_threshold() {
         let policy = RateLimitPolicy {
             rules: vec![CompiledRateRule {
+                response_status_codes: None,
+                response_config_fingerprint: None,
                 id: "rl-gc".to_string(),
                 name: "gc".to_string(),
                 expression: None,
@@ -10468,6 +11339,8 @@ inspect_body = true"###,
     fn rate_counters_expire_below_the_threshold() {
         let policy = RateLimitPolicy {
             rules: vec![CompiledRateRule {
+                response_status_codes: None,
+                response_config_fingerprint: None,
                 id: "rl-idle".to_string(),
                 name: "idle".to_string(),
                 expression: None,
@@ -10599,6 +11472,9 @@ inspect_body = true"###,
     fn rate_rule_build_filters_unenforceable_rules() {
         let build = |rule: proto::RateLimitRule| {
             CompiledRateRule::build(&CacheRateLimitRule {
+                response_enabled: false,
+                counting_mode: 0,
+                response_status_codes: Vec::new(),
                 id: rule.id,
                 name: rule.name,
                 expression: rule.expression,
@@ -10704,6 +11580,8 @@ inspect_body = true"###,
     #[test]
     fn rate_limit_exception_skips_counting() {
         let rule = CompiledRateRule {
+            response_status_codes: None,
+            response_config_fingerprint: None,
             id: "except".to_string(),
             name: "except".to_string(),
             expression: None,
@@ -10741,6 +11619,9 @@ inspect_body = true"###,
     fn rate_rule_build_accepts_parameterized_characteristics() {
         let build = |characteristics: &[&str], params: &[&str]| {
             CompiledRateRule::build(&CacheRateLimitRule {
+                response_enabled: false,
+                counting_mode: 0,
+                response_status_codes: Vec::new(),
                 id: "p".to_string(),
                 name: "rule-p".to_string(),
                 expression: String::new(),
@@ -10789,6 +11670,8 @@ inspect_body = true"###,
     #[test]
     fn rate_limit_keys_parameterized_characteristics() {
         let rule = CompiledRateRule {
+            response_status_codes: None,
+            response_config_fingerprint: None,
             id: "rl-h".to_string(),
             name: "per-key".to_string(),
             expression: None,
@@ -10903,6 +11786,8 @@ inspect_body = true"###,
     #[test]
     fn rate_key_keeps_parts_and_rules_apart() {
         let rule = |id: &str| CompiledRateRule {
+            response_status_codes: None,
+            response_config_fingerprint: None,
             id: id.to_string(),
             name: "k".to_string(),
             expression: None,
@@ -10978,6 +11863,8 @@ inspect_body = true"###,
     fn rate_counters_full_of_bans_refuse_new_keys() {
         let policy = RateLimitPolicy {
             rules: vec![CompiledRateRule {
+                response_status_codes: None,
+                response_config_fingerprint: None,
                 id: "rl-cap".to_string(),
                 name: "cap".to_string(),
                 expression: None,
@@ -11036,6 +11923,8 @@ inspect_body = true"###,
     fn rate_policy_counts_per_key_and_expires() {
         let policy = RateLimitPolicy {
             rules: vec![CompiledRateRule {
+                response_status_codes: None,
+                response_config_fingerprint: None,
                 id: "rl".to_string(),
                 name: "per-ip".to_string(),
                 expression: None,
@@ -12046,5 +12935,218 @@ inspect_body = true"###,
         )])
         .unwrap();
         assert_eq!(compiled.match_path("/anon").unwrap().name, "/anon");
+    }
+}
+
+#[cfg(test)]
+mod response_rate_tests {
+    use super::*;
+
+    fn pending(
+        key: u128,
+        threshold: u32,
+        mitigation_secs: u64,
+    ) -> PendingResponseRate {
+        PendingResponseRate {
+            key: RateKey(key),
+            rule_id: "response-test".to_string(),
+            rule_name: "Response test".to_string(),
+            action: RateAction::Block,
+            status_codes: vec![400, 403, 404, 405],
+            period_secs: 60,
+            threshold,
+            mitigation_secs,
+        }
+    }
+
+    fn compiled(threshold: u32, mitigation_secs: u64) -> CompiledRateRule {
+        CompiledRateRule {
+            response_status_codes: Some(vec![400, 403, 404, 405]),
+            response_config_fingerprint: Some(
+                "response-test-fingerprint".to_string(),
+            ),
+            id: "response-test".to_string(),
+            name: "Response test".to_string(),
+            expression: None,
+            exception: None,
+            chars: vec![RateChar::Ip],
+            period_secs: 60,
+            threshold,
+            mitigation_secs,
+            action: RateAction::Block,
+        }
+    }
+
+    #[test]
+    fn response_rate_ignores_non_matching_statuses() {
+        let counters = RateCounters::default();
+        let rule = pending(1, 3, 300);
+
+        for status in [200, 201, 301, 302, 429, 500, 502, 503, 504] {
+            assert!(!counters.count_response(&rule, status, 1000));
+        }
+
+        assert_eq!(counters.len(), 0);
+    }
+
+    #[test]
+    fn response_rate_combines_matching_statuses() {
+        let counters = RateCounters::default();
+        let rule = pending(1, 3, 300);
+
+        assert!(!counters.count_response(&rule, 400, 1000));
+        assert!(!counters.count_response(&rule, 403, 1000));
+        assert!(!counters.count_response(&rule, 404, 1000));
+
+        assert_eq!(counters.map.get(&rule.key).unwrap().count, 3);
+
+        assert!(counters.count_response(&rule, 405, 1000));
+
+        assert_eq!(counters.map.get(&rule.key).unwrap().count, 4);
+    }
+
+    #[test]
+    fn response_rate_triggers_only_above_threshold() {
+        let counters = RateCounters::default();
+        let rule = pending(1, 3, 300);
+        let policy = compiled(3, 300);
+
+        for _ in 0..3 {
+            assert!(!counters.count_response(&rule, 404, 1000));
+        }
+
+        assert_eq!(counters.response_mitigation(rule.key, &policy, 1000), None);
+
+        assert!(counters.count_response(&rule, 404, 1000));
+
+        assert_eq!(
+            counters.response_mitigation(rule.key, &policy, 1000),
+            Some(300)
+        );
+    }
+
+    #[test]
+    fn response_rate_inflight_responses_do_not_extend_ban() {
+        let counters = RateCounters::default();
+        let rule = pending(1, 1, 300);
+        let policy = compiled(1, 300);
+
+        assert!(!counters.count_response(&rule, 404, 1000));
+        assert!(counters.count_response(&rule, 404, 1000));
+
+        for _ in 0..100 {
+            assert!(!counters.count_response(&rule, 404, 1100));
+        }
+
+        assert_eq!(
+            counters.response_mitigation(rule.key, &policy, 1100),
+            Some(200)
+        );
+
+        let entry = counters.map.get(&rule.key).unwrap();
+        assert_eq!(entry.count, 2);
+        assert_eq!(entry.blocked_until, 1300);
+    }
+
+    #[test]
+    fn response_rate_expired_mitigation_resets_count() {
+        let counters = RateCounters::default();
+        let rule = pending(1, 1, 10);
+        let policy = compiled(1, 10);
+
+        assert!(!counters.count_response(&rule, 404, 1000));
+        assert!(counters.count_response(&rule, 404, 1000));
+
+        assert_eq!(
+            counters.response_mitigation(rule.key, &policy, 1009),
+            Some(1)
+        );
+
+        assert_eq!(counters.response_mitigation(rule.key, &policy, 1010), None);
+
+        assert!(!counters.count_response(&rule, 404, 1010));
+
+        assert_eq!(counters.map.get(&rule.key).unwrap().count, 1);
+    }
+
+    #[test]
+    fn response_rate_zero_timeout_expires_at_window_boundary() {
+        let counters = RateCounters::default();
+        let rule = pending(1, 1, 0);
+        let policy = compiled(1, 0);
+
+        assert!(!counters.count_response(&rule, 404, 1000));
+        assert!(counters.count_response(&rule, 404, 1000));
+
+        assert_eq!(
+            counters.response_mitigation(rule.key, &policy, 1000),
+            Some(20)
+        );
+
+        assert_eq!(counters.map.get(&rule.key).unwrap().blocked_until, 1020);
+
+        assert_eq!(counters.response_mitigation(rule.key, &policy, 1020), None);
+
+        assert!(!counters.count_response(&rule, 404, 1020));
+
+        assert_eq!(counters.map.get(&rule.key).unwrap().count, 1);
+    }
+
+    #[test]
+    fn response_rate_window_rollover_resets_count() {
+        let counters = RateCounters::default();
+        let rule = pending(1, 3, 300);
+
+        for _ in 0..3 {
+            assert!(!counters.count_response(&rule, 404, 1019));
+        }
+
+        assert!(!counters.count_response(&rule, 404, 1020));
+
+        assert_eq!(counters.map.get(&rule.key).unwrap().count, 1);
+    }
+
+    #[test]
+    fn response_rate_keys_are_independent() {
+        let counters = RateCounters::default();
+        let first = pending(1, 1, 300);
+        let second = pending(2, 1, 300);
+        let policy = compiled(1, 300);
+
+        assert!(!counters.count_response(&first, 404, 1000));
+        assert!(counters.count_response(&first, 404, 1000));
+
+        assert!(!counters.count_response(&second, 404, 1000));
+
+        assert_eq!(
+            counters.response_mitigation(first.key, &policy, 1000),
+            Some(300)
+        );
+
+        assert_eq!(
+            counters.response_mitigation(second.key, &policy, 1000),
+            None
+        );
+    }
+
+    #[test]
+    fn response_rate_concurrent_increments_are_preserved() {
+        let counters = RateCounters::default();
+        let rule = pending(1, 10000, 300);
+
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let counters = &counters;
+                let rule = &rule;
+
+                scope.spawn(move || {
+                    for _ in 0..100 {
+                        assert!(!counters.count_response(rule, 404, 1000));
+                    }
+                });
+            }
+        });
+
+        assert_eq!(counters.map.get(&rule.key).unwrap().count, 800);
     }
 }

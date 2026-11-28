@@ -18,8 +18,8 @@ use pingwaf_proto::control_plane as proto;
 mod persist;
 
 use persist::{
-    check_format_version, content_crc32, content_matches, write_atomic,
-    CacheHealth, LoadSource, CACHE_FORMAT_VERSION,
+    CACHE_FORMAT_VERSION, CacheHealth, LoadSource, check_format_version,
+    content_crc32, content_matches, write_atomic,
 };
 
 /// Caps a status detail shipped in the heartbeat, so one long error cannot
@@ -705,6 +705,16 @@ pub struct RuleOverride {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RateLimitRule {
+    /// Zero = request counting; one = response counting.
+    #[serde(default)]
+    pub counting_mode: i32,
+    /// Upstream HTTP status codes counted in response mode.
+    #[serde(default)]
+    pub response_status_codes: Vec<u32>,
+    /// Separate enable flag keeps response rules disabled
+    /// when a legacy agent reads the persisted JSON snapshot.
+    #[serde(default)]
+    pub response_enabled: bool,
     pub id: String,
     pub name: String,
     pub expression: String,
@@ -723,6 +733,17 @@ pub struct RateLimitRule {
     pub mitigation_timeout_seconds: u32,
     pub enabled: bool,
     pub priority: u32,
+}
+
+impl RateLimitRule {
+    /// Effective enabled state for the supported counting mode.
+    pub fn is_enabled(&self) -> bool {
+        match self.counting_mode {
+            0 => self.enabled,
+            1 => self.response_enabled,
+            _ => false,
+        }
+    }
 }
 
 // ─── IP Access ──────────────────────────────────────────────
@@ -965,11 +986,7 @@ pub struct ChallengeConfig {
 
 /// A proto3 scalar of `0` means "unset"; fall back to the documented default.
 fn or_default(value: u32, default: u32) -> u32 {
-    if value == 0 {
-        default
-    } else {
-        value
-    }
+    if value == 0 { default } else { value }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -3391,6 +3408,8 @@ impl RuleCache {
 
     fn convert_rate_limit_rule(r: &proto::RateLimitRule) -> RateLimitRule {
         RateLimitRule {
+            counting_mode: r.counting_mode,
+            response_status_codes: r.response_status_codes.clone(),
             id: r.id.clone(),
             name: r.name.clone(),
             expression: r.expression.clone(),
@@ -3413,7 +3432,8 @@ impl RuleCache {
             threshold: r.threshold,
             action: WafAction::from(r.action),
             mitigation_timeout_seconds: r.mitigation_timeout_seconds,
-            enabled: r.enabled,
+            enabled: r.counting_mode == 0 && r.enabled,
+            response_enabled: r.counting_mode == 1 && r.response_enabled,
             priority: r.priority,
         }
     }
@@ -5561,5 +5581,98 @@ mod tests {
                 "{name} must be tightened from 0644, got {mode:o}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod response_rate_cache_tests {
+    use super::*;
+
+    fn fixture() -> RateLimitRule {
+        serde_json::from_value(serde_json::json!({
+            "id": "rl-compatibility",
+            "name": "Compatibility test",
+            "expression": "",
+            "characteristics": ["ip"],
+            "period_seconds": 60,
+            "threshold": 30,
+            "action": "block",
+            "mitigation_timeout_seconds": 300,
+            "enabled": true,
+            "priority": 100
+        }))
+        .unwrap()
+    }
+
+    /// Simulate the enabled field read by an older agent
+    /// that does not understand response counting.
+    #[derive(Deserialize)]
+    struct LegacyRule {
+        enabled: bool,
+    }
+
+    #[test]
+    fn response_rate_cache_old_snapshot_defaults_to_request() {
+        let rule = fixture();
+
+        assert_eq!(rule.counting_mode, 0);
+        assert!(rule.response_status_codes.is_empty());
+        assert!(!rule.response_enabled);
+        assert!(rule.is_enabled());
+    }
+
+    #[test]
+    fn response_rate_cache_enabled_response_is_legacy_safe() {
+        let mut rule = fixture();
+
+        rule.counting_mode = 1;
+        rule.response_status_codes = vec![404];
+        rule.enabled = false;
+        rule.response_enabled = true;
+
+        let bytes = serde_json::to_vec(&rule).unwrap();
+
+        let legacy: LegacyRule = serde_json::from_slice(&bytes).unwrap();
+
+        assert!(!legacy.enabled);
+
+        let restored: RateLimitRule = serde_json::from_slice(&bytes).unwrap();
+
+        assert!(restored.is_enabled());
+        assert_eq!(restored.counting_mode, 1);
+        assert_eq!(restored.response_status_codes, vec![404]);
+    }
+
+    #[test]
+    fn response_rate_cache_disabled_response_stays_disabled() {
+        let mut rule = fixture();
+
+        rule.counting_mode = 1;
+        rule.response_status_codes = vec![404];
+        rule.enabled = false;
+        rule.response_enabled = false;
+
+        assert!(!rule.is_enabled());
+    }
+
+    #[test]
+    fn response_rate_cache_unknown_mode_is_disabled() {
+        let mut rule = fixture();
+
+        rule.counting_mode = 99;
+        rule.enabled = true;
+        rule.response_enabled = true;
+
+        assert!(!rule.is_enabled());
+    }
+
+    #[test]
+    fn response_rate_cache_request_mode_ignores_response_flag() {
+        let mut rule = fixture();
+
+        rule.enabled = false;
+        rule.response_enabled = true;
+
+        assert!(!rule.is_enabled());
     }
 }

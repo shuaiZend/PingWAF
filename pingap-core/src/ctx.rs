@@ -374,6 +374,10 @@ pub struct CacheInfo {
 /// Optional features like tracing, plugins, and response modifications.
 #[derive(Default)]
 pub struct Features {
+    /// Private per-request state carried between plugin lifecycle stages.
+    /// Dropped automatically when the request context is released.
+    pub plugin_state:
+        Option<AHashMap<&'static str, Box<dyn std::any::Any + Send + Sync>>>,
     /// A map of custom variables for request processing.
     pub variables: Option<AHashMap<String, String>>,
     /// The uri the client asked for, when the location has rewritten it.

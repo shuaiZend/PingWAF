@@ -757,7 +757,11 @@ export function isValidRateLimitCharacteristic(value: string): boolean {
 }
 
 /** `models::rules::rate_limit_rules::Model` */
+export type RateLimitCountingMode = 'request' | 'response'
+
 export interface RateLimitRule {
+  counting_mode?: RateLimitCountingMode
+  response_status_codes?: number[]
   id: string
   site_id: string
   name: string
@@ -775,6 +779,8 @@ export interface RateLimitRule {
 }
 
 export interface CreateRateLimitRequest {
+  counting_mode?: RateLimitCountingMode
+  response_status_codes?: number[]
   name: string
   expression?: string
   exception_expression?: string
@@ -788,6 +794,8 @@ export interface CreateRateLimitRequest {
 }
 
 export interface UpdateRateLimitRequest {
+  counting_mode?: RateLimitCountingMode
+  response_status_codes?: number[]
   name?: string
   expression?: string
   exception_expression?: string

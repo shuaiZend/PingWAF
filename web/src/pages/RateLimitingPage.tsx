@@ -27,6 +27,10 @@ import { useToast } from '@/components/ui/Toast'
 import { ErrorState } from '@/components/ErrorState'
 import { rateLimitApi, rateLimitKeys } from '@/api/rateLimiting'
 import { formatPeriodSeconds } from '@/lib/rateLimitPeriod'
+import {
+  parseResponseStatusCodes,
+  formatResponseStatusCodes,
+} from '@/lib/rateLimitStatus'
 import { siteKeys } from '@/api/sites'
 import { useCanWrite } from '@/hooks'
 import { formatNumber } from '@/lib/format'
@@ -36,6 +40,7 @@ import {
   RULE_ACTIONS,
   isValidRateLimitCharacteristic,
   type CreateRateLimitRequest,
+  type RateLimitCountingMode,
   type RateLimitRule,
 } from '@/api/types'
 
@@ -56,6 +61,8 @@ const PERIOD_MIN = 1
 const PERIOD_MAX = 86_400
 
 interface FormState {
+  counting_mode: RateLimitCountingMode
+  response_status_input: string
   name: string
   expression: string
   exception_expression: string
@@ -69,6 +76,8 @@ interface FormState {
 }
 
 const emptyForm = (): FormState => ({
+  counting_mode: 'request',
+  response_status_input: '404',
   name: '',
   expression: '',
   exception_expression: '',
@@ -83,6 +92,10 @@ const emptyForm = (): FormState => ({
 
 function formFromRule(rule: RateLimitRule): FormState {
   return {
+    counting_mode: rule.counting_mode ?? 'request',
+    response_status_input: formatResponseStatusCodes(
+      rule.response_status_codes ?? [],
+    ),
     name: rule.name,
     expression: rule.expression,
     exception_expression: rule.exception_expression ?? '',
@@ -223,6 +236,13 @@ export function RateLimitingPage() {
     setCharDraft('')
   }
 
+  const responseStatuses = parseResponseStatusCodes(
+    form.response_status_input,
+  )
+
+  const hasServerErrors =
+    responseStatuses?.some((code) => code >= 500) ?? false
+
   const submit = () => {
     setError(null)
     const name = form.name.trim()
@@ -254,8 +274,24 @@ export function RateLimitingPage() {
       setError(t('pages.rateLimiting.mitigationInvalid'))
       return
     }
+    if (form.counting_mode === 'response') {
+      if (!responseStatuses || responseStatuses.length === 0) {
+        setError(t('pages.rateLimiting.responseStatusesInvalid'))
+        return
+      }
+
+      if (form.action === 'allow') {
+        setError(t('pages.rateLimiting.responseAllowInvalid'))
+        return
+      }
+    }
+
     save.mutate({
-      name,
+      counting_mode: form.counting_mode,
+      response_status_codes:
+        form.counting_mode === 'response'
+          ? (responseStatuses ?? [])
+          : [],      name,
       expression: form.expression.trim(),
       exception_expression: form.exception_expression.trim(),
       characteristics: form.characteristics,
@@ -279,6 +315,13 @@ export function RateLimitingPage() {
           <p className="truncate text-[13px] font-medium text-fg-strong">{r.name}</p>
           <p className="pw-mono truncate text-xs text-fg-subtle">
             {r.expression || t('pages.rateLimiting.allRequests')}
+          </p>
+          <p className="mt-1 text-xs text-fg-subtle">
+            {r.counting_mode === 'response'
+              ? `${t('pages.rateLimiting.countingResponse')}: ${
+                  formatResponseStatusCodes(r.response_status_codes ?? [])
+                }`
+              : t('pages.rateLimiting.countingRequest')}
           </p>
           {r.exception_expression && (
             <p className="pw-mono truncate text-xs text-fg-subtle">
@@ -600,6 +643,107 @@ export function RateLimitingPage() {
             </Button>
           </div>
 
+          <Select
+            label={t('pages.rateLimiting.countingMode')}
+            value={form.counting_mode}
+            options={[
+              {
+                value: 'request',
+                label: t('pages.rateLimiting.countingRequest'),
+              },
+              {
+                value: 'response',
+                label: t('pages.rateLimiting.countingResponse'),
+              },
+            ]}
+            onChange={(e) => {
+              const mode = e.target.value as RateLimitCountingMode
+              setError(null)
+              setForm((f) => ({
+                ...f,
+                counting_mode: mode,
+                response_status_input:
+                  f.response_status_input.trim()
+                    ? f.response_status_input
+                    : '404',
+                action:
+                  mode === 'response' && f.counting_mode !== 'response'
+                    ? 'log'
+                    : f.action,
+              }))
+            }}
+          />
+
+          {form.counting_mode === 'response' && (
+            <div className="flex flex-col gap-2 rounded-lg border border-line p-3">
+              <Input
+                label={t('pages.rateLimiting.responseStatuses')}
+                value={form.response_status_input}
+                placeholder="400, 403, 404, 405"
+                className="pw-mono text-[13px]"
+                hint={t('pages.rateLimiting.responseStatusesHint')}
+                onChange={(e) =>
+                  setForm((f) => ({
+                    ...f,
+                    response_status_input: e.target.value,
+                  }))
+                }
+              />
+
+              <div className="flex flex-wrap gap-2">
+                {[
+                  ['404', 'statusPreset404'],
+                  ['400, 401, 403, 404, 405', 'statusPresetCommon4xx'],
+                  ['4xx', 'statusPreset4xx'],
+                  ['5xx', 'statusPreset5xx'],
+                  ['4xx, 5xx', 'statusPresetErrors'],
+                ].map(([value, label]) => (
+                  <Button
+                    key={value}
+                    variant="secondary"
+                    onClick={() =>
+                      setForm((f) => ({
+                        ...f,
+                        response_status_input: value,
+                      }))
+                    }
+                  >
+                    {t(`pages.rateLimiting.${label}`)}
+                  </Button>
+                ))}
+              </div>
+
+              {responseStatuses && responseStatuses.length > 0 ? (
+                <p className="text-xs text-fg-subtle">
+                  {t('pages.rateLimiting.responseStatusesSelected', {
+                    count: responseStatuses.length,
+                  })}
+                </p>
+              ) : (
+                <p className="text-xs text-fg-danger">
+                  {t('pages.rateLimiting.responseStatusesInvalid')}
+                </p>
+              )}
+
+              <p className="text-xs text-fg-subtle">
+                {t('pages.rateLimiting.responseOriginHint')}
+              </p>
+
+              <p className="text-xs text-fg-subtle">
+                {t('pages.rateLimiting.responseLegacyHint')}
+              </p>
+
+              {hasServerErrors && form.action !== 'log' && (
+                <p
+                  role="alert"
+                  className="rounded-md border border-danger/40 bg-danger/8 px-3 py-2 text-xs text-fg-danger"
+                >
+                  {t('pages.rateLimiting.responseServerErrorWarning')}
+                </p>
+              )}
+            </div>
+          )}
+
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <Input
               type="number"
@@ -607,7 +751,11 @@ export function RateLimitingPage() {
               value={form.threshold}
               min={1}
               max={10000000}
-              hint={t('pages.rateLimiting.thresholdHint')}
+              hint={t(
+                form.counting_mode === 'response'
+                  ? 'pages.rateLimiting.responseThresholdHint'
+                  : 'pages.rateLimiting.thresholdHint',
+              )}
               onChange={(e) => setForm((f) => ({ ...f, threshold: Number(e.target.value) }))}
             />
             <div className="flex flex-col gap-1">
@@ -654,7 +802,14 @@ export function RateLimitingPage() {
             <Select
               label={t('pages.waf.action')}
               value={form.action}
-              options={RULE_ACTIONS.map((a) => ({ value: a, label: t(`actions.${a}`, a) }))}
+              options={RULE_ACTIONS
+                .filter((a) =>
+                  form.counting_mode !== 'response' || a !== 'allow',
+                )
+                .map((a) => ({
+                  value: a,
+                  label: t(`actions.${a}`, a),
+                }))}
               onChange={(e) => setForm((f) => ({ ...f, action: e.target.value }))}
             />
             <Input

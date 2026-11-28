@@ -807,6 +807,11 @@ message RuleOverride {
   bool enabled = 4;
 }
 
+enum RateLimitCountingMode {
+  RATE_LIMIT_COUNT_REQUEST = 0;
+  RATE_LIMIT_COUNT_RESPONSE = 1;
+}
+
 message RateLimitRule {
   string id = 1;
   string name = 2;
@@ -825,6 +830,17 @@ message RateLimitRule {
   // Requests matching this filter are excluded from the rule entirely. Empty
   // means no exception; `expression` remains an inclusion filter.
   string exception_expression = 12;
+
+  // Determines whether requests or matching upstream responses count.
+  RateLimitCountingMode counting_mode = 13;
+
+  // HTTP status codes counted in response mode.
+  repeated uint32 response_status_codes = 14;
+
+  // Response-mode rules deliberately carry enabled=false so
+  // legacy agents cannot interpret them as request-mode rules.
+  // Agents supporting response counting use this flag instead.
+  bool response_enabled = 15;
 }
 
 enum RateLimitCharacteristics {

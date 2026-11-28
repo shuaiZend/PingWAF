@@ -1,11 +1,11 @@
 //! Rate limiting rule management.
 
+use axum::Json;
+use axum::Router;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, put};
-use axum::Json;
-use axum::Router;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter,
     QueryOrder, Set,
@@ -14,7 +14,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::api::common::{
-    load_site_read, load_site_write, non_empty, parse_uuid, Page, Pagination,
+    Page, Pagination, load_site_read, load_site_write, non_empty, parse_uuid,
 };
 use crate::api::error::ApiError;
 use crate::api::sites::touch_site;
@@ -31,6 +31,10 @@ const MAX_PERIOD_SECONDS: i32 = 86_400;
 const MIN_THRESHOLD: i32 = 1;
 const MAX_THRESHOLD: i32 = 10_000_000;
 const MAX_MITIGATION_SECONDS: i32 = 86_400;
+
+fn default_counting_mode() -> String {
+    "request".to_string()
+}
 
 fn default_characteristics() -> Vec<String> {
     vec![characteristic::IP.to_string()]
@@ -64,6 +68,10 @@ pub struct ListQuery {
 
 #[derive(Debug, Deserialize)]
 pub struct CreateRequest {
+    #[serde(default = "default_counting_mode")]
+    pub counting_mode: String,
+    #[serde(default)]
+    pub response_status_codes: Vec<u32>,
     pub name: String,
     #[serde(default)]
     pub expression: String,
@@ -87,6 +95,10 @@ pub struct CreateRequest {
 
 #[derive(Debug, Deserialize, Default)]
 pub struct UpdateRequest {
+    #[serde(default)]
+    pub counting_mode: Option<String>,
+    #[serde(default)]
+    pub response_status_codes: Option<Vec<u32>>,
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
@@ -165,6 +177,55 @@ fn normalise_characteristics(raw: &[String]) -> Result<Vec<String>, ApiError> {
     Ok(out)
 }
 
+fn normalise_counting(
+    mode: &str,
+    statuses: &[u32],
+    rule_action: &str,
+) -> Result<Vec<u32>, ApiError> {
+    match mode {
+        "request" => {
+            if !statuses.is_empty() {
+                return Err(ApiError::BadRequest(
+                    "request counting cannot specify response status codes"
+                        .to_string(),
+                ));
+            }
+            Ok(Vec::new())
+        },
+        "response" => {
+            if rule_action == action::ALLOW {
+                return Err(ApiError::BadRequest(
+                    "allow action is not supported for response counting"
+                        .to_string(),
+                ));
+            }
+
+            if statuses.is_empty() {
+                return Err(ApiError::BadRequest(
+                    "response counting requires at least one HTTP status code"
+                        .to_string(),
+                ));
+            }
+
+            if statuses.iter().any(|status| !(200..=599).contains(status)) {
+                return Err(ApiError::BadRequest(
+                    "response status codes must be between 200 and 599"
+                        .to_string(),
+                ));
+            }
+
+            let mut codes = statuses.to_vec();
+            codes.sort_unstable();
+            codes.dedup();
+
+            Ok(codes)
+        },
+        _ => Err(ApiError::BadRequest(
+            "counting_mode must be request or response".to_string(),
+        )),
+    }
+}
+
 fn validate(
     name: &str,
     rule_action: &str,
@@ -240,6 +301,12 @@ async fn create(
         payload.mitigation_timeout_seconds,
     )?;
     let characteristics = normalise_characteristics(&payload.characteristics)?;
+
+    let response_status_codes = normalise_counting(
+        &payload.counting_mode,
+        &payload.response_status_codes,
+        &payload.action,
+    )?;
     // A rate-limit expression is optional (blank = every request for the
     // site), but a present one is compiled on the data plane, which drops the
     // whole rule when it fails to parse — so it is validated here, the same way
@@ -254,6 +321,8 @@ async fn create(
         name: Set(payload.name.trim().to_string()),
         expression: Set(payload.expression),
         exception_expression: Set(payload.exception_expression),
+        counting_mode: Set(payload.counting_mode),
+        response_status_codes: Set(serde_json::json!(response_status_codes)),
         characteristics: Set(characteristics),
         period_seconds: Set(payload.period_seconds),
         threshold: Set(payload.threshold),
@@ -286,7 +355,41 @@ async fn update(
     load_site_write(&state.db, id, &current).await?;
 
     let row = find(&state, id, target).await?;
+
+    let effective_mode = payload
+        .counting_mode
+        .clone()
+        .unwrap_or_else(|| row.counting_mode.clone());
+
+    let effective_action =
+        non_empty(&payload.action).unwrap_or_else(|| row.action.clone());
+
+    let effective_statuses: Vec<u32> =
+        if let Some(codes) = &payload.response_status_codes {
+            codes.clone()
+        } else if effective_mode == "request" {
+            Vec::new()
+        } else {
+            serde_json::from_value(row.response_status_codes.clone()).map_err(
+                |_| {
+                    ApiError::BadRequest(
+                        "stored response status codes are invalid".to_string(),
+                    )
+                },
+            )?
+        };
+
+    let response_status_codes = normalise_counting(
+        &effective_mode,
+        &effective_statuses,
+        &effective_action,
+    )?;
+
     let mut active: rate_limit_rules::ActiveModel = row.into();
+
+    active.counting_mode = Set(effective_mode);
+    active.response_status_codes =
+        Set(serde_json::json!(response_status_codes));
 
     if let Some(name) = non_empty(&payload.name) {
         if name.len() > 200 {
@@ -424,7 +527,9 @@ mod tests {
         // Bare kinds carry no key to count on and are rejected.
         assert!(normalise_characteristics(&["header".into()]).is_err());
         assert!(normalise_characteristics(&["cookie:".into()]).is_err());
-        assert!(normalise_characteristics(&["query:has space".into()]).is_err());
+        assert!(
+            normalise_characteristics(&["query:has space".into()]).is_err()
+        );
         assert!(normalise_characteristics(&["host:nope".into()]).is_err());
     }
 
@@ -446,5 +551,82 @@ mod tests {
         assert_eq!(default_mitigation(), 300);
         assert_eq!(default_action(), action::BLOCK);
         assert!(default_true());
+    }
+}
+
+#[cfg(test)]
+mod response_counting_tests {
+    use super::*;
+
+    #[test]
+    fn request_counting_accepts_empty_statuses() {
+        assert_eq!(
+            normalise_counting("request", &[], "block").unwrap(),
+            Vec::<u32>::new()
+        );
+    }
+
+    #[test]
+    fn request_counting_rejects_statuses() {
+        assert!(normalise_counting("request", &[404], "block").is_err());
+    }
+
+    #[test]
+    fn response_counting_normalises_statuses() {
+        assert_eq!(
+            normalise_counting(
+                "response",
+                &[404, 403, 404, 500, 400],
+                "challenge",
+            )
+            .unwrap(),
+            vec![400, 403, 404, 500]
+        );
+    }
+
+    #[test]
+    fn response_counting_requires_statuses() {
+        assert!(normalise_counting("response", &[], "block").is_err());
+    }
+
+    #[test]
+    fn response_counting_rejects_invalid_statuses() {
+        for code in [0, 100, 199, 600, 999] {
+            assert!(normalise_counting("response", &[code], "block",).is_err());
+        }
+    }
+
+    #[test]
+    fn response_counting_accepts_status_boundaries() {
+        assert_eq!(
+            normalise_counting("response", &[599, 200], "log",).unwrap(),
+            vec![200, 599]
+        );
+    }
+
+    #[test]
+    fn response_counting_rejects_allow_action() {
+        assert!(normalise_counting("response", &[404], "allow",).is_err());
+    }
+
+    #[test]
+    fn request_counting_preserves_allow_action() {
+        assert!(normalise_counting("request", &[], "allow").is_ok());
+    }
+
+    #[test]
+    fn response_counting_rejects_unknown_modes() {
+        for mode in ["", "unknown", "responses", "RESPONSE"] {
+            assert!(normalise_counting(mode, &[404], "block",).is_err());
+        }
+    }
+
+    #[test]
+    fn response_counting_accepts_supported_actions() {
+        for rule_action in ["log", "challenge", "block"] {
+            assert!(
+                normalise_counting("response", &[404], rule_action,).is_ok()
+            );
+        }
     }
 }
