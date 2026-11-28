@@ -370,7 +370,7 @@ jobs:
       # consumers can verify with
       # `gh attestation verify pingwaf-linux-amd64.tar.gz --repo <repo>`.
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: |
             pingwaf-${{ matrix.plat }}-${{ matrix.arch }}.tar.xz
